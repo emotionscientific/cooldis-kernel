@@ -1,38 +1,43 @@
-use super::*;
-use crate::{
-    OpenAIChatCompletionsAdapter, OpenAIResponsesAdapter, ProviderRequest, ProviderWireAdapter,
-};
-use serde_json::json;
-use verlet_history::{CacheControl, CanonicalUsage, ThinkingMetadata, ThinkingProvider};
+use crate::ProviderWireAdapter as _;
 
-const ANTHROPIC: (&str, ProviderApi) = ("anthropic", ProviderApi::AnthropicMessages);
-const OPENAI: (&str, ProviderApi) = ("openai", ProviderApi::OpenAIResponses);
-const OPENAI_COMPATIBLE: (&str, ProviderApi) =
-    ("openai_compatible", ProviderApi::OpenAIChatCompletions);
+const ANTHROPIC: (&str, verlet_history::ProviderApi) =
+    ("anthropic", verlet_history::ProviderApi::AnthropicMessages);
+const OPENAI: (&str, verlet_history::ProviderApi) =
+    ("openai", verlet_history::ProviderApi::OpenAIResponses);
+const OPENAI_COMPATIBLE: (&str, verlet_history::ProviderApi) = (
+    "openai_compatible",
+    verlet_history::ProviderApi::OpenAIChatCompletions,
+);
 
 fn assistant(
-    source: (&str, ProviderApi),
-    content: Vec<CanonicalContent>,
-    stop_reason: CanonicalStopReason,
-) -> CanonicalMessage {
-    CanonicalMessage::assistant(source.0, source.1, "test-model", content, stop_reason)
+    source: (&str, verlet_history::ProviderApi),
+    content: Vec<verlet_history::CanonicalContent>,
+    stop_reason: verlet_history::CanonicalStopReason,
+) -> verlet_history::CanonicalMessage {
+    verlet_history::CanonicalMessage::assistant(
+        source.0,
+        source.1,
+        "test-model",
+        content,
+        stop_reason,
+    )
 }
 
-fn anthropic_thinking(text: &str) -> CanonicalContent {
-    CanonicalContent::Thinking {
+fn anthropic_thinking(text: &str) -> verlet_history::CanonicalContent {
+    verlet_history::CanonicalContent::Thinking {
         text: text.to_string(),
-        provider: ThinkingProvider::Anthropic,
-        metadata: ThinkingMetadata::Anthropic {
+        provider: verlet_history::ThinkingProvider::Anthropic,
+        metadata: verlet_history::ThinkingMetadata::Anthropic {
             signature: Some("sig".to_string()),
         },
     }
 }
 
-fn openai_thinking(text: &str) -> CanonicalContent {
-    CanonicalContent::Thinking {
+fn openai_thinking(text: &str) -> verlet_history::CanonicalContent {
+    verlet_history::CanonicalContent::Thinking {
         text: text.to_string(),
-        provider: ThinkingProvider::OpenAIResponses,
-        metadata: ThinkingMetadata::OpenAIResponses {
+        provider: verlet_history::ThinkingProvider::OpenAIResponses,
+        metadata: verlet_history::ThinkingMetadata::OpenAIResponses {
             item_id: Some("rs_1".to_string()),
             output_index: Some(0),
             summary_index: 0,
@@ -41,35 +46,42 @@ fn openai_thinking(text: &str) -> CanonicalContent {
     }
 }
 
-fn image() -> CanonicalContent {
-    CanonicalContent::Image {
+fn image() -> verlet_history::CanonicalContent {
+    verlet_history::CanonicalContent::Image {
         data: "aGk=".to_string(),
         mime_type: "image/png".to_string(),
     }
 }
 
-fn normalize(messages: Vec<CanonicalMessage>, target: (&str, ProviderApi)) -> ReplayTransform {
-    normalize_history_for_target(messages, &target.1, target.0)
+fn normalize(
+    messages: Vec<verlet_history::CanonicalMessage>,
+    target: (&str, verlet_history::ProviderApi),
+) -> crate::provider_transform::ReplayTransform {
+    crate::provider_transform::normalize_history_for_target(messages, &target.1, target.0)
 }
 
 #[test]
 fn matching_provenance_history_is_a_zero_count_pass_through() {
     let messages = vec![
-        CanonicalMessage::user_text("hi"),
+        verlet_history::CanonicalMessage::user_text("hi"),
         assistant(
             ANTHROPIC,
             vec![
                 anthropic_thinking("hmm"),
-                CanonicalContent::text("hello"),
-                CanonicalContent::tool_call("toolu_1", "lookup", json!({"q": 1})),
+                verlet_history::CanonicalContent::text("hello"),
+                verlet_history::CanonicalContent::tool_call(
+                    "toolu_1",
+                    "lookup",
+                    serde_json::json!({"q": 1}),
+                ),
             ],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result("toolu_1", "lookup", "found", false),
+        verlet_history::CanonicalMessage::tool_result("toolu_1", "lookup", "found", false),
         assistant(
             ANTHROPIC,
-            vec![CanonicalContent::text("done")],
-            CanonicalStopReason::EndTurn,
+            vec![verlet_history::CanonicalContent::text("done")],
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
     ];
     let transformed = normalize(messages.clone(), ANTHROPIC);
@@ -80,33 +92,35 @@ fn matching_provenance_history_is_a_zero_count_pass_through() {
 #[test]
 fn foreign_thinking_converts_to_tagged_text_and_native_thinking_passes() {
     let messages = vec![
-        CanonicalMessage::user_text("hi"),
+        verlet_history::CanonicalMessage::user_text("hi"),
         assistant(
             ANTHROPIC,
             vec![anthropic_thinking("foreign reasoning")],
-            CanonicalStopReason::EndTurn,
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
         assistant(
             OPENAI,
             vec![openai_thinking("native reasoning")],
-            CanonicalStopReason::EndTurn,
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
-        CanonicalMessage::user_text("again"),
+        verlet_history::CanonicalMessage::user_text("again"),
     ];
     let transformed = normalize(messages, OPENAI);
     assert_eq!(transformed.counts.thinking_converted, 1);
     assert_eq!(transformed.counts.thinking_dropped, 0);
-    let CanonicalMessage::Assistant { content, .. } = &transformed.messages[1] else {
+    let verlet_history::CanonicalMessage::Assistant { content, .. } = &transformed.messages[1]
+    else {
         panic!("expected assistant");
     };
     assert_eq!(
         content[0],
-        CanonicalContent::Text {
+        verlet_history::CanonicalContent::Text {
             text: "<thinking>\nforeign reasoning\n</thinking>".to_string(),
             cache_control: None,
         }
     );
-    let CanonicalMessage::Assistant { content, .. } = &transformed.messages[2] else {
+    let verlet_history::CanonicalMessage::Assistant { content, .. } = &transformed.messages[2]
+    else {
         panic!("expected assistant");
     };
     assert_eq!(content[0], openai_thinking("native reasoning"));
@@ -115,20 +129,20 @@ fn foreign_thinking_converts_to_tagged_text_and_native_thinking_passes() {
 #[test]
 fn foreign_thinking_without_visible_text_is_dropped() {
     let messages = vec![
-        CanonicalMessage::user_text("hi"),
+        verlet_history::CanonicalMessage::user_text("hi"),
         assistant(
             ANTHROPIC,
             vec![
-                CanonicalContent::Thinking {
+                verlet_history::CanonicalContent::Thinking {
                     text: String::new(),
-                    provider: ThinkingProvider::Anthropic,
-                    metadata: ThinkingMetadata::AnthropicRedacted {
+                    provider: verlet_history::ThinkingProvider::Anthropic,
+                    metadata: verlet_history::ThinkingMetadata::AnthropicRedacted {
                         data: "opaque".to_string(),
                     },
                 },
-                CanonicalContent::text("visible answer"),
+                verlet_history::CanonicalContent::text("visible answer"),
             ],
-            CanonicalStopReason::EndTurn,
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
     ];
     let transformed = normalize(messages, OPENAI);
@@ -139,18 +153,18 @@ fn foreign_thinking_without_visible_text_is_dropped() {
 #[test]
 fn errored_assistants_drop_with_their_tool_results() {
     let messages = vec![
-        CanonicalMessage::user_text("hi"),
+        verlet_history::CanonicalMessage::user_text("hi"),
         assistant(
             ANTHROPIC,
-            vec![CanonicalContent::tool_call(
+            vec![verlet_history::CanonicalContent::tool_call(
                 "toolu_err",
                 "lookup",
-                json!({}),
+                serde_json::json!({}),
             )],
-            CanonicalStopReason::Error,
+            verlet_history::CanonicalStopReason::Error,
         ),
-        CanonicalMessage::tool_result("toolu_err", "lookup", "late result", false),
-        CanonicalMessage::user_text("retry"),
+        verlet_history::CanonicalMessage::tool_result("toolu_err", "lookup", "late result", false),
+        verlet_history::CanonicalMessage::user_text("retry"),
     ];
     let transformed = normalize(messages, ANTHROPIC);
     assert_eq!(transformed.counts.errored_assistants_dropped, 1);
@@ -161,43 +175,60 @@ fn errored_assistants_drop_with_their_tool_results() {
 #[test]
 fn dangling_tool_calls_and_unpaired_tool_results_are_dropped() {
     let messages = vec![
-        CanonicalMessage::user_text("hi"),
+        verlet_history::CanonicalMessage::user_text("hi"),
         assistant(
             ANTHROPIC,
             vec![
-                CanonicalContent::tool_call("toolu_paired", "lookup", json!({})),
-                CanonicalContent::tool_call("toolu_dangling", "lookup", json!({})),
+                verlet_history::CanonicalContent::tool_call(
+                    "toolu_paired",
+                    "lookup",
+                    serde_json::json!({}),
+                ),
+                verlet_history::CanonicalContent::tool_call(
+                    "toolu_dangling",
+                    "lookup",
+                    serde_json::json!({}),
+                ),
             ],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result("toolu_paired", "lookup", "ok", false),
-        CanonicalMessage::tool_result("toolu_unknown", "lookup", "orphan", false),
+        verlet_history::CanonicalMessage::tool_result("toolu_paired", "lookup", "ok", false),
+        verlet_history::CanonicalMessage::tool_result("toolu_unknown", "lookup", "orphan", false),
     ];
     let transformed = normalize(messages, ANTHROPIC);
     assert_eq!(transformed.counts.dangling_tool_calls_dropped, 1);
     assert_eq!(transformed.counts.unpaired_tool_results_dropped, 1);
-    let CanonicalMessage::Assistant { content, .. } = &transformed.messages[1] else {
+    let verlet_history::CanonicalMessage::Assistant { content, .. } = &transformed.messages[1]
+    else {
         panic!("expected assistant");
     };
     assert_eq!(content.len(), 1);
     assert!(matches!(
         &content[0],
-        CanonicalContent::ToolCall { id, .. } if id == "toolu_paired"
+        verlet_history::CanonicalContent::ToolCall { id, .. } if id == "toolu_paired"
     ));
     assert_eq!(transformed.messages.len(), 3);
 
     let messages = vec![
-        CanonicalMessage::user_text("hi"),
+        verlet_history::CanonicalMessage::user_text("hi"),
         assistant(
             ANTHROPIC,
             vec![
-                CanonicalContent::tool_call("toolu_dup", "lookup", json!({"q": 1})),
-                CanonicalContent::tool_call("toolu_dup", "lookup", json!({"q": 2})),
+                verlet_history::CanonicalContent::tool_call(
+                    "toolu_dup",
+                    "lookup",
+                    serde_json::json!({"q": 1}),
+                ),
+                verlet_history::CanonicalContent::tool_call(
+                    "toolu_dup",
+                    "lookup",
+                    serde_json::json!({"q": 2}),
+                ),
             ],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result("toolu_dup", "lookup", "ambiguous", false),
-        CanonicalMessage::user_text("continue"),
+        verlet_history::CanonicalMessage::tool_result("toolu_dup", "lookup", "ambiguous", false),
+        verlet_history::CanonicalMessage::user_text("continue"),
     ];
     let transformed = normalize(messages, ANTHROPIC);
     assert_eq!(transformed.counts.dangling_tool_calls_dropped, 2);
@@ -207,7 +238,7 @@ fn dangling_tool_calls_and_unpaired_tool_results_are_dropped() {
         transformed
             .messages
             .iter()
-            .filter(|message| matches!(message, CanonicalMessage::User { .. }))
+            .filter(|message| matches!(message, verlet_history::CanonicalMessage::User { .. }))
             .count(),
         2
     );
@@ -216,17 +247,17 @@ fn dangling_tool_calls_and_unpaired_tool_results_are_dropped() {
 #[test]
 fn assistants_left_empty_by_drops_are_removed() {
     let messages = vec![
-        CanonicalMessage::user_text("hi"),
+        verlet_history::CanonicalMessage::user_text("hi"),
         assistant(
             ANTHROPIC,
-            vec![CanonicalContent::tool_call(
+            vec![verlet_history::CanonicalContent::tool_call(
                 "toolu_dangling",
                 "lookup",
-                json!({}),
+                serde_json::json!({}),
             )],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::user_text("again"),
+        verlet_history::CanonicalMessage::user_text("again"),
     ];
     let transformed = normalize(messages, ANTHROPIC);
     assert_eq!(transformed.counts.dangling_tool_calls_dropped, 1);
@@ -237,76 +268,93 @@ fn assistants_left_empty_by_drops_are_removed() {
 #[test]
 fn historical_user_images_drop_for_non_image_targets_but_latest_user_keeps_them() {
     let messages = vec![
-        CanonicalMessage::User {
-            content: vec![CanonicalContent::text("look at this"), image()],
+        verlet_history::CanonicalMessage::User {
+            content: vec![
+                verlet_history::CanonicalContent::text("look at this"),
+                image(),
+            ],
             timestamp_ms: 1,
         },
         assistant(
             OPENAI_COMPATIBLE,
-            vec![CanonicalContent::text("seen")],
-            CanonicalStopReason::EndTurn,
+            vec![verlet_history::CanonicalContent::text("seen")],
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
-        CanonicalMessage::User {
-            content: vec![CanonicalContent::text("and this"), image()],
+        verlet_history::CanonicalMessage::User {
+            content: vec![verlet_history::CanonicalContent::text("and this"), image()],
             timestamp_ms: 2,
         },
     ];
     let transformed = normalize(messages, OPENAI_COMPATIBLE);
     assert_eq!(transformed.counts.images_dropped, 1);
-    let CanonicalMessage::User { content, .. } = &transformed.messages[0] else {
+    let verlet_history::CanonicalMessage::User { content, .. } = &transformed.messages[0] else {
         panic!("expected user");
     };
     assert_eq!(content.len(), 1);
-    let CanonicalMessage::User { content, .. } = &transformed.messages[2] else {
+    let verlet_history::CanonicalMessage::User { content, .. } = &transformed.messages[2] else {
         panic!("expected user");
     };
     assert_eq!(content.len(), 2, "latest user message keeps its image");
 
     let messages = vec![
-        CanonicalMessage::User {
-            content: vec![CanonicalContent::text("look at this"), image()],
+        verlet_history::CanonicalMessage::User {
+            content: vec![
+                verlet_history::CanonicalContent::text("look at this"),
+                image(),
+            ],
             timestamp_ms: 1,
         },
         assistant(
             OPENAI_COMPATIBLE,
-            vec![CanonicalContent::tool_call("call_1", "lookup", json!({}))],
-            CanonicalStopReason::ToolUse,
+            vec![verlet_history::CanonicalContent::tool_call(
+                "call_1",
+                "lookup",
+                serde_json::json!({}),
+            )],
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result("call_1", "lookup", "found", false),
+        verlet_history::CanonicalMessage::tool_result("call_1", "lookup", "found", false),
     ];
     let transformed = normalize(messages, OPENAI_COMPATIBLE);
     assert_eq!(transformed.counts.images_dropped, 1);
     assert_eq!(transformed.messages.len(), 3);
-    let CanonicalMessage::User { content, .. } = &transformed.messages[0] else {
+    let verlet_history::CanonicalMessage::User { content, .. } = &transformed.messages[0] else {
         panic!("expected user");
     };
-    assert_eq!(content, &[CanonicalContent::text("look at this")]);
+    assert_eq!(
+        content,
+        &[verlet_history::CanonicalContent::text("look at this")]
+    );
 }
 
 #[test]
 fn cache_controls_strip_for_non_cache_targets_and_survive_for_anthropic() {
     let messages = vec![
-        CanonicalMessage::User {
-            content: vec![CanonicalContent::cached_text(
+        verlet_history::CanonicalMessage::User {
+            content: vec![verlet_history::CanonicalContent::cached_text(
                 "cached prompt",
-                CacheControl::ephemeral(),
+                verlet_history::CacheControl::ephemeral(),
             )],
             timestamp_ms: 1,
         },
         assistant(
             ANTHROPIC,
-            vec![CanonicalContent::tool_call("toolu_1", "lookup", json!({}))],
-            CanonicalStopReason::ToolUse,
+            vec![verlet_history::CanonicalContent::tool_call(
+                "toolu_1",
+                "lookup",
+                serde_json::json!({}),
+            )],
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             tool_call_id: "toolu_1".to_string(),
             tool_name: "lookup".to_string(),
-            content: vec![CanonicalContent::text("ok")],
+            content: vec![verlet_history::CanonicalContent::text("ok")],
             is_error: false,
-            cache_control: Some(CacheControl::ephemeral()),
+            cache_control: Some(verlet_history::CacheControl::ephemeral()),
             timestamp_ms: 2,
         },
-        CanonicalMessage::user_text("next"),
+        verlet_history::CanonicalMessage::user_text("next"),
     ];
     let kept = normalize(messages.clone(), ANTHROPIC);
     assert!(kept.counts.is_noop());
@@ -317,9 +365,12 @@ fn cache_controls_strip_for_non_cache_targets_and_survive_for_anthropic() {
 #[test]
 fn normalized_anthropic_history_passes_openai_validation_and_builds_wire_bodies() {
     let messages = vec![
-        CanonicalMessage::User {
+        verlet_history::CanonicalMessage::User {
             content: vec![
-                CanonicalContent::cached_text("cached", CacheControl::ephemeral()),
+                verlet_history::CanonicalContent::cached_text(
+                    "cached",
+                    verlet_history::CacheControl::ephemeral(),
+                ),
                 image(),
             ],
             timestamp_ms: 1,
@@ -328,29 +379,33 @@ fn normalized_anthropic_history_passes_openai_validation_and_builds_wire_bodies(
             ANTHROPIC,
             vec![
                 anthropic_thinking("let me look"),
-                CanonicalContent::tool_call("toolu_1", "lookup", json!({"q": 1})),
+                verlet_history::CanonicalContent::tool_call(
+                    "toolu_1",
+                    "lookup",
+                    serde_json::json!({"q": 1}),
+                ),
             ],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             tool_call_id: "toolu_1".to_string(),
             tool_name: "lookup".to_string(),
-            content: vec![CanonicalContent::text("found")],
+            content: vec![verlet_history::CanonicalContent::text("found")],
             is_error: false,
-            cache_control: Some(CacheControl::ephemeral()),
+            cache_control: Some(verlet_history::CacheControl::ephemeral()),
             timestamp_ms: 2,
         },
         assistant(
             ANTHROPIC,
-            vec![CanonicalContent::text("answer")],
-            CanonicalStopReason::EndTurn,
+            vec![verlet_history::CanonicalContent::text("answer")],
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
-        CanonicalMessage::user_text("continue"),
+        verlet_history::CanonicalMessage::user_text("continue"),
     ];
 
     for (target, body_must_validate) in [(OPENAI, true), (OPENAI_COMPATIBLE, true)] {
         let transformed = normalize(messages.clone(), target.clone());
-        let request = ProviderRequest {
+        let request = crate::ProviderRequest {
             api: target.1.clone(),
             provider: target.0.to_string(),
             model: "test-model".to_string(),
@@ -362,11 +417,11 @@ fn normalized_anthropic_history_passes_openai_validation_and_builds_wire_bodies(
             thinking: None,
         };
         let body = match target.1 {
-            ProviderApi::OpenAIResponses => {
-                OpenAIResponsesAdapter::default().build_request_body(&request)
+            verlet_history::ProviderApi::OpenAIResponses => {
+                crate::OpenAIResponsesAdapter::default().build_request_body(&request)
             }
-            ProviderApi::OpenAIChatCompletions => {
-                OpenAIChatCompletionsAdapter.build_request_body(&request)
+            verlet_history::ProviderApi::OpenAIChatCompletions => {
+                crate::OpenAIChatCompletionsAdapter.build_request_body(&request)
             }
             _ => unreachable!(),
         };
@@ -376,15 +431,15 @@ fn normalized_anthropic_history_passes_openai_validation_and_builds_wire_bodies(
 
 #[test]
 fn unnormalized_anthropic_history_fails_openai_validation() {
-    let request = ProviderRequest {
-        api: ProviderApi::OpenAIResponses,
+    let request = crate::ProviderRequest {
+        api: verlet_history::ProviderApi::OpenAIResponses,
         provider: "openai".to_string(),
         model: "test-model".to_string(),
         system: Vec::new(),
-        messages: vec![CanonicalMessage::User {
-            content: vec![CanonicalContent::cached_text(
+        messages: vec![verlet_history::CanonicalMessage::User {
+            content: vec![verlet_history::CanonicalContent::cached_text(
                 "cached",
-                CacheControl::ephemeral(),
+                verlet_history::CacheControl::ephemeral(),
             )],
             timestamp_ms: 1,
         }],
@@ -394,7 +449,7 @@ fn unnormalized_anthropic_history_fails_openai_validation() {
         thinking: None,
     };
     assert!(
-        OpenAIResponsesAdapter::default()
+        crate::OpenAIResponsesAdapter::default()
             .build_request_body(&request)
             .is_err()
     );
@@ -402,23 +457,26 @@ fn unnormalized_anthropic_history_fails_openai_validation() {
 
 #[test]
 fn usage_and_provenance_survive_the_rebuild() {
-    let usage = CanonicalUsage {
+    let usage = verlet_history::CanonicalUsage {
         input_tokens: 7,
-        ..CanonicalUsage::default()
+        ..verlet_history::CanonicalUsage::default()
     };
     let messages = vec![
-        CanonicalMessage::user_text("hi"),
-        CanonicalMessage::assistant_with_usage(
+        verlet_history::CanonicalMessage::user_text("hi"),
+        verlet_history::CanonicalMessage::assistant_with_usage(
             "anthropic",
-            ProviderApi::AnthropicMessages,
+            verlet_history::ProviderApi::AnthropicMessages,
             "test-model",
-            vec![anthropic_thinking("t"), CanonicalContent::text("a")],
+            vec![
+                anthropic_thinking("t"),
+                verlet_history::CanonicalContent::text("a"),
+            ],
             usage.clone(),
-            CanonicalStopReason::EndTurn,
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
     ];
     let transformed = normalize(messages, OPENAI);
-    let CanonicalMessage::Assistant {
+    let verlet_history::CanonicalMessage::Assistant {
         usage: kept_usage,
         provider,
         api,
@@ -429,5 +487,5 @@ fn usage_and_provenance_survive_the_rebuild() {
     };
     assert_eq!(kept_usage, &usage);
     assert_eq!(provider, "anthropic");
-    assert_eq!(api, &ProviderApi::AnthropicMessages);
+    assert_eq!(api, &verlet_history::ProviderApi::AnthropicMessages);
 }

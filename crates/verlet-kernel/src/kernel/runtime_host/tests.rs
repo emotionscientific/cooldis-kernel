@@ -1,71 +1,24 @@
-use super::*;
-use crate::agent::hooks::{HookEventName, HookRunStatus};
-use crate::agent::manifest_bind::{
-    BoundCoupling, BoundCouplingFunction, BoundCouplingSelector, BoundCouplingSet,
-    BoundCouplingSink, CouplingRole,
-};
-use crate::agent::manifest_schema::{AgentManifestCouplingBudget, AgentManifestCouplingQuota};
-use crate::kernel::context_compiler::AgentContextCompilationDiagnostics;
-use crate::kernel::control_decision::{
-    MandateCatchUpPolicy, MandateSchedulePayload, MandateStartedPayload, MandateSubject,
-    TurnContinuationAcceptedPayload, TurnContinuationSubject, TurnContinueRequestedPayload,
-    control_stream_id,
-};
-use crate::kernel::history::{
-    CanonicalContent,
-    CanonicalMessage,
-    CanonicalStopReason,
-    EventKind,
-    EventOrigin,
-    EventProvenance,
-    EventRecord,
-    EventRecordId,
-    EventSequence,
-    EventStore,
-    EventStreamId,
-    HistoryResult,
-    NewEventRecord,
-    NewObservationRecord,
-    ObservationRecord,
-    // lexicon-allow: observation_store - test wrapper must implement the history observation trait
-    ObservationStore,
-    ProviderApi,
-    SessionEntry,
-    SessionEntryId,
-    SessionEntryKind,
-    SessionStore,
-    ThreadBaseRef,
-    ThreadForkReason,
-    TimerFiredPayload,
-};
-use crate::test_support::FaultingRuntimeStore;
-use crate::{
-    AgentLoopConfig, AgentLoopFactory, CouplingScheduler, DaemonClock, LocalOfflineProviderClient,
-    SqliteSessionStore, StdlibCouplingExecutor, VerletDaemonClockRoute,
-};
-use async_trait::async_trait;
-use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
-use uuid::Uuid;
-use verlet_io_core::{IngressAck, IngressContent, IngressEnvelope, IngressSink, IoError, IoResult};
-
+use crate::kernel::history::EventStore as _;
+use crate::kernel::history::SessionStore as _;
+use chrono::TimeZone as _;
 #[test]
 fn thread_topology_distinguishes_spawn_attribution_from_branch_lineage() {
-    let source_thread_id = ThreadId::new();
-    let checkpoint_id = ThreadCheckpointId::new();
+    let source_thread_id = crate::kernel::runtime_host::ThreadId::new();
+    let checkpoint_id = crate::kernel::runtime_host::ThreadCheckpointId::new();
 
-    let spawned = ThreadTopology::spawned_from(source_thread_id);
+    let spawned = crate::kernel::runtime_host::ThreadTopology::spawned_from(source_thread_id);
     assert_eq!(
         spawned.initiation,
-        ThreadInitiationSource::Thread {
+        crate::kernel::runtime_host::ThreadInitiationSource::Thread {
             thread_id: source_thread_id,
             turn_id: None,
             event_id: None,
         }
     );
-    assert_eq!(spawned.lineage, ThreadLineage::Root);
+    assert_eq!(
+        spawned.lineage,
+        crate::kernel::runtime_host::ThreadLineage::Root
+    );
     assert_eq!(
         spawned
             .spawn_attribution
@@ -81,11 +34,17 @@ fn thread_topology_distinguishes_spawn_attribution_from_branch_lineage() {
     assert_eq!(spawned.branch_parent_thread_id(), None);
     assert_eq!(spawned.controller_thread_id(), Some(source_thread_id));
 
-    let branched = ThreadTopology::branch_from(source_thread_id, Some(checkpoint_id));
-    assert_eq!(branched.initiation, ThreadInitiationSource::Root);
+    let branched = crate::kernel::runtime_host::ThreadTopology::branch_from(
+        source_thread_id,
+        Some(checkpoint_id),
+    );
+    assert_eq!(
+        branched.initiation,
+        crate::kernel::runtime_host::ThreadInitiationSource::Root
+    );
     assert_eq!(
         branched.lineage,
-        ThreadLineage::Branch {
+        crate::kernel::runtime_host::ThreadLineage::Branch {
             parent_thread_id: source_thread_id,
             checkpoint_id: Some(checkpoint_id),
         }
@@ -102,8 +61,8 @@ fn thread_topology_distinguishes_spawn_attribution_from_branch_lineage() {
 
 #[test]
 fn turn_context_snapshot_carries_stable_turn_identity_and_cancellation() {
-    let cancellation = CancellationToken::new();
-    let input = TurnInput::text("hello")
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let input = crate::kernel::runtime_host::TurnInput::text("hello")
         .with_cwd("/tmp/verlet-turn")
         .with_workspace_root("/workspace")
         .with_model("gpt-test")
@@ -111,14 +70,15 @@ fn turn_context_snapshot_carries_stable_turn_identity_and_cancellation() {
         .with_permission_profile("workspace-write")
         .with_provider_metadata("region", "us")
         .with_metadata("source", "unit-test");
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
-    let context = TurnContext::new(
-        ThreadContext::root(coordinates.clone()),
+    let coordinates =
+        crate::kernel::runtime_host::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let context = crate::kernel::runtime_host::TurnContext::new(
+        crate::kernel::runtime_host::ThreadContext::root(coordinates.clone()),
         "turn-1",
         &input,
         cancellation.clone(),
     )
-    .with_budget(TurnBudget {
+    .with_budget(crate::kernel::runtime_host::TurnBudget {
         max_tool_rounds: Some(8),
         max_output_tokens: Some(128),
         max_context_text_bytes: Some(4096),
@@ -152,13 +112,17 @@ fn turn_context_snapshot_carries_stable_turn_identity_and_cancellation() {
 
 #[tokio::test]
 async fn runtime_services_schedule_bound_stdlib_context_spill_on_context_compile() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default())
-        .with_bound_coupling_set(BoundCouplingSet::new(
-            "snapshot-a",
-            vec![runtime_std_context_spill_coupling()],
-        ));
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let services = crate::kernel::runtime_host::RuntimeServices::new(
+        store.clone(),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default(),
+    )
+    .with_bound_coupling_set(crate::agent::manifest_bind::BoundCouplingSet::new(
+        "snapshot-a",
+        vec![runtime_std_context_spill_coupling()],
+    ));
+    let coordinates =
+        crate::kernel::runtime_host::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
     let session_entry = services
         .append_user_message(&coordinates, "hello")
         .await
@@ -177,15 +141,18 @@ async fn runtime_services_schedule_bound_stdlib_context_spill_on_context_compile
         .await
         .unwrap();
 
-    let derived_stream = EventStreamId::new(format!("derived:context:{}", coordinates.thread_id));
+    let derived_stream = crate::kernel::history::EventStreamId::new(format!(
+        "derived:context:{}",
+        coordinates.thread_id
+    ));
     let derived_events = store.read_events(&derived_stream, None).await.unwrap();
     let summary = derived_events
         .iter()
-        .find(|event| event.kind == EventKind::ContextSummaryCompleted)
+        .find(|event| event.kind == crate::kernel::history::EventKind::ContextSummaryCompleted)
         .unwrap();
     let read_plan = derived_events
         .iter()
-        .find(|event| event.kind == EventKind::ContextReadPlanSet)
+        .find(|event| event.kind == crate::kernel::history::EventKind::ContextReadPlanSet)
         .unwrap();
     assert_eq!(
         summary.provenance.discharged_by.as_deref(),
@@ -200,11 +167,12 @@ async fn runtime_services_schedule_bound_stdlib_context_spill_on_context_compile
         summary.id.to_string()
     );
 
-    let control_stream = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let control_stream =
+        crate::kernel::history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
     let control_events = store.read_events(&control_stream, None).await.unwrap();
     let receipt = control_events
         .iter()
-        .find(|event| event.kind == EventKind::CouplingRunCompleted)
+        .find(|event| event.kind == crate::kernel::history::EventKind::CouplingRunCompleted)
         .unwrap();
     assert_eq!(receipt.payload["coupling_id"], "std::context.spill");
     assert_eq!(receipt.payload["status"], "completed");
@@ -219,14 +187,18 @@ async fn runtime_services_schedule_bound_stdlib_context_spill_on_context_compile
 
 #[tokio::test]
 async fn context_compile_receipt_event_carries_discharged_provenance() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let services = crate::kernel::runtime_host::RuntimeServices::new(
+        store.clone(),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default(),
+    );
+    let coordinates =
+        crate::kernel::runtime_host::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
     let session_entry = services
         .append_user_message(&coordinates, "hello")
         .await
         .unwrap();
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = crate::kernel::history::EventStreamId::for_thread(&coordinates);
     let payload = serde_json::json!({
         "strategy": "naive_assembly",
         "output_hash": "sha256:test",
@@ -244,9 +216,12 @@ async fn context_compile_receipt_event_carries_discharged_provenance() {
     let events = store.read_events(&stream_id, None).await.unwrap();
     let compile_event = events
         .iter()
-        .find(|event| event.kind == EventKind::ContextCompileCompleted)
+        .find(|event| event.kind == crate::kernel::history::EventKind::ContextCompileCompleted)
         .unwrap();
-    assert_eq!(compile_event.origin, EventOrigin::Discharged);
+    assert_eq!(
+        compile_event.origin,
+        crate::kernel::history::EventOrigin::Discharged
+    );
     assert_eq!(compile_event.payload["strategy"], payload["strategy"]);
     assert_eq!(compile_event.payload["output_hash"], payload["output_hash"]);
     assert_eq!(
@@ -313,21 +288,26 @@ async fn manifest_bind_receipts_emit_policy_bound_for_bound_coupling_set() {
 
 #[tokio::test]
 async fn context_compile_receipt_carries_borrowed_prefix_source_ranges() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let parent = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
-    let child = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let services = crate::kernel::runtime_host::RuntimeServices::new(
+        store.clone(),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default(),
+    );
+    let parent =
+        crate::kernel::runtime_host::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let child =
+        crate::kernel::runtime_host::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
     let parent_entry = services
         .append_user_message(&parent, "parent")
         .await
         .unwrap();
-    let parent_stream = EventStreamId::for_thread(&parent);
-    let child_stream = EventStreamId::for_thread(&child);
+    let parent_stream = crate::kernel::history::EventStreamId::for_thread(&parent);
+    let child_stream = crate::kernel::history::EventStreamId::for_thread(&child);
     store
         .fork_by_reference(
             &parent,
             &child,
-            ThreadBaseRef {
+            crate::kernel::history::ThreadBaseRef {
                 child_thread_id: child.thread_id,
                 parent_thread_id: parent.thread_id,
                 parent_checkpoint_id: None,
@@ -335,7 +315,7 @@ async fn context_compile_receipt_carries_borrowed_prefix_source_ranges() {
                 parent_stream_id: parent_stream.clone(),
                 parent_stream_to_sequence: None,
                 parent_binding_snapshot_id: None,
-                reason: ThreadForkReason::ManifestUpdate,
+                reason: crate::kernel::history::ThreadForkReason::ManifestUpdate,
                 created_at_ms: crate::kernel::history::now_ms(),
             },
         )
@@ -357,7 +337,7 @@ async fn context_compile_receipt_carries_borrowed_prefix_source_ranges() {
     let events = store.read_events(&child_stream, None).await.unwrap();
     let compile_event = events
         .iter()
-        .find(|event| event.kind == EventKind::ContextCompileCompleted)
+        .find(|event| event.kind == crate::kernel::history::EventKind::ContextCompileCompleted)
         .unwrap();
     assert_eq!(
         compile_event.provenance.source_streams,
@@ -401,28 +381,28 @@ async fn context_compile_receipt_carries_borrowed_prefix_source_ranges() {
     assert_eq!(context.source_cuts[1].entry_ids, vec![child_entry.entry_id]);
 }
 
-fn runtime_std_context_spill_coupling() -> BoundCoupling {
-    BoundCoupling {
+fn runtime_std_context_spill_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+    crate::agent::manifest_bind::BoundCoupling {
         id: "std::context.spill".to_string(),
-        role: CouplingRole::Projection,
-        trigger_kind: EventKind::ContextCompileCompleted,
+        role: crate::agent::manifest_bind::CouplingRole::Projection,
+        trigger_kind: crate::kernel::history::EventKind::ContextCompileCompleted,
         trigger_match: Default::default(),
-        trigger_quota: AgentManifestCouplingQuota::default(),
-        source_selectors: vec![BoundCouplingSelector {
+        trigger_quota: crate::agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![EventKind::ContextCompileCompleted],
+            kinds: vec![crate::kernel::history::EventKind::ContextCompileCompleted],
             scope: None,
             since: None,
         }],
-        sink: BoundCouplingSink {
+        sink: crate::agent::manifest_bind::BoundCouplingSink {
             stream: "derived:context".to_string(),
             kinds: vec![
-                EventKind::ContextSummaryCompleted,
-                EventKind::ContextReadPlanSet,
+                crate::kernel::history::EventKind::ContextSummaryCompleted,
+                crate::kernel::history::EventKind::ContextReadPlanSet,
             ],
         },
         function_ref: format!("op://std-context-spill/run@sha256:{}", "c".repeat(64)),
-        function: BoundCouplingFunction {
+        function: crate::agent::manifest_bind::BoundCouplingFunction {
             name: "std-context-spill".to_string(),
             artifact_hash: "c".repeat(64),
             operation_name: Some("run".to_string()),
@@ -431,7 +411,7 @@ fn runtime_std_context_spill_coupling() -> BoundCoupling {
             "stream.read:thread".to_string(),
             "stream.write:derived:context".to_string(),
         ],
-        budget: AgentManifestCouplingBudget {
+        budget: crate::agent::manifest_schema::AgentManifestCouplingBudget {
             max_discharge_events: Some(2),
             max_ms: None,
         },
@@ -440,32 +420,32 @@ fn runtime_std_context_spill_coupling() -> BoundCoupling {
     }
 }
 
-fn runtime_std_schedule_cron_timer_coupling() -> BoundCoupling {
-    BoundCoupling {
+fn runtime_std_schedule_cron_timer_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+    crate::agent::manifest_bind::BoundCoupling {
         id: "std::schedule.cron".to_string(),
-        role: CouplingRole::Controller,
-        trigger_kind: EventKind::TimerFired,
+        role: crate::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: crate::kernel::history::EventKind::TimerFired,
         trigger_match: Default::default(),
-        trigger_quota: AgentManifestCouplingQuota::default(),
-        source_selectors: vec![BoundCouplingSelector {
+        trigger_quota: crate::agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
             stream: "control".to_string(),
             kinds: vec![
-                EventKind::MandateStarted,
-                EventKind::MandateRevoked,
-                EventKind::TimerFired,
+                crate::kernel::history::EventKind::MandateStarted,
+                crate::kernel::history::EventKind::MandateRevoked,
+                crate::kernel::history::EventKind::TimerFired,
             ],
             scope: None,
             since: None,
         }],
-        sink: BoundCouplingSink {
+        sink: crate::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
             kinds: vec![
-                EventKind::TurnContinueRequested,
-                EventKind::LoopBudgetExhausted,
+                crate::kernel::history::EventKind::TurnContinueRequested,
+                crate::kernel::history::EventKind::LoopBudgetExhausted,
             ],
         },
         function_ref: format!("op://std-schedule-cron/run@sha256:{}", "s".repeat(64)),
-        function: BoundCouplingFunction {
+        function: crate::agent::manifest_bind::BoundCouplingFunction {
             name: "std-schedule-cron".to_string(),
             artifact_hash: "s".repeat(64),
             operation_name: Some("run".to_string()),
@@ -474,7 +454,7 @@ fn runtime_std_schedule_cron_timer_coupling() -> BoundCoupling {
             "stream.read:control".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: AgentManifestCouplingBudget {
+        budget: crate::agent::manifest_schema::AgentManifestCouplingBudget {
             max_discharge_events: Some(1),
             max_ms: None,
         },
@@ -491,74 +471,78 @@ fn runtime_std_schedule_cron_timer_coupling() -> BoundCoupling {
 
 struct EchoRuntimeFactory;
 
-#[async_trait]
-impl AgentRuntimeFactory for EchoRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for EchoRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(EchoRuntime))
     }
 }
 
 struct EchoRuntime;
 
-#[async_trait]
-impl AgentRuntime for EchoRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for EchoRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        services: crate::kernel::runtime_host::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Started { context });
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
 
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    let _ = status.send(ThreadStatus::Stopped);
-                    let _ = events.send(ThreadEvent::Stopped { thread_id });
+                    let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Stopped);
+                    let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Stopped { thread_id });
                     break;
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { turn_id, input, .. }) => {
-                            let _ = status.send(ThreadStatus::Running);
+                        Some(crate::kernel::runtime_host::ThreadCommand::Submit { turn_id, input, .. }) => {
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Running);
                             if let Ok(entry) = services.append_user_turn_input(&coordinates, &turn_id, &input).await {
-                                let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                                let _ = events.send(crate::kernel::runtime_host::ThreadEvent::CanonicalMirror { thread_id, entry });
                             }
-                            let _ = events.send(ThreadEvent::Output {
+                            let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Output {
                                 thread_id,
                                 text: format!("{turn_id}:{}", input.text_projection()),
                             });
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::Cancel { reason }) => {
-                            let _ = status.send(ThreadStatus::Cancelling);
-                            let _ = events.send(ThreadEvent::Signal {
+                        Some(crate::kernel::runtime_host::ThreadCommand::Cancel { reason }) => {
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Cancelling);
+                            let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Signal {
                                 thread_id,
-                                signal: ThreadSignal::interrupt_cancel(&coordinates, reason.clone()),
+                                signal: crate::kernel::runtime_host::ThreadSignal::interrupt_cancel(&coordinates, reason.clone()),
                             });
-                            let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Cancelled { thread_id, reason });
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::CancelTurn { .. }) => {}
-                        Some(ThreadCommand::Compact { .. }) => {
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::kernel::runtime_host::ThreadCommand::CancelTurn { .. }) => {}
+                        Some(crate::kernel::runtime_host::ThreadCommand::Compact { .. }) => {
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::ResumeToolCall { .. }) => {
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::kernel::runtime_host::ThreadCommand::ResumeToolCall { .. }) => {
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::Shutdown) | None => {
-                            let _ = events.send(ThreadEvent::Signal {
+                        Some(crate::kernel::runtime_host::ThreadCommand::Shutdown) | None => {
+                            let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Signal {
                                 thread_id,
-                                signal: ThreadSignal::shutdown(&coordinates),
+                                signal: crate::kernel::runtime_host::ThreadSignal::shutdown(&coordinates),
                             });
-                            let _ = status.send(ThreadStatus::Stopped);
-                            let _ = events.send(ThreadEvent::Stopped { thread_id });
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Stopped);
+                            let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Stopped { thread_id });
                             break;
                         }
                     }
@@ -570,59 +554,59 @@ impl AgentRuntime for EchoRuntime {
 
 #[derive(Clone)]
 struct AdmissionTestStore {
-    inner: InMemorySessionStore,
-    admission_barrier: Option<Arc<AdmissionAppendBarrier>>,
-    manifest_barrier: Option<Arc<AdmissionAppendBarrier>>,
-    select_branch_calls: Arc<AtomicUsize>,
+    inner: crate::kernel::history::InMemorySessionStore,
+    admission_barrier: Option<std::sync::Arc<AdmissionAppendBarrier>>,
+    manifest_barrier: Option<std::sync::Arc<AdmissionAppendBarrier>>,
+    select_branch_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AdmissionTestStore {
-    fn blocking(admission_barrier: Arc<AdmissionAppendBarrier>) -> Self {
+    fn blocking(admission_barrier: std::sync::Arc<AdmissionAppendBarrier>) -> Self {
         Self {
-            inner: InMemorySessionStore::new(),
+            inner: crate::kernel::history::InMemorySessionStore::new(),
             admission_barrier: Some(admission_barrier),
             manifest_barrier: None,
-            select_branch_calls: Arc::new(AtomicUsize::new(0)),
+            select_branch_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
-    fn blocking_manifest(manifest_barrier: Arc<AdmissionAppendBarrier>) -> Self {
+    fn blocking_manifest(manifest_barrier: std::sync::Arc<AdmissionAppendBarrier>) -> Self {
         Self {
-            inner: InMemorySessionStore::new(),
+            inner: crate::kernel::history::InMemorySessionStore::new(),
             admission_barrier: None,
             manifest_barrier: Some(manifest_barrier),
-            select_branch_calls: Arc::new(AtomicUsize::new(0)),
+            select_branch_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
     fn tracking_selects() -> Self {
         Self {
-            inner: InMemorySessionStore::new(),
+            inner: crate::kernel::history::InMemorySessionStore::new(),
             admission_barrier: None,
             manifest_barrier: None,
-            select_branch_calls: Arc::new(AtomicUsize::new(0)),
+            select_branch_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
 
-#[async_trait]
-impl SessionStore for AdmissionTestStore {
+#[async_trait::async_trait]
+impl crate::kernel::history::SessionStore for AdmissionTestStore {
     async fn append(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+        parent_entry_id: Option<crate::kernel::history::SessionEntryId>,
+        kind: crate::kernel::history::SessionEntryKind,
+    ) -> crate::kernel::history::HistoryResult<crate::kernel::history::SessionEntry> {
         self.inner.append(coordinates, parent_entry_id, kind).await
     }
 
     async fn append_with_provenance(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-        provenance: EventProvenance,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+        parent_entry_id: Option<crate::kernel::history::SessionEntryId>,
+        kind: crate::kernel::history::SessionEntryKind,
+        provenance: crate::kernel::history::EventProvenance,
+    ) -> crate::kernel::history::HistoryResult<crate::kernel::history::SessionEntry> {
         self.inner
             .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
             .await
@@ -630,10 +614,10 @@ impl SessionStore for AdmissionTestStore {
 
     async fn append_turn_input(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
         turn_id: &str,
-        kind: SessionEntryKind,
-    ) -> HistoryResult<SessionEntry> {
+        kind: crate::kernel::history::SessionEntryKind,
+    ) -> crate::kernel::history::HistoryResult<crate::kernel::history::SessionEntry> {
         self.inner
             .append_turn_input(coordinates, turn_id, kind)
             .await
@@ -641,33 +625,34 @@ impl SessionStore for AdmissionTestStore {
 
     async fn active_leaf(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<Option<SessionEntryId>> {
+        coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+    ) -> crate::kernel::history::HistoryResult<Option<crate::kernel::history::SessionEntryId>> {
         self.inner.active_leaf(coordinates).await
     }
 
     async fn select_branch(
         &self,
-        coordinates: &ThreadCoordinates,
-        leaf_entry_id: Option<SessionEntryId>,
-    ) -> HistoryResult<()> {
-        self.select_branch_calls.fetch_add(1, Ordering::SeqCst);
+        coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+        leaf_entry_id: Option<crate::kernel::history::SessionEntryId>,
+    ) -> crate::kernel::history::HistoryResult<()> {
+        self.select_branch_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.select_branch(coordinates, leaf_entry_id).await
     }
 
     async fn build_context(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<SessionContext> {
+        coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+    ) -> crate::kernel::history::HistoryResult<crate::kernel::history::SessionContext> {
         self.inner.build_context(coordinates).await
     }
 
     async fn clone_branch(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        source_leaf: Option<SessionEntryId>,
-        target_coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<Option<SessionEntryId>> {
+        source_coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+        source_leaf: Option<crate::kernel::history::SessionEntryId>,
+        target_coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+    ) -> crate::kernel::history::HistoryResult<Option<crate::kernel::history::SessionEntryId>> {
         self.inner
             .clone_branch(source_coordinates, source_leaf, target_coordinates)
             .await
@@ -675,32 +660,32 @@ impl SessionStore for AdmissionTestStore {
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        target_coordinates: &ThreadCoordinates,
-        base: ThreadBaseRef,
-    ) -> HistoryResult<()> {
+        source_coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+        target_coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+        base: crate::kernel::history::ThreadBaseRef,
+    ) -> crate::kernel::history::HistoryResult<()> {
         self.inner
             .fork_by_reference(source_coordinates, target_coordinates, base)
             .await
     }
 }
 
-#[async_trait]
-impl EventStore for AdmissionTestStore {
+#[async_trait::async_trait]
+impl crate::kernel::history::EventStore for AdmissionTestStore {
     async fn append_events(
         &self,
-        stream_id: &EventStreamId,
-        records: Vec<NewEventRecord>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &crate::kernel::history::EventStreamId,
+        records: Vec<crate::kernel::history::NewEventRecord>,
+    ) -> crate::kernel::history::HistoryResult<Vec<crate::kernel::history::EventRecord>> {
         let appends_admission = records
             .iter()
-            .any(|record| record.kind == EventKind::AdmissionDecided);
+            .any(|record| record.kind == crate::kernel::history::EventKind::AdmissionDecided);
         if appends_admission && let Some(barrier) = &self.admission_barrier {
             barrier.arrive_and_wait().await;
         }
         let appends_manifest_bind = records
             .iter()
-            .any(|record| record.kind == EventKind::ManifestBindCompleted);
+            .any(|record| record.kind == crate::kernel::history::EventKind::ManifestBindCompleted);
         if appends_manifest_bind && let Some(barrier) = &self.manifest_barrier {
             barrier.arrive_and_wait().await;
         }
@@ -709,46 +694,47 @@ impl EventStore for AdmissionTestStore {
 
     async fn read_events(
         &self,
-        stream_id: &EventStreamId,
-        from_sequence: Option<EventSequence>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &crate::kernel::history::EventStreamId,
+        from_sequence: Option<crate::kernel::history::EventSequence>,
+    ) -> crate::kernel::history::HistoryResult<Vec<crate::kernel::history::EventRecord>> {
         self.inner.read_events(stream_id, from_sequence).await
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 // lexicon-allow: observation_store - test wrapper must implement the history observation trait
-impl ObservationStore for AdmissionTestStore {
+impl crate::kernel::history::ObservationStore for AdmissionTestStore {
     async fn append_observation(
         &self,
-        record: NewObservationRecord,
-    ) -> HistoryResult<ObservationRecord> {
+        record: crate::kernel::history::NewObservationRecord,
+    ) -> crate::kernel::history::HistoryResult<crate::kernel::history::ObservationRecord> {
         self.inner.append_observation(record).await
     }
 
     async fn list_observations(
         &self,
-        scope: &ThreadCoordinates,
+        scope: &crate::kernel::runtime_host::ThreadCoordinates,
         kind: Option<&str>,
-    ) -> HistoryResult<Vec<ObservationRecord>> {
+    ) -> crate::kernel::history::HistoryResult<Vec<crate::kernel::history::ObservationRecord>> {
         self.inner.list_observations(scope, kind).await
     }
 }
 
 #[derive(Default)]
 struct AdmissionAppendBarrier {
-    entered: AtomicUsize,
-    entered_notify: Notify,
-    released: AtomicBool,
-    release_notify: Notify,
+    entered: std::sync::atomic::AtomicUsize,
+    entered_notify: tokio::sync::Notify,
+    released: std::sync::atomic::AtomicBool,
+    release_notify: tokio::sync::Notify,
 }
 
 impl AdmissionAppendBarrier {
     async fn arrive_and_wait(&self) {
         let release = self.release_notify.notified();
-        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.entered_notify.notify_waiters();
-        if !self.released.load(Ordering::SeqCst) {
+        if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
             release.await;
         }
     }
@@ -756,7 +742,7 @@ impl AdmissionAppendBarrier {
     async fn wait_for_entries(&self, expected: usize) {
         loop {
             let entered = self.entered_notify.notified();
-            if self.entered.load(Ordering::SeqCst) >= expected {
+            if self.entered.load(std::sync::atomic::Ordering::SeqCst) >= expected {
                 return;
             }
             entered.await;
@@ -764,86 +750,91 @@ impl AdmissionAppendBarrier {
     }
 
     fn release(&self) {
-        self.released.store(true, Ordering::SeqCst);
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.release_notify.notify_waiters();
     }
 }
 
 struct AssistantHistoryRuntimeFactory;
 
-#[async_trait]
-impl AgentRuntimeFactory for AssistantHistoryRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for AssistantHistoryRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(AssistantHistoryRuntime))
     }
 }
 
 struct AssistantHistoryRuntime;
 
-#[async_trait]
-impl AgentRuntime for AssistantHistoryRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for AssistantHistoryRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        services: crate::kernel::runtime_host::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Started { context });
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
 
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    let _ = status.send(ThreadStatus::Stopped);
-                    let _ = events.send(ThreadEvent::Stopped { thread_id });
+                    let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Stopped);
+                    let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Stopped { thread_id });
                     break;
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { turn_id, input, .. }) => {
-                            let _ = status.send(ThreadStatus::Running);
+                        Some(crate::kernel::runtime_host::ThreadCommand::Submit { turn_id, input, .. }) => {
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Running);
                             if let Ok(entry) = services.append_user_turn_input(&coordinates, &turn_id, &input).await {
-                                let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                                let _ = events.send(crate::kernel::runtime_host::ThreadEvent::CanonicalMirror { thread_id, entry });
                             }
                             let output = format!("{turn_id}:{}", input.text_projection());
                             let _ = services.append_session_entry(
                                 &coordinates,
                                 None,
-                                SessionEntryKind::Message {
-                                    message: CanonicalMessage::assistant(
+                                crate::kernel::history::SessionEntryKind::Message {
+                                    message: crate::kernel::history::CanonicalMessage::assistant(
                                         "test",
-                                        ProviderApi::Other("test".to_string()),
+                                        crate::kernel::history::ProviderApi::Other("test".to_string()),
                                         "test-model",
-                                        vec![CanonicalContent::text(output.clone())],
-                                        CanonicalStopReason::EndTurn,
+                                        vec![crate::kernel::history::CanonicalContent::text(output.clone())],
+                                        crate::kernel::history::CanonicalStopReason::EndTurn,
                                     ),
                                 },
                             ).await;
-                            let _ = events.send(ThreadEvent::Output {
+                            let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Output {
                                 thread_id,
                                 text: output,
                             });
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::Cancel { reason }) => {
-                            let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::kernel::runtime_host::ThreadCommand::Cancel { reason }) => {
+                            let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Cancelled { thread_id, reason });
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::CancelTurn { .. }) => {}
-                        Some(ThreadCommand::Compact { .. }) => {
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::kernel::runtime_host::ThreadCommand::CancelTurn { .. }) => {}
+                        Some(crate::kernel::runtime_host::ThreadCommand::Compact { .. }) => {
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::ResumeToolCall { .. }) => {
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::kernel::runtime_host::ThreadCommand::ResumeToolCall { .. }) => {
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::Shutdown) | None => {
-                            let _ = status.send(ThreadStatus::Stopped);
-                            let _ = events.send(ThreadEvent::Stopped { thread_id });
+                        Some(crate::kernel::runtime_host::ThreadCommand::Shutdown) | None => {
+                            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Stopped);
+                            let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Stopped { thread_id });
                             break;
                         }
                     }
@@ -855,31 +846,35 @@ impl AgentRuntime for AssistantHistoryRuntime {
 
 struct InspectTurnInputRuntimeFactory;
 
-#[async_trait]
-impl AgentRuntimeFactory for InspectTurnInputRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for InspectTurnInputRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(InspectTurnInputRuntime))
     }
 }
 
 struct InspectTurnInputRuntime;
 
-#[async_trait]
-impl AgentRuntime for InspectTurnInputRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for InspectTurnInputRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        _services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        _cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        _services: crate::kernel::runtime_host::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
         while let Some(command) = commands.recv().await {
             match command {
-                ThreadCommand::Submit { input, .. } => {
+                crate::kernel::runtime_host::ThreadCommand::Submit { input, .. } => {
                     let mut parts = Vec::new();
                     parts.push(format!("text={}", input.text_projection()));
                     parts.push(format!(
@@ -913,10 +908,12 @@ impl AgentRuntime for InspectTurnInputRuntime {
                     ));
                     for content in &input.content {
                         match content {
-                            TurnContent::Image { mime_type, .. } => {
+                            crate::kernel::runtime_host::TurnContent::Image {
+                                mime_type, ..
+                            } => {
                                 parts.push(format!("image={mime_type}"));
                             }
-                            TurnContent::FileRef {
+                            crate::kernel::runtime_host::TurnContent::FileRef {
                                 path,
                                 mime_type,
                                 size_bytes,
@@ -931,19 +928,19 @@ impl AgentRuntime for InspectTurnInputRuntime {
                                     sha256.as_deref().unwrap_or_default()
                                 ));
                             }
-                            TurnContent::Text { .. } => {}
+                            crate::kernel::runtime_host::TurnContent::Text { .. } => {}
                         }
                     }
-                    let _ = events.send(ThreadEvent::Output {
+                    let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Output {
                         thread_id,
                         text: parts.join("|"),
                     });
                 }
-                ThreadCommand::Cancel { .. } => {}
-                ThreadCommand::CancelTurn { .. } => {}
-                ThreadCommand::Compact { .. } => {}
-                ThreadCommand::ResumeToolCall { .. } => {}
-                ThreadCommand::Shutdown => break,
+                crate::kernel::runtime_host::ThreadCommand::Cancel { .. } => {}
+                crate::kernel::runtime_host::ThreadCommand::CancelTurn { .. } => {}
+                crate::kernel::runtime_host::ThreadCommand::Compact { .. } => {}
+                crate::kernel::runtime_host::ThreadCommand::ResumeToolCall { .. } => {}
+                crate::kernel::runtime_host::ThreadCommand::Shutdown => break,
             }
         }
     }
@@ -951,37 +948,46 @@ impl AgentRuntime for InspectTurnInputRuntime {
 
 struct StuckRuntimeFactory;
 
-#[async_trait]
-impl AgentRuntimeFactory for StuckRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for StuckRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(StuckRuntime))
     }
 }
 
 struct StuckRuntime;
 
-#[async_trait]
-impl AgentRuntime for StuckRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for StuckRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        _cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        services: crate::kernel::runtime_host::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
-        if let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await {
-            let _ = status.send(ThreadStatus::Running);
+        let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Started { context });
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
+        if let Some(crate::kernel::runtime_host::ThreadCommand::Submit { turn_id, input, .. }) =
+            commands.recv().await
+        {
+            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Running);
             if let Ok(entry) = services
                 .append_user_turn_input(&coordinates, &turn_id, &input)
                 .await
             {
-                let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                let _ = events.send(crate::kernel::runtime_host::ThreadEvent::CanonicalMirror {
+                    thread_id,
+                    entry,
+                });
             }
             std::future::pending::<()>().await;
         }
@@ -990,44 +996,48 @@ impl AgentRuntime for StuckRuntime {
 
 #[derive(Default)]
 struct GatedTurnRuntimeState {
-    first_started: Notify,
-    release_first: Notify,
-    second_started: Notify,
-    release_second: Notify,
+    first_started: tokio::sync::Notify,
+    release_first: tokio::sync::Notify,
+    second_started: tokio::sync::Notify,
+    release_second: tokio::sync::Notify,
 }
 
 struct GatedTurnRuntimeFactory {
-    state: Arc<GatedTurnRuntimeState>,
+    state: std::sync::Arc<GatedTurnRuntimeState>,
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for GatedTurnRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for GatedTurnRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(GatedTurnRuntime {
-            state: Arc::clone(&self.state),
+            state: std::sync::Arc::clone(&self.state),
         }))
     }
 }
 
 struct GatedTurnRuntime {
-    state: Arc<GatedTurnRuntimeState>,
+    state: std::sync::Arc<GatedTurnRuntimeState>,
 }
 
-#[async_trait]
-impl AgentRuntime for GatedTurnRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for GatedTurnRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        _cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        services: crate::kernel::runtime_host::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Started { context });
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
 
         for (expected_turn_id, started, release) in [
             (
@@ -1041,56 +1051,68 @@ impl AgentRuntime for GatedTurnRuntime {
                 &self.state.release_second,
             ),
         ] {
-            let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await else {
+            let Some(crate::kernel::runtime_host::ThreadCommand::Submit { turn_id, input, .. }) =
+                commands.recv().await
+            else {
                 return;
             };
             assert_eq!(turn_id, expected_turn_id);
-            let _ = status.send(ThreadStatus::Running);
+            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Running);
             if let Ok(entry) = services
                 .append_user_turn_input(&coordinates, &turn_id, &input)
                 .await
             {
-                let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                let _ = events.send(crate::kernel::runtime_host::ThreadEvent::CanonicalMirror {
+                    thread_id,
+                    entry,
+                });
             }
             started.notify_one();
             release.notified().await;
             drop(input);
-            let _ = status.send(ThreadStatus::Idle);
+            let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
         }
     }
 }
 
 #[derive(Default)]
 struct WatchdogHandoffState {
-    first_started: Notify,
-    release_first: Notify,
-    second_started: Notify,
-    stale_cancel_applied: AtomicBool,
-    stale_cancel_observed: Notify,
+    first_started: tokio::sync::Notify,
+    release_first: tokio::sync::Notify,
+    second_started: tokio::sync::Notify,
+    stale_cancel_applied: std::sync::atomic::AtomicBool,
+    stale_cancel_observed: tokio::sync::Notify,
 }
 
 struct WatchdogHandoffRuntimeFactory {
-    state: Arc<WatchdogHandoffState>,
+    state: std::sync::Arc<WatchdogHandoffState>,
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for WatchdogHandoffRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for WatchdogHandoffRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(WatchdogHandoffRuntime {
-            state: Arc::clone(&self.state),
+            state: std::sync::Arc::clone(&self.state),
         }))
     }
 }
 
 struct WatchdogHandoffRuntime {
-    state: Arc<WatchdogHandoffState>,
+    state: std::sync::Arc<WatchdogHandoffState>,
 }
 
 impl WatchdogHandoffState {
     async fn wait_for_stale_cancel(&self) {
         loop {
             let observed = self.stale_cancel_observed.notified();
-            if self.stale_cancel_applied.load(Ordering::SeqCst) {
+            if self
+                .stale_cancel_applied
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return;
             }
             observed.await;
@@ -1098,43 +1120,49 @@ impl WatchdogHandoffState {
     }
 }
 
-#[async_trait]
-impl AgentRuntime for WatchdogHandoffRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for WatchdogHandoffRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        _events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        _cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        services: crate::kernel::runtime_host::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        _events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) {
         let coordinates = context.coordinates;
-        let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await else {
+        let Some(crate::kernel::runtime_host::ThreadCommand::Submit { turn_id, input, .. }) =
+            commands.recv().await
+        else {
             return;
         };
-        let _ = status.send(ThreadStatus::Running);
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Running);
         let _ = services
             .append_user_turn_input(&coordinates, &turn_id, &input)
             .await;
         self.state.first_started.notify_one();
         self.state.release_first.notified().await;
         drop(input);
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
 
-        let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await else {
+        let Some(crate::kernel::runtime_host::ThreadCommand::Submit { turn_id, input, .. }) =
+            commands.recv().await
+        else {
             return;
         };
-        let _ = status.send(ThreadStatus::Running);
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Running);
         let _ = services
             .append_user_turn_input(&coordinates, &turn_id, &input)
             .await;
         self.state.second_started.notify_one();
 
-        if let Some(ThreadCommand::Cancel { .. }) = commands.recv().await {
+        if let Some(crate::kernel::runtime_host::ThreadCommand::Cancel { .. }) =
+            commands.recv().await
+        {
             self.state
                 .stale_cancel_applied
-                .store(true, Ordering::SeqCst);
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             self.state.stale_cancel_observed.notify_waiters();
         }
     }
@@ -1142,51 +1170,57 @@ impl AgentRuntime for WatchdogHandoffRuntime {
 
 #[derive(Default)]
 struct DrainedPendingInputState {
-    first_started: Notify,
-    queued_input_drained: Notify,
-    release: Notify,
+    first_started: tokio::sync::Notify,
+    queued_input_drained: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 struct DrainedPendingInputRuntimeFactory {
-    state: Arc<DrainedPendingInputState>,
+    state: std::sync::Arc<DrainedPendingInputState>,
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for DrainedPendingInputRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for DrainedPendingInputRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(DrainedPendingInputRuntime {
-            state: Arc::clone(&self.state),
+            state: std::sync::Arc::clone(&self.state),
         }))
     }
 }
 
 struct DrainedPendingInputRuntime {
-    state: Arc<DrainedPendingInputState>,
+    state: std::sync::Arc<DrainedPendingInputState>,
 }
 
-#[async_trait]
-impl AgentRuntime for DrainedPendingInputRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for DrainedPendingInputRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        _events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        _cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        services: crate::kernel::runtime_host::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        _events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) {
         let coordinates = context.coordinates;
-        let Some(ThreadCommand::Submit { turn_id, input, .. }) = commands.recv().await else {
+        let Some(crate::kernel::runtime_host::ThreadCommand::Submit { turn_id, input, .. }) =
+            commands.recv().await
+        else {
             return;
         };
-        let _ = status.send(ThreadStatus::Running);
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Running);
         let _ = services
             .append_user_turn_input(&coordinates, &turn_id, &input)
             .await;
         self.state.first_started.notify_one();
 
         let queued_input = match commands.recv().await {
-            Some(ThreadCommand::Submit { input, .. }) => input,
+            Some(crate::kernel::runtime_host::ThreadCommand::Submit { input, .. }) => input,
             _ => return,
         };
         self.state.queued_input_drained.notify_one();
@@ -1197,18 +1231,26 @@ impl AgentRuntime for DrainedPendingInputRuntime {
 
 #[derive(Default)]
 struct GatedShutdownFactory {
-    builds: AtomicUsize,
-    shutdown_received: Arc<Notify>,
-    release_shutdown: Arc<Notify>,
+    builds: std::sync::atomic::AtomicUsize,
+    shutdown_received: std::sync::Arc<tokio::sync::Notify>,
+    release_shutdown: std::sync::Arc<tokio::sync::Notify>,
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for GatedShutdownFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
-        if self.builds.fetch_add(1, Ordering::SeqCst) == 0 {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for GatedShutdownFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
+        if self
+            .builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
             Ok(Box::new(GatedShutdownRuntime {
-                shutdown_received: Arc::clone(&self.shutdown_received),
-                release_shutdown: Arc::clone(&self.release_shutdown),
+                shutdown_received: std::sync::Arc::clone(&self.shutdown_received),
+                release_shutdown: std::sync::Arc::clone(&self.release_shutdown),
             }))
         } else {
             Ok(Box::new(EchoRuntime))
@@ -1217,27 +1259,30 @@ impl AgentRuntimeFactory for GatedShutdownFactory {
 }
 
 struct GatedShutdownRuntime {
-    shutdown_received: Arc<Notify>,
-    release_shutdown: Arc<Notify>,
+    shutdown_received: std::sync::Arc<tokio::sync::Notify>,
+    release_shutdown: std::sync::Arc<tokio::sync::Notify>,
 }
 
-#[async_trait]
-impl AgentRuntime for GatedShutdownRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for GatedShutdownRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        _services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        _events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        _cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        _services: crate::kernel::runtime_host::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        _events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) {
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
         while let Some(command) = commands.recv().await {
-            if matches!(command, ThreadCommand::Shutdown) {
+            if matches!(
+                command,
+                crate::kernel::runtime_host::ThreadCommand::Shutdown
+            ) {
                 self.shutdown_received.notify_one();
                 self.release_shutdown.notified().await;
-                let _ = status.send(ThreadStatus::Stopped);
+                let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Stopped);
                 return;
             }
         }
@@ -1247,18 +1292,18 @@ impl AgentRuntime for GatedShutdownRuntime {
 
 #[derive(Default)]
 struct ControlledChildBuildFactory {
-    child_builds: AtomicUsize,
-    child_build_notify: Notify,
-    released: AtomicBool,
-    release_notify: Notify,
-    child_runtime_starts: Arc<AtomicUsize>,
+    child_builds: std::sync::atomic::AtomicUsize,
+    child_build_notify: tokio::sync::Notify,
+    released: std::sync::atomic::AtomicBool,
+    release_notify: tokio::sync::Notify,
+    child_runtime_starts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ControlledChildBuildFactory {
     async fn wait_for_child_builds(&self, expected: usize) {
         loop {
             let entered = self.child_build_notify.notified();
-            if self.child_builds.load(Ordering::SeqCst) >= expected {
+            if self.child_builds.load(std::sync::atomic::Ordering::SeqCst) >= expected {
                 return;
             }
             entered.await;
@@ -1266,52 +1311,58 @@ impl ControlledChildBuildFactory {
     }
 
     fn release_builds(&self) {
-        self.released.store(true, Ordering::SeqCst);
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.release_notify.notify_waiters();
     }
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for ControlledChildBuildFactory {
-    async fn build(&self, context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for ControlledChildBuildFactory {
+    async fn build(
+        &self,
+        context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         let is_child = context.parent_thread_id.is_some();
         if is_child {
             let release = self.release_notify.notified();
-            self.child_builds.fetch_add(1, Ordering::SeqCst);
+            self.child_builds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.child_build_notify.notify_waiters();
-            if !self.released.load(Ordering::SeqCst) {
+            if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
                 release.await;
             }
         }
         Ok(Box::new(CountingEchoRuntime {
-            starts: is_child.then(|| Arc::clone(&self.child_runtime_starts)),
+            starts: is_child.then(|| std::sync::Arc::clone(&self.child_runtime_starts)),
         }))
     }
 }
 
 struct BlockingThreadBuildFactory {
-    target_thread_id: ThreadId,
-    entered: AtomicBool,
-    entered_notify: Notify,
-    released: AtomicBool,
-    release_notify: Notify,
+    target_thread_id: crate::kernel::runtime_host::ThreadId,
+    entered: std::sync::atomic::AtomicBool,
+    entered_notify: tokio::sync::Notify,
+    released: std::sync::atomic::AtomicBool,
+    release_notify: tokio::sync::Notify,
 }
 
 impl BlockingThreadBuildFactory {
-    fn new(target_thread_id: ThreadId) -> Self {
+    fn new(target_thread_id: crate::kernel::runtime_host::ThreadId) -> Self {
         Self {
             target_thread_id,
-            entered: AtomicBool::new(false),
-            entered_notify: Notify::new(),
-            released: AtomicBool::new(false),
-            release_notify: Notify::new(),
+            entered: std::sync::atomic::AtomicBool::new(false),
+            entered_notify: tokio::sync::Notify::new(),
+            released: std::sync::atomic::AtomicBool::new(false),
+            release_notify: tokio::sync::Notify::new(),
         }
     }
 
     async fn wait_until_blocked(&self) {
         loop {
             let entered = self.entered_notify.notified();
-            if self.entered.load(Ordering::SeqCst) {
+            if self.entered.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
             entered.await;
@@ -1319,19 +1370,25 @@ impl BlockingThreadBuildFactory {
     }
 
     fn release(&self) {
-        self.released.store(true, Ordering::SeqCst);
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.release_notify.notify_waiters();
     }
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for BlockingThreadBuildFactory {
-    async fn build(&self, context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for BlockingThreadBuildFactory {
+    async fn build(
+        &self,
+        context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         if context.coordinates.thread_id == self.target_thread_id {
             let release = self.release_notify.notified();
-            self.entered.store(true, Ordering::SeqCst);
+            self.entered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             self.entered_notify.notify_waiters();
-            if !self.released.load(Ordering::SeqCst) {
+            if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
                 release.await;
             }
         }
@@ -1340,22 +1397,22 @@ impl AgentRuntimeFactory for BlockingThreadBuildFactory {
 }
 
 struct CountingEchoRuntime {
-    starts: Option<Arc<AtomicUsize>>,
+    starts: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 
-#[async_trait]
-impl AgentRuntime for CountingEchoRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for CountingEchoRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        services: crate::kernel::runtime_host::RuntimeServices,
+        commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         if let Some(starts) = &self.starts {
-            starts.fetch_add(1, Ordering::SeqCst);
+            starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         Box::new(EchoRuntime)
             .run(context, services, commands, events, status, cancellation)
@@ -1365,14 +1422,20 @@ impl AgentRuntime for CountingEchoRuntime {
 
 #[derive(Default)]
 struct FailFirstChildBuildFactory {
-    failed: AtomicBool,
+    failed: std::sync::atomic::AtomicBool,
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for FailFirstChildBuildFactory {
-    async fn build(&self, context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
-        if context.parent_thread_id.is_some() && !self.failed.swap(true, Ordering::SeqCst) {
-            return Err(VerletError::RuntimeFactory(
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for FailFirstChildBuildFactory {
+    async fn build(
+        &self,
+        context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
+        if context.parent_thread_id.is_some()
+            && !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "controlled child build failure".to_string(),
             ));
         }
@@ -1391,17 +1454,20 @@ enum RegistrationProbeOutcome {
 
 #[derive(Default)]
 struct RegistrationProbeFactory {
-    build_completed: AtomicBool,
-    build_notify: Notify,
-    outcome: Arc<AtomicUsize>,
-    outcome_notify: Arc<Notify>,
+    build_completed: std::sync::atomic::AtomicBool,
+    build_notify: tokio::sync::Notify,
+    outcome: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    outcome_notify: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl RegistrationProbeFactory {
     async fn wait_for_build(&self) {
         loop {
             let completed = self.build_notify.notified();
-            if self.build_completed.load(Ordering::SeqCst) {
+            if self
+                .build_completed
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return;
             }
             completed.await;
@@ -1411,7 +1477,7 @@ impl RegistrationProbeFactory {
     async fn wait_for_outcome(&self) -> RegistrationProbeOutcome {
         loop {
             let completed = self.outcome_notify.notified();
-            match self.outcome.load(Ordering::SeqCst) {
+            match self.outcome.load(std::sync::atomic::Ordering::SeqCst) {
                 0 => completed.await,
                 1 => return RegistrationProbeOutcome::DroppedWithoutRun,
                 2 => return RegistrationProbeOutcome::ObservedThreadNotFound,
@@ -1423,26 +1489,32 @@ impl RegistrationProbeFactory {
     }
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for RegistrationProbeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
-        self.build_completed.store(true, Ordering::SeqCst);
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for RegistrationProbeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
+        self.build_completed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.build_notify.notify_waiters();
         Ok(Box::new(RegistrationProbeRuntime {
-            outcome: Arc::clone(&self.outcome),
-            outcome_notify: Arc::clone(&self.outcome_notify),
+            outcome: std::sync::Arc::clone(&self.outcome),
+            outcome_notify: std::sync::Arc::clone(&self.outcome_notify),
         }))
     }
 }
 
 struct RegistrationProbeRuntime {
-    outcome: Arc<AtomicUsize>,
-    outcome_notify: Arc<Notify>,
+    outcome: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    outcome_notify: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl RegistrationProbeRuntime {
     fn record(&self, outcome: RegistrationProbeOutcome) {
-        self.outcome.store(outcome as usize, Ordering::SeqCst);
+        self.outcome
+            .store(outcome as usize, std::sync::atomic::Ordering::SeqCst);
         self.outcome_notify.notify_waiters();
     }
 }
@@ -1454,8 +1526,8 @@ impl Drop for RegistrationProbeRuntime {
             .compare_exchange(
                 RegistrationProbeOutcome::Pending as usize,
                 RegistrationProbeOutcome::DroppedWithoutRun as usize,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
             )
             .is_ok()
         {
@@ -1464,16 +1536,16 @@ impl Drop for RegistrationProbeRuntime {
     }
 }
 
-#[async_trait]
-impl AgentRuntime for RegistrationProbeRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for RegistrationProbeRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        services: crate::kernel::runtime_host::RuntimeServices,
+        commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         let outcome = match services
             .kernel_control()
@@ -1482,7 +1554,9 @@ impl AgentRuntime for RegistrationProbeRuntime {
             .await
         {
             Ok(_) => RegistrationProbeOutcome::ObservedRegistered,
-            Err(VerletError::ThreadNotFound(_)) => RegistrationProbeOutcome::ObservedThreadNotFound,
+            Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_)) => {
+                RegistrationProbeOutcome::ObservedThreadNotFound
+            }
             Err(_) => RegistrationProbeOutcome::ObservedOtherError,
         };
         self.record(outcome);
@@ -1494,16 +1568,16 @@ impl AgentRuntime for RegistrationProbeRuntime {
 
 #[derive(Default)]
 struct CancellationTrackedFactory {
-    active_runs: Arc<AtomicUsize>,
-    runtime_started: Arc<Notify>,
-    runtime_stopped: Arc<Notify>,
+    active_runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    runtime_started: std::sync::Arc<tokio::sync::Notify>,
+    runtime_stopped: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl CancellationTrackedFactory {
     async fn wait_until_stopped(&self) {
         loop {
             let stopped = self.runtime_stopped.notified();
-            if self.active_runs.load(Ordering::SeqCst) == 0 {
+            if self.active_runs.load(std::sync::atomic::Ordering::SeqCst) == 0 {
                 return;
             }
             stopped.await;
@@ -1511,50 +1585,56 @@ impl CancellationTrackedFactory {
     }
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for CancellationTrackedFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for CancellationTrackedFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(CancellationTrackedRuntime {
-            active_runs: Arc::clone(&self.active_runs),
-            runtime_started: Arc::clone(&self.runtime_started),
-            runtime_stopped: Arc::clone(&self.runtime_stopped),
+            active_runs: std::sync::Arc::clone(&self.active_runs),
+            runtime_started: std::sync::Arc::clone(&self.runtime_started),
+            runtime_stopped: std::sync::Arc::clone(&self.runtime_stopped),
         }))
     }
 }
 
 struct CancellationTrackedRuntime {
-    active_runs: Arc<AtomicUsize>,
-    runtime_started: Arc<Notify>,
-    runtime_stopped: Arc<Notify>,
+    active_runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    runtime_started: std::sync::Arc<tokio::sync::Notify>,
+    runtime_stopped: std::sync::Arc<tokio::sync::Notify>,
 }
 
 struct ActiveRunGuard {
-    active_runs: Arc<AtomicUsize>,
-    runtime_stopped: Arc<Notify>,
+    active_runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    runtime_stopped: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl Drop for ActiveRunGuard {
     fn drop(&mut self) {
-        self.active_runs.fetch_sub(1, Ordering::SeqCst);
+        self.active_runs
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         self.runtime_stopped.notify_waiters();
     }
 }
 
-#[async_trait]
-impl AgentRuntime for CancellationTrackedRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for CancellationTrackedRuntime {
     async fn run(
         self: Box<Self>,
-        _context: ThreadContext,
-        _services: RuntimeServices,
-        _commands: mpsc::Receiver<ThreadCommand>,
-        _events: broadcast::Sender<ThreadEvent>,
-        _status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        _context: crate::kernel::runtime_host::ThreadContext,
+        _services: crate::kernel::runtime_host::RuntimeServices,
+        _commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        _events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        _status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
-        self.active_runs.fetch_add(1, Ordering::SeqCst);
+        self.active_runs
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _guard = ActiveRunGuard {
-            active_runs: Arc::clone(&self.active_runs),
-            runtime_stopped: Arc::clone(&self.runtime_stopped),
+            active_runs: std::sync::Arc::clone(&self.active_runs),
+            runtime_stopped: std::sync::Arc::clone(&self.runtime_stopped),
         };
         self.runtime_started.notify_waiters();
         cancellation.cancelled().await;
@@ -1562,13 +1642,16 @@ impl AgentRuntime for CancellationTrackedRuntime {
 }
 
 struct BlockingLifecycleSink {
-    entered: Arc<Notify>,
-    release: Arc<Notify>,
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
 }
 
-#[async_trait]
-impl ThreadLifecycleSink for BlockingLifecycleSink {
-    async fn thread_started(&self, _handle: RuntimeThreadHandle) -> VerletResult<()> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::ThreadLifecycleSink for BlockingLifecycleSink {
+    async fn thread_started(
+        &self,
+        _handle: crate::kernel::runtime_host::RuntimeThreadHandle,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.entered.notify_one();
         self.release.notified().await;
         Ok(())
@@ -1576,36 +1659,43 @@ impl ThreadLifecycleSink for BlockingLifecycleSink {
 }
 
 struct FailingAfterRuntimeStartsSink {
-    active_runs: Arc<AtomicUsize>,
-    runtime_started: Arc<Notify>,
+    active_runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    runtime_started: std::sync::Arc<tokio::sync::Notify>,
 }
 
-#[async_trait]
-impl ThreadLifecycleSink for FailingAfterRuntimeStartsSink {
-    async fn thread_started(&self, _handle: RuntimeThreadHandle) -> VerletResult<()> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::ThreadLifecycleSink for FailingAfterRuntimeStartsSink {
+    async fn thread_started(
+        &self,
+        _handle: crate::kernel::runtime_host::RuntimeThreadHandle,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         loop {
             let started = self.runtime_started.notified();
-            if self.active_runs.load(Ordering::SeqCst) > 0 {
+            if self.active_runs.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 break;
             }
             started.await;
         }
-        Err(VerletError::RuntimeFactory(
+        Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "controlled lifecycle sink failure".to_string(),
         ))
     }
 }
 
 struct HistoryFailingChildLifecycleSink {
-    child_calls: Arc<AtomicUsize>,
+    child_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[async_trait]
-impl ThreadLifecycleSink for HistoryFailingChildLifecycleSink {
-    async fn thread_started(&self, handle: RuntimeThreadHandle) -> VerletResult<()> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::ThreadLifecycleSink for HistoryFailingChildLifecycleSink {
+    async fn thread_started(
+        &self,
+        handle: crate::kernel::runtime_host::RuntimeThreadHandle,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if handle.context().parent_thread_id.is_some() {
-            self.child_calls.fetch_add(1, Ordering::SeqCst);
-            return Err(VerletError::History(
+            self.child_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "controlled child lifecycle history failure".to_string(),
             ));
         }
@@ -1615,53 +1705,61 @@ impl ThreadLifecycleSink for HistoryFailingChildLifecycleSink {
 
 struct ExitRuntimeFactory;
 
-#[async_trait]
-impl AgentRuntimeFactory for ExitRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntimeFactory for ExitRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::kernel::runtime_host::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Box<dyn crate::kernel::runtime_host::AgentRuntime>>
+    {
         Ok(Box::new(ExitRuntime))
     }
 }
 
 struct ExitRuntime;
 
-#[async_trait]
-impl AgentRuntime for ExitRuntime {
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::AgentRuntime for ExitRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        _services: RuntimeServices,
-        _commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        _cancellation: CancellationToken,
+        context: crate::kernel::runtime_host::ThreadContext,
+        _services: crate::kernel::runtime_host::RuntimeServices,
+        _commands: tokio::sync::mpsc::Receiver<crate::kernel::runtime_host::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::kernel::runtime_host::ThreadStatus>,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) {
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Started { context });
+        let _ = status.send(crate::kernel::runtime_host::ThreadStatus::Idle);
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
     }
 }
 
-fn coords(tenant: &str, user: &str, session: &str) -> ThreadCoordinates {
-    ThreadCoordinates::new(tenant, user, session)
+fn coords(
+    tenant: &str,
+    user: &str,
+    session: &str,
+) -> crate::kernel::runtime_host::ThreadCoordinates {
+    crate::kernel::runtime_host::ThreadCoordinates::new(tenant, user, session)
 }
 
 #[test]
 fn runtime_event_kind_serializes_stable_shapes() {
-    let checkpoint_id = ThreadCheckpointId::new();
-    let child_thread_id = ThreadId::new();
-    let interaction_id = RuntimeEventId::new();
-    let source_thread_id = ThreadId::new();
+    let checkpoint_id = crate::kernel::runtime_host::ThreadCheckpointId::new();
+    let child_thread_id = crate::kernel::runtime_host::ThreadId::new();
+    let interaction_id = crate::kernel::runtime_host::RuntimeEventId::new();
+    let source_thread_id = crate::kernel::runtime_host::ThreadId::new();
     let cases = vec![
         (
-            RuntimeEventKind::ThreadInteraction {
+            crate::kernel::runtime_host::RuntimeEventKind::ThreadInteraction {
                 interaction_id,
-                kind: ThreadInteractionKind::PromptSubmitted,
+                kind: crate::kernel::runtime_host::ThreadInteractionKind::PromptSubmitted,
                 source_thread_id,
                 target_thread_id: child_thread_id,
                 source_turn_id: None,
                 target_turn_id: Some("turn-2".to_string()),
                 result_preview: None,
-                metadata: BTreeMap::from([(
+                metadata: std::collections::BTreeMap::from([(
                     "operation".to_string(),
                     "cooldis.submit_to_thread".to_string(),
                 )]),
@@ -1669,19 +1767,19 @@ fn runtime_event_kind_serializes_stable_shapes() {
             serde_json::json!({"type":"thread_interaction","interaction_id":interaction_id.to_string(),"kind":"prompt_submitted","source_thread_id":source_thread_id.to_string(),"target_thread_id":child_thread_id.to_string(),"target_turn_id":"turn-2","metadata":{"operation":"cooldis.submit_to_thread"}}),
         ),
         (
-            RuntimeEventKind::TextDelta {
+            crate::kernel::runtime_host::RuntimeEventKind::TextDelta {
                 text: "hello".to_string(),
             },
             serde_json::json!({"type":"text_delta","text":"hello"}),
         ),
         (
-            RuntimeEventKind::ThinkingDelta {
+            crate::kernel::runtime_host::RuntimeEventKind::ThinkingDelta {
                 text: "plan".to_string(),
             },
             serde_json::json!({"type":"thinking_delta","text":"plan"}),
         ),
         (
-            RuntimeEventKind::ToolCallStarted {
+            crate::kernel::runtime_host::RuntimeEventKind::ToolCallStarted {
                 call_id: "call_1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command":"pwd"}),
@@ -1689,7 +1787,7 @@ fn runtime_event_kind_serializes_stable_shapes() {
             serde_json::json!({"type":"tool_call_started","call_id":"call_1","name":"bash","input":{"command":"pwd"}}),
         ),
         (
-            RuntimeEventKind::ToolCallResult {
+            crate::kernel::runtime_host::RuntimeEventKind::ToolCallResult {
                 call_id: "call_1".to_string(),
                 output: "ok".to_string(),
                 success: true,
@@ -1698,7 +1796,7 @@ fn runtime_event_kind_serializes_stable_shapes() {
             serde_json::json!({"type":"tool_call_result","call_id":"call_1","output":"ok","success":true}),
         ),
         (
-            RuntimeEventKind::ToolCallResult {
+            crate::kernel::runtime_host::RuntimeEventKind::ToolCallResult {
                 call_id: "call_2".to_string(),
                 output: "ok".to_string(),
                 success: true,
@@ -1707,61 +1805,67 @@ fn runtime_event_kind_serializes_stable_shapes() {
             serde_json::json!({"type":"tool_call_result","call_id":"call_2","output":"ok","success":true,"duration_ms":17}),
         ),
         (
-            RuntimeEventKind::ToolLog {
+            crate::kernel::runtime_host::RuntimeEventKind::ToolLog {
                 call_id: "call_2".to_string(),
                 tool_name: "bash".to_string(),
-                level: RuntimeToolLogLevel::Info,
+                level: crate::kernel::runtime_host::RuntimeToolLogLevel::Info,
                 message: "tool completed".to_string(),
-                metadata: BTreeMap::from([("duration_ms".to_string(), "17".to_string())]),
+                metadata: std::collections::BTreeMap::from([(
+                    "duration_ms".to_string(),
+                    "17".to_string(),
+                )]),
             },
             serde_json::json!({"type":"tool_log","call_id":"call_2","tool_name":"bash","level":"info","message":"tool completed","metadata":{"duration_ms":"17"}}),
         ),
         (
-            RuntimeEventKind::HookStarted {
+            crate::kernel::runtime_host::RuntimeEventKind::HookStarted {
                 hook_id: "pre-echo".to_string(),
-                event_name: HookEventName::PreToolUse,
+                event_name: crate::agent::hooks::HookEventName::PreToolUse,
                 matcher: Some("echo_search".to_string()),
             },
             serde_json::json!({"type":"hook_started","hook_id":"pre-echo","event_name":"pre_tool_use","matcher":"echo_search"}),
         ),
         (
-            RuntimeEventKind::HookCompleted {
+            crate::kernel::runtime_host::RuntimeEventKind::HookCompleted {
                 hook_id: "pre-echo".to_string(),
-                event_name: HookEventName::PreToolUse,
-                status: HookRunStatus::Completed,
+                event_name: crate::agent::hooks::HookEventName::PreToolUse,
+                status: crate::agent::hooks::HookRunStatus::Completed,
                 duration_ms: 12,
                 message: None,
             },
             serde_json::json!({"type":"hook_completed","hook_id":"pre-echo","event_name":"pre_tool_use","status":"completed","duration_ms":12}),
         ),
         (
-            RuntimeEventKind::ApprovalRequested {
+            crate::kernel::runtime_host::RuntimeEventKind::ApprovalRequested {
                 approval_id: "approval_1".to_string(),
                 action: "write_file".to_string(),
-                metadata: BTreeMap::from([("path".to_string(), "/workspace/a".to_string())]),
+                metadata: std::collections::BTreeMap::from([(
+                    "path".to_string(),
+                    "/workspace/a".to_string(),
+                )]),
             },
             serde_json::json!({"type":"approval_requested","approval_id":"approval_1","action":"write_file","metadata":{"path":"/workspace/a"}}),
         ),
         (
-            RuntimeEventKind::ApprovalResolved {
+            crate::kernel::runtime_host::RuntimeEventKind::ApprovalResolved {
                 approval_id: "approval_1".to_string(),
-                decision: RuntimeApprovalDecision::Approved,
+                decision: crate::kernel::runtime_host::RuntimeApprovalDecision::Approved,
                 reason: None,
             },
             serde_json::json!({"type":"approval_resolved","approval_id":"approval_1","decision":"approved"}),
         ),
         (
-            RuntimeEventKind::PermissionDecision {
+            crate::kernel::runtime_host::RuntimeEventKind::PermissionDecision {
                 call_id: "call_1".to_string(),
                 tool_name: "bash".to_string(),
-                decision: RuntimePermissionDecision::Deny,
+                decision: crate::kernel::runtime_host::RuntimePermissionDecision::Deny,
                 reason: Some("policy denied".to_string()),
             },
             serde_json::json!({"type":"permission_decision","call_id":"call_1","tool_name":"bash","decision":"deny","reason":"policy denied"}),
         ),
         (
-            RuntimeEventKind::ContextCompiled {
-                diagnostics: AgentContextCompilationDiagnostics {
+            crate::kernel::runtime_host::RuntimeEventKind::ContextCompiled {
+                diagnostics: crate::kernel::context_compiler::AgentContextCompilationDiagnostics {
                     input_entry_count: 2,
                     output_message_count: 1,
                     system_block_count: 1,
@@ -1778,14 +1882,14 @@ fn runtime_event_kind_serializes_stable_shapes() {
             serde_json::json!({"type":"context_compiled","diagnostics":{"input_entry_count":2,"output_message_count":1,"system_block_count":1,"tool_count":1,"attachment_count":0,"retained_text_bytes":11,"truncated_text_bytes":4},"provider_dropped_messages":1,"provider_truncated_text_bytes":2,"provider_retained_text_bytes":9}),
         ),
         (
-            RuntimeEventKind::ModelRequestStarted {
+            crate::kernel::runtime_host::RuntimeEventKind::ModelRequestStarted {
                 request_id: "req_1".to_string(),
                 turn_id: "turn-1".to_string(),
                 provider: "openai".to_string(),
                 api: "openai_responses".to_string(),
                 model: "gpt-test".to_string(),
-                mode: RuntimeModelRequestMode::Complete,
-                purpose: RuntimeModelRequestPurpose::Turn,
+                mode: crate::kernel::runtime_host::RuntimeModelRequestMode::Complete,
+                purpose: crate::kernel::runtime_host::RuntimeModelRequestPurpose::Turn,
                 system_block_count: 1,
                 message_count: 2,
                 tool_count: 3,
@@ -1794,45 +1898,46 @@ fn runtime_event_kind_serializes_stable_shapes() {
             serde_json::json!({"type":"model_request_started","request_id":"req_1","turn_id":"turn-1","provider":"openai","api":"openai_responses","model":"gpt-test","mode":"complete","purpose":"turn","system_block_count":1,"message_count":2,"tool_count":3,"max_tokens":128}),
         ),
         (
-            RuntimeEventKind::ModelRequestCompleted {
+            crate::kernel::runtime_host::RuntimeEventKind::ModelRequestCompleted {
                 request_id: "req_1".to_string(),
                 turn_id: "turn-1".to_string(),
                 provider: "openai".to_string(),
                 api: "openai_responses".to_string(),
                 model: "gpt-test".to_string(),
-                mode: RuntimeModelRequestMode::Complete,
-                purpose: RuntimeModelRequestPurpose::Turn,
+                mode: crate::kernel::runtime_host::RuntimeModelRequestMode::Complete,
+                purpose: crate::kernel::runtime_host::RuntimeModelRequestPurpose::Turn,
                 duration_ms: 25,
-                usage: RuntimeUsage {
+                usage: crate::kernel::runtime_host::RuntimeUsage {
                     input_tokens: 1,
                     output_tokens: 2,
                     cache_creation_input_tokens: 3,
                     cache_read_input_tokens: 4,
                 },
-                stop_reason: CanonicalStopReason::EndTurn,
+                stop_reason: crate::kernel::history::CanonicalStopReason::EndTurn,
             },
             serde_json::json!({"type":"model_request_completed","request_id":"req_1","turn_id":"turn-1","provider":"openai","api":"openai_responses","model":"gpt-test","mode":"complete","purpose":"turn","duration_ms":25,"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4},"stop_reason":"end_turn"}),
         ),
         (
-            RuntimeEventKind::ModelRequestRetryScheduled {
+            crate::kernel::runtime_host::RuntimeEventKind::ModelRequestRetryScheduled {
                 request_id: "req_1".to_string(),
                 next_request_id: "req_1_retry".to_string(),
                 turn_id: "turn-1".to_string(),
                 provider: "openai".to_string(),
                 api: "openai_responses".to_string(),
                 model: "gpt-test".to_string(),
-                mode: RuntimeModelRequestMode::Complete,
-                purpose: RuntimeModelRequestPurpose::Turn,
+                mode: crate::kernel::runtime_host::RuntimeModelRequestMode::Complete,
+                purpose: crate::kernel::runtime_host::RuntimeModelRequestPurpose::Turn,
                 attempt: 1,
                 next_attempt: 2,
                 delay_ms: 50,
-                error_class: RuntimeModelRequestErrorClass::RateLimited,
+                error_class:
+                    crate::kernel::runtime_host::RuntimeModelRequestErrorClass::RateLimited,
                 error: "rate limited".to_string(),
             },
             serde_json::json!({"type":"model_request_retry_scheduled","request_id":"req_1","next_request_id":"req_1_retry","turn_id":"turn-1","provider":"openai","api":"openai_responses","model":"gpt-test","mode":"complete","purpose":"turn","attempt":1,"next_attempt":2,"delay_ms":50,"error_class":"rate_limited","error":"rate limited"}),
         ),
         (
-            RuntimeEventKind::ModelRequestFallbackSelected {
+            crate::kernel::runtime_host::RuntimeEventKind::ModelRequestFallbackSelected {
                 request_id: "req_1".to_string(),
                 turn_id: "turn-1".to_string(),
                 from_provider: "openai".to_string(),
@@ -1841,64 +1946,64 @@ fn runtime_event_kind_serializes_stable_shapes() {
                 to_provider: "fallback".to_string(),
                 to_api: "openai_responses".to_string(),
                 to_model: "gpt-fallback".to_string(),
-                mode: RuntimeModelRequestMode::Complete,
-                purpose: RuntimeModelRequestPurpose::Turn,
-                error_class: RuntimeModelRequestErrorClass::Retryable,
+                mode: crate::kernel::runtime_host::RuntimeModelRequestMode::Complete,
+                purpose: crate::kernel::runtime_host::RuntimeModelRequestPurpose::Turn,
+                error_class: crate::kernel::runtime_host::RuntimeModelRequestErrorClass::Retryable,
                 error: "provider down".to_string(),
             },
             serde_json::json!({"type":"model_request_fallback_selected","request_id":"req_1","turn_id":"turn-1","from_provider":"openai","from_api":"openai_responses","from_model":"gpt-test","to_provider":"fallback","to_api":"openai_responses","to_model":"gpt-fallback","mode":"complete","purpose":"turn","error_class":"retryable","error":"provider down"}),
         ),
         (
-            RuntimeEventKind::ModelRequestFailed {
+            crate::kernel::runtime_host::RuntimeEventKind::ModelRequestFailed {
                 request_id: "req_2".to_string(),
                 turn_id: "turn-1".to_string(),
                 provider: "openai".to_string(),
                 api: "openai_responses".to_string(),
                 model: "gpt-test".to_string(),
-                mode: RuntimeModelRequestMode::Stream,
-                purpose: RuntimeModelRequestPurpose::Compaction,
+                mode: crate::kernel::runtime_host::RuntimeModelRequestMode::Stream,
+                purpose: crate::kernel::runtime_host::RuntimeModelRequestPurpose::Compaction,
                 duration_ms: 3,
-                error_class: RuntimeModelRequestErrorClass::Retryable,
+                error_class: crate::kernel::runtime_host::RuntimeModelRequestErrorClass::Retryable,
                 error: "network".to_string(),
             },
             serde_json::json!({"type":"model_request_failed","request_id":"req_2","turn_id":"turn-1","provider":"openai","api":"openai_responses","model":"gpt-test","mode":"stream","purpose":"compaction","duration_ms":3,"error_class":"retryable","error":"network"}),
         ),
         (
-            RuntimeEventKind::Terminal {
-                state: RuntimeTerminalState::Completed,
+            crate::kernel::runtime_host::RuntimeEventKind::Terminal {
+                state: crate::kernel::runtime_host::RuntimeTerminalState::Completed,
             },
             serde_json::json!({"type":"terminal","state":"completed"}),
         ),
         (
-            RuntimeEventKind::Terminal {
-                state: RuntimeTerminalState::TimedOut,
+            crate::kernel::runtime_host::RuntimeEventKind::Terminal {
+                state: crate::kernel::runtime_host::RuntimeTerminalState::TimedOut,
             },
             serde_json::json!({"type":"terminal","state":"timed_out"}),
         ),
         (
-            RuntimeEventKind::Timeout {
+            crate::kernel::runtime_host::RuntimeEventKind::Timeout {
                 operation: "turn".to_string(),
                 timeout_ms: 100,
             },
             serde_json::json!({"type":"timeout","operation":"turn","timeout_ms":100}),
         ),
         (
-            RuntimeEventKind::PolicyRejected {
+            crate::kernel::runtime_host::RuntimeEventKind::PolicyRejected {
                 code: "max_pending_inputs".to_string(),
                 message: "full".to_string(),
             },
             serde_json::json!({"type":"policy_rejected","code":"max_pending_inputs","message":"full"}),
         ),
         (
-            RuntimeEventKind::Recovery {
+            crate::kernel::runtime_host::RuntimeEventKind::Recovery {
                 action: "abort_runtime".to_string(),
                 reason: "timeout".to_string(),
             },
             serde_json::json!({"type":"recovery","action":"abort_runtime","reason":"timeout"}),
         ),
         (
-            RuntimeEventKind::Usage {
-                usage: RuntimeUsage {
+            crate::kernel::runtime_host::RuntimeEventKind::Usage {
+                usage: crate::kernel::runtime_host::RuntimeUsage {
                     input_tokens: 1,
                     output_tokens: 2,
                     cache_creation_input_tokens: 3,
@@ -1908,38 +2013,38 @@ fn runtime_event_kind_serializes_stable_shapes() {
             serde_json::json!({"type":"usage","usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}),
         ),
         (
-            RuntimeEventKind::SubthreadStarted { child_thread_id },
+            crate::kernel::runtime_host::RuntimeEventKind::SubthreadStarted { child_thread_id },
             serde_json::json!({"type":"subthread_started","child_thread_id":child_thread_id.to_string()}),
         ),
         (
-            RuntimeEventKind::SubthreadFinished {
+            crate::kernel::runtime_host::RuntimeEventKind::SubthreadFinished {
                 child_thread_id,
-                status: ThreadLifecycleStatus::Stopped,
+                status: crate::kernel::runtime_host::ThreadLifecycleStatus::Stopped,
             },
             serde_json::json!({"type":"subthread_finished","child_thread_id":child_thread_id.to_string(),"status":"stopped"}),
         ),
         (
-            RuntimeEventKind::Checkpoint {
+            crate::kernel::runtime_host::RuntimeEventKind::Checkpoint {
                 checkpoint_id,
                 label: Some("label".to_string()),
             },
             serde_json::json!({"type":"checkpoint","checkpoint_id":checkpoint_id.to_string(),"label":"label"}),
         ),
         (
-            RuntimeEventKind::Compaction {
-                trigger: CompactionTrigger::Manual,
+            crate::kernel::runtime_host::RuntimeEventKind::Compaction {
+                trigger: crate::CompactionTrigger::Manual,
                 summary: "summary".to_string(),
             },
             serde_json::json!({"type":"compaction","trigger":"manual","summary":"summary"}),
         ),
         (
-            RuntimeEventKind::Cancelled {
+            crate::kernel::runtime_host::RuntimeEventKind::Cancelled {
                 reason: "stop".to_string(),
             },
             serde_json::json!({"type":"cancelled","reason":"stop"}),
         ),
         (
-            RuntimeEventKind::Failed {
+            crate::kernel::runtime_host::RuntimeEventKind::Failed {
                 code: "runtime_execution".to_string(),
                 message: "boom".to_string(),
             },
@@ -1954,15 +2059,22 @@ fn runtime_event_kind_serializes_stable_shapes() {
 
 #[tokio::test]
 async fn lifecycle_record_tracks_root_start_checkpoint_and_stop() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
 
-    wait_for_status(&thread, ThreadStatus::Idle).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Idle).await;
     let record = thread.lifecycle_record().await;
-    assert_eq!(record.status, ThreadLifecycleStatus::Idle);
+    assert_eq!(
+        record.status,
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Idle
+    );
     assert_eq!(record.parent_thread_id, None);
 
     let checkpoint = host
@@ -1970,11 +2082,17 @@ async fn lifecycle_record_tracks_root_start_checkpoint_and_stop() {
             thread.context().coordinates.thread_id,
             None,
             Some("before-stop".to_string()),
-            BTreeMap::from([("opaque_app_id".to_string(), "app_123".to_string())]),
+            std::collections::BTreeMap::from([(
+                "opaque_app_id".to_string(),
+                "app_123".to_string(),
+            )]),
         )
         .await
         .unwrap();
-    assert_eq!(checkpoint.lineage, ThreadCheckpointLineage::Root);
+    assert_eq!(
+        checkpoint.lineage,
+        crate::kernel::runtime_host::ThreadCheckpointLineage::Root
+    );
     assert_eq!(checkpoint.coordinates, thread.context().coordinates);
     assert_eq!(checkpoint.label.as_deref(), Some("before-stop"));
 
@@ -1982,20 +2100,30 @@ async fn lifecycle_record_tracks_root_start_checkpoint_and_stop() {
     assert_eq!(record.latest_checkpoint_id, Some(checkpoint.id));
     assert!(record.latest_signal_id.is_some());
 
-    thread.send(ThreadCommand::Shutdown).await.unwrap();
+    thread
+        .send(crate::kernel::runtime_host::ThreadCommand::Shutdown)
+        .await
+        .unwrap();
     thread.wait().await;
     let record = thread.lifecycle_record().await;
-    assert_eq!(record.status, ThreadLifecycleStatus::Stopped);
+    assert_eq!(
+        record.status,
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Stopped
+    );
 }
 
 #[tokio::test]
 async fn lifecycle_snapshot_returns_records_not_only_thin_status() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
-    wait_for_status(&thread, ThreadStatus::Idle).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Idle).await;
 
     let snapshot = host.lifecycle_snapshot().await;
 
@@ -2004,18 +2132,28 @@ async fn lifecycle_snapshot_returns_records_not_only_thin_status() {
         snapshot.records[0].coordinates,
         thread.context().coordinates
     );
-    assert_eq!(snapshot.records[0].status, ThreadLifecycleStatus::Idle);
+    assert_eq!(
+        snapshot.records[0].status,
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Idle
+    );
 }
 
 #[tokio::test]
 async fn text_submit_helper_matches_structured_text_turn_canonical_record() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let old = host
-        .start_thread(coords("tenant_a", "user_1", "old"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "old"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let new = host
-        .start_thread(coords("tenant_a", "user_1", "new"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "new"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut old_events = old.subscribe_events();
@@ -2027,7 +2165,7 @@ async fn text_submit_helper_matches_structured_text_turn_canonical_record() {
     host.submit_turn(
         new.context().coordinates.thread_id,
         "turn",
-        TurnInput::text("hello"),
+        crate::kernel::runtime_host::TurnInput::text("hello"),
     )
     .await
     .unwrap();
@@ -2042,12 +2180,15 @@ async fn text_submit_helper_matches_structured_text_turn_canonical_record() {
 
 #[tokio::test]
 async fn runtime_host_submit_records_surface_admission_before_turn_execution() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "host-submit"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2059,12 +2200,15 @@ async fn runtime_host_submit_records_surface_admission_before_turn_execution() {
     assert_output(&mut events, "turn:hello").await;
 
     let control_events = store
-        .read_events(&control_stream_id(&thread.context().coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&thread.context().coordinates),
+            None,
+        )
         .await
         .unwrap();
     let thread_events = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::kernel::history::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -2075,7 +2219,7 @@ async fn runtime_host_submit_records_surface_admission_before_turn_execution() {
     );
     assert_eq!(
         admission.payload["schema"],
-        EventKind::AdmissionDecided.payload_schema_id()
+        crate::kernel::history::EventKind::AdmissionDecided.payload_schema_id()
     );
     assert_eq!(admission.payload["route_id"], "surface:host-submit");
     assert_eq!(admission.payload["decision"], "queue");
@@ -2087,7 +2231,10 @@ async fn runtime_host_submit_records_surface_admission_before_turn_execution() {
         admission.payload["source_ingress_event_ids"],
         serde_json::json!([])
     );
-    assert_eq!(admission.origin, EventOrigin::Discharged);
+    assert_eq!(
+        admission.origin,
+        crate::kernel::history::EventOrigin::Discharged
+    );
     assert_eq!(
         admission.provenance.discharged_by.as_deref(),
         Some("policy:admission_surface:host-submit")
@@ -2104,22 +2251,24 @@ async fn runtime_host_submit_records_surface_admission_before_turn_execution() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn failed_admission_append_prevents_runtime_host_turn_execution() {
-    let store = Arc::new(
-        FaultingRuntimeStore::new(Arc::new(InMemorySessionStore::new())).fail_nth(
-            "append_events",
-            1,
-            "admission append failed",
-        ),
+    let store = std::sync::Arc::new(
+        crate::test_support::FaultingRuntimeStore::new(std::sync::Arc::new(
+            crate::kernel::history::InMemorySessionStore::new(),
+        ))
+        .fail_nth("append_events", 1, "admission append failed"),
     );
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "failed-admission"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
-    wait_for_status(&thread, ThreadStatus::Idle).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Idle).await;
     let mut events = thread.subscribe_events();
 
     let err = host
@@ -2133,9 +2282,11 @@ async fn failed_admission_append_prevents_runtime_host_turn_execution() {
     assert_eq!(store.call_count("append_events"), 1);
 
     // tight-timeout: paused time deterministically proves failed admission emits no output
-    let output = timeout(Duration::from_millis(100), async {
+    let output = tokio::time::timeout(tokio::time::Duration::from_millis(100), async {
         loop {
-            if let ThreadEvent::Output { text, .. } = events.recv().await.unwrap() {
+            if let crate::kernel::runtime_host::ThreadEvent::Output { text, .. } =
+                events.recv().await.unwrap()
+            {
                 return text;
             }
         }
@@ -2150,16 +2301,19 @@ async fn failed_admission_append_prevents_runtime_host_turn_execution() {
 
 #[tokio::test]
 async fn closed_thread_rejection_does_not_append_admission() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(Arc::new(ExitRuntimeFactory), store.clone());
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(ExitRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "closed-submit"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
-    wait_for_status(&thread, ThreadStatus::Failed).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Failed).await;
 
     let err = host
         .submit(
@@ -2170,28 +2324,32 @@ async fn closed_thread_rejection_does_not_append_admission() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, VerletError::ThreadClosed(thread_id) if thread_id == thread.context().coordinates.thread_id)
+        matches!(err, crate::kernel::runtime_host::VerletError::ThreadClosed(thread_id) if thread_id == thread.context().coordinates.thread_id)
     );
 
     let control_events = store
-        .read_events(&control_stream_id(&thread.context().coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&thread.context().coordinates),
+            None,
+        )
         .await
         .unwrap();
     assert!(
         control_events
             .iter()
-            .all(|event| event.kind != EventKind::AdmissionDecided),
+            .all(|event| event.kind != crate::kernel::history::EventKind::AdmissionDecided),
         "closed thread submit must not leave an orphan admission.decided"
     );
 }
 
 #[tokio::test]
 async fn structured_image_turn_maps_to_canonical_user_content() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "image"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2200,9 +2358,9 @@ async fn structured_image_turn_maps_to_canonical_user_content() {
     host.submit_turn(
         thread.context().coordinates.thread_id,
         "turn",
-        TurnInput::new([
-            TurnContent::text("look"),
-            TurnContent::image("base64-image", "image/png"),
+        crate::kernel::runtime_host::TurnInput::new([
+            crate::kernel::runtime_host::TurnContent::text("look"),
+            crate::kernel::runtime_host::TurnContent::image("base64-image", "image/png"),
         ]),
     )
     .await
@@ -2213,8 +2371,8 @@ async fn structured_image_turn_maps_to_canonical_user_content() {
     assert_eq!(
         content,
         vec![vec![
-            CanonicalContent::text("look"),
-            CanonicalContent::Image {
+            crate::kernel::history::CanonicalContent::text("look"),
+            crate::kernel::history::CanonicalContent::Image {
                 data: "base64-image".to_string(),
                 mime_type: "image/png".to_string(),
             },
@@ -2224,19 +2382,24 @@ async fn structured_image_turn_maps_to_canonical_user_content() {
 
 #[tokio::test]
 async fn file_and_runtime_context_reach_runtime_boundary_without_canonicalizing_file() {
-    let host = RuntimeHost::new(Arc::new(InspectTurnInputRuntimeFactory));
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        InspectTurnInputRuntimeFactory,
+    ));
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "file"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "file"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
-    let input = TurnInput::new([
-        TurnContent::text("inspect"),
-        TurnContent::file_ref("/workspace/report.txt")
+    let input = crate::kernel::runtime_host::TurnInput::new([
+        crate::kernel::runtime_host::TurnContent::text("inspect"),
+        crate::kernel::runtime_host::TurnContent::file_ref("/workspace/report.txt")
             .with_mime_type("text/plain")
             .with_size_bytes(42)
             .with_sha256("abc123"),
-        TurnContent::image("inline", "image/jpeg"),
+        crate::kernel::runtime_host::TurnContent::image("inline", "image/jpeg"),
     ])
     .with_cwd("/workspace")
     .with_workspace_root("/workspace")
@@ -2264,16 +2427,22 @@ async fn file_and_runtime_context_reach_runtime_boundary_without_canonicalizing_
 
 #[tokio::test]
 async fn child_lifecycle_is_visible_through_runtime_event_stream() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let root = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut root_events = root.subscribe_events();
     let child = host
         .start_thread(
             coords("tenant_a", "user_1", "s1"),
-            ThreadTopology::spawned_from(root.context().coordinates.thread_id),
+            crate::kernel::runtime_host::ThreadTopology::spawned_from(
+                root.context().coordinates.thread_id,
+            ),
         )
         .await
         .unwrap();
@@ -2281,7 +2450,7 @@ async fn child_lifecycle_is_visible_through_runtime_event_stream() {
     let started = assert_runtime_kind(&mut root_events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::SubthreadStarted { child_thread_id }
+            crate::kernel::runtime_host::RuntimeEventKind::SubthreadStarted { child_thread_id }
                 if *child_thread_id == child.context().coordinates.thread_id
         )
     })
@@ -2294,9 +2463,9 @@ async fn child_lifecycle_is_visible_through_runtime_event_stream() {
     assert_runtime_kind(&mut root_events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::SubthreadFinished {
+            crate::kernel::runtime_host::RuntimeEventKind::SubthreadFinished {
                 child_thread_id,
-                status: ThreadLifecycleStatus::Stopped,
+                status: crate::kernel::runtime_host::ThreadLifecycleStatus::Stopped,
             } if *child_thread_id == child.context().coordinates.thread_id
         )
     })
@@ -2305,9 +2474,14 @@ async fn child_lifecycle_is_visible_through_runtime_event_stream() {
 
 #[tokio::test]
 async fn cross_thread_prompt_and_result_events_do_not_rewrite_lineage() {
-    let host = RuntimeHost::new(Arc::new(AssistantHistoryRuntimeFactory));
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        AssistantHistoryRuntimeFactory,
+    ));
     let root = host
-        .start_thread(coords("tenant_a", "user_1", "root"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "root"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let root_id = root.context().coordinates.thread_id;
@@ -2315,15 +2489,15 @@ async fn cross_thread_prompt_and_result_events_do_not_rewrite_lineage() {
     let child = host
         .start_thread(
             coords("tenant_a", "user_1", "root"),
-            ThreadTopology::spawned_from(root_id),
+            crate::kernel::runtime_host::ThreadTopology::spawned_from(root_id),
         )
         .await
         .unwrap();
     let child_id = child.context().coordinates.thread_id;
     let mut child_interaction_events = child.subscribe_events();
     let mut child_output_events = child.subscribe_events();
-    wait_for_status(&root, ThreadStatus::Idle).await;
-    wait_for_status(&child, ThreadStatus::Idle).await;
+    wait_for_status(&root, crate::kernel::runtime_host::ThreadStatus::Idle).await;
+    wait_for_status(&child, crate::kernel::runtime_host::ThreadStatus::Idle).await;
 
     let control = host.kernel_control();
     let receipt = control
@@ -2331,7 +2505,7 @@ async fn cross_thread_prompt_and_result_events_do_not_rewrite_lineage() {
             root.context(),
             child_id,
             Some("turn-cross".to_string()),
-            TurnInput::text("from root"),
+            crate::kernel::runtime_host::TurnInput::text("from root"),
         )
         .await
         .unwrap();
@@ -2342,9 +2516,9 @@ async fn cross_thread_prompt_and_result_events_do_not_rewrite_lineage() {
     let submitted = assert_runtime_kind(&mut root_events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::ThreadInteraction {
+            crate::kernel::runtime_host::RuntimeEventKind::ThreadInteraction {
                 interaction_id,
-                kind: ThreadInteractionKind::PromptSubmitted,
+                kind: crate::kernel::runtime_host::ThreadInteractionKind::PromptSubmitted,
                 source_thread_id,
                 target_thread_id,
                 target_turn_id: Some(target_turn_id),
@@ -2361,9 +2535,9 @@ async fn cross_thread_prompt_and_result_events_do_not_rewrite_lineage() {
     let received = assert_runtime_kind(&mut child_interaction_events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::ThreadInteraction {
+            crate::kernel::runtime_host::RuntimeEventKind::ThreadInteraction {
                 interaction_id,
-                kind: ThreadInteractionKind::PromptReceived,
+                kind: crate::kernel::runtime_host::ThreadInteractionKind::PromptReceived,
                 source_thread_id,
                 target_thread_id,
                 target_turn_id: Some(target_turn_id),
@@ -2400,9 +2574,9 @@ async fn cross_thread_prompt_and_result_events_do_not_rewrite_lineage() {
     assert_runtime_kind(&mut root_events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::ThreadInteraction {
+            crate::kernel::runtime_host::RuntimeEventKind::ThreadInteraction {
                 interaction_id,
-                kind: ThreadInteractionKind::ResultAttached,
+                kind: crate::kernel::runtime_host::ThreadInteractionKind::ResultAttached,
                 source_thread_id,
                 target_thread_id,
                 result_preview: Some(result_preview),
@@ -2416,28 +2590,39 @@ async fn cross_thread_prompt_and_result_events_do_not_rewrite_lineage() {
     .await;
 
     let child_topology = child.lifecycle_record().await.topology;
-    assert_eq!(child_topology.lineage, ThreadLineage::Root);
+    assert_eq!(
+        child_topology.lineage,
+        crate::kernel::runtime_host::ThreadLineage::Root
+    );
     assert_eq!(child_topology.spawn_source_thread_id(), Some(root_id));
     assert_eq!(child_topology.branch_parent_thread_id(), None);
     assert!(canonical_user_content(&root.session_context().await.unwrap()).is_empty());
     assert_eq!(
         canonical_user_content(&child.session_context().await.unwrap()),
-        vec![vec![CanonicalContent::text("from root")]]
+        vec![vec![crate::kernel::history::CanonicalContent::text(
+            "from root"
+        )]]
     );
 }
 
 #[tokio::test]
 async fn loop_continuation_accepts_request_and_submits_next_turn_once() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "loop"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "loop"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let thread_id = thread.context().coordinates.thread_id;
     let coordinates = thread.context().coordinates.clone();
     let mut events = thread.subscribe_events();
-    wait_for_status(&thread, ThreadStatus::Idle).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Idle).await;
     let parent = append_loop_parent_completed(store.as_ref(), &coordinates, "turn-1").await;
     append_loop_mandate_started(
         store.as_ref(),
@@ -2464,7 +2649,7 @@ async fn loop_continuation_accepts_request_and_submits_next_turn_once() {
         .unwrap();
 
     let accepted_event_id = match &receipt {
-        LoopContinuationReceipt::Accepted {
+        crate::kernel::runtime_host::LoopContinuationReceipt::Accepted {
             loop_id,
             parent_turn_id,
             next_turn_id,
@@ -2486,34 +2671,44 @@ async fn loop_continuation_accepts_request_and_submits_next_turn_once() {
     assert_eq!(replay, receipt);
 
     let control_events = store
-        .read_events(&control_stream_id(&coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let accepted = control_events
         .iter()
-        .filter(|event| event.kind == EventKind::TurnContinuationAccepted)
+        .filter(|event| event.kind == crate::kernel::history::EventKind::TurnContinuationAccepted)
         .collect::<Vec<_>>();
     assert_eq!(accepted.len(), 1);
     assert_eq!(accepted[0].id, accepted_event_id);
-    let payload =
-        serde_json::from_value::<TurnContinuationAcceptedPayload>(accepted[0].payload.clone())
-            .unwrap();
+    let payload = serde_json::from_value::<
+        crate::kernel::control_decision::TurnContinuationAcceptedPayload,
+    >(accepted[0].payload.clone())
+    .unwrap();
     assert_eq!(payload.next_turn_id, "turn-2");
     assert_eq!(payload.mandate_id, "mandate-loop-1");
 
     let thread_events = store
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(
+            &crate::kernel::history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let submitted = thread_events
         .iter()
         .filter(|event| {
-            event.kind == EventKind::TurnSubmitted
+            event.kind == crate::kernel::history::EventKind::TurnSubmitted
                 && event.payload["turn_id"].as_str() == Some("turn-2")
         })
         .collect::<Vec<_>>();
     assert_eq!(submitted.len(), 1);
-    assert_eq!(submitted[0].origin, EventOrigin::Discharged);
+    assert_eq!(
+        submitted[0].origin,
+        crate::kernel::history::EventOrigin::Discharged
+    );
     assert_eq!(
         submitted[0].provenance.source_event_ids,
         vec![accepted_event_id]
@@ -2522,27 +2717,30 @@ async fn loop_continuation_accepts_request_and_submits_next_turn_once() {
 
 #[tokio::test]
 async fn catch_up_continuation_fired_before_expiry_is_rejected_after_expiry() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "expired-catch-up"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let thread_id = thread.context().coordinates.thread_id;
     let coordinates = thread.context().coordinates.clone();
-    wait_for_status(&thread, ThreadStatus::Idle).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Idle).await;
     let parent = append_loop_parent_completed(store.as_ref(), &coordinates, "turn-1").await;
     store
         .append_events(
-            &control_stream_id(&coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            vec![crate::kernel::history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::MandateStarted,
-                serde_json::to_value(MandateStartedPayload {
-                    subject: MandateSubject {
+                crate::kernel::history::EventKind::MandateStarted,
+                serde_json::to_value(crate::kernel::control_decision::MandateStartedPayload {
+                    subject: crate::kernel::control_decision::MandateSubject {
                         thread_id: Some(coordinates.thread_id.to_string()),
                         loop_id: Some("loop-catch-up".to_string()),
                     },
@@ -2551,9 +2749,15 @@ async fn catch_up_continuation_fired_before_expiry_is_rejected_after_expiry() {
                     thread_id: Some(coordinates.thread_id.to_string()),
                     max_continuations: None,
                     expires_at_ms: Some(1_000),
-                    schedule: Some(MandateSchedulePayload::Interval { every_ms: 60_000 }),
+                    schedule: Some(
+                        crate::kernel::control_decision::MandateSchedulePayload::Interval {
+                            every_ms: 60_000,
+                        },
+                    ),
                     max_occurrences: None,
-                    catch_up: Some(MandateCatchUpPolicy::CoalesceMissed),
+                    catch_up: Some(
+                        crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed,
+                    ),
                     input_template: Some("catch up".to_string()),
                 })
                 .unwrap(),
@@ -2561,29 +2765,36 @@ async fn catch_up_continuation_fired_before_expiry_is_rejected_after_expiry() {
         )
         .await
         .unwrap();
-    let mut request = NewEventRecord::discharged(
+    let mut request = crate::kernel::history::NewEventRecord::discharged(
         coordinates.clone(),
-        EventKind::TurnContinueRequested,
-        serde_json::to_value(TurnContinueRequestedPayload {
-            subject: TurnContinuationSubject {
-                loop_id: "loop-catch-up".to_string(),
-                parent_turn_id: "turn-1".to_string(),
+        crate::kernel::history::EventKind::TurnContinueRequested,
+        serde_json::to_value(
+            crate::kernel::control_decision::TurnContinueRequestedPayload {
+                subject: crate::kernel::control_decision::TurnContinuationSubject {
+                    loop_id: "loop-catch-up".to_string(),
+                    parent_turn_id: "turn-1".to_string(),
+                },
+                snapshot_id: "schedule.v1".to_string(),
+                next_turn_input: "catch up".to_string(),
             },
-            snapshot_id: "schedule.v1".to_string(),
-            next_turn_input: "catch up".to_string(),
-        })
+        )
         .unwrap(),
-        EventProvenance {
-            source_streams: vec![EventStreamId::for_thread(&coordinates)],
+        crate::kernel::history::EventProvenance {
+            source_streams: vec![crate::kernel::history::EventStreamId::for_thread(
+                &coordinates,
+            )],
             source_event_ids: vec![parent.id],
             discharged_by: Some("coupling:std::schedule.cron".to_string()),
             function: Some("schedule_continuation/v1".to_string()),
-            ..EventProvenance::default()
+            ..crate::kernel::history::EventProvenance::default()
         },
     );
     request.created_at_ms = 900;
     store
-        .append_events(&control_stream_id(&coordinates), vec![request])
+        .append_events(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            vec![request],
+        )
         .await
         .unwrap();
 
@@ -2594,23 +2805,29 @@ async fn catch_up_continuation_fired_before_expiry_is_rejected_after_expiry() {
 
     assert!(matches!(
         receipt,
-        LoopContinuationReceipt::Rejected { reason, .. }
+        crate::kernel::runtime_host::LoopContinuationReceipt::Rejected { reason, .. }
             if reason == "continuation mandate expired at 1000 (1970-01-01T00:00:01.000Z)"
     ));
     let thread_events = store
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(
+            &crate::kernel::history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     assert!(thread_events.iter().all(|event| {
-        event.kind != EventKind::TurnSubmitted
+        event.kind != crate::kernel::history::EventKind::TurnSubmitted
             || event.payload["turn_id"].as_str() != Some("turn-2")
     }));
     let control_events = store
-        .read_events(&control_stream_id(&coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     assert!(control_events.iter().any(|event| {
-        event.kind == EventKind::TurnContinuationRejected
+        event.kind == crate::kernel::history::EventKind::TurnContinuationRejected
             && event.payload["reason"]
                 == "continuation mandate expired at 1000 (1970-01-01T00:00:01.000Z)"
     }));
@@ -2621,56 +2838,72 @@ async fn schedule_timer_fired_continuation_is_accepted_and_runs_offline_provider
     let root = std::env::temp_dir()
         .join("verlet-runtime-host-tests")
         .join(uuid::Uuid::now_v7().to_string());
-    let store = SqliteSessionStore::open(root.join("history.sqlite3"))
+    let store = crate::SqliteSessionStore::open(root.join("history.sqlite3"))
         .await
         .unwrap();
-    let mut config = AgentLoopConfig::new(
-        ProviderApi::Other("local_offline".to_string()),
+    let mut config = crate::AgentLoopConfig::new(
+        crate::kernel::history::ProviderApi::Other("local_offline".to_string()),
         "local_offline",
         "gpt-test",
     );
     config.max_tokens = 128;
-    let provider = Arc::new(LocalOfflineProviderClient::new("local_offline", "gpt-test"));
-    let factory = Arc::new(AgentLoopFactory::new(config, provider));
-    let host = RuntimeHost::with_session_store(factory, Arc::new(store.clone()));
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "scheduled");
+    let provider = std::sync::Arc::new(crate::LocalOfflineProviderClient::new(
+        "local_offline",
+        "gpt-test",
+    ));
+    let factory = std::sync::Arc::new(crate::AgentLoopFactory::new(config, provider));
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        factory,
+        std::sync::Arc::new(store.clone()),
+    );
+    let coordinates =
+        crate::kernel::runtime_host::ThreadCoordinates::new("tenant_a", "user_1", "scheduled");
     let thread = host
-        .start_thread(coordinates.clone(), ThreadTopology::root())
+        .start_thread(
+            coordinates.clone(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let thread_id = thread.context().coordinates.thread_id;
     let mut events = thread.subscribe_events();
-    wait_for_status(&thread, ThreadStatus::Idle).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Idle).await;
 
-    let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap();
-    let due = start + ChronoDuration::minutes(1);
+    let start = chrono::Utc
+        .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+        .single()
+        .unwrap();
+    let due = start + chrono::Duration::minutes(1);
     let mandate = append_scheduled_loop_mandate(&store, &coordinates, "loop-nightly", start).await;
-    let sink = Arc::new(WitnessTimerFiredSink {
+    let sink = std::sync::Arc::new(WitnessTimerFiredSink {
         store: store.clone(),
         coordinates: coordinates.clone(),
     });
-    let clock = Arc::new(RuntimeFakeClock::new(due));
-    let route = VerletDaemonClockRoute::new("clock-main", store.clone(), sink, clock)
+    let clock = std::sync::Arc::new(RuntimeFakeClock::new(due));
+    let route = crate::VerletDaemonClockRoute::new("clock-main", store.clone(), sink, clock)
         .with_started_at(start);
 
     assert_eq!(route.enqueue_due_once().await.unwrap(), 1);
     let control_events = store
-        .read_events(&control_stream_id(&coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let fired = control_events
         .iter()
-        .filter(|event| event.kind == EventKind::TimerFired)
+        .filter(|event| event.kind == crate::kernel::history::EventKind::TimerFired)
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0].provenance.source_event_ids, vec![mandate.id]);
 
-    let executor = StdlibCouplingExecutor;
-    let scheduler = CouplingScheduler::new(&store, &executor);
+    let executor = crate::StdlibCouplingExecutor;
+    let scheduler = crate::CouplingScheduler::new(&store, &executor);
     let receipt = scheduler
         .run_batch(
-            &BoundCouplingSet::new(
+            &crate::agent::manifest_bind::BoundCouplingSet::new(
                 "schedule.v1",
                 vec![runtime_std_schedule_cron_timer_coupling()],
             ),
@@ -2683,11 +2916,14 @@ async fn schedule_timer_fired_continuation_is_accepted_and_runs_offline_provider
     assert_eq!(receipt.runs[0].discharged_event_ids.len(), 1);
 
     let continuation = store
-        .read_events(&control_stream_id(&coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&coordinates),
+            None,
+        )
         .await
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == EventKind::TurnContinueRequested)
+        .find(|event| event.kind == crate::kernel::history::EventKind::TurnContinueRequested)
         .unwrap();
     assert_eq!(
         continuation.payload["next_turn_input"],
@@ -2706,7 +2942,7 @@ async fn schedule_timer_fired_continuation_is_accepted_and_runs_offline_provider
         .await
         .unwrap();
     match continuation_receipt {
-        LoopContinuationReceipt::Accepted {
+        crate::kernel::runtime_host::LoopContinuationReceipt::Accepted {
             loop_id,
             parent_turn_id,
             next_turn_id,
@@ -2724,18 +2960,21 @@ async fn schedule_timer_fired_continuation_is_accepted_and_runs_offline_provider
 
 #[tokio::test]
 async fn loop_continuation_without_mandate_rejects_without_submitting() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "loop-denied"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let thread_id = thread.context().coordinates.thread_id;
     let coordinates = thread.context().coordinates.clone();
-    wait_for_status(&thread, ThreadStatus::Idle).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Idle).await;
     let parent = append_loop_parent_completed(store.as_ref(), &coordinates, "turn-1").await;
     append_loop_continue_request(
         store.as_ref(),
@@ -2754,7 +2993,7 @@ async fn loop_continuation_without_mandate_rejects_without_submitting() {
         .unwrap();
 
     match receipt {
-        LoopContinuationReceipt::Rejected {
+        crate::kernel::runtime_host::LoopContinuationReceipt::Rejected {
             loop_id,
             parent_turn_id,
             reason,
@@ -2767,30 +3006,38 @@ async fn loop_continuation_without_mandate_rejects_without_submitting() {
         other => panic!("expected rejected continuation, got {other:?}"),
     }
     let thread_events = store
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(
+            &crate::kernel::history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     assert!(
         thread_events
             .iter()
-            .all(|event| event.kind != EventKind::TurnSubmitted)
+            .all(|event| event.kind != crate::kernel::history::EventKind::TurnSubmitted)
     );
 }
 
 #[tokio::test]
 async fn execution_policy_limits_child_threads() {
-    let host = RuntimeHost::with_policy(
-        Arc::new(EchoRuntimeFactory),
-        RuntimeExecutionPolicy::default().with_max_child_threads(1),
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default().with_max_child_threads(1),
     );
     let root = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut root_events = root.subscribe_events();
     host.start_thread(
         coords("tenant_a", "user_1", "s1"),
-        ThreadTopology::spawned_from(root.context().coordinates.thread_id),
+        crate::kernel::runtime_host::ThreadTopology::spawned_from(
+            root.context().coordinates.thread_id,
+        ),
     )
     .await
     .unwrap();
@@ -2798,7 +3045,9 @@ async fn execution_policy_limits_child_threads() {
     let err = match host
         .start_thread(
             coords("tenant_a", "user_1", "s1"),
-            ThreadTopology::spawned_from(root.context().coordinates.thread_id),
+            crate::kernel::runtime_host::ThreadTopology::spawned_from(
+                root.context().coordinates.thread_id,
+            ),
         )
         .await
     {
@@ -2808,7 +3057,7 @@ async fn execution_policy_limits_child_threads() {
 
     assert!(matches!(
         err,
-        VerletError::ThreadPolicyViolation {
+        crate::kernel::runtime_host::VerletError::ThreadPolicyViolation {
             code: "max_child_threads",
             ..
         }
@@ -2816,7 +3065,7 @@ async fn execution_policy_limits_child_threads() {
     assert_runtime_kind(&mut root_events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::PolicyRejected { code, .. } if code == "max_child_threads"
+            crate::kernel::runtime_host::RuntimeEventKind::PolicyRejected { code, .. } if code == "max_child_threads"
         )
     })
     .await;
@@ -2824,15 +3073,15 @@ async fn execution_policy_limits_child_threads() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn concurrent_child_starts_reserve_policy_slots_before_runtime_build() {
-    let factory = Arc::new(ControlledChildBuildFactory::default());
-    let host = RuntimeHost::with_policy(
+    let factory = std::sync::Arc::new(ControlledChildBuildFactory::default());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
         factory.clone(),
-        RuntimeExecutionPolicy::default().with_max_child_threads(2),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default().with_max_child_threads(2),
     );
     let root = host
         .start_thread(
             coords("tenant_a", "user_1", "concurrent-child-cap"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2843,7 +3092,7 @@ async fn concurrent_child_starts_reserve_policy_slots_before_runtime_build() {
         starts.push(tokio::spawn(async move {
             host.start_thread(
                 coords("tenant_a", "user_1", "concurrent-child-cap"),
-                ThreadTopology::spawned_from(root_thread_id),
+                crate::kernel::runtime_host::ThreadTopology::spawned_from(root_thread_id),
             )
             .await
         }));
@@ -2863,10 +3112,12 @@ async fn concurrent_child_starts_reserve_policy_slots_before_runtime_build() {
             .filter(|result| {
                 matches!(
                     result,
-                    Err(VerletError::ThreadPolicyViolation {
-                        code: "max_child_threads",
-                        ..
-                    })
+                    Err(
+                        crate::kernel::runtime_host::VerletError::ThreadPolicyViolation {
+                            code: "max_child_threads",
+                            ..
+                        }
+                    )
                 )
             })
             .count(),
@@ -2878,14 +3129,14 @@ async fn concurrent_child_starts_reserve_policy_slots_before_runtime_build() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn failed_child_build_releases_reserved_policy_slot() {
-    let host = RuntimeHost::with_policy(
-        Arc::new(FailFirstChildBuildFactory::default()),
-        RuntimeExecutionPolicy::default().with_max_child_threads(1),
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(FailFirstChildBuildFactory::default()),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default().with_max_child_threads(1),
     );
     let root = host
         .start_thread(
             coords("tenant_a", "user_1", "failed-child-reservation"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2894,14 +3145,14 @@ async fn failed_child_build_releases_reserved_policy_slot() {
     assert!(matches!(
         host.start_thread(
             coords("tenant_a", "user_1", "failed-child-reservation"),
-            ThreadTopology::spawned_from(root_thread_id),
+            crate::kernel::runtime_host::ThreadTopology::spawned_from(root_thread_id),
         )
         .await,
-        Err(VerletError::RuntimeFactory(_))
+        Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(_))
     ));
     host.start_thread(
         coords("tenant_a", "user_1", "failed-child-reservation"),
-        ThreadTopology::spawned_from(root_thread_id),
+        crate::kernel::runtime_host::ThreadTopology::spawned_from(root_thread_id),
     )
     .await
     .unwrap();
@@ -2912,12 +3163,15 @@ async fn failed_child_build_releases_reserved_policy_slot() {
 
 #[tokio::test]
 async fn execution_policy_rejects_submit_when_command_queue_is_full() {
-    let host = RuntimeHost::with_policy(
-        Arc::new(StuckRuntimeFactory),
-        RuntimeExecutionPolicy::default().with_max_pending_inputs(1),
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(StuckRuntimeFactory),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default().with_max_pending_inputs(1),
     );
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
@@ -2925,7 +3179,7 @@ async fn execution_policy_rejects_submit_when_command_queue_is_full() {
     host.submit(thread.context().coordinates.thread_id, "turn-1", "hold")
         .await
         .unwrap();
-    wait_for_status(&thread, ThreadStatus::Running).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Running).await;
     host.submit(thread.context().coordinates.thread_id, "turn-2", "queued")
         .await
         .unwrap();
@@ -2936,7 +3190,7 @@ async fn execution_policy_rejects_submit_when_command_queue_is_full() {
 
     assert!(matches!(
         err,
-        VerletError::ThreadPolicyViolation {
+        crate::kernel::runtime_host::VerletError::ThreadPolicyViolation {
             code: "max_pending_inputs",
             ..
         }
@@ -2944,24 +3198,30 @@ async fn execution_policy_rejects_submit_when_command_queue_is_full() {
     assert_runtime_kind(&mut events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::PolicyRejected { code, .. } if code == "max_pending_inputs"
+            crate::kernel::runtime_host::RuntimeEventKind::PolicyRejected { code, .. } if code == "max_pending_inputs"
         )
     })
     .await;
     assert_eq!(
         canonical_user_content(&thread.session_context().await.unwrap()),
-        vec![vec![CanonicalContent::text("hold")]]
+        vec![vec![crate::kernel::history::CanonicalContent::text("hold")]]
     );
     thread.abort().await;
 }
 
 #[tokio::test]
 async fn user_turn_input_persistence_adopts_existing_entry_by_turn_id() {
-    let store = Arc::new(InMemorySessionStore::new());
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
     let coordinates = coords("tenant_a", "user_1", "turn-input-idempotency");
-    let first_services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let recovered_services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let input = TurnInput::text("persist exactly once");
+    let first_services = crate::kernel::runtime_host::RuntimeServices::new(
+        store.clone(),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default(),
+    );
+    let recovered_services = crate::kernel::runtime_host::RuntimeServices::new(
+        store.clone(),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default(),
+    );
+    let input = crate::kernel::runtime_host::TurnInput::text("persist exactly once");
 
     let first = first_services
         .append_user_turn_input(&coordinates, "turn-stable", &input)
@@ -2976,23 +3236,25 @@ async fn user_turn_input_persistence_adopts_existing_entry_by_turn_id() {
     let context = store.build_context(&coordinates).await.unwrap();
     assert_eq!(
         canonical_user_content(&context),
-        vec![vec![CanonicalContent::text("persist exactly once")]]
+        vec![vec![crate::kernel::history::CanonicalContent::text(
+            "persist exactly once"
+        )]]
     );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
-    let state = Arc::new(GatedTurnRuntimeState::default());
-    let host = RuntimeHost::with_policy(
-        Arc::new(GatedTurnRuntimeFactory {
-            state: Arc::clone(&state),
+    let state = std::sync::Arc::new(GatedTurnRuntimeState::default());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(GatedTurnRuntimeFactory {
+            state: std::sync::Arc::clone(&state),
         }),
-        RuntimeExecutionPolicy::default().with_turn_timeout_ms(100),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default().with_turn_timeout_ms(100),
     );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "watchdog"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3003,19 +3265,19 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
         .unwrap();
     state.first_started.notified().await;
 
-    tokio::time::advance(Duration::from_millis(50)).await;
+    tokio::time::advance(tokio::time::Duration::from_millis(50)).await;
     host.submit(thread.context().coordinates.thread_id, "turn-b", "queued")
         .await
         .unwrap();
 
-    tokio::time::advance(Duration::from_millis(50)).await;
+    tokio::time::advance(tokio::time::Duration::from_millis(50)).await;
     // tight-timeout: paused time deterministically bounds the first turn watchdog event
-    timeout(
-        Duration::from_millis(1),
+    tokio::time::timeout(
+        tokio::time::Duration::from_millis(1),
         assert_runtime_kind(&mut events, |kind| {
             matches!(
                 kind,
-                RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+                crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
             )
         }),
     )
@@ -3024,12 +3286,12 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
 
     assert!(
         // tight-timeout: paused time proves the queued turn watchdog remains inactive
-        timeout(
-            Duration::from_millis(51),
+        tokio::time::timeout(
+            tokio::time::Duration::from_millis(51),
             assert_runtime_kind(&mut events, |kind| {
                 matches!(
                     kind,
-                    RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+                    crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
                 )
             }),
         )
@@ -3043,12 +3305,12 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
 
     assert!(
         // tight-timeout: paused time proves the second watchdog stays quiet before its deadline
-        timeout(
-            Duration::from_millis(99),
+        tokio::time::timeout(
+            tokio::time::Duration::from_millis(99),
             assert_runtime_kind(&mut events, |kind| {
                 matches!(
                     kind,
-                    RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+                    crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
                 )
             }),
         )
@@ -3057,12 +3319,12 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
         "the second turn watchdog fired before its execution deadline"
     );
     // tight-timeout: paused time deterministically crosses the second turn watchdog deadline
-    timeout(
-        Duration::from_millis(2),
+    tokio::time::timeout(
+        tokio::time::Duration::from_millis(2),
         assert_runtime_kind(&mut events, |kind| {
             matches!(
                 kind,
-                RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+                crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
             )
         }),
     )
@@ -3074,17 +3336,17 @@ async fn queued_turn_watchdog_starts_only_when_that_turn_begins_executing() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn timed_out_turn_cancellation_does_not_apply_to_the_next_turn() {
-    let state = Arc::new(WatchdogHandoffState::default());
-    let host = RuntimeHost::with_policy(
-        Arc::new(WatchdogHandoffRuntimeFactory {
-            state: Arc::clone(&state),
+    let state = std::sync::Arc::new(WatchdogHandoffState::default());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(WatchdogHandoffRuntimeFactory {
+            state: std::sync::Arc::clone(&state),
         }),
-        RuntimeExecutionPolicy::default().with_turn_timeout_ms(100),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default().with_turn_timeout_ms(100),
     );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "watchdog-handoff"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3095,11 +3357,11 @@ async fn timed_out_turn_cancellation_does_not_apply_to_the_next_turn() {
     state.first_started.notified().await;
     host.submit(thread_id, "turn-b", "queued").await.unwrap();
 
-    tokio::time::advance(Duration::from_millis(100)).await;
+    tokio::time::advance(tokio::time::Duration::from_millis(100)).await;
     assert_runtime_kind(&mut events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+            crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
         )
     })
     .await;
@@ -3108,9 +3370,12 @@ async fn timed_out_turn_cancellation_does_not_apply_to_the_next_turn() {
 
     assert!(
         // tight-timeout: paused time deterministically proves the stale cancellation stays absent
-        timeout(Duration::from_millis(1), state.wait_for_stale_cancel())
-            .await
-            .is_err(),
+        tokio::time::timeout(
+            tokio::time::Duration::from_millis(1),
+            state.wait_for_stale_cancel()
+        )
+        .await
+        .is_err(),
         "turn A's timeout cancellation was applied after turn B started"
     );
     thread.abort().await;
@@ -3118,22 +3383,22 @@ async fn timed_out_turn_cancellation_does_not_apply_to_the_next_turn() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn turn_watchdog_cancels_without_waiting_for_full_command_queue() {
-    let host = RuntimeHost::with_policy(
-        Arc::new(StuckRuntimeFactory),
-        RuntimeExecutionPolicy::default()
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(StuckRuntimeFactory),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default()
             .with_turn_timeout_ms(100)
             .with_cancel_grace_timeout_ms(20),
     );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "watchdog-full-queue"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let thread_id = thread.context().coordinates.thread_id;
     host.submit(thread_id, "active", "hold").await.unwrap();
-    wait_for_status(&thread, ThreadStatus::Running).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Running).await;
 
     for queued in 0..thread.thread.command_capacity {
         host.submit(thread_id, format!("queued-{queued}"), "queued")
@@ -3145,27 +3410,31 @@ async fn turn_watchdog_cancels_without_waiting_for_full_command_queue() {
         thread.thread.command_capacity
     );
 
-    tokio::time::advance(Duration::from_millis(100)).await;
-    wait_for_status(&thread, ThreadStatus::Cancelling).await;
-    tokio::time::advance(Duration::from_millis(20)).await;
-    wait_for_status(&thread, ThreadStatus::Failed).await;
+    tokio::time::advance(tokio::time::Duration::from_millis(100)).await;
+    wait_for_status(
+        &thread,
+        crate::kernel::runtime_host::ThreadStatus::Cancelling,
+    )
+    .await;
+    tokio::time::advance(tokio::time::Duration::from_millis(20)).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Failed).await;
 
     host.shutdown_thread(thread_id).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn concurrent_submits_reserve_pending_input_slots_atomically() {
-    let barrier = Arc::new(AdmissionAppendBarrier::default());
-    let store = Arc::new(AdmissionTestStore::blocking(barrier.clone()));
-    let host = RuntimeHost::with_session_store_and_policy(
-        Arc::new(StuckRuntimeFactory),
+    let barrier = std::sync::Arc::new(AdmissionAppendBarrier::default());
+    let store = std::sync::Arc::new(AdmissionTestStore::blocking(barrier.clone()));
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store_and_policy(
+        std::sync::Arc::new(StuckRuntimeFactory),
         store,
-        RuntimeExecutionPolicy::default().with_max_pending_inputs(2),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default().with_max_pending_inputs(2),
     );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "concurrent-submit-cap"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3184,7 +3453,7 @@ async fn concurrent_submits_reserve_pending_input_slots_atomically() {
         tokio::task::yield_now().await;
     }
     assert_eq!(
-        barrier.entered.load(Ordering::SeqCst),
+        barrier.entered.load(std::sync::atomic::Ordering::SeqCst),
         2,
         "over-cap submits must be rejected before entering the async admission append"
     );
@@ -3201,10 +3470,12 @@ async fn concurrent_submits_reserve_pending_input_slots_atomically() {
             .filter(|result| {
                 matches!(
                     result,
-                    Err(VerletError::ThreadPolicyViolation {
-                        code: "max_pending_inputs",
-                        ..
-                    })
+                    Err(
+                        crate::kernel::runtime_host::VerletError::ThreadPolicyViolation {
+                            code: "max_pending_inputs",
+                            ..
+                        }
+                    )
                 )
             })
             .count(),
@@ -3215,17 +3486,17 @@ async fn concurrent_submits_reserve_pending_input_slots_atomically() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn pending_input_cap_counts_commands_drained_into_runtime_queues() {
-    let state = Arc::new(DrainedPendingInputState::default());
-    let host = RuntimeHost::with_policy(
-        Arc::new(DrainedPendingInputRuntimeFactory {
-            state: Arc::clone(&state),
+    let state = std::sync::Arc::new(DrainedPendingInputState::default());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(DrainedPendingInputRuntimeFactory {
+            state: std::sync::Arc::clone(&state),
         }),
-        RuntimeExecutionPolicy::default().with_max_pending_inputs(1),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default().with_max_pending_inputs(1),
     );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "drained-pending-input"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3238,10 +3509,12 @@ async fn pending_input_cap_counts_commands_drained_into_runtime_queues() {
 
     assert!(matches!(
         host.submit(thread_id, "turn-c", "over-cap").await,
-        Err(VerletError::ThreadPolicyViolation {
-            code: "max_pending_inputs",
-            ..
-        })
+        Err(
+            crate::kernel::runtime_host::VerletError::ThreadPolicyViolation {
+                code: "max_pending_inputs",
+                ..
+            }
+        )
     ));
 
     state.release.notify_one();
@@ -3250,17 +3523,19 @@ async fn pending_input_cap_counts_commands_drained_into_runtime_queues() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn duplicate_start_is_rejected_before_factory_build_or_runtime_spawn() {
-    let factory = Arc::new(ControlledChildBuildFactory::default());
-    let host = RuntimeHost::new(factory.clone());
+    let factory = std::sync::Arc::new(ControlledChildBuildFactory::default());
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory.clone());
     let root = host
         .start_thread(
             coords("tenant_a", "user_1", "duplicate-start"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let duplicate_coordinates = coords("tenant_a", "user_1", "duplicate-start");
-    let topology = ThreadTopology::spawned_from(root.context().coordinates.thread_id);
+    let topology = crate::kernel::runtime_host::ThreadTopology::spawned_from(
+        root.context().coordinates.thread_id,
+    );
     let first_host = host.clone();
     let first_coordinates = duplicate_coordinates.clone();
     let first_topology = topology.clone();
@@ -3286,7 +3561,9 @@ async fn duplicate_start_is_rejected_before_factory_build_or_runtime_spawn() {
     }
 
     assert_eq!(
-        factory.child_builds.load(Ordering::SeqCst),
+        factory
+            .child_builds
+            .load(std::sync::atomic::Ordering::SeqCst),
         1,
         "duplicate start must be rejected before runtime construction"
     );
@@ -3296,9 +3573,17 @@ async fn duplicate_start_is_rejected_before_factory_build_or_runtime_spawn() {
         Some(result) => result,
         None => second.await.unwrap(),
     };
-    assert!(matches!(second, Err(VerletError::ThreadAlreadyExists(_))));
-    wait_for_status(&first, ThreadStatus::Idle).await;
-    assert_eq!(factory.child_runtime_starts.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        second,
+        Err(crate::kernel::runtime_host::VerletError::ThreadAlreadyExists(_))
+    ));
+    wait_for_status(&first, crate::kernel::runtime_host::ThreadStatus::Idle).await;
+    assert_eq!(
+        factory
+            .child_runtime_starts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     host.shutdown_all().await.unwrap();
 }
 
@@ -3306,12 +3591,15 @@ async fn duplicate_start_is_rejected_before_factory_build_or_runtime_spawn() {
 async fn cancelled_start_wakes_reservation_waiters() {
     let coordinates = coords("tenant_a", "user_1", "cancelled-start-reservation");
     let thread_id = coordinates.thread_id;
-    let factory = Arc::new(BlockingThreadBuildFactory::new(thread_id));
-    let host = RuntimeHost::new(factory.clone());
+    let factory = std::sync::Arc::new(BlockingThreadBuildFactory::new(thread_id));
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory.clone());
     let start_host = host.clone();
     let start = tokio::spawn(async move {
         start_host
-            .start_thread(coordinates, ThreadTopology::root())
+            .start_thread(
+                coordinates,
+                crate::kernel::runtime_host::ThreadTopology::root(),
+            )
             .await
     });
     factory.wait_until_blocked().await;
@@ -3322,7 +3610,7 @@ async fn cancelled_start_wakes_reservation_waiters() {
     });
     assert!(
         // tight-timeout: paused time deterministically proves the reservation waiter stays pending
-        tokio::time::timeout(Duration::from_millis(250), &mut waiter)
+        tokio::time::timeout(tokio::time::Duration::from_millis(250), &mut waiter)
             .await
             .is_err(),
         "waiter must remain pending while the start reservation is held"
@@ -3334,27 +3622,27 @@ async fn cancelled_start_wakes_reservation_waiters() {
         Ok(_) => panic!("blocked start unexpectedly completed"),
     }
     // tight-timeout: paused time deterministically bounds the reservation wakeup
-    tokio::time::timeout(Duration::from_secs(1), waiter)
+    tokio::time::timeout(tokio::time::Duration::from_secs(1), waiter)
         .await
         .expect("reservation waiter should wake after start cancellation")
         .unwrap();
     assert!(matches!(
         host.get_thread(thread_id).await,
-        Err(VerletError::ThreadNotFound(missing)) if missing == thread_id
+        Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(missing)) if missing == thread_id
     ));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn runtime_is_registered_before_its_first_kernel_control_call() {
-    let factory = Arc::new(RegistrationProbeFactory::default());
-    let host = RuntimeHost::new(factory.clone());
+    let factory = std::sync::Arc::new(RegistrationProbeFactory::default());
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory.clone());
     let registration_barrier = host.inner.threads.read().await;
     let start_host = host.clone();
     let start = tokio::spawn(async move {
         start_host
             .start_thread(
                 coords("tenant_a", "user_1", "startup-registration"),
-                ThreadTopology::root(),
+                crate::kernel::runtime_host::ThreadTopology::root(),
             )
             .await
     });
@@ -3376,24 +3664,26 @@ async fn runtime_is_registered_before_its_first_kernel_control_call() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn lifecycle_sink_failure_joins_spawned_runtime_before_returning() {
-    let factory = Arc::new(CancellationTrackedFactory::default());
-    let host = RuntimeHost::new(factory.clone());
-    host.set_lifecycle_sink(Some(Arc::new(FailingAfterRuntimeStartsSink {
-        active_runs: Arc::clone(&factory.active_runs),
-        runtime_started: Arc::clone(&factory.runtime_started),
+    let factory = std::sync::Arc::new(CancellationTrackedFactory::default());
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory.clone());
+    host.set_lifecycle_sink(Some(std::sync::Arc::new(FailingAfterRuntimeStartsSink {
+        active_runs: std::sync::Arc::clone(&factory.active_runs),
+        runtime_started: std::sync::Arc::clone(&factory.runtime_started),
     })))
     .await;
 
     assert!(matches!(
         host.start_thread(
             coords("tenant_a", "user_1", "sink-start-failure"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await,
-        Err(VerletError::RuntimeFactory(_))
+        Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(_))
     ));
     assert_eq!(
-        factory.active_runs.load(Ordering::SeqCst),
+        factory
+            .active_runs
+            .load(std::sync::atomic::Ordering::SeqCst),
         0,
         "failed start returned before its runtime task was joined"
     );
@@ -3402,13 +3692,13 @@ async fn lifecycle_sink_failure_joins_spawned_runtime_before_returning() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn cancelled_start_after_publication_cleans_up_registered_runtime() {
-    let factory = Arc::new(CancellationTrackedFactory::default());
-    let sink_entered = Arc::new(Notify::new());
-    let sink_release = Arc::new(Notify::new());
-    let host = RuntimeHost::new(factory.clone());
-    host.set_lifecycle_sink(Some(Arc::new(BlockingLifecycleSink {
-        entered: Arc::clone(&sink_entered),
-        release: Arc::clone(&sink_release),
+    let factory = std::sync::Arc::new(CancellationTrackedFactory::default());
+    let sink_entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let sink_release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory.clone());
+    host.set_lifecycle_sink(Some(std::sync::Arc::new(BlockingLifecycleSink {
+        entered: std::sync::Arc::clone(&sink_entered),
+        release: std::sync::Arc::clone(&sink_release),
     })))
     .await;
     let coordinates = coords("tenant_a", "user_1", "cancel-after-publication");
@@ -3416,12 +3706,20 @@ async fn cancelled_start_after_publication_cleans_up_registered_runtime() {
     let start_host = host.clone();
     let start = tokio::spawn(async move {
         start_host
-            .start_thread(coordinates, ThreadTopology::root())
+            .start_thread(
+                coordinates,
+                crate::kernel::runtime_host::ThreadTopology::root(),
+            )
             .await
     });
 
     sink_entered.notified().await;
-    assert_eq!(factory.active_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        factory
+            .active_runs
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     start.abort();
     match start.await {
         Err(err) => assert!(err.is_cancelled()),
@@ -3429,25 +3727,31 @@ async fn cancelled_start_after_publication_cleans_up_registered_runtime() {
     }
 
     // tight-timeout: paused time deterministically bounds cancelled runtime shutdown
-    timeout(Duration::from_millis(1), factory.wait_until_stopped())
-        .await
-        .expect("cancelled start left its published runtime running");
+    tokio::time::timeout(
+        tokio::time::Duration::from_millis(1),
+        factory.wait_until_stopped(),
+    )
+    .await
+    .expect("cancelled start left its published runtime running");
     assert!(matches!(
         host.get_thread(thread_id).await,
-        Err(VerletError::ThreadNotFound(missing)) if missing == thread_id
+        Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(missing)) if missing == thread_id
     ));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn turn_timeout_emits_timeout_and_cancel_timeout_recovery_events() {
-    let host = RuntimeHost::with_policy(
-        Arc::new(StuckRuntimeFactory),
-        RuntimeExecutionPolicy::default()
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(StuckRuntimeFactory),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default()
             .with_turn_timeout_ms(20)
             .with_cancel_grace_timeout_ms(20),
     );
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
@@ -3459,39 +3763,43 @@ async fn turn_timeout_emits_timeout_and_cancel_timeout_recovery_events() {
     assert_runtime_kind(&mut events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
+            crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "turn"
         )
     })
     .await;
     assert_runtime_kind(&mut events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::Timeout { operation, .. } if operation == "cancel"
+            crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "cancel"
         )
     })
     .await;
     assert_runtime_kind(&mut events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::Failed { code, .. } if code == "cancel_timeout"
+            crate::kernel::runtime_host::RuntimeEventKind::Failed { code, .. } if code == "cancel_timeout"
         )
     })
     .await;
-    wait_for_status(&thread, ThreadStatus::Failed).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Failed).await;
     assert_eq!(
         canonical_user_content(&thread.session_context().await.unwrap()),
-        vec![vec![CanonicalContent::text("hold")]]
+        vec![vec![crate::kernel::history::CanonicalContent::text("hold")]]
     );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn explicit_cancel_timeout_marks_thread_failed_without_extra_history() {
-    let host = RuntimeHost::with_policy(
-        Arc::new(StuckRuntimeFactory),
-        RuntimeExecutionPolicy::default().with_cancel_grace_timeout_ms(20),
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(StuckRuntimeFactory),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default()
+            .with_cancel_grace_timeout_ms(20),
     );
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
@@ -3499,7 +3807,7 @@ async fn explicit_cancel_timeout_marks_thread_failed_without_extra_history() {
     host.submit(thread.context().coordinates.thread_id, "turn-1", "hold")
         .await
         .unwrap();
-    wait_for_status(&thread, ThreadStatus::Running).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Running).await;
     let err = host
         .cancel(thread.context().coordinates.thread_id, "stop")
         .await
@@ -3507,7 +3815,7 @@ async fn explicit_cancel_timeout_marks_thread_failed_without_extra_history() {
 
     assert!(matches!(
         err,
-        VerletError::ThreadPolicyViolation {
+        crate::kernel::runtime_host::VerletError::ThreadPolicyViolation {
             code: "cancel_timeout",
             ..
         }
@@ -3515,25 +3823,29 @@ async fn explicit_cancel_timeout_marks_thread_failed_without_extra_history() {
     assert_runtime_kind(&mut events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::Timeout { operation, .. } if operation == "cancel"
+            crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "cancel"
         )
     })
     .await;
-    wait_for_status(&thread, ThreadStatus::Failed).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Failed).await;
     assert_eq!(
         canonical_user_content(&thread.session_context().await.unwrap()),
-        vec![vec![CanonicalContent::text("hold")]]
+        vec![vec![crate::kernel::history::CanonicalContent::text("hold")]]
     );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn shutdown_timeout_aborts_runtime_and_removes_thread() {
-    let host = RuntimeHost::with_policy(
-        Arc::new(StuckRuntimeFactory),
-        RuntimeExecutionPolicy::default().with_shutdown_grace_timeout_ms(20),
+    let host = crate::kernel::runtime_host::RuntimeHost::with_policy(
+        std::sync::Arc::new(StuckRuntimeFactory),
+        crate::kernel::runtime_host::RuntimeExecutionPolicy::default()
+            .with_shutdown_grace_timeout_ms(20),
     );
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
@@ -3541,7 +3853,7 @@ async fn shutdown_timeout_aborts_runtime_and_removes_thread() {
     host.submit(thread.context().coordinates.thread_id, "turn-1", "hold")
         .await
         .unwrap();
-    wait_for_status(&thread, ThreadStatus::Running).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Running).await;
     host.shutdown_thread(thread.context().coordinates.thread_id)
         .await
         .unwrap();
@@ -3549,22 +3861,26 @@ async fn shutdown_timeout_aborts_runtime_and_removes_thread() {
     assert_runtime_kind(&mut events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::Timeout { operation, .. } if operation == "shutdown"
+            crate::kernel::runtime_host::RuntimeEventKind::Timeout { operation, .. } if operation == "shutdown"
         )
     })
     .await;
     assert!(matches!(
         host.get_thread(thread.context().coordinates.thread_id)
             .await,
-        Err(VerletError::ThreadNotFound(_))
+        Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_))
     ));
 }
 
 #[tokio::test]
 async fn runtime_exit_without_terminal_status_is_marked_failed() {
-    let host = RuntimeHost::new(Arc::new(ExitRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(ExitRuntimeFactory));
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
@@ -3572,18 +3888,22 @@ async fn runtime_exit_without_terminal_status_is_marked_failed() {
     assert_runtime_kind(&mut events, |kind| {
         matches!(
             kind,
-            RuntimeEventKind::Recovery { action, .. } if action == "mark_failed"
+            crate::kernel::runtime_host::RuntimeEventKind::Recovery { action, .. } if action == "mark_failed"
         )
     })
     .await;
-    wait_for_status(&thread, ThreadStatus::Failed).await;
+    wait_for_status(&thread, crate::kernel::runtime_host::ThreadStatus::Failed).await;
 }
 
 #[tokio::test]
 async fn resume_and_fork_use_loaded_checkpoint_records() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let thread = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let checkpoint = host
@@ -3591,7 +3911,7 @@ async fn resume_and_fork_use_loaded_checkpoint_records() {
             thread.context().coordinates.thread_id,
             None,
             Some("checkpoint".to_string()),
-            BTreeMap::from([("opaque".to_string(), "value".to_string())]),
+            std::collections::BTreeMap::from([("opaque".to_string(), "value".to_string())]),
         )
         .await
         .unwrap();
@@ -3632,14 +3952,17 @@ async fn resume_and_fork_use_loaded_checkpoint_records() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
-    let child_thread_id = ThreadId::new();
-    let factory = Arc::new(BlockingThreadBuildFactory::new(child_thread_id));
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(factory.clone(), store.clone());
+    let child_thread_id = crate::kernel::runtime_host::ThreadId::new();
+    let factory = std::sync::Arc::new(BlockingThreadBuildFactory::new(child_thread_id));
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        factory.clone(),
+        store.clone(),
+    );
     let parent = host
         .start_thread(
             coords("tenant_a", "user_1", "fork-reserved-no-start"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3648,7 +3971,7 @@ async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
             parent.context().coordinates.thread_id,
             None,
             Some("first fork cut".to_string()),
-            BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -3663,7 +3986,7 @@ async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
     factory.wait_until_blocked().await;
     assert!(
         store
-            .active_leaf(&ThreadCoordinates {
+            .active_leaf(&crate::kernel::runtime_host::ThreadCoordinates {
                 tenant_id: parent.context().coordinates.tenant_id.clone(),
                 user_id: parent.context().coordinates.user_id.clone(),
                 session_id: parent.context().coordinates.session_id.clone(),
@@ -3685,7 +4008,7 @@ async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
             parent.context().coordinates.thread_id,
             None,
             Some("recovery checkpoint".to_string()),
-            BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -3696,7 +4019,7 @@ async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
         .unwrap();
     assert!(matches!(
         child.context().topology.lineage,
-        ThreadLineage::Branch {
+        crate::kernel::runtime_host::ThreadLineage::Branch {
             parent_thread_id,
             checkpoint_id: Some(checkpoint_id),
         } if parent_thread_id == parent.context().coordinates.thread_id
@@ -3704,7 +4027,7 @@ async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
     ));
     let events = store
         .read_events(
-            &EventStreamId::for_thread(&child.context().coordinates),
+            &crate::kernel::history::EventStreamId::for_thread(&child.context().coordinates),
             None,
         )
         .await
@@ -3714,7 +4037,7 @@ async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
         events
             .iter()
             .filter(|event| {
-                event.kind == EventKind::SessionEntryAppended
+                event.kind == crate::kernel::history::EventKind::SessionEntryAppended
                     && event.payload["runtime_kind"].as_str() == Some("thread_started")
                     && event.payload["runtime_payload"]["metadata"]["forked_from_checkpoint_id"]
                         .as_str()
@@ -3730,26 +4053,29 @@ async fn reserved_fork_adopts_a_cloned_branch_without_start_history() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn fork_checkpoint_reconciles_one_shot_append_failures() {
     for fail_after_commit in [false, true] {
-        let inner = Arc::new(InMemorySessionStore::new());
+        let inner = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
         let faulting = if fail_after_commit {
-            FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
+            crate::test_support::FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
                 "append",
                 2,
                 "fork checkpoint append committed before disconnect",
             )
         } else {
-            FaultingRuntimeStore::new(inner.clone()).fail_nth(
+            crate::test_support::FaultingRuntimeStore::new(inner.clone()).fail_nth(
                 "append",
                 2,
                 "fork checkpoint append failed before commit",
             )
         };
-        let store = Arc::new(faulting);
-        let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+        let store = std::sync::Arc::new(faulting);
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(EchoRuntimeFactory),
+            store.clone(),
+        );
         let parent = host
             .start_thread(
                 coords("tenant_a", "user_1", "fork-checkpoint-append-fault"),
-                ThreadTopology::root(),
+                crate::kernel::runtime_host::ThreadTopology::root(),
             )
             .await
             .unwrap();
@@ -3759,14 +4085,14 @@ async fn fork_checkpoint_reconciles_one_shot_append_failures() {
                 parent.context().coordinates.thread_id,
                 None,
                 Some("fork cut".to_string()),
-                BTreeMap::new(),
+                std::collections::BTreeMap::new(),
             )
             .await
             .expect("a one-shot checkpoint append fault must be reconciled");
 
         let events = inner
             .read_events(
-                &EventStreamId::for_thread(&parent.context().coordinates),
+                &crate::kernel::history::EventStreamId::for_thread(&parent.context().coordinates),
                 None,
             )
             .await
@@ -3775,7 +4101,7 @@ async fn fork_checkpoint_reconciles_one_shot_append_failures() {
             events
                 .iter()
                 .filter(|event| {
-                    event.kind == EventKind::SessionEntryAppended
+                    event.kind == crate::kernel::history::EventKind::SessionEntryAppended
                         && event.payload["runtime_kind"].as_str() == Some("thread_checkpoint")
                         && event.payload["runtime_payload"]["checkpoint_id"].as_str()
                             == Some(checkpoint.id.to_string().as_str())
@@ -3790,9 +4116,9 @@ async fn fork_checkpoint_reconciles_one_shot_append_failures() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn checkpoint_reconciliation_reads_authoritative_event_history() {
-    let inner = Arc::new(InMemorySessionStore::new());
-    let store = Arc::new(
-        FaultingRuntimeStore::new(inner)
+    let inner = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let store = std::sync::Arc::new(
+        crate::test_support::FaultingRuntimeStore::new(inner)
             .fail_nth_after(
                 "append",
                 2,
@@ -3804,7 +4130,10 @@ async fn checkpoint_reconciliation_reads_authoritative_event_history() {
                 "selected branch projection is temporarily unavailable",
             ),
     );
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let parent = host
         .start_thread(
             coords(
@@ -3812,7 +4141,7 @@ async fn checkpoint_reconciliation_reads_authoritative_event_history() {
                 "user_1",
                 "checkpoint-authoritative-reconciliation",
             ),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3821,7 +4150,7 @@ async fn checkpoint_reconciliation_reads_authoritative_event_history() {
         parent.context().coordinates.thread_id,
         None,
         Some("fork cut".to_string()),
-        BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .expect("reconciliation must use the durable event stream, not a branch projection");
@@ -3834,23 +4163,29 @@ async fn checkpoint_reconciliation_reads_authoritative_event_history() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn checkpoint_reconciliation_reports_append_and_read_failures() {
     for fail_after_commit in [false, true] {
-        let inner = Arc::new(InMemorySessionStore::new());
+        let inner = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
         let faulting = if fail_after_commit {
-            FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
+            crate::test_support::FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
                 "append",
                 2,
                 "checkpoint append committed before disconnect",
             )
         } else {
-            FaultingRuntimeStore::new(inner.clone()).fail_nth(
+            crate::test_support::FaultingRuntimeStore::new(inner.clone()).fail_nth(
                 "append",
                 2,
                 "checkpoint append failed before commit",
             )
         };
-        let store =
-            Arc::new(faulting.fail_nth("read_events", 1, "checkpoint reconciliation read failed"));
-        let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store);
+        let store = std::sync::Arc::new(faulting.fail_nth(
+            "read_events",
+            1,
+            "checkpoint reconciliation read failed",
+        ));
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(EchoRuntimeFactory),
+            store,
+        );
         let parent = host
             .start_thread(
                 coords(
@@ -3858,7 +4193,7 @@ async fn checkpoint_reconciliation_reports_append_and_read_failures() {
                     "user_1",
                     "checkpoint-reconciliation-read-failure",
                 ),
-                ThreadTopology::root(),
+                crate::kernel::runtime_host::ThreadTopology::root(),
             )
             .await
             .unwrap();
@@ -3868,7 +4203,7 @@ async fn checkpoint_reconciliation_reports_append_and_read_failures() {
                 parent.context().coordinates.thread_id,
                 None,
                 Some("fork cut".to_string()),
-                BTreeMap::new(),
+                std::collections::BTreeMap::new(),
             )
             .await
             .expect_err("a failed reconciliation read cannot prove append success");
@@ -3888,7 +4223,7 @@ async fn checkpoint_reconciliation_reports_append_and_read_failures() {
 
         let events = inner
             .read_events(
-                &EventStreamId::for_thread(&parent.context().coordinates),
+                &crate::kernel::history::EventStreamId::for_thread(&parent.context().coordinates),
                 None,
             )
             .await
@@ -3897,7 +4232,7 @@ async fn checkpoint_reconciliation_reports_append_and_read_failures() {
             events
                 .iter()
                 .filter(|event| {
-                    event.kind == EventKind::SessionEntryAppended
+                    event.kind == crate::kernel::history::EventKind::SessionEntryAppended
                         && event.payload["runtime_kind"].as_str() == Some("thread_checkpoint")
                 })
                 .count(),
@@ -3911,26 +4246,29 @@ async fn checkpoint_reconciliation_reports_append_and_read_failures() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn reserved_fork_child_start_reconciles_one_shot_append_failures() {
     for fail_after_commit in [false, true] {
-        let inner = Arc::new(InMemorySessionStore::new());
+        let inner = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
         let faulting = if fail_after_commit {
-            FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
+            crate::test_support::FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
                 "append",
                 3,
                 "fork child start append committed before disconnect",
             )
         } else {
-            FaultingRuntimeStore::new(inner.clone()).fail_nth(
+            crate::test_support::FaultingRuntimeStore::new(inner.clone()).fail_nth(
                 "append",
                 3,
                 "fork child start append failed before commit",
             )
         };
-        let store = Arc::new(faulting);
-        let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+        let store = std::sync::Arc::new(faulting);
+        let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(EchoRuntimeFactory),
+            store.clone(),
+        );
         let parent = host
             .start_thread(
                 coords("tenant_a", "user_1", "fork-child-start-append-fault"),
-                ThreadTopology::root(),
+                crate::kernel::runtime_host::ThreadTopology::root(),
             )
             .await
             .unwrap();
@@ -3939,11 +4277,11 @@ async fn reserved_fork_child_start_reconciles_one_shot_append_failures() {
                 parent.context().coordinates.thread_id,
                 None,
                 Some("fork cut".to_string()),
-                BTreeMap::new(),
+                std::collections::BTreeMap::new(),
             )
             .await
             .unwrap();
-        let child_thread_id = ThreadId::new();
+        let child_thread_id = crate::kernel::runtime_host::ThreadId::new();
 
         let child = host
             .fork_thread_from_checkpoint_with_id(checkpoint, child_thread_id)
@@ -3953,7 +4291,7 @@ async fn reserved_fork_child_start_reconciles_one_shot_append_failures() {
         assert_eq!(child.context().coordinates.thread_id, child_thread_id);
         let events = inner
             .read_events(
-                &EventStreamId::for_thread(&child.context().coordinates),
+                &crate::kernel::history::EventStreamId::for_thread(&child.context().coordinates),
                 None,
             )
             .await
@@ -3962,7 +4300,7 @@ async fn reserved_fork_child_start_reconciles_one_shot_append_failures() {
             events
                 .iter()
                 .filter(|event| {
-                    event.kind == EventKind::SessionEntryAppended
+                    event.kind == crate::kernel::history::EventKind::SessionEntryAppended
                         && event.payload["runtime_kind"].as_str() == Some("thread_started")
                         && event.payload["runtime_payload"]["metadata"]["forked_from_thread_id"]
                             .as_str()
@@ -3980,16 +4318,19 @@ async fn reserved_fork_child_start_reconciles_one_shot_append_failures() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn reserved_fork_child_does_not_retry_lifecycle_history_errors() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
-    let child_calls = Arc::new(AtomicUsize::new(0));
-    host.set_lifecycle_sink(Some(Arc::new(HistoryFailingChildLifecycleSink {
-        child_calls: Arc::clone(&child_calls),
-    })))
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
+    let child_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    host.set_lifecycle_sink(Some(std::sync::Arc::new(
+        HistoryFailingChildLifecycleSink {
+            child_calls: std::sync::Arc::clone(&child_calls),
+        },
+    )))
     .await;
     let parent = host
         .start_thread(
             coords("tenant_a", "user_1", "fork-child-lifecycle-history-error"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3998,7 +4339,7 @@ async fn reserved_fork_child_does_not_retry_lifecycle_history_errors() {
             parent.context().coordinates.thread_id,
             None,
             Some("fork cut".to_string()),
-            BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -4013,7 +4354,7 @@ async fn reserved_fork_child_does_not_retry_lifecycle_history_errors() {
             .contains("controlled child lifecycle history failure")
     );
     assert_eq!(
-        child_calls.load(Ordering::SeqCst),
+        child_calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "a lifecycle history error is not an identity-append retry signal"
     );
@@ -4022,19 +4363,20 @@ async fn reserved_fork_child_does_not_retry_lifecycle_history_errors() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn resume_rejects_checkpoints_created_by_non_root_threads() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let parent = host
         .start_thread(
             coords("tenant_a", "user_1", "resume-parent"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let parent_thread_id = parent.context().coordinates.thread_id;
 
     for topology in [
-        ThreadTopology::spawned_from(parent_thread_id),
-        ThreadTopology::branch_from(parent_thread_id, None),
+        crate::kernel::runtime_host::ThreadTopology::spawned_from(parent_thread_id),
+        crate::kernel::runtime_host::ThreadTopology::branch_from(parent_thread_id, None),
     ] {
         let child = host
             .start_thread(coords("tenant_a", "user_1", "resume-child"), topology)
@@ -4042,19 +4384,24 @@ async fn resume_rejects_checkpoints_created_by_non_root_threads() {
             .unwrap();
         let child_thread_id = child.context().coordinates.thread_id;
         let checkpoint = host
-            .create_checkpoint(child_thread_id, None, None, BTreeMap::new())
+            .create_checkpoint(
+                child_thread_id,
+                None,
+                None,
+                std::collections::BTreeMap::new(),
+            )
             .await
             .unwrap();
         assert_eq!(
             checkpoint.lineage,
-            ThreadCheckpointLineage::Parent { parent_thread_id }
+            crate::kernel::runtime_host::ThreadCheckpointLineage::Parent { parent_thread_id }
         );
         host.shutdown_thread(child_thread_id).await.unwrap();
 
         assert!(
             matches!(
                 host.resume_thread(checkpoint.id).await,
-                Err(VerletError::CheckpointResumeRequiresRoot {
+                Err(crate::kernel::runtime_host::VerletError::CheckpointResumeRequiresRoot {
                     checkpoint_id,
                     thread_id,
                     parent_thread_id: recorded_parent_thread_id,
@@ -4067,16 +4414,25 @@ async fn resume_rejects_checkpoints_created_by_non_root_threads() {
     }
 
     let root_checkpoint = host
-        .create_checkpoint(parent_thread_id, None, None, BTreeMap::new())
+        .create_checkpoint(
+            parent_thread_id,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
         .await
         .unwrap();
     let mut legacy_value = serde_json::to_value(&root_checkpoint).unwrap();
     legacy_value.as_object_mut().unwrap().remove("lineage");
-    let legacy_checkpoint: ThreadCheckpoint = serde_json::from_value(legacy_value).unwrap();
-    assert_eq!(legacy_checkpoint.lineage, ThreadCheckpointLineage::Unknown);
+    let legacy_checkpoint: crate::kernel::runtime_host::ThreadCheckpoint =
+        serde_json::from_value(legacy_value).unwrap();
+    assert_eq!(
+        legacy_checkpoint.lineage,
+        crate::kernel::runtime_host::ThreadCheckpointLineage::Unknown
+    );
     assert!(matches!(
         host.resume_thread_from_checkpoint(legacy_checkpoint).await,
-        Err(VerletError::CheckpointResumeLineageUnknown {
+        Err(crate::kernel::runtime_host::VerletError::CheckpointResumeLineageUnknown {
             checkpoint_id,
             thread_id,
         }) if checkpoint_id == root_checkpoint.id && thread_id == parent_thread_id
@@ -4087,33 +4443,44 @@ async fn resume_rejects_checkpoints_created_by_non_root_threads() {
 async fn concurrent_resume_rejects_reserved_duplicate_before_store_mutation() {
     let coordinates = coords("tenant_a", "user_1", "resume-reservation");
     let thread_id = coordinates.thread_id;
-    let factory = Arc::new(BlockingThreadBuildFactory::new(thread_id));
-    let store = Arc::new(AdmissionTestStore::tracking_selects());
-    let host = RuntimeHost::with_session_store(factory.clone(), store.clone());
+    let factory = std::sync::Arc::new(BlockingThreadBuildFactory::new(thread_id));
+    let store = std::sync::Arc::new(AdmissionTestStore::tracking_selects());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        factory.clone(),
+        store.clone(),
+    );
     let start_host = host.clone();
     let start_coordinates = coordinates.clone();
     let start = tokio::spawn(async move {
         start_host
-            .start_thread(start_coordinates, ThreadTopology::root())
+            .start_thread(
+                start_coordinates,
+                crate::kernel::runtime_host::ThreadTopology::root(),
+            )
             .await
     });
     factory.wait_until_blocked().await;
 
-    let checkpoint = ThreadCheckpoint {
-        id: ThreadCheckpointId::new(),
+    let checkpoint = crate::kernel::runtime_host::ThreadCheckpoint {
+        id: crate::kernel::runtime_host::ThreadCheckpointId::new(),
         coordinates,
-        lineage: ThreadCheckpointLineage::Root,
+        lineage: crate::kernel::runtime_host::ThreadCheckpointLineage::Root,
         parent_checkpoint_id: None,
         active_entry_id: None,
         label: None,
-        metadata: BTreeMap::new(),
+        metadata: std::collections::BTreeMap::new(),
         created_at_ms: 0,
     };
     assert!(matches!(
         host.resume_thread_from_checkpoint(checkpoint).await,
-        Err(VerletError::ThreadAlreadyExists(existing)) if existing == thread_id
+        Err(crate::kernel::runtime_host::VerletError::ThreadAlreadyExists(existing)) if existing == thread_id
     ));
-    assert_eq!(store.select_branch_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        store
+            .select_branch_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 
     factory.release();
     start.await.unwrap().unwrap();
@@ -4122,17 +4489,27 @@ async fn concurrent_resume_rejects_reserved_duplicate_before_store_mutation() {
 
 #[tokio::test]
 async fn host_runs_multiple_tenants_and_routes_events() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let a1 = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let a2 = host
-        .start_thread(coords("tenant_a", "user_1", "s2"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s2"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let b1 = host
-        .start_thread(coords("tenant_b", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_b", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
 
@@ -4166,13 +4543,20 @@ async fn host_runs_multiple_tenants_and_routes_events() {
 
 #[tokio::test]
 async fn host_mirrors_submits_into_thread_scoped_history() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let a = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let b = host
-        .start_thread(coords("tenant_b", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_b", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut a_events = a.subscribe_events();
@@ -4203,16 +4587,20 @@ async fn host_mirrors_submits_into_thread_scoped_history() {
 
 #[tokio::test]
 async fn cancelling_one_thread_does_not_cancel_siblings() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let parent = host
-        .start_thread(coords("tenant_a", "user_1", "root"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "root"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let parent_id = parent.context().coordinates.thread_id;
     let child = host
         .start_thread(
             coords("tenant_a", "user_1", "child"),
-            ThreadTopology::spawned_from(parent_id),
+            crate::kernel::runtime_host::ThreadTopology::spawned_from(parent_id),
         )
         .await
         .unwrap();
@@ -4245,13 +4633,20 @@ async fn cancelling_one_thread_does_not_cancel_siblings() {
 
 #[tokio::test]
 async fn shutdown_removes_only_the_target_thread() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let a = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let b = host
-        .start_thread(coords("tenant_b", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_b", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
 
@@ -4273,13 +4668,20 @@ async fn shutdown_removes_only_the_target_thread() {
 
 #[tokio::test]
 async fn shutdown_all_drains_every_thread() {
-    let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+    let host =
+        crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
     let a = host
-        .start_thread(coords("tenant_a", "user_1", "s1"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let b = host
-        .start_thread(coords("tenant_a", "user_1", "s2"), ThreadTopology::root())
+        .start_thread(
+            coords("tenant_a", "user_1", "s2"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
 
@@ -4301,20 +4703,25 @@ async fn shutdown_all_drains_every_thread() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn stale_shutdown_cleanup_does_not_remove_same_id_replacement() {
-    let thread_id = ThreadId::parse_str("00000000-0000-0000-0000-000000000051").unwrap();
-    let coordinates = ThreadCoordinates {
+    let thread_id =
+        crate::kernel::runtime_host::ThreadId::parse_str("00000000-0000-0000-0000-000000000051")
+            .unwrap();
+    let coordinates = crate::kernel::runtime_host::ThreadCoordinates {
         tenant_id: "tenant_a".to_string(),
         user_id: "user_1".to_string(),
         session_id: "stale-shutdown-cleanup".to_string(),
         thread_id,
     };
-    let factory = Arc::new(GatedShutdownFactory::default());
-    let host = RuntimeHost::new(factory.clone());
+    let factory = std::sync::Arc::new(GatedShutdownFactory::default());
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory.clone());
     let old = host
-        .start_thread(coordinates.clone(), ThreadTopology::root())
+        .start_thread(
+            coordinates.clone(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
-    wait_for_status(&old, ThreadStatus::Idle).await;
+    wait_for_status(&old, crate::kernel::runtime_host::ThreadStatus::Idle).await;
 
     let shutdown_host = host.clone();
     let shutdown = tokio::spawn(async move { shutdown_host.shutdown_thread(thread_id).await });
@@ -4327,12 +4734,19 @@ async fn stale_shutdown_cleanup_does_not_remove_same_id_replacement() {
         .await
         .remove(&thread_id)
         .expect("old runtime must still be registered");
-    assert!(Arc::ptr_eq(&removed, &old.thread));
+    assert!(std::sync::Arc::ptr_eq(&removed, &old.thread));
     let replacement = host
-        .start_thread(coordinates, ThreadTopology::root())
+        .start_thread(
+            coordinates,
+            crate::kernel::runtime_host::ThreadTopology::root(),
+        )
         .await
         .unwrap();
-    wait_for_status(&replacement, ThreadStatus::Idle).await;
+    wait_for_status(
+        &replacement,
+        crate::kernel::runtime_host::ThreadStatus::Idle,
+    )
+    .await;
 
     factory.release_shutdown.notify_one();
     shutdown.await.unwrap().unwrap();
@@ -4341,17 +4755,24 @@ async fn stale_shutdown_cleanup_does_not_remove_same_id_replacement() {
         .get_thread(thread_id)
         .await
         .expect("stale shutdown cleanup removed the replacement runtime");
-    assert!(Arc::ptr_eq(&resident.thread, &replacement.thread));
+    assert!(std::sync::Arc::ptr_eq(
+        &resident.thread,
+        &replacement.thread
+    ));
     host.shutdown_thread(thread_id).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn shutdown_all_uses_repeatable_children_before_parent_effect_order() {
-    let parent_thread_id = ThreadId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let parent_thread_id =
+        crate::kernel::runtime_host::ThreadId::parse_str("00000000-0000-0000-0000-000000000001")
+            .unwrap();
     let first_child_thread_id =
-        ThreadId::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        crate::kernel::runtime_host::ThreadId::parse_str("00000000-0000-0000-0000-000000000002")
+            .unwrap();
     let second_child_thread_id =
-        ThreadId::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+        crate::kernel::runtime_host::ThreadId::parse_str("00000000-0000-0000-0000-000000000003")
+            .unwrap();
     let expected_order = vec![
         first_child_thread_id,
         second_child_thread_id,
@@ -4360,38 +4781,39 @@ async fn shutdown_all_uses_repeatable_children_before_parent_effect_order() {
     let expected_finished = vec![first_child_thread_id, second_child_thread_id];
 
     for run in 0..32 {
-        let host = RuntimeHost::new(Arc::new(EchoRuntimeFactory));
+        let host =
+            crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(EchoRuntimeFactory));
         let parent = host
             .start_thread(
-                ThreadCoordinates {
+                crate::kernel::runtime_host::ThreadCoordinates {
                     tenant_id: "tenant_a".to_string(),
                     user_id: "user_1".to_string(),
                     session_id: format!("shutdown-order-{run}"),
                     thread_id: parent_thread_id,
                 },
-                ThreadTopology::root(),
+                crate::kernel::runtime_host::ThreadTopology::root(),
             )
             .await
             .unwrap();
         host.start_thread(
-            ThreadCoordinates {
+            crate::kernel::runtime_host::ThreadCoordinates {
                 tenant_id: "tenant_a".to_string(),
                 user_id: "user_1".to_string(),
                 session_id: format!("shutdown-order-{run}"),
                 thread_id: second_child_thread_id,
             },
-            ThreadTopology::spawned_from(parent_thread_id),
+            crate::kernel::runtime_host::ThreadTopology::spawned_from(parent_thread_id),
         )
         .await
         .unwrap();
         host.start_thread(
-            ThreadCoordinates {
+            crate::kernel::runtime_host::ThreadCoordinates {
                 tenant_id: "tenant_a".to_string(),
                 user_id: "user_1".to_string(),
                 session_id: format!("shutdown-order-{run}"),
                 thread_id: first_child_thread_id,
             },
-            ThreadTopology::spawned_from(parent_thread_id),
+            crate::kernel::runtime_host::ThreadTopology::spawned_from(parent_thread_id),
         )
         .await
         .unwrap();
@@ -4401,12 +4823,13 @@ async fn shutdown_all_uses_repeatable_children_before_parent_effect_order() {
 
         let mut finished = Vec::new();
         while let Ok(event) = parent_events.try_recv() {
-            if let ThreadEvent::Runtime {
+            if let crate::kernel::runtime_host::ThreadEvent::Runtime {
                 event:
-                    RuntimeEvent {
+                    crate::kernel::runtime_host::RuntimeEvent {
                         kind:
-                            RuntimeEventKind::SubthreadFinished {
-                                child_thread_id, ..
+                            crate::kernel::runtime_host::RuntimeEventKind::SubthreadFinished {
+                                child_thread_id,
+                                ..
                             },
                         ..
                     },
@@ -4420,43 +4843,48 @@ async fn shutdown_all_uses_repeatable_children_before_parent_effect_order() {
     }
 }
 
-async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
+async fn assert_output(
+    events: &mut tokio::sync::broadcast::Receiver<crate::kernel::runtime_host::ThreadEvent>,
+    expected: &str,
+) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::Output { text, .. } = event {
+        if let crate::kernel::runtime_host::ThreadEvent::Output { text, .. } = event {
             assert_eq!(text, expected);
             return;
         }
     }
 }
 
-async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
+async fn next_output(
+    events: &mut tokio::sync::broadcast::Receiver<crate::kernel::runtime_host::ThreadEvent>,
+) -> String {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::Output { text, .. } = event {
+        if let crate::kernel::runtime_host::ThreadEvent::Output { text, .. } = event {
             return text;
         }
     }
 }
 
 async fn assert_canonical_mirror(
-    events: &mut broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<crate::kernel::runtime_host::ThreadEvent>,
     expected_text: &str,
 ) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::CanonicalMirror { entry, .. } = event {
+        if let crate::kernel::runtime_host::ThreadEvent::CanonicalMirror { entry, .. } = event {
             match entry.kind {
-                SessionEntryKind::Message { message } => {
+                crate::kernel::history::SessionEntryKind::Message { message } => {
                     assert_eq!(message_texts(&[message]), vec![expected_text]);
                 }
                 other => panic!("unexpected canonical mirror entry: {other:?}"),
@@ -4466,13 +4894,13 @@ async fn assert_canonical_mirror(
     }
 }
 
-fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
+fn message_texts(messages: &[crate::kernel::history::CanonicalMessage]) -> Vec<&str> {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => content
+            crate::kernel::history::CanonicalMessage::User { content, .. }
+            | crate::kernel::history::CanonicalMessage::Assistant { content, .. }
+            | crate::kernel::history::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .find_map(|content| match content {
                     crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
@@ -4484,22 +4912,26 @@ fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
 }
 
 async fn policy_bound_content_hash_for_config(config: serde_json::Value) -> String {
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let mut coupling = runtime_std_context_spill_coupling();
     coupling.id = "test.policy".to_string();
     coupling.function_ref = format!("op://policy/check@sha256:{}", "d".repeat(64));
     coupling.config = config;
     coupling.config_hash = "sha256:test-config".to_string();
-    let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
-    let metadata = BTreeMap::from([(
-        THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
+    let coupling_set =
+        crate::agent::manifest_bind::BoundCouplingSet::new("snapshot-a", vec![coupling]);
+    let metadata = std::collections::BTreeMap::from([(
+        crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
         serde_json::to_string(&coupling_set).unwrap(),
     )]);
     let thread = host
         .start_thread_with_topology_and_metadata(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::kernel::runtime_host::ThreadTopology::root(),
             metadata,
         )
         .await
@@ -4522,24 +4954,24 @@ async fn policy_bound_content_hash_for_config(config: serde_json::Value) -> Stri
 
     let events = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::kernel::history::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap();
     let bind_position = events
         .iter()
-        .position(|event| event.kind == EventKind::ManifestBindCompleted)
+        .position(|event| event.kind == crate::kernel::history::EventKind::ManifestBindCompleted)
         .unwrap();
     let policy_position = events
         .iter()
-        .position(|event| event.kind == EventKind::PolicyBound)
+        .position(|event| event.kind == crate::kernel::history::EventKind::PolicyBound)
         .unwrap();
     assert!(bind_position < policy_position);
     let policy = &events[policy_position];
     assert_eq!(
         policy.payload["schema"],
-        EventKind::PolicyBound.payload_schema_id()
+        crate::kernel::history::EventKind::PolicyBound.payload_schema_id()
     );
     assert_eq!(policy.payload["policy_kind"], "coupling_set");
     assert_eq!(policy.payload["policy_id"], "coupling_set:snapshot-a");
@@ -4548,18 +4980,24 @@ async fn policy_bound_content_hash_for_config(config: serde_json::Value) -> Stri
 
 #[tokio::test]
 async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
-    let store = Arc::new(
-        FaultingRuntimeStore::new(Arc::new(InMemorySessionStore::new())).fail_nth(
+    let store = std::sync::Arc::new(
+        crate::test_support::FaultingRuntimeStore::new(std::sync::Arc::new(
+            crate::kernel::history::InMemorySessionStore::new(),
+        ))
+        .fail_nth(
             "append_events",
             2,
             "a second manifest append must not occur",
         ),
     );
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "placement-atomic"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4583,7 +5021,7 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
     assert_eq!(store.call_count("append_events"), 1);
     let events = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::kernel::history::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -4591,16 +5029,19 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.kind == EventKind::ManifestBindCompleted)
+            .filter(|event| event.kind == crate::kernel::history::EventKind::ManifestBindCompleted)
             .count(),
         1
     );
     let placement_events = events
         .iter()
-        .filter(|event| event.kind == EventKind::PlacementDecision)
+        .filter(|event| event.kind == crate::kernel::history::EventKind::PlacementDecision)
         .collect::<Vec<_>>();
     assert_eq!(placement_events.len(), 1);
-    assert_eq!(placement_events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(
+        placement_events[0].origin,
+        crate::kernel::history::EventOrigin::Witnessed
+    );
     assert_eq!(placement_events[0].payload["placement"], "local");
     assert_eq!(
         placement_events[0].payload["snapshot_id"],
@@ -4610,13 +5051,16 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
 
 #[tokio::test]
 async fn cancelled_manifest_receipt_caller_cannot_leave_a_half_witnessed_workspace() {
-    let barrier = Arc::new(AdmissionAppendBarrier::default());
-    let store = Arc::new(AdmissionTestStore::blocking_manifest(barrier.clone()));
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let barrier = std::sync::Arc::new(AdmissionAppendBarrier::default());
+    let store = std::sync::Arc::new(AdmissionTestStore::blocking_manifest(barrier.clone()));
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "workspace-bind-cancelled"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4648,13 +5092,13 @@ async fn cancelled_manifest_receipt_caller_cannot_leave_a_half_witnessed_workspa
     assert!(recorder.await.unwrap_err().is_cancelled());
     barrier.release();
 
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let events = tokio::time::timeout(Duration::from_secs(30), async {
+    let stream_id = crate::kernel::history::EventStreamId::for_thread(&coordinates);
+    let events = tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             let events = store.read_events(&stream_id, None).await.unwrap();
             if events
                 .iter()
-                .any(|event| event.kind == EventKind::ManifestBindCompleted)
+                .any(|event| event.kind == crate::kernel::history::EventKind::ManifestBindCompleted)
             {
                 break events;
             }
@@ -4665,25 +5109,28 @@ async fn cancelled_manifest_receipt_caller_cannot_leave_a_half_witnessed_workspa
     .expect("shielded manifest append did not finish after caller cancellation");
     let bind = events
         .iter()
-        .find(|event| event.kind == EventKind::ManifestBindCompleted)
+        .find(|event| event.kind == crate::kernel::history::EventKind::ManifestBindCompleted)
         .unwrap();
     assert_eq!(bind.payload["workspace"]["guest_path"], "/work");
     assert!(
         events
             .iter()
-            .any(|event| event.kind == EventKind::PlacementDecision),
+            .any(|event| event.kind == crate::kernel::history::EventKind::PlacementDecision),
         "the placement witness must commit in the same append"
     );
 }
 
 #[tokio::test]
 async fn remote_manifest_receipt_rejects_a_workspace_before_witnessing_it() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let store = std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "remote-workspace-bind"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4716,28 +5163,33 @@ async fn remote_manifest_receipt_rejects_a_workspace_before_witnessing_it() {
     assert!(error.to_string().contains("require local placement"));
     assert!(
         store
-            .read_events(&EventStreamId::for_thread(&coordinates), None)
+            .read_events(
+                &crate::kernel::history::EventStreamId::for_thread(&coordinates),
+                None
+            )
             .await
             .unwrap()
             .iter()
-            .all(|event| event.kind != EventKind::ManifestBindCompleted)
+            .all(|event| event.kind != crate::kernel::history::EventKind::ManifestBindCompleted)
     );
 }
 
 #[tokio::test]
 async fn failed_manifest_batch_leaves_no_bind_receipt_without_placement_witness() {
-    let store = Arc::new(
-        FaultingRuntimeStore::new(Arc::new(InMemorySessionStore::new())).fail_nth(
-            "append_events",
-            1,
-            "manifest batch failed",
-        ),
+    let store = std::sync::Arc::new(
+        crate::test_support::FaultingRuntimeStore::new(std::sync::Arc::new(
+            crate::kernel::history::InMemorySessionStore::new(),
+        ))
+        .fail_nth("append_events", 1, "manifest batch failed"),
     );
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "placement-failed"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4756,7 +5208,7 @@ async fn failed_manifest_batch_leaves_no_bind_receipt_without_placement_witness(
 
     let events = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::kernel::history::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -4764,25 +5216,28 @@ async fn failed_manifest_batch_leaves_no_bind_receipt_without_placement_witness(
     assert!(
         events
             .iter()
-            .all(|event| event.kind != EventKind::ManifestBindCompleted)
+            .all(|event| event.kind != crate::kernel::history::EventKind::ManifestBindCompleted)
     );
     assert!(
         events
             .iter()
-            .all(|event| event.kind != EventKind::PlacementDecision)
+            .all(|event| event.kind != crate::kernel::history::EventKind::PlacementDecision)
     );
 }
 
 #[tokio::test]
 async fn manifest_receipt_append_fails_closed_for_non_local_placement() {
-    let store = Arc::new(FaultingRuntimeStore::new(Arc::new(
-        InMemorySessionStore::new(),
-    )));
-    let host = RuntimeHost::with_session_store(Arc::new(EchoRuntimeFactory), store.clone());
+    let store = std::sync::Arc::new(crate::test_support::FaultingRuntimeStore::new(
+        std::sync::Arc::new(crate::kernel::history::InMemorySessionStore::new()),
+    ));
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
     let thread = host
         .start_thread(
             coords("tenant_a", "user_1", "placement-fail-closed"),
-            ThreadTopology::root(),
+            crate::kernel::runtime_host::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4803,7 +5258,7 @@ async fn manifest_receipt_append_fails_closed_for_non_local_placement() {
     assert_eq!(store.call_count("append_events"), 0);
     let events = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::kernel::history::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -4811,21 +5266,22 @@ async fn manifest_receipt_append_fails_closed_for_non_local_placement() {
     assert!(events.iter().all(|event| {
         !matches!(
             event.kind,
-            EventKind::ManifestBindCompleted | EventKind::PlacementDecision
+            crate::kernel::history::EventKind::ManifestBindCompleted
+                | crate::kernel::history::EventKind::PlacementDecision
         )
     }));
 }
 
 async fn assert_runtime_kind(
-    events: &mut broadcast::Receiver<ThreadEvent>,
-    predicate: impl Fn(&RuntimeEventKind) -> bool,
-) -> RuntimeEvent {
+    events: &mut tokio::sync::broadcast::Receiver<crate::kernel::runtime_host::ThreadEvent>,
+    predicate: impl Fn(&crate::kernel::runtime_host::RuntimeEventKind) -> bool,
+) -> crate::kernel::runtime_host::RuntimeEvent {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::Runtime { event, .. } = event
+        if let crate::kernel::runtime_host::ThreadEvent::Runtime { event, .. } = event
             && predicate(&event.kind)
         {
             return event;
@@ -4833,13 +5289,15 @@ async fn assert_runtime_kind(
     }
 }
 
-fn canonical_user_content(context: &SessionContext) -> Vec<Vec<CanonicalContent>> {
+fn canonical_user_content(
+    context: &crate::kernel::history::SessionContext,
+) -> Vec<Vec<crate::kernel::history::CanonicalContent>> {
     context
         .entries
         .iter()
         .filter_map(|entry| match &entry.kind {
-            SessionEntryKind::Message {
-                message: CanonicalMessage::User { content, .. },
+            crate::kernel::history::SessionEntryKind::Message {
+                message: crate::kernel::history::CanonicalMessage::User { content, .. },
             } => Some(content.clone()),
             _ => None,
         })
@@ -4848,75 +5306,82 @@ fn canonical_user_content(context: &SessionContext) -> Vec<Vec<CanonicalContent>
 
 #[derive(Clone)]
 struct RuntimeFakeClock {
-    now: Arc<std::sync::Mutex<DateTime<Utc>>>,
+    now: std::sync::Arc<std::sync::Mutex<chrono::DateTime<chrono::Utc>>>,
 }
 
 impl RuntimeFakeClock {
-    fn new(now: DateTime<Utc>) -> Self {
+    fn new(now: chrono::DateTime<chrono::Utc>) -> Self {
         Self {
-            now: Arc::new(std::sync::Mutex::new(now)),
+            now: std::sync::Arc::new(std::sync::Mutex::new(now)),
         }
     }
 }
 
-impl DaemonClock for RuntimeFakeClock {
-    fn now(&self) -> DateTime<Utc> {
+impl crate::DaemonClock for RuntimeFakeClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
         *self.now.lock().unwrap()
     }
 }
 
 struct WitnessTimerFiredSink {
-    store: SqliteSessionStore,
-    coordinates: ThreadCoordinates,
+    store: crate::SqliteSessionStore,
+    coordinates: crate::kernel::runtime_host::ThreadCoordinates,
 }
 
-#[async_trait]
-impl IngressSink for WitnessTimerFiredSink {
-    async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
-        let IngressContent::Event { kind, payload } = &envelope.content else {
-            return Err(IoError::Bridge(
+#[async_trait::async_trait]
+impl verlet_io_core::IngressSink for WitnessTimerFiredSink {
+    async fn submit(
+        &self,
+        envelope: verlet_io_core::IngressEnvelope,
+    ) -> verlet_io_core::IoResult<verlet_io_core::IngressAck> {
+        let verlet_io_core::IngressContent::Event { kind, payload } = &envelope.content else {
+            return Err(verlet_io_core::IoError::Bridge(
                 "clock route emitted non-event ingress".to_string(),
             ));
         };
         if kind != "timer.fired" {
-            return Err(IoError::Bridge(format!(
+            return Err(verlet_io_core::IoError::Bridge(format!(
                 "clock route emitted unexpected event kind {kind:?}"
             )));
         }
-        let timer = serde_json::from_value::<TimerFiredPayload>(payload.clone())
-            .map_err(|err| IoError::Bridge(format!("invalid timer.fired payload: {err}")))?;
+        let timer =
+            serde_json::from_value::<crate::kernel::history::TimerFiredPayload>(payload.clone())
+                .map_err(|err| {
+                    verlet_io_core::IoError::Bridge(format!("invalid timer.fired payload: {err}"))
+                })?;
         let mandate_event_id = timer.mandate_event_id;
-        let control_stream = control_stream_id(&self.coordinates);
-        let mut record = NewEventRecord::witnessed(
+        let control_stream = crate::kernel::control_decision::control_stream_id(&self.coordinates);
+        let mut record = crate::kernel::history::NewEventRecord::witnessed(
             self.coordinates.clone(),
-            EventKind::TimerFired,
-            serde_json::to_value(timer)
-                .map_err(|err| IoError::Bridge(format!("encode timer.fired payload: {err}")))?,
+            crate::kernel::history::EventKind::TimerFired,
+            serde_json::to_value(timer).map_err(|err| {
+                verlet_io_core::IoError::Bridge(format!("encode timer.fired payload: {err}"))
+            })?,
         );
-        record.provenance = EventProvenance {
+        record.provenance = crate::kernel::history::EventProvenance {
             source_streams: vec![control_stream.clone()],
             source_event_ids: vec![mandate_event_id],
-            ..EventProvenance::default()
+            ..crate::kernel::history::EventProvenance::default()
         };
         self.store
             .append_events(&control_stream, vec![record])
             .await
-            .map_err(|err| IoError::Bridge(format!("append timer.fired: {err}")))?;
-        Ok(IngressAck::accepted(&envelope))
+            .map_err(|err| verlet_io_core::IoError::Bridge(format!("append timer.fired: {err}")))?;
+        Ok(verlet_io_core::IngressAck::accepted(&envelope))
     }
 }
 
 async fn append_scheduled_loop_mandate(
-    store: &SqliteSessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::SqliteSessionStore,
+    coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
     loop_id: &str,
-    created_at: DateTime<Utc>,
-) -> EventRecord {
-    let mut record = NewEventRecord::witnessed(
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> crate::kernel::history::EventRecord {
+    let mut record = crate::kernel::history::NewEventRecord::witnessed(
         coordinates.clone(),
-        EventKind::MandateStarted,
-        serde_json::to_value(MandateStartedPayload {
-            subject: MandateSubject {
+        crate::kernel::history::EventKind::MandateStarted,
+        serde_json::to_value(crate::kernel::control_decision::MandateStartedPayload {
+            subject: crate::kernel::control_decision::MandateSubject {
                 thread_id: Some(coordinates.thread_id.to_string()),
                 loop_id: Some(loop_id.to_string()),
             },
@@ -4925,16 +5390,23 @@ async fn append_scheduled_loop_mandate(
             thread_id: Some(coordinates.thread_id.to_string()),
             max_continuations: None,
             expires_at_ms: None,
-            schedule: Some(MandateSchedulePayload::Interval { every_ms: 60_000 }),
+            schedule: Some(
+                crate::kernel::control_decision::MandateSchedulePayload::Interval {
+                    every_ms: 60_000,
+                },
+            ),
             max_occurrences: Some(2),
-            catch_up: Some(MandateCatchUpPolicy::SkipMissed),
+            catch_up: Some(crate::kernel::control_decision::MandateCatchUpPolicy::SkipMissed),
             input_template: Some("wake at {scheduled_for}".to_string()),
         })
         .unwrap(),
     );
     record.created_at_ms = created_at.timestamp_millis();
     store
-        .append_events(&control_stream_id(coordinates), vec![record])
+        .append_events(
+            &crate::kernel::control_decision::control_stream_id(coordinates),
+            vec![record],
+        )
         .await
         .unwrap()
         .pop()
@@ -4942,16 +5414,16 @@ async fn append_scheduled_loop_mandate(
 }
 
 async fn append_loop_parent_completed(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::kernel::history::InMemorySessionStore,
+    coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
     turn_id: &str,
-) -> EventRecord {
+) -> crate::kernel::history::EventRecord {
     store
         .append_events(
-            &EventStreamId::for_thread(coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::kernel::history::EventStreamId::for_thread(coordinates),
+            vec![crate::kernel::history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::TurnCompleted,
+                crate::kernel::history::EventKind::TurnCompleted,
                 serde_json::json!({ "turn_id": turn_id }),
             )],
         )
@@ -4962,20 +5434,20 @@ async fn append_loop_parent_completed(
 }
 
 async fn append_loop_mandate_started(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::kernel::history::InMemorySessionStore,
+    coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
     loop_id: &str,
     snapshot_id: &str,
     max_continuations: Option<u32>,
 ) {
     store
         .append_events(
-            &control_stream_id(coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::kernel::control_decision::control_stream_id(coordinates),
+            vec![crate::kernel::history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::MandateStarted,
-                serde_json::to_value(MandateStartedPayload {
-                    subject: MandateSubject {
+                crate::kernel::history::EventKind::MandateStarted,
+                serde_json::to_value(crate::kernel::control_decision::MandateStartedPayload {
+                    subject: crate::kernel::control_decision::MandateSubject {
                         thread_id: None,
                         loop_id: Some(loop_id.to_string()),
                     },
@@ -4997,35 +5469,39 @@ async fn append_loop_mandate_started(
 }
 
 async fn append_loop_continue_request(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
-    parent_event_id: EventRecordId,
+    store: &crate::kernel::history::InMemorySessionStore,
+    coordinates: &crate::kernel::runtime_host::ThreadCoordinates,
+    parent_event_id: crate::kernel::history::EventRecordId,
     loop_id: &str,
     parent_turn_id: &str,
     snapshot_id: &str,
     next_turn_input: &str,
-) -> EventRecord {
+) -> crate::kernel::history::EventRecord {
     store
         .append_events(
-            &control_stream_id(coordinates),
-            vec![NewEventRecord::discharged(
+            &crate::kernel::control_decision::control_stream_id(coordinates),
+            vec![crate::kernel::history::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::TurnContinueRequested,
-                serde_json::to_value(TurnContinueRequestedPayload {
-                    subject: TurnContinuationSubject {
-                        loop_id: loop_id.to_string(),
-                        parent_turn_id: parent_turn_id.to_string(),
+                crate::kernel::history::EventKind::TurnContinueRequested,
+                serde_json::to_value(
+                    crate::kernel::control_decision::TurnContinueRequestedPayload {
+                        subject: crate::kernel::control_decision::TurnContinuationSubject {
+                            loop_id: loop_id.to_string(),
+                            parent_turn_id: parent_turn_id.to_string(),
+                        },
+                        snapshot_id: snapshot_id.to_string(),
+                        next_turn_input: next_turn_input.to_string(),
                     },
-                    snapshot_id: snapshot_id.to_string(),
-                    next_turn_input: next_turn_input.to_string(),
-                })
+                )
                 .unwrap(),
-                EventProvenance {
-                    source_streams: vec![EventStreamId::for_thread(coordinates)],
+                crate::kernel::history::EventProvenance {
+                    source_streams: vec![crate::kernel::history::EventStreamId::for_thread(
+                        coordinates,
+                    )],
                     source_event_ids: vec![parent_event_id],
                     discharged_by: Some("coupling:loop-test".to_string()),
                     function: Some("op://test/loop@sha256:test".to_string()),
-                    ..EventProvenance::default()
+                    ..crate::kernel::history::EventProvenance::default()
                 },
             )],
         )
@@ -5035,9 +5511,12 @@ async fn append_loop_continue_request(
         .unwrap()
 }
 
-async fn wait_for_status(thread: &RuntimeThreadHandle, expected: ThreadStatus) {
+async fn wait_for_status(
+    thread: &crate::kernel::runtime_host::RuntimeThreadHandle,
+    expected: crate::kernel::runtime_host::ThreadStatus,
+) {
     let mut status = thread.subscribe_status();
-    timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             if *status.borrow() == expected {
                 return;
@@ -5059,11 +5538,11 @@ struct TsAgentThreadFixture {
     status: String,
     latest_signal_id: Option<String>,
     latest_checkpoint_id: Option<String>,
-    metadata: BTreeMap<String, String>,
+    metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl TsAgentThreadFixture {
-    fn from_lifecycle(record: &ThreadLifecycleRecord) -> Self {
+    fn from_lifecycle(record: &crate::kernel::runtime_host::ThreadLifecycleRecord) -> Self {
         Self {
             tenant_id: record.coordinates.tenant_id.clone(),
             user_id: record.coordinates.user_id.clone(),
@@ -5077,26 +5556,30 @@ impl TsAgentThreadFixture {
         }
     }
 
-    fn into_lifecycle(self) -> ThreadLifecycleRecord {
-        let coordinates = ThreadCoordinates {
+    fn into_lifecycle(self) -> crate::kernel::runtime_host::ThreadLifecycleRecord {
+        let coordinates = crate::kernel::runtime_host::ThreadCoordinates {
             tenant_id: self.tenant_id,
             user_id: self.user_id,
             session_id: self.session_id,
-            thread_id: ThreadId::parse_str(&self.thread_id).unwrap(),
+            thread_id: crate::kernel::runtime_host::ThreadId::parse_str(&self.thread_id).unwrap(),
         };
-        ThreadLifecycleRecord {
+        crate::kernel::runtime_host::ThreadLifecycleRecord {
             coordinates,
             parent_thread_id: self
                 .parent_thread_id
-                .map(|id| ThreadId::parse_str(&id).unwrap()),
-            topology: ThreadTopology::root(),
+                .map(|id| crate::kernel::runtime_host::ThreadId::parse_str(&id).unwrap()),
+            topology: crate::kernel::runtime_host::ThreadTopology::root(),
             status: lifecycle_status_from_ts(&self.status),
-            latest_signal_id: self
-                .latest_signal_id
-                .map(|id| ThreadSignalId::from_uuid(Uuid::parse_str(&id).unwrap())),
-            latest_checkpoint_id: self
-                .latest_checkpoint_id
-                .map(|id| ThreadCheckpointId::from_uuid(Uuid::parse_str(&id).unwrap())),
+            latest_signal_id: self.latest_signal_id.map(|id| {
+                crate::kernel::runtime_host::ThreadSignalId::from_uuid(
+                    uuid::Uuid::parse_str(&id).unwrap(),
+                )
+            }),
+            latest_checkpoint_id: self.latest_checkpoint_id.map(|id| {
+                crate::kernel::runtime_host::ThreadCheckpointId::from_uuid(
+                    uuid::Uuid::parse_str(&id).unwrap(),
+                )
+            }),
             created_at_ms: 0,
             updated_at_ms: 0,
             metadata: self.metadata,
@@ -5112,11 +5595,11 @@ struct TsAgentThreadSignalFixture {
     session_id: String,
     thread_id: String,
     kind: String,
-    metadata: BTreeMap<String, String>,
+    metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl TsAgentThreadSignalFixture {
-    fn from_signal(signal: &ThreadSignal) -> Self {
+    fn from_signal(signal: &crate::kernel::runtime_host::ThreadSignal) -> Self {
         Self {
             signal_id: signal.id.to_string(),
             tenant_id: signal.coordinates.tenant_id.clone(),
@@ -5128,14 +5611,17 @@ impl TsAgentThreadSignalFixture {
         }
     }
 
-    fn into_signal(self) -> ThreadSignal {
-        ThreadSignal {
-            id: ThreadSignalId::from_uuid(Uuid::parse_str(&self.signal_id).unwrap()),
-            coordinates: ThreadCoordinates {
+    fn into_signal(self) -> crate::kernel::runtime_host::ThreadSignal {
+        crate::kernel::runtime_host::ThreadSignal {
+            id: crate::kernel::runtime_host::ThreadSignalId::from_uuid(
+                uuid::Uuid::parse_str(&self.signal_id).unwrap(),
+            ),
+            coordinates: crate::kernel::runtime_host::ThreadCoordinates {
                 tenant_id: self.tenant_id,
                 user_id: self.user_id,
                 session_id: self.session_id,
-                thread_id: ThreadId::parse_str(&self.thread_id).unwrap(),
+                thread_id: crate::kernel::runtime_host::ThreadId::parse_str(&self.thread_id)
+                    .unwrap(),
             },
             kind: signal_kind_from_ts(&self.kind),
             metadata: self.metadata,
@@ -5151,15 +5637,15 @@ struct TsAgentThreadCheckpointFixture {
     user_id: String,
     session_id: String,
     thread_id: String,
-    lineage: ThreadCheckpointLineage,
+    lineage: crate::kernel::runtime_host::ThreadCheckpointLineage,
     parent_checkpoint_id: Option<String>,
     active_entry_id: Option<String>,
     label: Option<String>,
-    metadata: BTreeMap<String, String>,
+    metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl TsAgentThreadCheckpointFixture {
-    fn from_checkpoint(checkpoint: &ThreadCheckpoint) -> Self {
+    fn from_checkpoint(checkpoint: &crate::kernel::runtime_host::ThreadCheckpoint) -> Self {
         Self {
             checkpoint_id: checkpoint.id.to_string(),
             tenant_id: checkpoint.coordinates.tenant_id.clone(),
@@ -5174,22 +5660,29 @@ impl TsAgentThreadCheckpointFixture {
         }
     }
 
-    fn into_checkpoint(self) -> ThreadCheckpoint {
-        ThreadCheckpoint {
-            id: ThreadCheckpointId::from_uuid(Uuid::parse_str(&self.checkpoint_id).unwrap()),
-            coordinates: ThreadCoordinates {
+    fn into_checkpoint(self) -> crate::kernel::runtime_host::ThreadCheckpoint {
+        crate::kernel::runtime_host::ThreadCheckpoint {
+            id: crate::kernel::runtime_host::ThreadCheckpointId::from_uuid(
+                uuid::Uuid::parse_str(&self.checkpoint_id).unwrap(),
+            ),
+            coordinates: crate::kernel::runtime_host::ThreadCoordinates {
                 tenant_id: self.tenant_id,
                 user_id: self.user_id,
                 session_id: self.session_id,
-                thread_id: ThreadId::parse_str(&self.thread_id).unwrap(),
+                thread_id: crate::kernel::runtime_host::ThreadId::parse_str(&self.thread_id)
+                    .unwrap(),
             },
             lineage: self.lineage,
-            parent_checkpoint_id: self
-                .parent_checkpoint_id
-                .map(|id| ThreadCheckpointId::from_uuid(Uuid::parse_str(&id).unwrap())),
-            active_entry_id: self
-                .active_entry_id
-                .map(|id| SessionEntryId::from_uuid(Uuid::parse_str(&id).unwrap())),
+            parent_checkpoint_id: self.parent_checkpoint_id.map(|id| {
+                crate::kernel::runtime_host::ThreadCheckpointId::from_uuid(
+                    uuid::Uuid::parse_str(&id).unwrap(),
+                )
+            }),
+            active_entry_id: self.active_entry_id.map(|id| {
+                crate::kernel::history::SessionEntryId::from_uuid(
+                    uuid::Uuid::parse_str(&id).unwrap(),
+                )
+            }),
             label: self.label,
             metadata: self.metadata,
             created_at_ms: 0,
@@ -5200,17 +5693,17 @@ impl TsAgentThreadCheckpointFixture {
 #[test]
 fn ts_style_lifecycle_thread_fixture_round_trips_core_fields_and_metadata() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let parent_thread_id = ThreadId::new();
-    let record = ThreadLifecycleRecord {
+    let parent_thread_id = crate::kernel::runtime_host::ThreadId::new();
+    let record = crate::kernel::runtime_host::ThreadLifecycleRecord {
         coordinates: coordinates.clone(),
         parent_thread_id: Some(parent_thread_id),
-        topology: ThreadTopology::spawned_from(parent_thread_id),
-        status: ThreadLifecycleStatus::Running,
-        latest_signal_id: Some(ThreadSignalId::new()),
-        latest_checkpoint_id: Some(ThreadCheckpointId::new()),
+        topology: crate::kernel::runtime_host::ThreadTopology::spawned_from(parent_thread_id),
+        status: crate::kernel::runtime_host::ThreadLifecycleStatus::Running,
+        latest_signal_id: Some(crate::kernel::runtime_host::ThreadSignalId::new()),
+        latest_checkpoint_id: Some(crate::kernel::runtime_host::ThreadCheckpointId::new()),
         created_at_ms: 10,
         updated_at_ms: 20,
-        metadata: BTreeMap::from([
+        metadata: std::collections::BTreeMap::from([
             ("auth_subject".to_string(), "telegram:123".to_string()),
             ("billing_ledger_id".to_string(), "ledger_456".to_string()),
         ]),
@@ -5230,20 +5723,23 @@ fn ts_style_lifecycle_thread_fixture_round_trips_core_fields_and_metadata() {
 #[test]
 fn ts_style_signal_and_checkpoint_fixtures_round_trip_without_product_fields() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let parent_thread_id = ThreadId::new();
-    let signal =
-        ThreadSignal::user_steer(&coordinates, "turn-1").with_metadata(BTreeMap::from([(
+    let parent_thread_id = crate::kernel::runtime_host::ThreadId::new();
+    let signal = crate::kernel::runtime_host::ThreadSignal::user_steer(&coordinates, "turn-1")
+        .with_metadata(std::collections::BTreeMap::from([(
             "source_message_id".to_string(),
             "msg_123".to_string(),
         )]));
-    let checkpoint = ThreadCheckpoint {
-        id: ThreadCheckpointId::new(),
+    let checkpoint = crate::kernel::runtime_host::ThreadCheckpoint {
+        id: crate::kernel::runtime_host::ThreadCheckpointId::new(),
         coordinates: coordinates.clone(),
-        lineage: ThreadCheckpointLineage::Parent { parent_thread_id },
-        parent_checkpoint_id: Some(ThreadCheckpointId::new()),
-        active_entry_id: Some(SessionEntryId::new()),
+        lineage: crate::kernel::runtime_host::ThreadCheckpointLineage::Parent { parent_thread_id },
+        parent_checkpoint_id: Some(crate::kernel::runtime_host::ThreadCheckpointId::new()),
+        active_entry_id: Some(crate::kernel::history::SessionEntryId::new()),
         label: Some("after-tool".to_string()),
-        metadata: BTreeMap::from([("app_checkpoint_id".to_string(), "app_ckpt".to_string())]),
+        metadata: std::collections::BTreeMap::from([(
+            "app_checkpoint_id".to_string(),
+            "app_ckpt".to_string(),
+        )]),
         created_at_ms: 30,
     };
 
@@ -5270,52 +5766,58 @@ fn ts_style_signal_and_checkpoint_fixtures_round_trip_without_product_fields() {
     assert_eq!(checkpoint_roundtrip.metadata, checkpoint.metadata);
 }
 
-fn lifecycle_status_to_ts(status: ThreadLifecycleStatus) -> &'static str {
+fn lifecycle_status_to_ts(
+    status: crate::kernel::runtime_host::ThreadLifecycleStatus,
+) -> &'static str {
     match status {
-        ThreadLifecycleStatus::Starting => "starting",
-        ThreadLifecycleStatus::Idle => "idle",
-        ThreadLifecycleStatus::Running => "running",
-        ThreadLifecycleStatus::Cancelling => "cancelling",
-        ThreadLifecycleStatus::Stopped => "stopped",
-        ThreadLifecycleStatus::Failed => "failed",
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Starting => "starting",
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Idle => "idle",
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Running => "running",
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Cancelling => "cancelling",
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Stopped => "stopped",
+        crate::kernel::runtime_host::ThreadLifecycleStatus::Failed => "failed",
     }
 }
 
-fn lifecycle_status_from_ts(status: &str) -> ThreadLifecycleStatus {
+fn lifecycle_status_from_ts(status: &str) -> crate::kernel::runtime_host::ThreadLifecycleStatus {
     match status {
-        "starting" => ThreadLifecycleStatus::Starting,
-        "idle" => ThreadLifecycleStatus::Idle,
-        "running" => ThreadLifecycleStatus::Running,
-        "cancelling" => ThreadLifecycleStatus::Cancelling,
-        "stopped" => ThreadLifecycleStatus::Stopped,
-        "failed" => ThreadLifecycleStatus::Failed,
+        "starting" => crate::kernel::runtime_host::ThreadLifecycleStatus::Starting,
+        "idle" => crate::kernel::runtime_host::ThreadLifecycleStatus::Idle,
+        "running" => crate::kernel::runtime_host::ThreadLifecycleStatus::Running,
+        "cancelling" => crate::kernel::runtime_host::ThreadLifecycleStatus::Cancelling,
+        "stopped" => crate::kernel::runtime_host::ThreadLifecycleStatus::Stopped,
+        "failed" => crate::kernel::runtime_host::ThreadLifecycleStatus::Failed,
         other => panic!("unknown ts status: {other}"),
     }
 }
 
-fn signal_kind_to_ts(kind: ThreadSignalKind) -> &'static str {
+fn signal_kind_to_ts(kind: crate::kernel::runtime_host::ThreadSignalKind) -> &'static str {
     match kind {
-        ThreadSignalKind::InterruptCancel => "interrupt_cancel",
-        ThreadSignalKind::Shutdown => "shutdown",
-        ThreadSignalKind::UserQueue => "user_queue",
-        ThreadSignalKind::UserSteer => "user_steer",
-        ThreadSignalKind::UserInterrupt => "user_interrupt",
-        ThreadSignalKind::CheckpointRequested => "checkpoint_requested",
-        ThreadSignalKind::CheckpointCreated => "checkpoint_created",
-        ThreadSignalKind::Failed => "failed",
+        crate::kernel::runtime_host::ThreadSignalKind::InterruptCancel => "interrupt_cancel",
+        crate::kernel::runtime_host::ThreadSignalKind::Shutdown => "shutdown",
+        crate::kernel::runtime_host::ThreadSignalKind::UserQueue => "user_queue",
+        crate::kernel::runtime_host::ThreadSignalKind::UserSteer => "user_steer",
+        crate::kernel::runtime_host::ThreadSignalKind::UserInterrupt => "user_interrupt",
+        crate::kernel::runtime_host::ThreadSignalKind::CheckpointRequested => {
+            "checkpoint_requested"
+        }
+        crate::kernel::runtime_host::ThreadSignalKind::CheckpointCreated => "checkpoint_created",
+        crate::kernel::runtime_host::ThreadSignalKind::Failed => "failed",
     }
 }
 
-fn signal_kind_from_ts(kind: &str) -> ThreadSignalKind {
+fn signal_kind_from_ts(kind: &str) -> crate::kernel::runtime_host::ThreadSignalKind {
     match kind {
-        "interrupt_cancel" => ThreadSignalKind::InterruptCancel,
-        "shutdown" => ThreadSignalKind::Shutdown,
-        "user_queue" => ThreadSignalKind::UserQueue,
-        "user_steer" => ThreadSignalKind::UserSteer,
-        "user_interrupt" => ThreadSignalKind::UserInterrupt,
-        "checkpoint_requested" => ThreadSignalKind::CheckpointRequested,
-        "checkpoint_created" => ThreadSignalKind::CheckpointCreated,
-        "failed" => ThreadSignalKind::Failed,
+        "interrupt_cancel" => crate::kernel::runtime_host::ThreadSignalKind::InterruptCancel,
+        "shutdown" => crate::kernel::runtime_host::ThreadSignalKind::Shutdown,
+        "user_queue" => crate::kernel::runtime_host::ThreadSignalKind::UserQueue,
+        "user_steer" => crate::kernel::runtime_host::ThreadSignalKind::UserSteer,
+        "user_interrupt" => crate::kernel::runtime_host::ThreadSignalKind::UserInterrupt,
+        "checkpoint_requested" => {
+            crate::kernel::runtime_host::ThreadSignalKind::CheckpointRequested
+        }
+        "checkpoint_created" => crate::kernel::runtime_host::ThreadSignalKind::CheckpointCreated,
+        "failed" => crate::kernel::runtime_host::ThreadSignalKind::Failed,
         other => panic!("unknown ts signal kind: {other}"),
     }
 }

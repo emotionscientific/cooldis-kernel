@@ -1,8 +1,3 @@
-use std::ffi::OsString;
-use std::path::PathBuf;
-use std::time::Duration;
-use verlet::{VerletAcpAgentConfig, VerletError, VerletResult, serve_acp_stdio};
-
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
@@ -11,17 +6,17 @@ async fn main() {
     }
 }
 
-async fn run() -> VerletResult<()> {
+async fn run() -> verlet::VerletResult<()> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let config = parse_args(args)?;
-    serve_acp_stdio(tokio::io::stdin(), tokio::io::stdout(), config).await
+    verlet::serve_acp_stdio(tokio::io::stdin(), tokio::io::stdout(), config).await
 }
 
-fn parse_args(args: Vec<OsString>) -> VerletResult<VerletAcpAgentConfig> {
-    let mut config = VerletAcpAgentConfig::default();
+fn parse_args(args: Vec<std::ffi::OsString>) -> verlet::VerletResult<verlet::VerletAcpAgentConfig> {
+    let mut config = verlet::VerletAcpAgentConfig::default();
     if let Ok(socket) = verlet::env_compat::var("VERLET_DAEMON_SOCKET") {
         if !socket.trim().is_empty() {
-            config.daemon_socket = PathBuf::from(socket);
+            config.daemon_socket = std::path::PathBuf::from(socket);
         }
     }
     if let Ok(listen) = verlet::env_compat::var("VERLET_DAEMON_LISTEN") {
@@ -48,7 +43,7 @@ fn parse_args(args: Vec<OsString>) -> VerletResult<VerletAcpAgentConfig> {
             }
             "--socket" | "--daemon-socket" => {
                 let value = required_value(&mut iter, "--socket")?;
-                config.daemon_socket = PathBuf::from(value);
+                config.daemon_socket = std::path::PathBuf::from(value);
             }
             "--listen" | "--daemon-listen" => {
                 let value = required_value(&mut iter, "--listen")?;
@@ -59,7 +54,7 @@ fn parse_args(args: Vec<OsString>) -> VerletResult<VerletAcpAgentConfig> {
                 let timeout_ms = value.parse::<u64>().map_err(|err| {
                     usage_error(format!("invalid --timeout-ms value {value:?}: {err}"))
                 })?;
-                config.request_timeout = Duration::from_millis(timeout_ms);
+                config.request_timeout = std::time::Duration::from_millis(timeout_ms);
             }
             "--agent-ref" => {
                 let value = required_value(&mut iter, "--agent-ref")?;
@@ -67,7 +62,7 @@ fn parse_args(args: Vec<OsString>) -> VerletResult<VerletAcpAgentConfig> {
             }
             "--cwd" => {
                 let value = required_value(&mut iter, "--cwd")?;
-                config.cwd = Some(PathBuf::from(value));
+                config.cwd = Some(std::path::PathBuf::from(value));
             }
             other => return Err(usage_error(format!("unknown argument {other:?}"))),
         }
@@ -75,13 +70,16 @@ fn parse_args(args: Vec<OsString>) -> VerletResult<VerletAcpAgentConfig> {
     Ok(config)
 }
 
-fn required_value(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> VerletResult<String> {
+fn required_value(
+    iter: &mut impl Iterator<Item = std::ffi::OsString>,
+    flag: &str,
+) -> verlet::VerletResult<String> {
     iter.next()
         .map(|value| value.to_string_lossy().into_owned())
         .ok_or_else(|| usage_error(format!("{flag} requires a value")))
 }
 
-fn parse_unix_listen(value: &str) -> VerletResult<PathBuf> {
+fn parse_unix_listen(value: &str) -> verlet::VerletResult<std::path::PathBuf> {
     let Some(path) = value.strip_prefix("unix://") else {
         return Err(usage_error(format!(
             "unsupported daemon listen address {value:?}; expected unix://PATH"
@@ -90,11 +88,11 @@ fn parse_unix_listen(value: &str) -> VerletResult<PathBuf> {
     if path.is_empty() {
         return Err(usage_error("daemon listen address requires a path"));
     }
-    Ok(PathBuf::from(path))
+    Ok(std::path::PathBuf::from(path))
 }
 
-fn usage_error(message: impl Into<String>) -> VerletError {
-    VerletError::RuntimeFactory(message.into())
+fn usage_error(message: impl Into<String>) -> verlet::VerletError {
+    verlet::VerletError::RuntimeFactory(message.into())
 }
 
 fn print_help() {

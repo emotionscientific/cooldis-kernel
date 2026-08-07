@@ -1,18 +1,10 @@
-use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command as TokioCommand};
-use uuid::Uuid;
-use verlet::{
-    AppServerListenAddr, EventKind, EventStore, EventStreamId, SqliteSessionStore, VerletAppServer,
-    VerletAppServerConfig,
-};
+use tokio::io::AsyncBufReadExt as _;
+use tokio::io::AsyncWriteExt as _;
+use verlet::EventStore as _;
 
 #[test]
 fn acp_agent_binary_reports_stable_version() {
-    let output = Command::new(env!("CARGO_BIN_EXE_verlet-acp-agent"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet-acp-agent"))
         .arg("--version")
         .output()
         .unwrap();
@@ -33,22 +25,27 @@ fn acp_agent_binary_reports_stable_version() {
 
 #[tokio::test]
 async fn acp_agent_process_smoke_runs_binary_over_stdio() {
-    let root = PathBuf::from("/tmp").join(format!("cdis-acp-process-{}", Uuid::now_v7().simple()));
+    let root = std::path::PathBuf::from("/tmp").join(format!(
+        "cdis-acp-process-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let socket = root.join("app.sock");
-    let listen = AppServerListenAddr::Unix(socket.clone());
-    let mut app_config = VerletAppServerConfig::local(listen.clone(), &workspace);
+    let listen = verlet::AppServerListenAddr::Unix(socket.clone());
+    let mut app_config = verlet::VerletAppServerConfig::local(listen.clone(), &workspace);
     app_config.runtime_home = root.join("runtime");
     app_config.state_home = root.join("state");
     app_config.agent_registry_root = root.join("agents");
-    let app = VerletAppServer::new_local(app_config).await.unwrap();
+    let app = verlet::VerletAppServer::new_local(app_config)
+        .await
+        .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
     let mut agent = AcpAgentChild::spawn(&socket).await;
     let (mut stdin, stdout) = agent.take_stdio();
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     send(
         &mut stdin,
@@ -65,7 +62,7 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
 
     send(
         &mut stdin,
-        &json!({
+        &serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "session/new",
@@ -85,7 +82,7 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
 
     send(
         &mut stdin,
-        &json!({
+        &serde_json::json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "session/prompt",
@@ -103,7 +100,7 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
             break message;
         }
         assert!(
-            message.get("id").and_then(Value::as_u64) != Some(3),
+            message.get("id").and_then(serde_json::Value::as_u64) != Some(3),
             "prompt response arrived before text update: {message}"
         );
     };
@@ -111,7 +108,7 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
     assert_eq!(update["params"]["sessionId"], session_id);
     assert_eq!(
         update["params"]["update"]["content"],
-        json!({ "type": "text", "text": "local:process smoke" })
+        serde_json::json!({ "type": "text", "text": "local:process smoke" })
     );
     let prompt = read_json_response(&mut lines, 3).await;
     assert_eq!(prompt["result"]["stopReason"], "end_turn", "{prompt}");
@@ -119,22 +116,28 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
         prompt["result"]["verlet"]["assistantText"],
         "local:process smoke"
     );
-    let store = SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+    let store = verlet::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
         .await
         .unwrap();
     let control_events = store
-        .read_events(&EventStreamId::new(format!("control:{session_id}")), None)
+        .read_events(
+            &verlet::EventStreamId::new(format!("control:{session_id}")),
+            None,
+        )
         .await
         .unwrap();
     let thread_events = store
-        .read_events(&EventStreamId::new(format!("thread:{session_id}")), None)
+        .read_events(
+            &verlet::EventStreamId::new(format!("thread:{session_id}")),
+            None,
+        )
         .await
         .unwrap();
     assert_admission_precedes_execution(&control_events, &thread_events, "surface:acp-adapter");
 
     send(
         &mut stdin,
-        &json!({
+        &serde_json::json!({
             "jsonrpc": "2.0",
             "id": 4,
             "method": "session/close",
@@ -144,7 +147,7 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
     )
     .await;
     let close = read_json_response(&mut lines, 4).await;
-    assert_eq!(close["result"], json!({}), "{close}");
+    assert_eq!(close["result"], serde_json::json!({}), "{close}");
 
     agent.stop().await;
     serve_task.abort();
@@ -160,13 +163,14 @@ fn assert_admission_precedes_execution(
     let admission = control_events
         .iter()
         .find(|event| {
-            event.kind == EventKind::AdmissionDecided && event.payload["route_id"] == route_id
+            event.kind == verlet::EventKind::AdmissionDecided
+                && event.payload["route_id"] == route_id
         })
         .expect("control stream missing expected admission.decided");
     let executed = thread_events
         .iter()
         .find(|event| {
-            event.kind == EventKind::SessionEntryAppended
+            event.kind == verlet::EventKind::SessionEntryAppended
                 && event.payload["runtime_kind"] != "thread_started"
         })
         .expect("thread stream missing executed turn session entry");
@@ -195,11 +199,13 @@ where
     writer.flush().await.unwrap();
 }
 
-async fn read_json_message<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> Value
+async fn read_json_message<R>(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<R>>,
+) -> serde_json::Value
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let deadline = tokio::time::sleep(Duration::from_secs(30));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     tokio::select! {
         _ = &mut deadline => panic!("timed out waiting for ACP JSON-RPC message"),
@@ -210,19 +216,22 @@ where
     }
 }
 
-async fn read_json_response<R>(lines: &mut tokio::io::Lines<BufReader<R>>, id: u64) -> Value
+async fn read_json_response<R>(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<R>>,
+    id: u64,
+) -> serde_json::Value
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let deadline = tokio::time::sleep(Duration::from_secs(30));
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     loop {
         tokio::select! {
             _ = &mut deadline => panic!("timed out waiting for ACP JSON-RPC response id {id}"),
             line = lines.next_line() => {
                 let line = line.unwrap().expect("agent closed stdout before response");
-                let value: Value = serde_json::from_str(&line).unwrap();
-                if value.get("id").and_then(Value::as_u64) == Some(id) {
+                let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
                     return value;
                 }
             }
@@ -230,32 +239,32 @@ where
     }
 }
 
-async fn wait_for_socket(path: &Path) {
+async fn wait_for_socket(path: &std::path::Path) {
     for _ in 0..1_500 {
         if path.exists() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for {}", path.display());
 }
 
 struct AcpAgentChild {
-    child: Option<Child>,
+    child: Option<tokio::process::Child>,
     stdin: Option<tokio::process::ChildStdin>,
     stdout: Option<tokio::process::ChildStdout>,
 }
 
 impl AcpAgentChild {
-    async fn spawn(socket: &Path) -> Self {
-        let mut child = TokioCommand::new(env!("CARGO_BIN_EXE_verlet-acp-agent"))
+    async fn spawn(socket: &std::path::Path) -> Self {
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet-acp-agent"))
             .arg("--socket")
             .arg(socket)
             .arg("--timeout-ms")
             .arg("10000")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().expect("agent stdin");
@@ -277,7 +286,7 @@ impl AcpAgentChild {
     async fn stop(mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
         }
     }
 }

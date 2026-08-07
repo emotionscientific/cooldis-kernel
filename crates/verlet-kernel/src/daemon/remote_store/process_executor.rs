@@ -6,97 +6,64 @@
 //! ordinary durable ingress claim/settle lane, then propagate their local
 //! thread stream back under a fenced lease.
 
-use super::endpoint::{
-    SYNC_INGRESS_QUEUE_ACK_SCHEMA_V1, SyncIngressQueueAckRequestV1, SyncIngressQueueAcknowledger,
-    SyncPullSource,
-};
-use super::endpoint_http::HttpSyncClient;
-use super::lease::{
-    SqliteStreamLeaseAuthority, StreamLeaseAuthority, StreamLeaseGrantV1, StreamLeaseLineage,
-    StreamPrefixScope, SyncCredentialAuthority,
-};
-use super::placement::{
-    RemoteThreadExecutor, RemoteThreadObservation, RemoteThreadSpawnRequest,
-    RemoteThreadSubmitRequest, RemoteThreadWaitObservation,
-};
-use super::propagator::{
-    LocalFirstStreamPropagator, PropagationStep, SqlitePropagationStateStore,
-    StreamPropagationState, StreamPropagator,
-};
-use super::queue::{
-    RemoteIngressQueue, RemoteIngressQueueEntryV1, SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1,
-    SqliteRemoteIngressQueue, remote_ingress_queue_stream_id,
-};
-use super::tail::{RemoteStreamTail, RemoteStreamTailCursor, SqliteRemoteStreamTail};
-use crate::daemon::recovery_sweep::project_child_terminal_record;
-use crate::kernel::runtime_host::append_thread_joined_first_wins;
-use crate::{
-    CanonicalContent, CanonicalMessage, EventKind, EventStore, EventStreamId, SessionEntryKind,
-    SessionStore, SqliteSessionStore, SystemDaemonClock, ThreadContext, ThreadCoordinates,
-    ThreadId, ThreadStartRequest, ThreadStatus, ThreadTerminalState, TurnInput, VerletAppServer,
-    VerletAppServerConfig, VerletDaemonIoBridge, VerletError, VerletResult,
-};
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::{Arc, RwLock as StdRwLock};
-use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use tokio::sync::{Mutex, watch};
-use verlet_io_core::{
-    AdmissionDecision, ConversationKind, IngressContent, IngressEnvelope, IoConversation,
-    IoDedupeKey, IoDelivery, IoError, IoPrincipal, IoSource, IoTurnInput, ResolvedIoTarget,
-    ThreadAddress,
-};
-use verlet_sqlite::{TransactionBehavior, params};
+use crate::EventStore as _;
+use crate::SessionStore as _;
+use crate::daemon::remote_store::endpoint::SyncIngressQueueAcknowledger as _;
+use crate::daemon::remote_store::endpoint::SyncPullSource as _;
+use crate::daemon::remote_store::lease::StreamLeaseAuthority as _;
+use crate::daemon::remote_store::lease::SyncCredentialAuthority as _;
+use crate::daemon::remote_store::propagator::StreamPropagator as _;
+use crate::daemon::remote_store::queue::RemoteIngressQueue as _;
+use crate::daemon::remote_store::tail::RemoteStreamTail as _;
+use sha2::Digest as _;
+use std::fmt::Write as _;
+use tokio::io::AsyncWriteExt as _;
 
 const REMOTE_CHILD_COMMAND: &str = "__remote-child";
 const REMOTE_TURN_ID_METADATA: &str = "cooldis_remote_turn_id";
 const REMOTE_INPUT_METADATA: &str = "cooldis_remote_turn_input";
-const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const CHILD_RETRY_MAX: Duration = Duration::from_secs(1);
-const PARENT_TAIL_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const CHILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+const CHILD_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+const PARENT_TAIL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Secret-bearing bootstrap sent once over the child's stdin pipe. It is
 /// deliberately not `Debug`: bearer tokens must never reach diagnostics.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RemoteChildBootstrapV1 {
     pub schema: String,
-    pub request: RemoteThreadSpawnRequest,
+    pub request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
     pub sync_endpoint: String,
-    pub stream_lease: StreamLeaseGrantV1,
+    pub stream_lease: crate::daemon::remote_store::lease::StreamLeaseGrantV1,
     pub stream_bearer_token: String,
     pub queue_bearer_token: String,
-    pub daemon_config_path: Option<PathBuf>,
-    pub runtime_home: PathBuf,
-    pub state_home: PathBuf,
+    pub daemon_config_path: Option<std::path::PathBuf>,
+    pub runtime_home: std::path::PathBuf,
+    pub state_home: std::path::PathBuf,
 }
 
 const REMOTE_CHILD_BOOTSTRAP_SCHEMA_V1: &str = "cooldis.remote_child.bootstrap/1";
 
 pub(crate) struct ProcessRemoteThreadExecutor {
-    inner: Arc<ProcessRemoteThreadExecutorInner>,
+    inner: std::sync::Arc<ProcessRemoteThreadExecutorInner>,
 }
 
 struct ProcessRemoteThreadExecutorInner {
-    store: SqliteSessionStore,
-    queue: SqliteRemoteIngressQueue,
-    authority: Arc<SqliteStreamLeaseAuthority>,
+    store: crate::SqliteSessionStore,
+    queue: crate::daemon::remote_store::queue::SqliteRemoteIngressQueue,
+    authority: std::sync::Arc<crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority>,
     sync_endpoint: String,
-    daemon_config_path: Option<PathBuf>,
-    child_root: PathBuf,
-    executable: PathBuf,
-    spawn_lock: Mutex<()>,
-    states: StdRwLock<HashMap<ThreadId, Arc<RemoteChildState>>>,
+    daemon_config_path: Option<std::path::PathBuf>,
+    child_root: std::path::PathBuf,
+    executable: std::path::PathBuf,
+    spawn_lock: tokio::sync::Mutex<()>,
+    states: std::sync::RwLock<
+        std::collections::HashMap<crate::ThreadId, std::sync::Arc<RemoteChildState>>,
+    >,
 }
 
 struct RemoteChildState {
-    child: ThreadContext,
-    status: watch::Sender<ThreadStatus>,
+    child: crate::ThreadContext,
+    status: tokio::sync::watch::Sender<crate::ThreadStatus>,
     _process: AbortOnDrop,
     _tail: AbortOnDrop,
 }
@@ -112,7 +79,7 @@ impl Drop for AbortOnDrop {
 impl Clone for ProcessRemoteThreadExecutor {
     fn clone(&self) -> Self {
         Self {
-            inner: Arc::clone(&self.inner),
+            inner: std::sync::Arc::clone(&self.inner),
         }
     }
 }
@@ -130,16 +97,18 @@ impl std::fmt::Debug for ProcessRemoteThreadExecutor {
 impl ProcessRemoteThreadExecutor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
-        store: SqliteSessionStore,
-        authority: Arc<SqliteStreamLeaseAuthority>,
+        store: crate::SqliteSessionStore,
+        authority: std::sync::Arc<crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority>,
         sync_endpoint: String,
-        daemon_config_path: Option<PathBuf>,
-        child_root: PathBuf,
-        executable: PathBuf,
-    ) -> VerletResult<Self> {
-        let queue = SqliteRemoteIngressQueue::new(store.clone()).await?;
+        daemon_config_path: Option<std::path::PathBuf>,
+        child_root: std::path::PathBuf,
+        executable: std::path::PathBuf,
+    ) -> crate::VerletResult<Self> {
+        let queue =
+            crate::daemon::remote_store::queue::SqliteRemoteIngressQueue::new(store.clone())
+                .await?;
         Ok(Self {
-            inner: Arc::new(ProcessRemoteThreadExecutorInner {
+            inner: std::sync::Arc::new(ProcessRemoteThreadExecutorInner {
                 store,
                 queue,
                 authority,
@@ -147,14 +116,17 @@ impl ProcessRemoteThreadExecutor {
                 daemon_config_path,
                 child_root,
                 executable,
-                spawn_lock: Mutex::new(()),
-                states: StdRwLock::new(HashMap::new()),
+                spawn_lock: tokio::sync::Mutex::new(()),
+                states: std::sync::RwLock::new(std::collections::HashMap::new()),
             }),
         })
     }
 
-    async fn spawn_shielded(&self, request: RemoteThreadSpawnRequest) -> VerletResult<()> {
-        let inner = Arc::clone(&self.inner);
+    async fn spawn_shielded(
+        &self,
+        request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
+    ) -> crate::VerletResult<()> {
+        let inner = std::sync::Arc::clone(&self.inner);
         let settlement_store = inner.store.clone();
         let settlement_request = request.clone();
         tokio::spawn(async move {
@@ -177,25 +149,31 @@ impl ProcessRemoteThreadExecutor {
         })
             .await
             .map_err(|error| {
-                VerletError::RuntimeExecution(format!(
+                crate::VerletError::RuntimeExecution(format!(
                     "remote child spawn transaction task failed: {error}"
                 ))
             })?
     }
 
-    fn state(&self, thread_id: ThreadId) -> VerletResult<Arc<RemoteChildState>> {
+    fn state(
+        &self,
+        thread_id: crate::ThreadId,
+    ) -> crate::VerletResult<std::sync::Arc<RemoteChildState>> {
         self.inner
             .states
             .read()
             .map_err(|_| remote_error("remote child state lock poisoned"))?
             .get(&thread_id)
             .cloned()
-            .ok_or(VerletError::ThreadNotFound(thread_id))
+            .ok_or(crate::VerletError::ThreadNotFound(thread_id))
     }
 }
 
 impl ProcessRemoteThreadExecutorInner {
-    async fn spawn(self: Arc<Self>, request: RemoteThreadSpawnRequest) -> VerletResult<()> {
+    async fn spawn(
+        self: std::sync::Arc<Self>,
+        request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
+    ) -> crate::VerletResult<()> {
         // A duplicate projector/retry must not race the check below and boot
         // two OS children. The whole bootstrap is already detached from the
         // caller; serializing it also makes state installation the sole
@@ -211,23 +189,26 @@ impl ProcessRemoteThreadExecutorInner {
             return Ok(());
         }
 
-        let stream_id = EventStreamId::for_thread(&request.child.coordinates);
+        let stream_id = crate::EventStreamId::for_thread(&request.child.coordinates);
         let stream_grant = self
             .authority
             .grant_lease(
-                &StreamPrefixScope::new(stream_id.as_str()),
+                &crate::daemon::remote_store::lease::StreamPrefixScope::new(stream_id.as_str()),
                 &request.dispatch_id,
-                StreamLeaseLineage::default(),
+                crate::daemon::remote_store::lease::StreamLeaseLineage::default(),
             )
             .await?;
         let (_, stream_bearer_token) = self.authority.mint_credential(&stream_grant).await?;
-        let queue_stream_id = remote_ingress_queue_stream_id(thread_id);
+        let queue_stream_id =
+            crate::daemon::remote_store::queue::remote_ingress_queue_stream_id(thread_id);
         let queue_grant = self
             .authority
             .grant_lease(
-                &StreamPrefixScope::new(queue_stream_id.as_str()),
+                &crate::daemon::remote_store::lease::StreamPrefixScope::new(
+                    queue_stream_id.as_str(),
+                ),
                 &request.dispatch_id,
-                StreamLeaseLineage::default(),
+                crate::daemon::remote_store::lease::StreamLeaseLineage::default(),
             )
             .await?;
         let (_, queue_bearer_token) = self.authority.mint_credential(&queue_grant).await?;
@@ -260,12 +241,12 @@ impl ProcessRemoteThreadExecutorInner {
         };
         let encoded = serde_json::to_vec(&bootstrap)
             .map_err(|error| remote_error(format!("encode remote child bootstrap: {error}")))?;
-        let mut command = Command::new(&self.executable);
+        let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg(REMOTE_CHILD_COMMAND)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true);
         let mut child = command
             .spawn()
@@ -283,7 +264,7 @@ impl ProcessRemoteThreadExecutorInner {
             .await
             .map_err(|error| remote_error(format!("close remote child bootstrap: {error}")))?;
 
-        let (status_tx, _) = watch::channel(ThreadStatus::Starting);
+        let (status_tx, _) = tokio::sync::watch::channel(crate::ThreadStatus::Starting);
         let process_status = status_tx.clone();
         let process_store = self.store.clone();
         let process_request = request.clone();
@@ -291,9 +272,9 @@ impl ProcessRemoteThreadExecutorInner {
             let outcome = child.wait().await;
             if !matches!(
                 *process_status.borrow(),
-                ThreadStatus::Idle | ThreadStatus::Stopped
+                crate::ThreadStatus::Idle | crate::ThreadStatus::Stopped
             ) {
-                let _ = process_status.send(ThreadStatus::Failed);
+                let _ = process_status.send(crate::ThreadStatus::Failed);
             }
             let reason = match outcome {
                 Ok(status) => {
@@ -309,14 +290,15 @@ impl ProcessRemoteThreadExecutorInner {
                 eprintln!("verlet remote child process death settlement failed: {error}");
             }
         });
-        let tail = SqliteRemoteStreamTail::new(self.store.clone());
+        let tail =
+            crate::daemon::remote_store::tail::SqliteRemoteStreamTail::new(self.store.clone());
         let tail_store = self.store.clone();
         let tail_request = request.clone();
         let tail_status = status_tx.clone();
         let tail_task = tokio::spawn(async move {
             run_parent_tail(tail, tail_store, tail_request, tail_status).await;
         });
-        let state = Arc::new(RemoteChildState {
+        let state = std::sync::Arc::new(RemoteChildState {
             child: request.child.clone(),
             status: status_tx,
             _process: AbortOnDrop(process_task.abort_handle()),
@@ -336,9 +318,9 @@ impl ProcessRemoteThreadExecutorInner {
     }
 }
 
-#[async_trait]
-impl RemoteThreadExecutor for ProcessRemoteThreadExecutor {
-    async fn context(&self, thread_id: ThreadId) -> Option<ThreadContext> {
+#[async_trait::async_trait]
+impl crate::daemon::remote_store::placement::RemoteThreadExecutor for ProcessRemoteThreadExecutor {
+    async fn context(&self, thread_id: crate::ThreadId) -> Option<crate::ThreadContext> {
         self.inner
             .states
             .read()
@@ -346,11 +328,17 @@ impl RemoteThreadExecutor for ProcessRemoteThreadExecutor {
             .and_then(|states| states.get(&thread_id).map(|state| state.child.clone()))
     }
 
-    async fn spawn(&self, request: RemoteThreadSpawnRequest) -> VerletResult<()> {
+    async fn spawn(
+        &self,
+        request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
+    ) -> crate::VerletResult<()> {
         self.spawn_shielded(request).await
     }
 
-    async fn submit(&self, request: RemoteThreadSubmitRequest) -> VerletResult<ThreadStatus> {
+    async fn submit(
+        &self,
+        request: crate::daemon::remote_store::placement::RemoteThreadSubmitRequest,
+    ) -> crate::VerletResult<crate::ThreadStatus> {
         let state = self.state(request.target_thread_id)?;
         self.inner
             .queue
@@ -361,40 +349,48 @@ impl RemoteThreadExecutor for ProcessRemoteThreadExecutor {
                 &request.input,
             )?)
             .await?;
-        let _ = state.status.send(ThreadStatus::Running);
-        Ok(ThreadStatus::Running)
+        let _ = state.status.send(crate::ThreadStatus::Running);
+        Ok(crate::ThreadStatus::Running)
     }
 
-    async fn observe(&self, thread_id: ThreadId) -> VerletResult<RemoteThreadObservation> {
+    async fn observe(
+        &self,
+        thread_id: crate::ThreadId,
+    ) -> crate::VerletResult<crate::daemon::remote_store::placement::RemoteThreadObservation> {
         let state = self.state(thread_id)?;
-        let stream_id = EventStreamId::for_thread(&state.child.coordinates);
+        let stream_id = crate::EventStreamId::for_thread(&state.child.coordinates);
         let records = self
             .inner
             .store
             .read_events(&stream_id, None)
             .await
-            .map_err(|error| VerletError::History(error.to_string()))?;
+            .map_err(|error| crate::VerletError::History(error.to_string()))?;
         let status = fold_remote_status(&records).unwrap_or(*state.status.borrow());
         let latest_output =
             latest_assistant_output(&self.inner.store, &state.child.coordinates).await?;
-        Ok(RemoteThreadObservation {
-            status,
-            latest_output,
-        })
+        Ok(
+            crate::daemon::remote_store::placement::RemoteThreadObservation {
+                status,
+                latest_output,
+            },
+        )
     }
 
     async fn wait(
         &self,
-        thread_id: ThreadId,
+        thread_id: crate::ThreadId,
         timeout_ms: Option<u64>,
-    ) -> VerletResult<RemoteThreadWaitObservation> {
+    ) -> crate::VerletResult<crate::daemon::remote_store::placement::RemoteThreadWaitObservation>
+    {
         let state = self.state(thread_id)?;
         let mut status = state.status.subscribe();
         let wait = async {
             loop {
                 if matches!(
                     *status.borrow(),
-                    ThreadStatus::Idle | ThreadStatus::Stopped | ThreadStatus::Failed
+                    crate::ThreadStatus::Idle
+                        | crate::ThreadStatus::Stopped
+                        | crate::ThreadStatus::Failed
                 ) {
                     break;
                 }
@@ -404,29 +400,33 @@ impl RemoteThreadExecutor for ProcessRemoteThreadExecutor {
             }
         };
         let timed_out = match timeout_ms {
-            Some(timeout_ms) => tokio::time::timeout(Duration::from_millis(timeout_ms), wait)
-                .await
-                .is_err(),
+            Some(timeout_ms) => {
+                tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), wait)
+                    .await
+                    .is_err()
+            }
             None => {
                 wait.await;
                 false
             }
         };
-        Ok(RemoteThreadWaitObservation {
-            observation: self.observe(thread_id).await?,
-            timed_out,
-        })
+        Ok(
+            crate::daemon::remote_store::placement::RemoteThreadWaitObservation {
+                observation: self.observe(thread_id).await?,
+                timed_out,
+            },
+        )
     }
 }
 
 async fn run_parent_tail(
-    tail: SqliteRemoteStreamTail,
-    store: SqliteSessionStore,
-    request: RemoteThreadSpawnRequest,
-    status: watch::Sender<ThreadStatus>,
+    tail: crate::daemon::remote_store::tail::SqliteRemoteStreamTail,
+    store: crate::SqliteSessionStore,
+    request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
+    status: tokio::sync::watch::Sender<crate::ThreadStatus>,
 ) {
-    let stream_id = EventStreamId::for_thread(&request.child.coordinates);
-    let mut cursor = RemoteStreamTailCursor {
+    let stream_id = crate::EventStreamId::for_thread(&request.child.coordinates);
+    let mut cursor = crate::daemon::remote_store::tail::RemoteStreamTailCursor {
         stream_id: stream_id.clone(),
         cursor: None,
     };
@@ -473,8 +473,8 @@ async fn run_parent_tail(
 }
 
 fn remote_parent_coordinates(
-    request: &RemoteThreadSpawnRequest,
-) -> VerletResult<ThreadCoordinates> {
+    request: &crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
+) -> crate::VerletResult<crate::ThreadCoordinates> {
     let parent_thread_id = request
         .child
         .parent_thread_id
@@ -486,18 +486,18 @@ fn remote_parent_coordinates(
 
 #[allow(clippy::too_many_arguments)]
 async fn append_remote_join_shielded(
-    store: SqliteSessionStore,
-    request: RemoteThreadSpawnRequest,
-    terminal_state: ThreadTerminalState,
+    store: crate::SqliteSessionStore,
+    request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
+    terminal_state: crate::ThreadTerminalState,
     result_digest: Option<String>,
     reason: Option<String>,
-    source_event: Option<(EventStreamId, crate::EventRecordId)>,
+    source_event: Option<(crate::EventStreamId, crate::EventRecordId)>,
     discharged_by: &'static str,
     function: &'static str,
-) -> VerletResult<bool> {
+) -> crate::VerletResult<bool> {
     let parent = remote_parent_coordinates(&request)?;
     tokio::spawn(async move {
-        append_thread_joined_first_wins(
+        crate::kernel::runtime_host::append_thread_joined_first_wins(
             &store,
             parent,
             request.child.coordinates,
@@ -520,11 +520,13 @@ async fn append_remote_join_shielded(
 /// whether the record named that turn; the shared durable fence may already
 /// have been won by process-death settlement or startup recovery.
 async fn settle_remote_terminal_record(
-    store: SqliteSessionStore,
-    request: RemoteThreadSpawnRequest,
+    store: crate::SqliteSessionStore,
+    request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
     record: crate::EventRecord,
-) -> VerletResult<bool> {
-    let Some(terminal) = project_child_terminal_record(&record, &request.turn_id) else {
+) -> crate::VerletResult<bool> {
+    let Some(terminal) =
+        crate::daemon::recovery_sweep::project_child_terminal_record(&record, &request.turn_id)
+    else {
         return Ok(false);
     };
     append_remote_join_shielded(
@@ -542,14 +544,14 @@ async fn settle_remote_terminal_record(
 }
 
 async fn settle_remote_process_death(
-    store: SqliteSessionStore,
-    request: RemoteThreadSpawnRequest,
+    store: crate::SqliteSessionStore,
+    request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
     reason: String,
-) -> VerletResult<bool> {
+) -> crate::VerletResult<bool> {
     append_remote_join_shielded(
         store,
         request,
-        ThreadTerminalState::Failed,
+        crate::ThreadTerminalState::Failed,
         Some(reason.clone()),
         Some(reason),
         None,
@@ -560,14 +562,14 @@ async fn settle_remote_process_death(
 }
 
 async fn settle_remote_spawn_failure(
-    store: SqliteSessionStore,
-    request: RemoteThreadSpawnRequest,
+    store: crate::SqliteSessionStore,
+    request: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
     reason: String,
-) -> VerletResult<bool> {
+) -> crate::VerletResult<bool> {
     append_remote_join_shielded(
         store,
         request,
-        ThreadTerminalState::Failed,
+        crate::ThreadTerminalState::Failed,
         Some(reason.clone()),
         Some(reason),
         None,
@@ -578,22 +580,28 @@ async fn settle_remote_spawn_failure(
 }
 
 fn queue_entry(
-    target: &ThreadCoordinates,
+    target: &crate::ThreadCoordinates,
     turn_id: String,
     dispatch_id: verlet_runtime_contracts::DispatchId,
-    input: &TurnInput,
-) -> VerletResult<RemoteIngressQueueEntryV1> {
+    input: &crate::TurnInput,
+) -> crate::VerletResult<crate::daemon::remote_store::queue::RemoteIngressQueueEntryV1> {
     let target_thread_id = target.thread_id;
-    let source = IoSource::new("cooldis.remote", "ingress");
-    let mut envelope = IngressEnvelope::new(
+    let source = verlet_io_core::IoSource::new("cooldis.remote", "ingress");
+    let mut envelope = verlet_io_core::IngressEnvelope::new(
         source.clone(),
-        IoConversation::new(target_thread_id.to_string(), ConversationKind::System),
-        IngressContent::text(input.text_projection()),
+        verlet_io_core::IoConversation::new(
+            target_thread_id.to_string(),
+            verlet_io_core::ConversationKind::System,
+        ),
+        verlet_io_core::IngressContent::text(input.text_projection()),
         0,
     )
-    .with_dedupe_key(IoDedupeKey::for_source(&source, dispatch_id.as_str()))
-    .with_delivery(IoDelivery::new(dispatch_id.to_string()))
-    .with_principal(IoPrincipal::new(
+    .with_dedupe_key(verlet_io_core::IoDedupeKey::for_source(
+        &source,
+        dispatch_id.as_str(),
+    ))
+    .with_delivery(verlet_io_core::IoDelivery::new(dispatch_id.to_string()))
+    .with_principal(verlet_io_core::IoPrincipal::new(
         target.tenant_id.clone(),
         target.user_id.clone(),
         format!("remote:{dispatch_id}"),
@@ -607,46 +615,51 @@ fn queue_entry(
         serde_json::to_string(input)
             .map_err(|error| remote_error(format!("encode remote turn input: {error}")))?,
     );
-    Ok(RemoteIngressQueueEntryV1 {
-        schema: SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1.to_string(),
-        dispatch_id,
-        target_thread_id,
-        envelope,
-        // Queue identity must be byte-stable across retries. The durable row
-        // sequence is the authoritative enqueue order; this field therefore
-        // carries the stable dispatch epoch rather than a retry-local clock.
-        enqueued_at_ms: 0,
-    })
+    Ok(
+        crate::daemon::remote_store::queue::RemoteIngressQueueEntryV1 {
+            schema: crate::daemon::remote_store::queue::SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1
+                .to_string(),
+            dispatch_id,
+            target_thread_id,
+            envelope,
+            // Queue identity must be byte-stable across retries. The durable row
+            // sequence is the authoritative enqueue order; this field therefore
+            // carries the stable dispatch epoch rather than a retry-local clock.
+            enqueued_at_ms: 0,
+        },
+    )
 }
 
-fn fold_remote_status(records: &[crate::EventRecord]) -> Option<ThreadStatus> {
+fn fold_remote_status(records: &[crate::EventRecord]) -> Option<crate::ThreadStatus> {
     records.iter().rev().find_map(|record| match record.kind {
-        EventKind::TurnCompleted | EventKind::LoopCompleted => Some(ThreadStatus::Idle),
-        EventKind::LoopDenied | EventKind::LoopBlocked | EventKind::LoopBudgetExhausted => {
-            Some(ThreadStatus::Failed)
+        crate::EventKind::TurnCompleted | crate::EventKind::LoopCompleted => {
+            Some(crate::ThreadStatus::Idle)
         }
-        EventKind::TurnSubmitted => Some(ThreadStatus::Running),
+        crate::EventKind::LoopDenied
+        | crate::EventKind::LoopBlocked
+        | crate::EventKind::LoopBudgetExhausted => Some(crate::ThreadStatus::Failed),
+        crate::EventKind::TurnSubmitted => Some(crate::ThreadStatus::Running),
         _ => None,
     })
 }
 
 async fn latest_assistant_output(
-    store: &SqliteSessionStore,
-    coordinates: &ThreadCoordinates,
-) -> VerletResult<Option<String>> {
+    store: &crate::SqliteSessionStore,
+    coordinates: &crate::ThreadCoordinates,
+) -> crate::VerletResult<Option<String>> {
     let context = store
         .build_context(coordinates)
         .await
-        .map_err(|error| VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::VerletError::History(error.to_string()))?;
     Ok(context.entries.iter().rev().find_map(|entry| {
         if entry.coordinates.thread_id != coordinates.thread_id {
             return None;
         }
-        let (SessionEntryKind::Message {
-            message: CanonicalMessage::Assistant { content, .. },
+        let (crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::Assistant { content, .. },
         }
-        | SessionEntryKind::CustomContextMessage {
-            message: CanonicalMessage::Assistant { content, .. },
+        | crate::SessionEntryKind::CustomContextMessage {
+            message: crate::CanonicalMessage::Assistant { content, .. },
         }) = &entry.kind
         else {
             return None;
@@ -654,7 +667,7 @@ async fn latest_assistant_output(
         let text = content
             .iter()
             .filter_map(|content| match content {
-                CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<String>();
@@ -663,9 +676,9 @@ async fn latest_assistant_output(
 }
 
 pub(crate) async fn run_remote_child(
-    mut app_config: VerletAppServerConfig,
+    mut app_config: crate::VerletAppServerConfig,
     bootstrap: RemoteChildBootstrapV1,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     if bootstrap.schema != REMOTE_CHILD_BOOTSTRAP_SCHEMA_V1 {
         return Err(remote_error("unsupported remote child bootstrap schema"));
     }
@@ -675,7 +688,7 @@ pub(crate) async fn run_remote_child(
     let parent_process_id = unsafe { libc::getppid() };
     app_config.runtime_home = bootstrap.runtime_home.clone();
     app_config.state_home = bootstrap.state_home.clone();
-    let app = VerletAppServer::new_local(app_config).await?;
+    let app = crate::VerletAppServer::new_local(app_config).await?;
     let supervisor = app.supervisor();
     let child = &bootstrap.request.child;
     let parent_thread_id = child
@@ -686,10 +699,10 @@ pub(crate) async fn run_remote_child(
         .await
     {
         Ok(parent) => parent,
-        Err(VerletError::ThreadNotFound(_)) => {
+        Err(crate::VerletError::ThreadNotFound(_)) => {
             supervisor
                 .start_thread_with_id(
-                    ThreadStartRequest {
+                    crate::ThreadStartRequest {
                         tenant_id: child.coordinates.tenant_id.clone(),
                         user_id: child.coordinates.user_id.clone(),
                         session_id: child.coordinates.session_id.clone(),
@@ -707,10 +720,10 @@ pub(crate) async fn run_remote_child(
         .await
     {
         Ok(child) => child,
-        Err(VerletError::ThreadNotFound(_)) => {
+        Err(crate::VerletError::ThreadNotFound(_)) => {
             supervisor
                 .start_thread_with_id(
-                    ThreadStartRequest {
+                    crate::ThreadStartRequest {
                         tenant_id: child.coordinates.tenant_id.clone(),
                         user_id: child.coordinates.user_id.clone(),
                         session_id: child.coordinates.session_id.clone(),
@@ -732,16 +745,21 @@ pub(crate) async fn run_remote_child(
             .await?;
     }
 
-    let local_store = SqliteSessionStore::open(app.session_store_path())
+    let local_store = crate::SqliteSessionStore::open(app.session_store_path())
         .await
-        .map_err(|error| VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::VerletError::History(error.to_string()))?;
     init_child_cursor_schema(local_store.clone()).await?;
-    let state_store = Arc::new(SqlitePropagationStateStore::new(local_store.clone()).await?);
-    let stream_id = EventStreamId::for_thread(&child.coordinates);
+    let state_store = std::sync::Arc::new(
+        crate::daemon::remote_store::propagator::SqlitePropagationStateStore::new(
+            local_store.clone(),
+        )
+        .await?,
+    );
+    let stream_id = crate::EventStreamId::for_thread(&child.coordinates);
     let mut propagation_state = match state_store.load(&stream_id).await? {
         Some(state) => state,
         None => {
-            let state = StreamPropagationState {
+            let state = crate::daemon::remote_store::propagator::StreamPropagationState {
                 stream_id: stream_id.clone(),
                 lease: bootstrap.stream_lease.clone(),
                 pushed_through: None,
@@ -750,18 +768,22 @@ pub(crate) async fn run_remote_child(
             state
         }
     };
-    let http = Arc::new(HttpSyncClient::new(bootstrap.sync_endpoint)?);
-    let propagator = LocalFirstStreamPropagator::new(
+    let http = std::sync::Arc::new(
+        crate::daemon::remote_store::endpoint_http::HttpSyncClient::new(bootstrap.sync_endpoint)?,
+    );
+    let propagator = crate::daemon::remote_store::propagator::LocalFirstStreamPropagator::new(
         local_store.clone(),
         http.clone(),
         http.clone(),
         http.clone(),
         state_store,
         bootstrap.stream_bearer_token,
-        Arc::new(SystemDaemonClock),
+        std::sync::Arc::new(crate::SystemDaemonClock),
     );
-    let bridge = VerletDaemonIoBridge::from_app_server(&app);
-    let queue_stream_id = remote_ingress_queue_stream_id(child.coordinates.thread_id);
+    let bridge = crate::VerletDaemonIoBridge::from_app_server(&app);
+    let queue_stream_id = crate::daemon::remote_store::queue::remote_ingress_queue_stream_id(
+        child.coordinates.thread_id,
+    );
     let mut queue_cursor = load_child_cursor(&local_store, child.coordinates.thread_id).await?;
     let mut endpoint_backoff = CHILD_POLL_INTERVAL;
     loop {
@@ -789,10 +811,10 @@ pub(crate) async fn run_remote_child(
         };
         let mut retry_queue_delivery = false;
         for record in records {
-            let entry = serde_json::from_value::<RemoteIngressQueueEntryV1>(record.payload.clone())
-                .map_err(|error| {
-                    remote_error(format!("decode remote child queue entry: {error}"))
-                })?;
+            let entry = serde_json::from_value::<
+                crate::daemon::remote_store::queue::RemoteIngressQueueEntryV1,
+            >(record.payload.clone())
+            .map_err(|error| remote_error(format!("decode remote child queue entry: {error}")))?;
             if entry.target_thread_id != child.coordinates.thread_id {
                 return Err(remote_error(
                     "remote child queue entry escaped its target prefix",
@@ -808,12 +830,14 @@ pub(crate) async fn run_remote_child(
                 .envelope
                 .metadata
                 .get(REMOTE_INPUT_METADATA)
-                .map(|encoded| serde_json::from_str::<TurnInput>(encoded))
+                .map(|encoded| serde_json::from_str::<crate::TurnInput>(encoded))
                 .transpose()
                 .map_err(|error| remote_error(format!("decode remote turn input: {error}")))?
-                .unwrap_or_else(|| TurnInput::text(entry.envelope.content.text_projection()));
-            let mut target = ResolvedIoTarget::new(
-                ThreadAddress::new(
+                .unwrap_or_else(|| {
+                    crate::TurnInput::text(entry.envelope.content.text_projection())
+                });
+            let mut target = verlet_io_core::ResolvedIoTarget::new(
+                verlet_io_core::ThreadAddress::new(
                     child.coordinates.tenant_id.clone(),
                     child.coordinates.user_id.clone(),
                     child.coordinates.session_id.clone(),
@@ -821,28 +845,32 @@ pub(crate) async fn run_remote_child(
                 .with_thread_id(child.coordinates.thread_id.to_string()),
             );
             target.create_thread_if_missing = false;
-            let mut io_input = IoTurnInput::text(turn_input.text_projection());
+            let mut io_input = verlet_io_core::IoTurnInput::text(turn_input.text_projection());
             io_input.metadata = turn_input.metadata.clone();
             match bridge
                 .submit_durable_remote_envelope(
                     entry.envelope,
                     target,
-                    AdmissionDecision::queue(turn_id, io_input),
+                    verlet_io_core::AdmissionDecision::queue(turn_id, io_input),
                     1,
                 )
                 .await
             {
                 Ok(_) => {}
                 Err(
-                    error @ (IoError::InvalidEnvelope(_)
-                    | IoError::UnknownProtocol(_)
-                    | IoError::PolicyRejected(_)),
+                    error @ (verlet_io_core::IoError::InvalidEnvelope(_)
+                    | verlet_io_core::IoError::UnknownProtocol(_)
+                    | verlet_io_core::IoError::PolicyRejected(_)),
                 ) => {
                     return Err(remote_error(format!(
                         "remote child ingress rejected: {error}"
                     )));
                 }
-                Err(IoError::Queue(_) | IoError::Delivery(_) | IoError::Bridge(_)) => {
+                Err(
+                    verlet_io_core::IoError::Queue(_)
+                    | verlet_io_core::IoError::Delivery(_)
+                    | verlet_io_core::IoError::Bridge(_),
+                ) => {
                     // The ordinary durable ingress lane owns dedupe. Retrying the
                     // same queue row is safe whether the failed call committed
                     // nothing or lost its response after committing the claim.
@@ -853,8 +881,10 @@ pub(crate) async fn run_remote_child(
             match http
                 .acknowledge_ingress(
                     &bootstrap.queue_bearer_token,
-                    SyncIngressQueueAckRequestV1 {
-                        schema: SYNC_INGRESS_QUEUE_ACK_SCHEMA_V1.to_string(),
+                    crate::daemon::remote_store::endpoint::SyncIngressQueueAckRequestV1 {
+                        schema:
+                            crate::daemon::remote_store::endpoint::SYNC_INGRESS_QUEUE_ACK_SCHEMA_V1
+                                .to_string(),
                         target_thread_id: child.coordinates.thread_id,
                         dispatch_id: entry.dispatch_id,
                     },
@@ -886,16 +916,17 @@ pub(crate) async fn run_remote_child(
             continue;
         }
         match propagator.propagate_once(&mut propagation_state).await? {
-            PropagationStep::LeaseFenced => {
+            crate::daemon::remote_store::propagator::PropagationStep::LeaseFenced => {
                 return Err(remote_error("remote child stream lease was fenced"));
             }
-            PropagationStep::StreamDiverged { .. } => {
+            crate::daemon::remote_store::propagator::PropagationStep::StreamDiverged { .. } => {
                 return Err(remote_error("remote child stream diverged from parent"));
             }
-            PropagationStep::Converged | PropagationStep::Advanced { .. } => {
+            crate::daemon::remote_store::propagator::PropagationStep::Converged
+            | crate::daemon::remote_store::propagator::PropagationStep::Advanced { .. } => {
                 endpoint_backoff = CHILD_POLL_INTERVAL;
             }
-            PropagationStep::EndpointUnavailable => {
+            crate::daemon::remote_store::propagator::PropagationStep::EndpointUnavailable => {
                 tokio::time::sleep(endpoint_backoff).await;
                 endpoint_backoff = next_child_retry(endpoint_backoff);
                 continue;
@@ -905,7 +936,9 @@ pub(crate) async fn run_remote_child(
     }
 }
 
-fn reject_remote_workspace_binding(bind_payload: Option<&serde_json::Value>) -> VerletResult<()> {
+fn reject_remote_workspace_binding(
+    bind_payload: Option<&serde_json::Value>,
+) -> crate::VerletResult<()> {
     if bind_payload
         .and_then(|payload| payload.get("workspace"))
         .is_some_and(|workspace| !workspace.is_null())
@@ -917,11 +950,11 @@ fn reject_remote_workspace_binding(bind_payload: Option<&serde_json::Value>) -> 
     Ok(())
 }
 
-fn is_transient_sync_error(error: &VerletError) -> bool {
-    matches!(error, VerletError::RuntimeExecution(_))
+fn is_transient_sync_error(error: &crate::VerletError) -> bool {
+    matches!(error, crate::VerletError::RuntimeExecution(_))
 }
 
-fn next_child_retry(current: Duration) -> Duration {
+fn next_child_retry(current: std::time::Duration) -> std::time::Duration {
     current.saturating_mul(2).min(CHILD_RETRY_MAX)
 }
 
@@ -935,65 +968,66 @@ fn remote_parent_process_is_alive(expected_parent: libc::pid_t) -> bool {
     expected_parent <= 1 || unsafe { libc::getppid() == expected_parent }
 }
 
-async fn init_child_cursor_schema(store: SqliteSessionStore) -> VerletResult<()> {
+async fn init_child_cursor_schema(store: crate::SqliteSessionStore) -> crate::VerletResult<()> {
     child_cursor_transaction(store, None).await.map(|_| ())
 }
 
 async fn load_child_cursor(
-    store: &SqliteSessionStore,
-    thread_id: ThreadId,
-) -> VerletResult<Option<crate::StreamCursorV1>> {
+    store: &crate::SqliteSessionStore,
+    thread_id: crate::ThreadId,
+) -> crate::VerletResult<Option<crate::StreamCursorV1>> {
     let connection = store
         .sqlite_database()
         .connect()
         .await
-        .map_err(|error| VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::VerletError::History(error.to_string()))?;
     let mut rows = connection
         .query(
             "SELECT cursor_json FROM cooldis_remote_child_queue_cursor WHERE thread_id = ?1",
-            params![thread_id.to_string()],
+            verlet_sqlite::params![thread_id.to_string()],
         )
         .await
-        .map_err(|error| VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::VerletError::History(error.to_string()))?;
     rows.next()
         .await
-        .map_err(|error| VerletError::History(error.to_string()))?
+        .map_err(|error| crate::VerletError::History(error.to_string()))?
         .map(|row| {
             let encoded = row
                 .get::<String>(0)
-                .map_err(|error| VerletError::History(error.to_string()))?;
-            serde_json::from_str(&encoded)
-                .map_err(|error| VerletError::History(format!("decode child cursor: {error}")))
+                .map_err(|error| crate::VerletError::History(error.to_string()))?;
+            serde_json::from_str(&encoded).map_err(|error| {
+                crate::VerletError::History(format!("decode child cursor: {error}"))
+            })
         })
         .transpose()
 }
 
 async fn persist_child_cursor(
-    store: SqliteSessionStore,
-    thread_id: ThreadId,
+    store: crate::SqliteSessionStore,
+    thread_id: crate::ThreadId,
     cursor: &crate::StreamCursorV1,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     let encoded = serde_json::to_string(cursor)
-        .map_err(|error| VerletError::History(format!("encode child cursor: {error}")))?;
+        .map_err(|error| crate::VerletError::History(format!("encode child cursor: {error}")))?;
     child_cursor_transaction(store, Some((thread_id, encoded)))
         .await
         .map(|_| ())
 }
 
 async fn child_cursor_transaction(
-    store: SqliteSessionStore,
-    update: Option<(ThreadId, String)>,
-) -> VerletResult<()> {
+    store: crate::SqliteSessionStore,
+    update: Option<(crate::ThreadId, String)>,
+) -> crate::VerletResult<()> {
     tokio::spawn(async move {
         let database = store.sqlite_database();
         let mut connection = database
             .connect()
             .await
-            .map_err(|error| VerletError::History(error.to_string()))?;
+            .map_err(|error| crate::VerletError::History(error.to_string()))?;
         let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
             .await
-            .map_err(|error| VerletError::History(error.to_string()))?;
+            .map_err(|error| crate::VerletError::History(error.to_string()))?;
         transaction
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS cooldis_remote_child_queue_cursor (
@@ -1002,45 +1036,44 @@ async fn child_cursor_transaction(
                 );",
             )
             .await
-            .map_err(|error| VerletError::History(error.to_string()))?;
+            .map_err(|error| crate::VerletError::History(error.to_string()))?;
         if let Some((thread_id, encoded)) = update {
             transaction
                 .execute(
                     "INSERT INTO cooldis_remote_child_queue_cursor (thread_id, cursor_json)
                      VALUES (?1, ?2)
                      ON CONFLICT(thread_id) DO UPDATE SET cursor_json = excluded.cursor_json",
-                    params![thread_id.to_string(), encoded],
+                    verlet_sqlite::params![thread_id.to_string(), encoded],
                 )
                 .await
-                .map_err(|error| VerletError::History(error.to_string()))?;
+                .map_err(|error| crate::VerletError::History(error.to_string()))?;
         }
         transaction
             .commit()
             .await
-            .map_err(|error| VerletError::History(error.to_string()))?;
+            .map_err(|error| crate::VerletError::History(error.to_string()))?;
         Ok(())
     })
     .await
     .map_err(|error| {
-        VerletError::History(format!(
+        crate::VerletError::History(format!(
             "remote child cursor transaction task failed: {error}"
         ))
     })?
 }
 
 fn sha256_hex(value: &str) -> String {
-    use std::fmt::Write as _;
-
-    Sha256::digest(value.as_bytes())
-        .iter()
-        .fold(String::with_capacity(64), |mut encoded, byte| {
+    sha2::Sha256::digest(value.as_bytes()).iter().fold(
+        String::with_capacity(64),
+        |mut encoded, byte| {
             let _ = write!(encoded, "{byte:02x}");
             encoded
-        })
+        },
+    )
 }
 
-fn remote_error(message: impl Into<String>) -> VerletError {
-    VerletError::RuntimeExecution(message.into())
+fn remote_error(message: impl Into<String>) -> crate::VerletError {
+    crate::VerletError::RuntimeExecution(message.into())
 }
 
 pub(crate) fn is_remote_child_command(command: &std::ffi::OsStr) -> bool {
@@ -1049,26 +1082,23 @@ pub(crate) fn is_remote_child_command(command: &std::ffi::OsStr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        EventRecord, EventRecordId, EventSequence, NewEventRecord, ThreadJoinedPayload,
-        ThreadTopology, control_stream_id,
-    };
+    use crate::EventStore as _;
+    use crate::daemon::remote_store::placement::RemoteThreadExecutor as _;
 
-    fn request_fixture() -> RemoteThreadSpawnRequest {
-        let parent = ThreadCoordinates::new("tenant", "user", "session");
+    fn request_fixture() -> crate::daemon::remote_store::placement::RemoteThreadSpawnRequest {
+        let parent = crate::ThreadCoordinates::new("tenant", "user", "session");
         let child = crate::ThreadContext::with_topology_and_metadata(
-            ThreadCoordinates::new("tenant", "user", "session"),
-            ThreadTopology::spawned_from(parent.thread_id),
+            crate::ThreadCoordinates::new("tenant", "user", "session"),
+            crate::ThreadTopology::spawned_from(parent.thread_id),
             Default::default(),
         );
-        RemoteThreadSpawnRequest {
+        crate::daemon::remote_store::placement::RemoteThreadSpawnRequest {
             child,
             task_name: Some("remote-test".to_string()),
             turn_id: "spawn-turn".to_string(),
             dispatch_id: verlet_runtime_contracts::DispatchId::new("spawn-dispatch"),
-            input: TurnInput::text("run"),
-            spawned_event_id: EventRecordId::new(),
+            input: crate::TurnInput::text("run"),
+            spawned_event_id: crate::EventRecordId::new(),
             compile_payload: None,
             bind_payload: None,
         }
@@ -1085,21 +1115,24 @@ mod tests {
             }
         });
 
-        let error = reject_remote_workspace_binding(Some(&bind)).unwrap_err();
+        let error = crate::daemon::remote_store::process_executor::reject_remote_workspace_binding(
+            Some(&bind),
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("cannot carry"));
     }
 
     fn child_record(
-        request: &RemoteThreadSpawnRequest,
-        kind: EventKind,
+        request: &crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
+        kind: crate::EventKind,
         turn_id: &str,
-    ) -> EventRecord {
-        let stream_id = EventStreamId::for_thread(&request.child.coordinates);
-        EventRecord::from_new(
+    ) -> crate::EventRecord {
+        let stream_id = crate::EventStreamId::for_thread(&request.child.coordinates);
+        crate::EventRecord::from_new(
             stream_id,
-            EventSequence::new(1),
-            NewEventRecord::witnessed(
+            crate::EventSequence::new(1),
+            crate::NewEventRecord::witnessed(
                 request.child.coordinates.clone(),
                 kind,
                 serde_json::json!({"turn_id": turn_id}),
@@ -1108,16 +1141,18 @@ mod tests {
     }
 
     async fn joined_payloads(
-        store: &SqliteSessionStore,
-        request: &RemoteThreadSpawnRequest,
-    ) -> Vec<ThreadJoinedPayload> {
-        let parent = remote_parent_coordinates(request).unwrap();
+        store: &crate::SqliteSessionStore,
+        request: &crate::daemon::remote_store::placement::RemoteThreadSpawnRequest,
+    ) -> Vec<crate::ThreadJoinedPayload> {
+        let parent =
+            crate::daemon::remote_store::process_executor::remote_parent_coordinates(request)
+                .unwrap();
         store
-            .read_events(&control_stream_id(&parent), None)
+            .read_events(&crate::control_stream_id(&parent), None)
             .await
             .unwrap()
             .into_iter()
-            .filter(|event| event.kind == EventKind::ThreadJoined)
+            .filter(|event| event.kind == crate::EventKind::ThreadJoined)
             .map(|event| serde_json::from_value(event.payload).unwrap())
             .collect()
     }
@@ -1125,27 +1160,40 @@ mod tests {
     #[test]
     fn loop_completed_folds_remote_status_to_idle() {
         let request = request_fixture();
-        let record = child_record(&request, EventKind::LoopCompleted, "spawn-turn");
-        assert_eq!(fold_remote_status(&[record]), Some(ThreadStatus::Idle));
+        let record = child_record(&request, crate::EventKind::LoopCompleted, "spawn-turn");
+        assert_eq!(
+            crate::daemon::remote_store::process_executor::fold_remote_status(&[record]),
+            Some(crate::ThreadStatus::Idle)
+        );
     }
 
     #[tokio::test]
     async fn spawn_turn_failure_terminals_settle_with_emo426_state_projection() {
         for (kind, expected) in [
-            (EventKind::LoopDenied, ThreadTerminalState::Failed),
-            (EventKind::LoopBlocked, ThreadTerminalState::Failed),
             (
-                EventKind::LoopBudgetExhausted,
-                ThreadTerminalState::BudgetExhausted,
+                crate::EventKind::LoopDenied,
+                crate::ThreadTerminalState::Failed,
+            ),
+            (
+                crate::EventKind::LoopBlocked,
+                crate::ThreadTerminalState::Failed,
+            ),
+            (
+                crate::EventKind::LoopBudgetExhausted,
+                crate::ThreadTerminalState::BudgetExhausted,
             ),
         ] {
-            let store = SqliteSessionStore::in_memory().await.unwrap();
+            let store = crate::SqliteSessionStore::in_memory().await.unwrap();
             let request = request_fixture();
             let record = child_record(&request, kind, "spawn-turn");
             assert!(
-                settle_remote_terminal_record(store.clone(), request.clone(), record)
-                    .await
-                    .unwrap()
+                crate::daemon::remote_store::process_executor::settle_remote_terminal_record(
+                    store.clone(),
+                    request.clone(),
+                    record
+                )
+                .await
+                .unwrap()
             );
             let joined = joined_payloads(&store, &request).await;
             assert_eq!(joined.len(), 1);
@@ -1155,22 +1203,36 @@ mod tests {
 
     #[tokio::test]
     async fn process_death_late_terminal_duplicate_tail_and_recovery_share_one_join_fence() {
-        let store = SqliteSessionStore::in_memory().await.unwrap();
+        let store = crate::SqliteSessionStore::in_memory().await.unwrap();
         let request = request_fixture();
-        let terminal = child_record(&request, EventKind::TurnCompleted, "spawn-turn");
-        let parent = remote_parent_coordinates(&request).unwrap();
+        let terminal = child_record(&request, crate::EventKind::TurnCompleted, "spawn-turn");
+        let parent =
+            crate::daemon::remote_store::process_executor::remote_parent_coordinates(&request)
+                .unwrap();
         let reason = "remote child process died before durable terminal state".to_string();
 
-        let death = settle_remote_process_death(store.clone(), request.clone(), reason.clone());
-        let tail = settle_remote_terminal_record(store.clone(), request.clone(), terminal.clone());
+        let death = crate::daemon::remote_store::process_executor::settle_remote_process_death(
+            store.clone(),
+            request.clone(),
+            reason.clone(),
+        );
+        let tail = crate::daemon::remote_store::process_executor::settle_remote_terminal_record(
+            store.clone(),
+            request.clone(),
+            terminal.clone(),
+        );
         let duplicate_tail =
-            settle_remote_terminal_record(store.clone(), request.clone(), terminal.clone());
-        let recovery = append_thread_joined_first_wins(
+            crate::daemon::remote_store::process_executor::settle_remote_terminal_record(
+                store.clone(),
+                request.clone(),
+                terminal.clone(),
+            );
+        let recovery = crate::kernel::runtime_host::append_thread_joined_first_wins(
             &store,
             parent,
             request.child.coordinates.clone(),
             request.spawned_event_id,
-            ThreadTerminalState::Failed,
+            crate::ThreadTerminalState::Failed,
             Some(reason.clone()),
             Some(reason),
             Some((terminal.stream_id.clone(), terminal.id)),
@@ -1186,9 +1248,9 @@ mod tests {
 
         assert_eq!(joined_payloads(&store, &request).await.len(), 1);
 
-        let death_only_store = SqliteSessionStore::in_memory().await.unwrap();
+        let death_only_store = crate::SqliteSessionStore::in_memory().await.unwrap();
         assert!(
-            settle_remote_process_death(
+            crate::daemon::remote_store::process_executor::settle_remote_process_death(
                 death_only_store.clone(),
                 request.clone(),
                 "remote child process exited with status 17".to_string(),
@@ -1198,7 +1260,10 @@ mod tests {
         );
         let death_join = joined_payloads(&death_only_store, &request).await;
         assert_eq!(death_join.len(), 1);
-        assert_eq!(death_join[0].terminal_state, ThreadTerminalState::Failed);
+        assert_eq!(
+            death_join[0].terminal_state,
+            crate::ThreadTerminalState::Failed
+        );
         assert!(
             death_join[0]
                 .result_digest
@@ -1209,33 +1274,44 @@ mod tests {
 
     #[tokio::test]
     async fn successful_spawn_turn_settles_once_and_later_submit_turn_cannot_rejoin() {
-        let store = SqliteSessionStore::in_memory().await.unwrap();
+        let store = crate::SqliteSessionStore::in_memory().await.unwrap();
         let request = request_fixture();
-        let completed = child_record(&request, EventKind::TurnCompleted, "spawn-turn");
+        let completed = child_record(&request, crate::EventKind::TurnCompleted, "spawn-turn");
         assert!(
-            settle_remote_terminal_record(store.clone(), request.clone(), completed)
-                .await
-                .unwrap()
+            crate::daemon::remote_store::process_executor::settle_remote_terminal_record(
+                store.clone(),
+                request.clone(),
+                completed
+            )
+            .await
+            .unwrap()
         );
-        let later = child_record(&request, EventKind::LoopDenied, "later-submit-turn");
+        let later = child_record(&request, crate::EventKind::LoopDenied, "later-submit-turn");
         assert!(
-            !settle_remote_terminal_record(store.clone(), request.clone(), later)
-                .await
-                .unwrap()
+            !crate::daemon::remote_store::process_executor::settle_remote_terminal_record(
+                store.clone(),
+                request.clone(),
+                later
+            )
+            .await
+            .unwrap()
         );
         let joined = joined_payloads(&store, &request).await;
         assert_eq!(joined.len(), 1);
-        assert_eq!(joined[0].terminal_state, ThreadTerminalState::Completed);
+        assert_eq!(
+            joined[0].terminal_state,
+            crate::ThreadTerminalState::Completed
+        );
     }
 
     #[tokio::test]
     async fn detached_bootstrap_failure_settles_after_the_caller_is_cancelled() {
-        let store = SqliteSessionStore::in_memory().await.unwrap();
-        let authority = Arc::new(
-            SqliteStreamLeaseAuthority::new(
+        let store = crate::SqliteSessionStore::in_memory().await.unwrap();
+        let authority = std::sync::Arc::new(
+            crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
                 store.clone(),
-                super::super::endpoint::VerletDaemonSyncConfig::default(),
-                Arc::new(SystemDaemonClock),
+                crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default(),
+                std::sync::Arc::new(crate::SystemDaemonClock),
             )
             .await
             .unwrap(),
@@ -1244,16 +1320,17 @@ mod tests {
             "verlet-remote-cancelled-bootstrap-{}",
             uuid::Uuid::now_v7()
         ));
-        let executor = ProcessRemoteThreadExecutor::new(
-            store.clone(),
-            authority,
-            "http://127.0.0.1:1".to_string(),
-            None,
-            child_root.clone(),
-            child_root.join("missing-verlet-executable"),
-        )
-        .await
-        .unwrap();
+        let executor =
+            crate::daemon::remote_store::process_executor::ProcessRemoteThreadExecutor::new(
+                store.clone(),
+                authority,
+                "http://127.0.0.1:1".to_string(),
+                None,
+                child_root.clone(),
+                child_root.join("missing-verlet-executable"),
+            )
+            .await
+            .unwrap();
         let request = request_fixture();
         let spawn_guard = executor.inner.spawn_lock.lock().await;
         let caller_executor = executor.clone();
@@ -1264,7 +1341,7 @@ mod tests {
         assert!(caller.await.unwrap_err().is_cancelled());
         drop(spawn_guard);
 
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if !joined_payloads(&store, &request).await.is_empty() {
                     break;
@@ -1276,7 +1353,7 @@ mod tests {
         .expect("detached bootstrap failure did not settle the durable spawn");
         let joined = joined_payloads(&store, &request).await;
         assert_eq!(joined.len(), 1);
-        assert_eq!(joined[0].terminal_state, ThreadTerminalState::Failed);
+        assert_eq!(joined[0].terminal_state, crate::ThreadTerminalState::Failed);
         assert!(
             joined[0]
                 .result_digest

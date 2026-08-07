@@ -1,23 +1,15 @@
-use crate::{
-    LocalBlobRegistry, LocalSkillRegistry, PublishedBlobRecord, PublishedSkillPackageRecord,
-    SkillPackage, SkillPackageEntry, VerletOperationsError as VerletError, VerletResult,
-    validate_record_name, wasm_sha256,
-};
-use std::fs;
-use std::path::{Component, Path, PathBuf};
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillImportAsset {
     pub relative_path: String,
     pub resource_name: String,
     pub ref_uri: String,
     bytes: Vec<u8>,
-    source_path: PathBuf,
+    source_path: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkillImportPlan {
-    pub package: SkillPackage,
+    pub package: crate::SkillPackage,
     pub references: Vec<String>,
     pub assets: Vec<SkillImportAsset>,
     pub omitted_scripts: Vec<String>,
@@ -27,51 +19,54 @@ pub struct SkillImportPlan {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublishedSkillImport {
-    pub skill: PublishedSkillPackageRecord,
-    pub blobs: Vec<PublishedBlobRecord>,
+    pub skill: crate::PublishedSkillPackageRecord,
+    pub blobs: Vec<crate::PublishedBlobRecord>,
 }
 
 impl SkillImportPlan {
-    pub fn from_directory(skill_dir: &Path, package_name: Option<&str>) -> VerletResult<Self> {
-        let metadata = fs::symlink_metadata(skill_dir).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+    pub fn from_directory(
+        skill_dir: &std::path::Path,
+        package_name: Option<&str>,
+    ) -> crate::VerletResult<Self> {
+        let metadata = std::fs::symlink_metadata(skill_dir).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read skill import directory {}: {err}",
                 skill_dir.display()
             ))
         })?;
         if metadata.file_type().is_symlink() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill import does not follow symlink {}",
                 skill_dir.display()
             )));
         }
         if !metadata.is_dir() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill import input {} is not a directory",
                 skill_dir.display()
             )));
         }
         let package_name = match package_name {
-            Some(package_name) => validate_record_name(package_name)?,
+            Some(package_name) => crate::validate_record_name(package_name)?,
             None => {
                 let inferred_name = skill_dir
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| {
-                        VerletError::RuntimeFactory(format!(
+                        crate::VerletOperationsError::RuntimeFactory(format!(
                             "skill import directory {} has no package name; pass --name",
                             skill_dir.display()
                         ))
                     })?;
-                validate_record_name(inferred_name)?
+                crate::validate_record_name(inferred_name)?
             }
         };
         let mut files = Vec::new();
         collect_files(skill_dir, skill_dir, &mut files)?;
         files.sort_by(|left, right| left.0.cmp(&right.0));
         let skill_file = skill_dir.join("SKILL.md");
-        let original_body = fs::read_to_string(&skill_file).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let original_body = std::fs::read_to_string(&skill_file).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read imported skill file {}: {err}",
                 skill_file.display()
             ))
@@ -87,8 +82,8 @@ impl SkillImportPlan {
             if relative_path == "SKILL.md" {
                 continue;
             }
-            let bytes = fs::read(&path).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            let bytes = std::fs::read(&path).map_err(|err| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to read skill import component {}: {err}",
                     path.display()
                 ))
@@ -99,7 +94,7 @@ impl SkillImportPlan {
                 omitted_scripts.push(relative_path);
             } else if is_direct_markdown_reference(&relative_path) {
                 let body = String::from_utf8(bytes).map_err(|err| {
-                    VerletError::RuntimeFactory(format!(
+                    crate::VerletOperationsError::RuntimeFactory(format!(
                         "imported reference {} is not valid UTF-8: {err}",
                         path.display()
                     ))
@@ -139,7 +134,7 @@ impl SkillImportPlan {
             }
         }
 
-        let mut entry = SkillPackageEntry::from_skill_body(skill_dir, compiled_body)?;
+        let mut entry = crate::SkillPackageEntry::from_skill_body(skill_dir, compiled_body)?;
         if !omitted_scripts.is_empty() {
             entry
                 .description
@@ -147,12 +142,12 @@ impl SkillImportPlan {
             entry.description.push_str(&omitted_scripts.join(", "));
             entry.description.push('.');
         }
-        let package = SkillPackage::from_entries(&package_name, vec![entry])?;
+        let package = crate::SkillPackage::from_entries(&package_name, vec![entry])?;
         let assets = asset_sources
             .into_iter()
             .enumerate()
             .map(|(index, (relative_path, source_path, bytes))| {
-                let hash = wasm_sha256(&bytes);
+                let hash = crate::wasm_sha256(&bytes);
                 SkillImportAsset {
                     relative_path,
                     resource_name: asset_resource_name(&package_name, index + 1),
@@ -172,11 +167,11 @@ impl SkillImportPlan {
         })
     }
 
-    pub fn artifact_hash(&self) -> VerletResult<String> {
-        Ok(wasm_sha256(&self.package.to_artifact_bytes()?))
+    pub fn artifact_hash(&self) -> crate::VerletResult<String> {
+        Ok(crate::wasm_sha256(&self.package.to_artifact_bytes()?))
     }
 
-    pub fn pinned_ref(&self) -> VerletResult<String> {
+    pub fn pinned_ref(&self) -> crate::VerletResult<String> {
         Ok(format!(
             "skill://{}@sha256:{}",
             self.package.name,
@@ -188,7 +183,7 @@ impl SkillImportPlan {
         format!("skill://{}", self.package.name)
     }
 
-    pub fn manifest_fragment(&self) -> VerletResult<String> {
+    pub fn manifest_fragment(&self) -> crate::VerletResult<String> {
         let mut out = format!(
             "[[resources]]\nname = {:?}\nkind = \"skill\"\nref = {:?}\n",
             self.package.name,
@@ -205,9 +200,9 @@ impl SkillImportPlan {
 
     pub fn publish(
         &self,
-        skill_registry: &LocalSkillRegistry,
-        blob_registry: &LocalBlobRegistry,
-    ) -> VerletResult<PublishedSkillImport> {
+        skill_registry: &crate::LocalSkillRegistry,
+        blob_registry: &crate::LocalBlobRegistry,
+    ) -> crate::VerletResult<PublishedSkillImport> {
         let skill = skill_registry.publish_package(self.package.clone())?;
         let mut blobs = Vec::with_capacity(self.assets.len());
         for asset in &self.assets {
@@ -217,7 +212,7 @@ impl SkillImportPlan {
                 Some(asset.source_path.clone()),
             )?;
             if record.ref_uri != asset.ref_uri {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                     "published asset {} ref {:?} did not match planned ref {:?}",
                     asset.relative_path, record.ref_uri, asset.ref_uri
                 )));
@@ -229,32 +224,32 @@ impl SkillImportPlan {
 }
 
 fn collect_files(
-    root: &Path,
-    directory: &Path,
-    files: &mut Vec<(String, PathBuf)>,
-) -> VerletResult<()> {
-    let entries = fs::read_dir(directory).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    files: &mut Vec<(String, std::path::PathBuf)>,
+) -> crate::VerletResult<()> {
+    let entries = std::fs::read_dir(directory).map_err(|err| {
+        crate::VerletOperationsError::RuntimeFactory(format!(
             "failed to read skill import directory {}: {err}",
             directory.display()
         ))
     })?;
     for entry in entries {
         let entry = entry.map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read skill import entry in {}: {err}",
                 directory.display()
             ))
         })?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let metadata = std::fs::symlink_metadata(&path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to inspect skill import component {}: {err}",
                 path.display()
             ))
         })?;
         if metadata.file_type().is_symlink() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill import does not follow symlink {}",
                 path.display()
             )));
@@ -268,9 +263,12 @@ fn collect_files(
     Ok(())
 }
 
-fn relative_slash_path(root: &Path, path: &Path) -> VerletResult<String> {
+fn relative_slash_path(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> crate::VerletResult<String> {
     let relative = path.strip_prefix(root).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletOperationsError::RuntimeFactory(format!(
             "skill import component {} escaped {}: {err}",
             path.display(),
             root.display()
@@ -278,14 +276,14 @@ fn relative_slash_path(root: &Path, path: &Path) -> VerletResult<String> {
     })?;
     let mut segments = Vec::new();
     for component in relative.components() {
-        let Component::Normal(segment) = component else {
-            return Err(VerletError::RuntimeFactory(format!(
+        let std::path::Component::Normal(segment) = component else {
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill import component {} has a non-normal path",
                 path.display()
             )));
         };
         segments.push(segment.to_str().ok_or_else(|| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill import component {} has a non-Unicode path",
                 path.display()
             ))
@@ -383,11 +381,6 @@ fn asset_resource_name(package_name: &str, index: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{LocalBlobRegistry, LocalSkillRegistry};
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use uuid::Uuid;
 
     #[test]
     fn import_plan_converts_all_supported_components_and_leaves_authority_inert() {
@@ -416,7 +409,11 @@ Original body.
         write(&skill_dir.join("hooks.json"), br#"{"hooks": []}"#);
         write(&skill_dir.join(".mcp.json"), br#"{"mcpServers": {}}"#);
 
-        let plan = SkillImportPlan::from_directory(&skill_dir, Some("fixture-package")).unwrap();
+        let plan = crate::skill_import::SkillImportPlan::from_directory(
+            &skill_dir,
+            Some("fixture-package"),
+        )
+        .unwrap();
 
         assert_eq!(plan.package.name, "fixture-package");
         assert_eq!(plan.package.skills.len(), 1);
@@ -445,7 +442,7 @@ Original body.
             plan.assets[0].ref_uri,
             "resource://artifact/sha256:054edec1d0211f624fed0cbca9d4f9400b0e491c43742af2c5b0abebf0c990d8"
         );
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -459,13 +456,14 @@ Original body.
         write(&skill_dir.join("assets/one.bin"), b"one");
         write(&skill_dir.join("assets/two.bin"), b"two");
 
-        let before = SkillImportPlan::from_directory(&skill_dir, None).unwrap();
+        let before =
+            crate::skill_import::SkillImportPlan::from_directory(&skill_dir, None).unwrap();
         write(&skill_dir.join("README.md"), b"not imported\n");
         write(
             &skill_dir.join("references/nested/extra.md"),
             b"not a direct reference\n",
         );
-        let after = SkillImportPlan::from_directory(&skill_dir, None).unwrap();
+        let after = crate::skill_import::SkillImportPlan::from_directory(&skill_dir, None).unwrap();
 
         assert_eq!(
             before
@@ -483,7 +481,7 @@ Original body.
             after.skipped_files,
             vec!["README.md", "references/nested/extra.md"]
         );
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -496,7 +494,7 @@ Original body.
         write(&skill_dir.join("references/guide.md"), b"Guide body");
         write(&skill_dir.join("scripts/check.py"), b"print('check')\n");
 
-        let plan = SkillImportPlan::from_directory(&skill_dir, None).unwrap();
+        let plan = crate::skill_import::SkillImportPlan::from_directory(&skill_dir, None).unwrap();
         let body = &plan.package.skills[0].body;
 
         assert!(body.starts_with(original));
@@ -509,7 +507,7 @@ Original body.
                 .description
                 .starts_with("Uses fixtures.")
         );
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -537,7 +535,7 @@ Original body.
             br#"{"category":"hooks","description":"mcp_servers documentation"}"#,
         );
 
-        let plan = SkillImportPlan::from_directory(&skill_dir, None).unwrap();
+        let plan = crate::skill_import::SkillImportPlan::from_directory(&skill_dir, None).unwrap();
 
         assert_eq!(
             plan.ignored_hooks,
@@ -546,7 +544,7 @@ Original body.
         assert_eq!(plan.references, vec!["references/hooks.md"]);
         assert_eq!(plan.assets.len(), 1);
         assert_eq!(plan.assets[0].relative_path, "assets/labels.json");
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
@@ -561,29 +559,34 @@ Original body.
         let link = root.join("linked-skill");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let error = SkillImportPlan::from_directory(&link, Some("fixture-skill")).unwrap_err();
+        let error =
+            crate::skill_import::SkillImportPlan::from_directory(&link, Some("fixture-skill"))
+                .unwrap_err();
 
         assert!(error.to_string().contains("does not follow symlink"));
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn explicit_package_name_does_not_require_a_unicode_directory_name() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::ffi::OsStringExt as _;
 
         let root = temp_root("skill-import-explicit-name");
-        let skill_dir = root.join(OsString::from_vec(b"fixture-\xff".to_vec()));
+        let skill_dir = root.join(std::ffi::OsString::from_vec(b"fixture-\xff".to_vec()));
         write(
             &skill_dir.join("SKILL.md"),
             b"---\nname: fixture-skill\ndescription: Fixture description.\n---\n# Fixture Skill\n",
         );
 
-        let plan = SkillImportPlan::from_directory(&skill_dir, Some("fixture-package")).unwrap();
+        let plan = crate::skill_import::SkillImportPlan::from_directory(
+            &skill_dir,
+            Some("fixture-package"),
+        )
+        .unwrap();
 
         assert_eq!(plan.package.name, "fixture-package");
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -595,9 +598,9 @@ Original body.
             b"# Fixture Skill\n\nFixture description.\n",
         );
         write(&skill_dir.join("assets/payload.txt"), b"same payload\n");
-        let plan = SkillImportPlan::from_directory(&skill_dir, None).unwrap();
-        let skills = LocalSkillRegistry::new(root.join("skills"));
-        let blobs = LocalBlobRegistry::new(root.join("blobs"));
+        let plan = crate::skill_import::SkillImportPlan::from_directory(&skill_dir, None).unwrap();
+        let skills = crate::LocalSkillRegistry::new(root.join("skills"));
+        let blobs = crate::LocalBlobRegistry::new(root.join("blobs"));
 
         let first = plan.publish(&skills, &blobs).unwrap();
         let second = plan.publish(&skills, &blobs).unwrap();
@@ -608,26 +611,26 @@ Original body.
         );
         assert_eq!(first.blobs[0].ref_uri, second.blobs[0].ref_uri);
         assert_eq!(
-            fs::read_dir(root.join("skills/versions/fixture-skill"))
+            std::fs::read_dir(root.join("skills/versions/fixture-skill"))
                 .unwrap()
                 .count(),
             1
         );
         assert_eq!(
-            fs::read_dir(root.join("blobs/records/artifact"))
+            std::fs::read_dir(root.join("blobs/records/artifact"))
                 .unwrap()
                 .count(),
             1
         );
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
-    fn temp_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("verlet-{label}-{}", Uuid::now_v7()))
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("verlet-{label}-{}", uuid::Uuid::now_v7()))
     }
 
-    fn write(path: &Path, bytes: &[u8]) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, bytes).unwrap();
+    fn write(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
     }
 }

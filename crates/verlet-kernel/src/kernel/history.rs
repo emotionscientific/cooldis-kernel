@@ -1,2 +1,31 @@
-pub use verlet_history::*;
+pub use verlet_history::ObservationStore; // lexicon-allow: observation_store - de-globbed re-export of the verlet-history trait
+pub use verlet_history::{
+    AdmissionDecidedPayload, AdmissionDecision, COMPACTION_SUMMARY_PREFIX,
+    CONTEXT_READ_PLAN_SCHEMA_V1, CacheControl, CacheTtl, CanonicalContent, CanonicalMessage,
+    CanonicalStopReason, CanonicalUsage, ClientRecordAppendedPayload,
+    DEBUG_THREAD_EXPORT_SCHEMA_V1, EVENT_KIND_SCHEMA_VERSION, EventKind, EventOrigin,
+    EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore, EventStreamId,
+    GrantPetitionedPayload, HistoryError, HistoryResult, InMemorySessionStore,
+    IngressOutcomeIntent, IngressSettledBy, IoEgressDeliveredPayload, IoEgressFailedPayload,
+    IoEgressRequestedPayload, IoIngressClaimedPayload, IoIngressReceivedPayload,
+    IoIngressSettledPayload, NewEventRecord, NewObservationRecord, ObservationId,
+    ObservationProvenance, ObservationRecord, ObservationSourceRange, PolicyBoundPayload,
+    PolicyKind, ProviderApi, RuntimeStore, STREAM_APPEND_ACK_SCHEMA_V1,
+    STREAM_BACKEND_CAPABILITIES_SCHEMA_V1, STREAM_CURSOR_SCHEMA_V1, STREAM_RECORD_SCHEMA_V1,
+    STREAM_ROUTING_DECISION_SCHEMA_V1, SessionContext, SessionContextSourceCut, SessionEntry,
+    SessionEntryId, SessionEntryKind, SessionStore, StreamAckClass, StreamAppendAckV1,
+    StreamBackendCapabilitiesV1, StreamBackendKindV1, StreamCursorV1, StreamRecordEnvelopeV1,
+    StreamRouteProfile, StreamRoutingDecisionV1, StreamRoutingKeysV1, StreamStorageScopeV1,
+    ThinkingMetadata, ThinkingProvider, ThreadBaseRef, ThreadBranchSelectedPayload,
+    ThreadForkReason, ThreadJoinedPayload, ThreadReloadDegradedPayload,
+    ThreadSpawnRequestedPayload, ThreadSpawnedForkPayload, ThreadSpawnedForkSourceCutPayload,
+    ThreadSpawnedPayload, ThreadTerminalState, TimerFiredPayload, append_model_visible_messages,
+    codec_error, compaction_summary_message, coordinates_with_thread_id, decode_entry, now_ms,
+    parse_event_origin, parse_thread_id, parse_uuid, render_compaction_summary,
+    session_entry_event, session_entry_event_with_provenance,
+    session_entry_is_thread_start_identity, session_entry_is_user_authored, storage_error,
+    stream_schema_registry_v1, strip_thread_start_identity_entries, turn_input_kinds_match,
+    validate_context_payload_schema_v1, validate_entry_coordinates, validate_new_event,
+    validate_thread_base_ref,
+};
 pub use verlet_history_sqlite::SqliteSessionStore;

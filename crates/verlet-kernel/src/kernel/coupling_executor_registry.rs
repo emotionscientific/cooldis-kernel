@@ -1,11 +1,3 @@
-use super::stdlib_couplings::StdlibCouplingExecutor;
-use super::wasm_couplings::WasmCouplingExecutor;
-use crate::{
-    CouplingExecutionResult, CouplingExecutor, CouplingInvocation, VerletError, VerletResult,
-};
-use async_trait::async_trait;
-use std::path::PathBuf;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RegisteredCouplingExecutorKind {
     Stdlib,
@@ -15,9 +7,9 @@ pub(crate) enum RegisteredCouplingExecutorKind {
 pub(crate) fn registered_coupling_executor_for_id(
     id: &str,
 ) -> Option<RegisteredCouplingExecutorKind> {
-    if StdlibCouplingExecutor::supports_template(id) {
+    if crate::kernel::stdlib_couplings::StdlibCouplingExecutor::supports_template(id) {
         Some(RegisteredCouplingExecutorKind::Stdlib)
-    } else if WasmCouplingExecutor::supports_coupling_id(id) {
+    } else if crate::kernel::wasm_couplings::WasmCouplingExecutor::supports_coupling_id(id) {
         Some(RegisteredCouplingExecutorKind::Wasm)
     } else {
         None
@@ -30,34 +22,40 @@ pub(crate) fn registered_coupling_executor_supports_template(id: &str) -> bool {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CouplingExecutorRegistry {
-    wasm: Option<WasmCouplingExecutor>,
+    wasm: Option<crate::kernel::wasm_couplings::WasmCouplingExecutor>,
 }
 
 impl CouplingExecutorRegistry {
-    pub(crate) fn new(operation_registry_root: Option<PathBuf>) -> Self {
+    pub(crate) fn new(operation_registry_root: Option<std::path::PathBuf>) -> Self {
         Self {
-            wasm: operation_registry_root.map(WasmCouplingExecutor::new),
+            wasm: operation_registry_root
+                .map(crate::kernel::wasm_couplings::WasmCouplingExecutor::new),
         }
     }
 }
 
-#[async_trait]
-impl CouplingExecutor for CouplingExecutorRegistry {
-    async fn invoke(&self, request: CouplingInvocation) -> VerletResult<CouplingExecutionResult> {
+#[async_trait::async_trait]
+impl crate::CouplingExecutor for CouplingExecutorRegistry {
+    async fn invoke(
+        &self,
+        request: crate::CouplingInvocation,
+    ) -> crate::VerletResult<crate::CouplingExecutionResult> {
         match registered_coupling_executor_for_id(&request.coupling.id) {
             Some(RegisteredCouplingExecutorKind::Stdlib) => {
-                StdlibCouplingExecutor.invoke(request).await
+                crate::kernel::stdlib_couplings::StdlibCouplingExecutor
+                    .invoke(request)
+                    .await
             }
             Some(RegisteredCouplingExecutorKind::Wasm) => {
                 let Some(executor) = &self.wasm else {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletError::RuntimeFactory(format!(
                         "wasm coupling {:?} requires an operation registry root",
                         request.coupling.id
                     )));
                 };
                 executor.invoke(request).await
             }
-            None => Err(VerletError::RuntimeFactory(format!(
+            None => Err(crate::VerletError::RuntimeFactory(format!(
                 "no registered executor for coupling id {:?}",
                 request.coupling.id
             ))),

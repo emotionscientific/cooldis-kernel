@@ -1,13 +1,5 @@
 mod runner;
 
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::path::PathBuf;
-use std::sync::Arc;
-use verlet_abi::InvocationContext;
-use verlet_vfs::VerletVfs;
-
 pub const DEFAULT_ENTRYPOINT: &str = "handle_turn";
 pub const DEFAULT_OPERATION_NAME: &str = "handle_turn";
 pub const DEFAULT_MAX_INPUT_BYTES: usize = 1_048_576;
@@ -40,16 +32,16 @@ pub use runner::{WasmModuleRuntime, WasmRuntimeFactory};
 
 #[derive(Clone, Debug)]
 pub enum WasmRuntimeArtifact {
-    Bytes(Arc<[u8]>),
-    Path(PathBuf),
+    Bytes(std::sync::Arc<[u8]>),
+    Path(std::path::PathBuf),
 }
 
 impl WasmRuntimeArtifact {
     pub fn bytes(bytes: impl Into<Vec<u8>>) -> Self {
-        Self::Bytes(Arc::from(bytes.into()))
+        Self::Bytes(std::sync::Arc::from(bytes.into()))
     }
 
-    pub fn path(path: impl Into<PathBuf>) -> Self {
+    pub fn path(path: impl Into<std::path::PathBuf>) -> Self {
         Self::Path(path.into())
     }
 
@@ -82,10 +74,10 @@ pub struct WasmRuntimeConfig {
     pub memory_limit_bytes: Option<usize>,
     pub fuel: Option<u64>,
     pub fuel_yield_interval: Option<u64>,
-    pub capability_grants: BTreeSet<String>,
-    pub invocation_context: InvocationContext,
-    pub secrets: BTreeMap<String, String>,
-    pub vfs: Option<Arc<VerletVfs>>,
+    pub capability_grants: std::collections::BTreeSet<String>,
+    pub invocation_context: verlet_abi::InvocationContext,
+    pub secrets: std::collections::BTreeMap<String, String>,
+    pub vfs: Option<std::sync::Arc<verlet_vfs::VerletVfs>>,
     pub host_import_policy: WasmHostImportPolicy,
 }
 
@@ -100,9 +92,9 @@ impl WasmRuntimeConfig {
             memory_limit_bytes: Some(DEFAULT_MEMORY_LIMIT_BYTES),
             fuel: Some(DEFAULT_FUEL),
             fuel_yield_interval: Some(DEFAULT_FUEL_YIELD_INTERVAL),
-            capability_grants: BTreeSet::new(),
-            invocation_context: InvocationContext::anonymous(),
-            secrets: BTreeMap::new(),
+            capability_grants: std::collections::BTreeSet::new(),
+            invocation_context: verlet_abi::InvocationContext::anonymous(),
+            secrets: std::collections::BTreeMap::new(),
             vfs: None,
             host_import_policy: WasmHostImportPolicy::Operation,
         }
@@ -153,12 +145,12 @@ impl WasmRuntimeConfig {
         self
     }
 
-    pub fn with_invocation_context(mut self, context: InvocationContext) -> Self {
+    pub fn with_invocation_context(mut self, context: verlet_abi::InvocationContext) -> Self {
         self.invocation_context = context;
         self
     }
 
-    pub fn effective_capability_grants(&self) -> BTreeSet<String> {
+    pub fn effective_capability_grants(&self) -> std::collections::BTreeSet<String> {
         self.capability_grants
             .iter()
             .cloned()
@@ -176,7 +168,7 @@ impl WasmRuntimeConfig {
         self
     }
 
-    pub fn with_vfs(mut self, vfs: Arc<VerletVfs>) -> Self {
+    pub fn with_vfs(mut self, vfs: std::sync::Arc<verlet_vfs::VerletVfs>) -> Self {
         self.vfs = Some(vfs);
         self
     }
@@ -187,8 +179,8 @@ impl WasmRuntimeConfig {
     }
 }
 
-impl fmt::Debug for WasmRuntimeConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Debug for WasmRuntimeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WasmRuntimeConfig")
             .field("artifact", &self.artifact)
             .field("entrypoint", &self.entrypoint)
@@ -207,7 +199,7 @@ impl fmt::Debug for WasmRuntimeConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct WasmHttpRequest {
     pub abi: String,
     pub method: String,
@@ -228,7 +220,7 @@ pub struct WasmHttpRequest {
     pub max_response_bytes: Option<usize>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct WasmHttpResponse {
     pub abi: String,
     pub status: u16,

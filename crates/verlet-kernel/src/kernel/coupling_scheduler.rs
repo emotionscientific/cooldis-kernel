@@ -1,14 +1,4 @@
-use crate::{
-    BoundCoupling, BoundCouplingSet, EventKind, EventOrigin, EventProvenance, EventRecord,
-    EventRecordId, EventStore, EventStreamId, NewEventRecord, ThreadCoordinates, VerletError,
-    VerletResult,
-};
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingSchedulerConfig {
     pub max_depth: u32,
     pub max_discharge_events_per_cycle: u32,
@@ -31,7 +21,7 @@ pub struct CouplingScheduler<'a, S: ?Sized, E> {
 
 impl<'a, S, E> CouplingScheduler<'a, S, E>
 where
-    S: EventStore + ?Sized,
+    S: crate::EventStore + ?Sized,
     E: CouplingExecutor,
 {
     pub fn new(store: &'a S, executor: &'a E) -> Self {
@@ -48,34 +38,34 @@ where
 
     pub async fn run_batch(
         &self,
-        coupling_set: &BoundCouplingSet,
-        appended: Vec<EventRecord>,
-    ) -> VerletResult<CouplingSchedulerCycleReceipt> {
+        coupling_set: &crate::BoundCouplingSet,
+        appended: Vec<crate::EventRecord>,
+    ) -> crate::VerletResult<CouplingSchedulerCycleReceipt> {
         self.run_batch_with_clock(coupling_set, appended, crate::kernel::history::now_ms)
             .await
     }
 
     pub async fn run_batch_at(
         &self,
-        coupling_set: &BoundCouplingSet,
-        appended: Vec<EventRecord>,
+        coupling_set: &crate::BoundCouplingSet,
+        appended: Vec<crate::EventRecord>,
         now_ms: i64,
-    ) -> VerletResult<CouplingSchedulerCycleReceipt> {
+    ) -> crate::VerletResult<CouplingSchedulerCycleReceipt> {
         self.run_batch_with_clock(coupling_set, appended, || now_ms)
             .await
     }
 
     async fn run_batch_with_clock<F>(
         &self,
-        coupling_set: &BoundCouplingSet,
-        appended: Vec<EventRecord>,
+        coupling_set: &crate::BoundCouplingSet,
+        appended: Vec<crate::EventRecord>,
         mut now_ms: F,
-    ) -> VerletResult<CouplingSchedulerCycleReceipt>
+    ) -> crate::VerletResult<CouplingSchedulerCycleReceipt>
     where
         F: FnMut() -> i64,
     {
-        let mut seen = BTreeSet::new();
-        let mut queue = VecDeque::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut queue = std::collections::VecDeque::new();
         self.enqueue_matches(
             coupling_set,
             appended,
@@ -86,8 +76,9 @@ where
 
         let mut runs = Vec::new();
         let mut appended_events = Vec::new();
-        let mut per_turn_run_counts = HashMap::<String, u32>::new();
-        let mut per_thread_run_counts = HashMap::<ThreadCouplingRunKey, u32>::new();
+        let mut per_turn_run_counts = std::collections::HashMap::<String, u32>::new();
+        let mut per_thread_run_counts =
+            std::collections::HashMap::<ThreadCouplingRunKey, u32>::new();
         let mut remaining_discharge_budget = self.config.max_discharge_events_per_cycle;
         while let Some(queued) = queue.pop_front() {
             if queued.activation.depth > self.config.max_depth {
@@ -366,16 +357,20 @@ where
         })
     }
 
-    pub fn stream_id_for(&self, coordinates: &ThreadCoordinates, stream: &str) -> EventStreamId {
+    pub fn stream_id_for(
+        &self,
+        coordinates: &crate::ThreadCoordinates,
+        stream: &str,
+    ) -> crate::EventStreamId {
         stream_id_for(coordinates, stream)
     }
 
     fn enqueue_matches(
         &self,
-        coupling_set: &BoundCouplingSet,
-        events: Vec<EventRecord>,
-        seen: &mut BTreeSet<ActivationKey>,
-        queue: &mut VecDeque<QueuedActivation>,
+        coupling_set: &crate::BoundCouplingSet,
+        events: Vec<crate::EventRecord>,
+        seen: &mut std::collections::BTreeSet<ActivationKey>,
+        queue: &mut std::collections::VecDeque<QueuedActivation>,
         root_depth: RootDepth,
     ) {
         let mut candidates = Vec::new();
@@ -431,15 +426,15 @@ where
 
     async fn resolve_source_cut(
         &self,
-        coupling: &BoundCoupling,
-        trigger_event: &EventRecord,
-    ) -> VerletResult<(CouplingSourceCut, Vec<EventRecord>)> {
-        let mut entries = BTreeMap::<String, i64>::new();
+        coupling: &crate::BoundCoupling,
+        trigger_event: &crate::EventRecord,
+    ) -> crate::VerletResult<(CouplingSourceCut, Vec<crate::EventRecord>)> {
+        let mut entries = std::collections::BTreeMap::<String, i64>::new();
         let mut selected = Vec::new();
-        let mut seen_event_ids = HashSet::new();
+        let mut seen_event_ids = std::collections::HashSet::new();
         for selector in &coupling.source_selectors {
             if !has_stream_grant(&coupling.grants, "read", &selector.stream) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "coupling {:?} is missing stream.read grant for {:?}",
                     coupling.id, selector.stream
                 )));
@@ -449,7 +444,7 @@ where
                 .store
                 .read_events(&stream_id, None)
                 .await
-                .map_err(|err| VerletError::History(err.to_string()))?;
+                .map_err(|err| crate::VerletError::History(err.to_string()))?;
             let max_sequence = events
                 .iter()
                 .map(|event| event.sequence.get())
@@ -497,8 +492,8 @@ where
     async fn thread_run_count(
         &self,
         queued: &QueuedActivation,
-        per_thread_run_counts: &mut HashMap<ThreadCouplingRunKey, u32>,
-    ) -> VerletResult<(ThreadCouplingRunKey, u32)> {
+        per_thread_run_counts: &mut std::collections::HashMap<ThreadCouplingRunKey, u32>,
+    ) -> crate::VerletResult<(ThreadCouplingRunKey, u32)> {
         let key = ThreadCouplingRunKey::new(
             &queued.trigger_event.coordinates,
             queued.coupling.id.clone(),
@@ -509,7 +504,7 @@ where
                 .store
                 .read_events(&stream_id, None)
                 .await
-                .map_err(|err| VerletError::History(err.to_string()))?;
+                .map_err(|err| crate::VerletError::History(err.to_string()))?;
             let count = events
                 .iter()
                 .filter(|event| counted_thread_quota_run(event, &queued.coupling.id))
@@ -522,14 +517,14 @@ where
 
     async fn append_lapsed_run(
         &self,
-        coupling_set: &BoundCouplingSet,
+        coupling_set: &crate::BoundCouplingSet,
         queued: &QueuedActivation,
         reason: String,
         source_cut: CouplingSourceCut,
-        source_events: Vec<EventRecord>,
-        seen: &mut BTreeSet<ActivationKey>,
-        queue: &mut VecDeque<QueuedActivation>,
-    ) -> VerletResult<(CouplingRunReceipt, Vec<EventRecord>)> {
+        source_events: Vec<crate::EventRecord>,
+        seen: &mut std::collections::BTreeSet<ActivationKey>,
+        queue: &mut std::collections::VecDeque<QueuedActivation>,
+    ) -> crate::VerletResult<(CouplingRunReceipt, Vec<crate::EventRecord>)> {
         let (run, receipt) = self
             .append_run_receipt(
                 queued,
@@ -557,13 +552,14 @@ where
         &self,
         queued: &QueuedActivation,
         source_cut: &CouplingSourceCut,
-        source_events: &[EventRecord],
+        source_events: &[crate::EventRecord],
         discharges: Vec<CouplingDischarge>,
-    ) -> VerletResult<Vec<EventRecord>> {
+    ) -> crate::VerletResult<Vec<crate::EventRecord>> {
         if discharges.is_empty() {
             return Ok(Vec::new());
         }
-        let mut records_by_stream = BTreeMap::<String, Vec<NewEventRecord>>::new();
+        let mut records_by_stream =
+            std::collections::BTreeMap::<String, Vec<crate::NewEventRecord>>::new();
         for discharge in discharges {
             let provenance = event_provenance(
                 &queued.activation,
@@ -571,7 +567,7 @@ where
                 source_cut,
                 source_events,
             );
-            let mut record = NewEventRecord::discharged(
+            let mut record = crate::NewEventRecord::discharged(
                 queued.trigger_event.coordinates.clone(),
                 discharge.kind,
                 discharge.payload,
@@ -592,7 +588,7 @@ where
                 .store
                 .append_events(&stream_id, records)
                 .await
-                .map_err(|err| VerletError::History(err.to_string()))?;
+                .map_err(|err| crate::VerletError::History(err.to_string()))?;
             appended.append(&mut events);
         }
         Ok(appended)
@@ -604,9 +600,9 @@ where
         status: CouplingRunStatus,
         reason: Option<String>,
         source_cut: CouplingSourceCut,
-        source_events: Vec<EventRecord>,
-        discharged_event_ids: Vec<EventRecordId>,
-    ) -> VerletResult<(CouplingRunReceipt, Vec<EventRecord>)> {
+        source_events: Vec<crate::EventRecord>,
+        discharged_event_ids: Vec<crate::EventRecordId>,
+    ) -> crate::VerletResult<(CouplingRunReceipt, Vec<crate::EventRecord>)> {
         let source_event_ids = source_events
             .iter()
             .map(|event| event.id)
@@ -631,11 +627,13 @@ where
             budget_spent: CouplingBudgetSpent { discharge_events },
         };
         let payload = serde_json::to_value(&run).map_err(|err| {
-            VerletError::History(format!("coupling run receipt codec failed: {err}"))
+            crate::VerletError::History(format!("coupling run receipt codec failed: {err}"))
         })?;
         let kind = match status {
-            CouplingRunStatus::Completed => EventKind::CouplingRunCompleted,
-            CouplingRunStatus::Failed | CouplingRunStatus::Skipped => EventKind::CouplingRunFailed,
+            CouplingRunStatus::Completed => crate::EventKind::CouplingRunCompleted,
+            CouplingRunStatus::Failed | CouplingRunStatus::Skipped => {
+                crate::EventKind::CouplingRunFailed
+            }
         };
         let provenance = event_provenance(
             &queued.activation,
@@ -648,7 +646,7 @@ where
             .store
             .append_events(
                 &stream_id,
-                vec![NewEventRecord::discharged(
+                vec![crate::NewEventRecord::discharged(
                     queued.trigger_event.coordinates.clone(),
                     kind,
                     payload,
@@ -656,23 +654,26 @@ where
                 )],
             )
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::VerletError::History(err.to_string()))?;
         Ok((run, appended))
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait CouplingExecutor: Send + Sync {
-    async fn invoke(&self, request: CouplingInvocation) -> VerletResult<CouplingExecutionResult>;
+    async fn invoke(
+        &self,
+        request: CouplingInvocation,
+    ) -> crate::VerletResult<CouplingExecutionResult>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CouplingInvocation {
     pub activation: CouplingActivation,
-    pub coupling: BoundCoupling,
-    pub trigger_event: EventRecord,
+    pub coupling: crate::BoundCoupling,
+    pub trigger_event: crate::EventRecord,
     pub source_cut: CouplingSourceCut,
-    pub source_events: Vec<EventRecord>,
+    pub source_events: Vec<crate::EventRecord>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -682,42 +683,42 @@ pub struct CouplingExecutionResult {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CouplingDischarge {
-    pub event_id: Option<EventRecordId>,
+    pub event_id: Option<crate::EventRecordId>,
     pub stream: String,
-    pub kind: EventKind,
-    pub payload: JsonValue,
+    pub kind: crate::EventKind,
+    pub payload: serde_json::Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingSchedulerCycleReceipt {
     pub snapshot_id: String,
     pub runs: Vec<CouplingRunReceipt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub appended_events: Vec<EventRecord>,
+    pub appended_events: Vec<crate::EventRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingRunReceipt {
     pub coupling_id: String,
     pub role: crate::CouplingRole,
     pub status: CouplingRunStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    pub root_event_id: EventRecordId,
-    pub trigger_event_id: EventRecordId,
+    pub root_event_id: crate::EventRecordId,
+    pub trigger_event_id: crate::EventRecordId,
     pub trigger_stream_id: String,
     pub trigger_sequence: i64,
     pub snapshot_id: String,
     pub depth: u32,
     pub source_cut: CouplingSourceCut,
-    pub source_event_ids: Vec<EventRecordId>,
-    pub discharged_event_ids: Vec<EventRecordId>,
+    pub source_event_ids: Vec<crate::EventRecordId>,
+    pub discharged_event_ids: Vec<crate::EventRecordId>,
     pub function_ref: String,
     pub config_hash: String,
     pub budget_spent: CouplingBudgetSpent,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CouplingRunStatus {
     Completed,
@@ -725,26 +726,26 @@ pub enum CouplingRunStatus {
     Skipped,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingBudgetSpent {
     pub discharge_events: u32,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingSourceCut {
     pub entries: Vec<CouplingSourceCutEntry>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingSourceCutEntry {
     pub stream_id: String,
     pub max_sequence: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingActivation {
-    pub root_event_id: EventRecordId,
-    pub trigger_event_id: EventRecordId,
+    pub root_event_id: crate::EventRecordId,
+    pub trigger_event_id: crate::EventRecordId,
     pub trigger_stream_id: String,
     pub trigger_sequence: i64,
     pub coupling_id: String,
@@ -756,8 +757,8 @@ pub struct CouplingActivation {
 struct QueuedActivation {
     batch_index: usize,
     activation: CouplingActivation,
-    trigger_event: EventRecord,
-    coupling: BoundCoupling,
+    trigger_event: crate::EventRecord,
+    coupling: crate::BoundCoupling,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -781,7 +782,7 @@ impl ActivationKey {
 enum RootDepth {
     FromEvent,
     Inherited {
-        root_event_id: EventRecordId,
+        root_event_id: crate::EventRecordId,
         depth: u32,
     },
 }
@@ -796,7 +797,7 @@ struct ThreadCouplingRunKey {
 }
 
 impl ThreadCouplingRunKey {
-    fn new(coordinates: &ThreadCoordinates, coupling_id: String) -> Self {
+    fn new(coordinates: &crate::ThreadCoordinates, coupling_id: String) -> Self {
         Self {
             control_stream_id: stream_id_for(coordinates, "control").to_string(),
             coupling_id,
@@ -804,10 +805,10 @@ impl ThreadCouplingRunKey {
     }
 }
 
-fn root_depth_from_event(event: &EventRecord) -> (EventRecordId, u32) {
+fn root_depth_from_event(event: &crate::EventRecord) -> (crate::EventRecordId, u32) {
     match event.origin {
-        EventOrigin::Witnessed => (event.id, 0),
-        EventOrigin::Discharged => (
+        crate::EventOrigin::Witnessed => (event.id, 0),
+        crate::EventOrigin::Discharged => (
             event
                 .provenance
                 .source_event_ids
@@ -819,7 +820,7 @@ fn root_depth_from_event(event: &EventRecord) -> (EventRecordId, u32) {
     }
 }
 
-fn coupling_matches_event(coupling: &BoundCoupling, event: &EventRecord) -> bool {
+fn coupling_matches_event(coupling: &crate::BoundCoupling, event: &crate::EventRecord) -> bool {
     coupling.trigger_kind == event.kind
         && coupling
             .trigger_match
@@ -830,7 +831,11 @@ fn coupling_matches_event(coupling: &BoundCoupling, event: &EventRecord) -> bool
 /// `per_turn` is the scheduler-cycle count for this coupling id; `per_thread`
 /// is the lifetime count reconstructed from this thread's run receipts plus
 /// the non-skipped runs already admitted in the current cycle.
-fn quota_exhausted(coupling: &BoundCoupling, per_turn_count: u32, per_thread_count: u32) -> bool {
+fn quota_exhausted(
+    coupling: &crate::BoundCoupling,
+    per_turn_count: u32,
+    per_thread_count: u32,
+) -> bool {
     coupling
         .trigger_quota
         .per_turn
@@ -841,21 +846,30 @@ fn quota_exhausted(coupling: &BoundCoupling, per_turn_count: u32, per_thread_cou
             .is_some_and(|limit| per_thread_count >= limit)
 }
 
-fn counted_thread_quota_run(event: &EventRecord, coupling_id: &str) -> bool {
+fn counted_thread_quota_run(event: &crate::EventRecord, coupling_id: &str) -> bool {
     if !matches!(
         event.kind,
-        EventKind::CouplingRunCompleted | EventKind::CouplingRunFailed
+        crate::EventKind::CouplingRunCompleted | crate::EventKind::CouplingRunFailed
     ) {
         return false;
     }
-    if event.payload.get("coupling_id").and_then(JsonValue::as_str) != Some(coupling_id) {
+    if event
+        .payload
+        .get("coupling_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(coupling_id)
+    {
         return false;
     }
-    event.payload.get("status").and_then(JsonValue::as_str) != Some("skipped")
+    event
+        .payload
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        != Some("skipped")
 }
 
 fn validate_discharges(
-    coupling: &BoundCoupling,
+    coupling: &crate::BoundCoupling,
     discharges: &[CouplingDischarge],
     remaining_discharge_budget: u32,
 ) -> Result<(), String> {
@@ -907,17 +921,19 @@ fn has_stream_grant(grants: &[String], action: &str, stream: &str) -> bool {
 
 fn event_provenance(
     activation: &CouplingActivation,
-    coupling: &BoundCoupling,
+    coupling: &crate::BoundCoupling,
     source_cut: &CouplingSourceCut,
-    source_events: &[EventRecord],
-) -> EventProvenance {
+    source_events: &[crate::EventRecord],
+) -> crate::EventProvenance {
     let source_streams = if source_cut.entries.is_empty() {
-        vec![EventStreamId::new(activation.trigger_stream_id.clone())]
+        vec![crate::EventStreamId::new(
+            activation.trigger_stream_id.clone(),
+        )]
     } else {
         source_cut
             .entries
             .iter()
-            .map(|entry| EventStreamId::new(entry.stream_id.clone()))
+            .map(|entry| crate::EventStreamId::new(entry.stream_id.clone()))
             .collect()
     };
     let source_event_ids = if source_events.is_empty() {
@@ -925,57 +941,49 @@ fn event_provenance(
     } else {
         source_events.iter().map(|event| event.id).collect()
     };
-    EventProvenance {
+    crate::EventProvenance {
         source_streams,
         source_event_ids,
         discharged_by: Some(format!("coupling:{}", coupling.id)),
         function: Some(coupling.function_ref.clone()),
         config_hash: Some(coupling.config_hash.clone()),
-        ..EventProvenance::default()
+        ..crate::EventProvenance::default()
     }
 }
 
-fn stream_id_for(coordinates: &ThreadCoordinates, stream: &str) -> EventStreamId {
+fn stream_id_for(coordinates: &crate::ThreadCoordinates, stream: &str) -> crate::EventStreamId {
     if stream == "thread" {
-        EventStreamId::for_thread(coordinates)
+        crate::EventStreamId::for_thread(coordinates)
     } else {
-        EventStreamId::new(format!("{stream}:{}", coordinates.thread_id))
+        crate::EventStreamId::new(format!("{stream}:{}", coordinates.thread_id))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        BoundCoupling, BoundCouplingFunction, BoundCouplingSelector, BoundCouplingSet,
-        BoundCouplingSink, CouplingRole, EventKind, EventProvenance, EventStore, EventStreamId,
-        InMemorySessionStore, NewEventRecord, ThreadCoordinates,
-    };
-    use async_trait::async_trait;
-    use serde_json::json;
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use crate::kernel::history::EventStore as _;
 
     #[derive(Clone, Default)]
     struct RecordingExecutor {
-        calls: Arc<Mutex<Vec<CouplingInvocation>>>,
-        discharges: Vec<CouplingDischarge>,
+        calls: std::sync::Arc<
+            std::sync::Mutex<Vec<crate::kernel::coupling_scheduler::CouplingInvocation>>,
+        >,
+        discharges: Vec<crate::kernel::coupling_scheduler::CouplingDischarge>,
         fail: Option<String>,
     }
 
-    #[async_trait]
-    impl CouplingExecutor for RecordingExecutor {
+    #[async_trait::async_trait]
+    impl crate::kernel::coupling_scheduler::CouplingExecutor for RecordingExecutor {
         async fn invoke(
             &self,
-            request: CouplingInvocation,
-        ) -> crate::VerletResult<CouplingExecutionResult> {
+            request: crate::kernel::coupling_scheduler::CouplingInvocation,
+        ) -> crate::VerletResult<crate::kernel::coupling_scheduler::CouplingExecutionResult>
+        {
             self.calls.lock().unwrap().push(request);
             if let Some(message) = &self.fail {
                 return Err(crate::VerletError::RuntimeFactory(message.clone()));
             }
-            Ok(CouplingExecutionResult {
+            Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
                 discharges: self.discharges.clone(),
             })
         }
@@ -983,27 +991,28 @@ mod tests {
 
     #[tokio::test]
     async fn witnessed_event_starts_deterministic_activation_order_and_source_cut() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
-        let thread_stream = EventStreamId::for_thread(&coordinates);
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
         let appended = store
             .append_events(
                 &thread_stream,
-                vec![NewEventRecord::witnessed(
+                vec![crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnCompleted,
-                    json!({"turn_id": "t1"}),
+                    crate::EventKind::TurnCompleted,
+                    serde_json::json!({"turn_id": "t1"}),
                 )],
             )
             .await
             .unwrap();
         let executor = RecordingExecutor::default();
-        let scheduler = CouplingScheduler::new(&store, &executor);
-        let coupling_set = BoundCouplingSet::new(
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
+        let coupling_set = crate::BoundCouplingSet::new(
             "snapshot-a",
             vec![
-                test_coupling("b_gate", EventKind::TurnCompleted, "control"),
-                test_coupling("a_gate", EventKind::TurnCompleted, "control"),
+                test_coupling("b_gate", crate::EventKind::TurnCompleted, "control"),
+                test_coupling("a_gate", crate::EventKind::TurnCompleted, "control"),
             ],
         );
 
@@ -1025,7 +1034,7 @@ mod tests {
         assert_eq!(calls[0].activation.depth, 0);
         assert_eq!(
             calls[0].source_cut.entries,
-            vec![CouplingSourceCutEntry {
+            vec![crate::kernel::coupling_scheduler::CouplingSourceCutEntry {
                 stream_id: thread_stream.to_string(),
                 max_sequence: 1,
             }]
@@ -1034,26 +1043,27 @@ mod tests {
 
     #[tokio::test]
     async fn coupling_grant_lapse_fails_before_source_read_or_executor_invocation() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
         let appended = store
             .append_events(
-                &EventStreamId::for_thread(&coordinates),
-                vec![NewEventRecord::witnessed(
+                &crate::EventStreamId::for_thread(&coordinates),
+                vec![crate::NewEventRecord::witnessed(
                     coordinates,
-                    EventKind::TurnCompleted,
-                    json!({"turn_id": "t1"}),
+                    crate::EventKind::TurnCompleted,
+                    serde_json::json!({"turn_id": "t1"}),
                 )],
             )
             .await
             .unwrap();
         let executor = RecordingExecutor::default();
-        let scheduler = CouplingScheduler::new(&store, &executor);
-        let coupling = test_coupling("expiring_gate", EventKind::TurnCompleted, "control");
-        let coupling_set = BoundCouplingSet::new_with_grant_expiries(
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
+        let coupling = test_coupling("expiring_gate", crate::EventKind::TurnCompleted, "control");
+        let coupling_set = crate::BoundCouplingSet::new_with_grant_expiries(
             "snapshot-a",
             vec![coupling],
-            BTreeMap::from([(
+            std::collections::BTreeMap::from([(
                 "expiring_gate".to_string(),
                 vec![crate::AgentManifestGrantExpiry {
                     capability: "stream.read:thread".to_string(),
@@ -1068,12 +1078,15 @@ mod tests {
             .unwrap();
 
         assert!(executor.calls.lock().unwrap().is_empty());
-        assert_eq!(receipt.runs[0].status, CouplingRunStatus::Failed);
+        assert_eq!(
+            receipt.runs[0].status,
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Failed
+        );
         let reason = receipt.runs[0].reason.as_deref().unwrap();
         assert!(reason.contains("missing capability grants: stream.read:thread"));
         assert!(reason.contains("1970-01-01T00:00:01Z"));
         assert!(receipt.appended_events.iter().any(|event| {
-            event.kind == EventKind::CouplingRunFailed
+            event.kind == crate::EventKind::CouplingRunFailed
                 && event.payload["reason"]
                     .as_str()
                     .is_some_and(|reason| reason.contains("1970-01-01T00:00:01Z"))
@@ -1082,44 +1095,45 @@ mod tests {
 
     #[tokio::test]
     async fn coupling_batch_rechecks_expiry_at_each_consumption_boundary() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
         let appended = store
             .append_events(
-                &EventStreamId::for_thread(&coordinates),
+                &crate::EventStreamId::for_thread(&coordinates),
                 vec![
-                    NewEventRecord::witnessed(
+                    crate::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::TurnCompleted,
-                        json!({"turn_id": "t1"}),
+                        crate::EventKind::TurnCompleted,
+                        serde_json::json!({"turn_id": "t1"}),
                     ),
-                    NewEventRecord::witnessed(
+                    crate::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::TurnCompleted,
-                        json!({"turn_id": "t2"}),
+                        crate::EventKind::TurnCompleted,
+                        serde_json::json!({"turn_id": "t2"}),
                     ),
                 ],
             )
             .await
             .unwrap();
         let executor = RecordingExecutor {
-            discharges: vec![CouplingDischarge {
+            discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "control".to_string(),
-                kind: EventKind::PlacementDecision,
-                payload: json!({"placement": "local"}),
+                kind: crate::EventKind::PlacementDecision,
+                payload: serde_json::json!({"placement": "local"}),
             }],
             ..RecordingExecutor::default()
         };
-        let scheduler = CouplingScheduler::new(&store, &executor);
-        let coupling_set = BoundCouplingSet::new_with_grant_expiries(
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
+        let coupling_set = crate::BoundCouplingSet::new_with_grant_expiries(
             "snapshot-a",
             vec![test_coupling(
                 "expiring_gate",
-                EventKind::TurnCompleted,
+                crate::EventKind::TurnCompleted,
                 "control",
             )],
-            BTreeMap::from([(
+            std::collections::BTreeMap::from([(
                 "expiring_gate".to_string(),
                 vec![crate::AgentManifestGrantExpiry {
                     capability: "stream.write:control".to_string(),
@@ -1127,11 +1141,11 @@ mod tests {
                 }],
             )]),
         );
-        let reads = AtomicUsize::new(0);
+        let reads = std::sync::atomic::AtomicUsize::new(0);
 
         let receipt = scheduler
             .run_batch_with_clock(&coupling_set, appended, || {
-                if reads.fetch_add(1, Ordering::SeqCst) < 3 {
+                if reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3 {
                     1_000
                 } else {
                     1_001
@@ -1147,7 +1161,10 @@ mod tests {
                 .iter()
                 .map(|run| run.status)
                 .collect::<Vec<_>>(),
-            vec![CouplingRunStatus::Completed, CouplingRunStatus::Failed]
+            vec![
+                crate::kernel::coupling_scheduler::CouplingRunStatus::Completed,
+                crate::kernel::coupling_scheduler::CouplingRunStatus::Failed
+            ]
         );
         assert!(
             receipt.runs[1]
@@ -1159,36 +1176,36 @@ mod tests {
 
     #[tokio::test]
     async fn expired_failure_triggering_coupling_stops_at_the_depth_limit() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
         let appended = store
             .append_events(
-                &EventStreamId::for_thread(&coordinates),
-                vec![NewEventRecord::witnessed(
+                &crate::EventStreamId::for_thread(&coordinates),
+                vec![crate::NewEventRecord::witnessed(
                     coordinates,
-                    EventKind::CouplingRunFailed,
-                    json!({"reason": "initial failure"}),
+                    crate::EventKind::CouplingRunFailed,
+                    serde_json::json!({"reason": "initial failure"}),
                 )],
             )
             .await
             .unwrap();
         let executor = RecordingExecutor::default();
-        let scheduler = CouplingScheduler::with_config(
+        let scheduler = crate::kernel::coupling_scheduler::CouplingScheduler::with_config(
             &store,
             &executor,
-            CouplingSchedulerConfig {
+            crate::kernel::coupling_scheduler::CouplingSchedulerConfig {
                 max_depth: 1,
-                ..CouplingSchedulerConfig::default()
+                ..crate::kernel::coupling_scheduler::CouplingSchedulerConfig::default()
             },
         );
-        let coupling_set = BoundCouplingSet::new_with_grant_expiries(
+        let coupling_set = crate::BoundCouplingSet::new_with_grant_expiries(
             "snapshot-a",
             vec![test_coupling(
                 "expired_failure_observer",
-                EventKind::CouplingRunFailed,
+                crate::EventKind::CouplingRunFailed,
                 "control",
             )],
-            BTreeMap::from([(
+            std::collections::BTreeMap::from([(
                 "expired_failure_observer".to_string(),
                 vec![crate::AgentManifestGrantExpiry {
                     capability: "stream.read:control".to_string(),
@@ -1210,9 +1227,9 @@ mod tests {
                 .map(|run| run.status)
                 .collect::<Vec<_>>(),
             vec![
-                CouplingRunStatus::Failed,
-                CouplingRunStatus::Failed,
-                CouplingRunStatus::Skipped,
+                crate::kernel::coupling_scheduler::CouplingRunStatus::Failed,
+                crate::kernel::coupling_scheduler::CouplingRunStatus::Failed,
+                crate::kernel::coupling_scheduler::CouplingRunStatus::Skipped,
             ]
         );
         assert_eq!(
@@ -1223,43 +1240,43 @@ mod tests {
 
     #[tokio::test]
     async fn discharged_event_triggers_next_coupling_and_inherits_root() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
-        let thread_stream = EventStreamId::for_thread(&coordinates);
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
         let appended = store
             .append_events(
                 &thread_stream,
-                vec![NewEventRecord::witnessed(
+                vec![crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnCompleted,
-                    json!({}),
+                    crate::EventKind::TurnCompleted,
+                    serde_json::json!({}),
                 )],
             )
             .await
             .unwrap();
-        let first = test_coupling("extract", EventKind::TurnCompleted, "derived:memory");
-        let second = test_coupling("route", EventKind::PlacementDecision, "control");
+        let first = test_coupling("extract", crate::EventKind::TurnCompleted, "derived:memory");
+        let second = test_coupling("route", crate::EventKind::PlacementDecision, "control");
         let executor = RecordingExecutor {
-            discharges: vec![CouplingDischarge {
+            discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "derived:memory".to_string(),
-                kind: EventKind::PlacementDecision,
-                payload: json!({"placement": "local"}),
+                kind: crate::EventKind::PlacementDecision,
+                payload: serde_json::json!({"placement": "local"}),
             }],
             ..RecordingExecutor::default()
         };
-        let scheduler = CouplingScheduler::with_config(
+        let scheduler = crate::kernel::coupling_scheduler::CouplingScheduler::with_config(
             &store,
             &executor,
-            CouplingSchedulerConfig {
+            crate::kernel::coupling_scheduler::CouplingSchedulerConfig {
                 max_depth: 2,
-                ..CouplingSchedulerConfig::default()
+                ..crate::kernel::coupling_scheduler::CouplingSchedulerConfig::default()
             },
         );
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![first, second]),
+                &crate::BoundCouplingSet::new("snapshot-a", vec![first, second]),
                 appended,
             )
             .await
@@ -1283,32 +1300,32 @@ mod tests {
 
     #[tokio::test]
     async fn loop_discharged_session_entry_depth_uses_triggering_event_id() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
-        let thread_stream = EventStreamId::for_thread(&coordinates);
-        let submitted = NewEventRecord::witnessed(
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let submitted = crate::NewEventRecord::witnessed(
             coordinates.clone(),
-            EventKind::TurnSubmitted,
-            json!({
-                "schema": EventKind::TurnSubmitted.payload_schema_id(),
+            crate::EventKind::TurnSubmitted,
+            serde_json::json!({
+                "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
                 "turn_id": "t1",
             }),
         );
         let submitted_id = submitted.id;
-        let session_entry = NewEventRecord::discharged(
+        let session_entry = crate::NewEventRecord::discharged(
             coordinates.clone(),
-            EventKind::SessionEntryAppended,
-            json!({
+            crate::EventKind::SessionEntryAppended,
+            serde_json::json!({
                 "entry_id": "entry-1",
                 "parent_entry_id": null,
                 "entry_kind": "message",
             }),
-            EventProvenance {
+            crate::EventProvenance {
                 source_streams: vec![thread_stream.clone()],
                 source_event_ids: vec![submitted_id],
                 discharged_by: Some("propagator:agent-loop".to_string()),
                 function: Some("session_entry_append/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         );
         let appended = store
@@ -1316,15 +1333,16 @@ mod tests {
             .await
             .unwrap();
         let executor = RecordingExecutor::default();
-        let scheduler = CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
 
         scheduler
             .run_batch(
-                &BoundCouplingSet::new(
+                &crate::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![test_coupling(
                         "mirror_session",
-                        EventKind::SessionEntryAppended,
+                        crate::EventKind::SessionEntryAppended,
                         "control",
                     )],
                 ),
@@ -1343,41 +1361,45 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_sink_discharge_records_failure_without_partial_events() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
-        let thread_stream = EventStreamId::for_thread(&coordinates);
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
         let appended = store
             .append_events(
                 &thread_stream,
-                vec![NewEventRecord::witnessed(
+                vec![crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnCompleted,
-                    json!({}),
+                    crate::EventKind::TurnCompleted,
+                    serde_json::json!({}),
                 )],
             )
             .await
             .unwrap();
         let executor = RecordingExecutor {
-            discharges: vec![CouplingDischarge {
+            discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "control".to_string(),
-                kind: EventKind::LoopCompleted,
-                payload: json!({}),
+                kind: crate::EventKind::LoopCompleted,
+                payload: serde_json::json!({}),
             }],
             ..RecordingExecutor::default()
         };
-        let scheduler = CouplingScheduler::new(&store, &executor);
-        let coupling = test_coupling("gate", EventKind::TurnCompleted, "control");
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
+        let coupling = test_coupling("gate", crate::EventKind::TurnCompleted, "control");
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 appended,
             )
             .await
             .unwrap();
 
-        assert_eq!(receipt.runs[0].status, CouplingRunStatus::Failed);
+        assert_eq!(
+            receipt.runs[0].status,
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Failed
+        );
         assert!(
             receipt.runs[0]
                 .reason
@@ -1390,47 +1412,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(control_events.len(), 1);
-        assert_eq!(control_events[0].kind, EventKind::CouplingRunFailed);
+        assert_eq!(control_events[0].kind, crate::EventKind::CouplingRunFailed);
     }
 
     #[tokio::test]
     async fn cyclic_trigger_graph_halts_by_depth_with_receipt() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
-        let thread_stream = EventStreamId::for_thread(&coordinates);
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
         let appended = store
             .append_events(
                 &thread_stream,
-                vec![NewEventRecord::witnessed(
+                vec![crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnCompleted,
-                    json!({}),
+                    crate::EventKind::TurnCompleted,
+                    serde_json::json!({}),
                 )],
             )
             .await
             .unwrap();
         let executor = RecordingExecutor {
-            discharges: vec![CouplingDischarge {
+            discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "control".to_string(),
-                kind: EventKind::TurnCompleted,
-                payload: json!({}),
+                kind: crate::EventKind::TurnCompleted,
+                payload: serde_json::json!({}),
             }],
             ..RecordingExecutor::default()
         };
-        let scheduler = CouplingScheduler::with_config(
+        let scheduler = crate::kernel::coupling_scheduler::CouplingScheduler::with_config(
             &store,
             &executor,
-            CouplingSchedulerConfig {
+            crate::kernel::coupling_scheduler::CouplingSchedulerConfig {
                 max_depth: 1,
-                ..CouplingSchedulerConfig::default()
+                ..crate::kernel::coupling_scheduler::CouplingSchedulerConfig::default()
             },
         );
-        let coupling = test_coupling("loop_gate", EventKind::TurnCompleted, "control");
+        let coupling = test_coupling("loop_gate", crate::EventKind::TurnCompleted, "control");
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 appended,
             )
             .await
@@ -1440,30 +1462,32 @@ mod tests {
             receipt
                 .runs
                 .iter()
-                .filter(|run| run.status == CouplingRunStatus::Completed)
+                .filter(|run| run.status
+                    == crate::kernel::coupling_scheduler::CouplingRunStatus::Completed)
                 .count(),
             2
         );
-        assert!(
-            receipt
-                .runs
-                .iter()
-                .any(|run| run.status == CouplingRunStatus::Skipped
-                    && run.reason.as_deref() == Some("depth_limit_exhausted"))
-        );
+        assert!(receipt.runs.iter().any(|run| run.status
+            == crate::kernel::coupling_scheduler::CouplingRunStatus::Skipped
+            && run.reason.as_deref() == Some("depth_limit_exhausted")));
     }
 
     #[tokio::test]
     async fn empty_durable_batch_does_not_trigger_runtime_telemetry() {
-        let store = InMemorySessionStore::default();
+        let store = crate::InMemorySessionStore::default();
         let executor = RecordingExecutor::default();
-        let scheduler = CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new(
+                &crate::BoundCouplingSet::new(
                     "snapshot-a",
-                    vec![test_coupling("gate", EventKind::TurnCompleted, "control")],
+                    vec![test_coupling(
+                        "gate",
+                        crate::EventKind::TurnCompleted,
+                        "control",
+                    )],
                 ),
                 Vec::new(),
             )
@@ -1476,34 +1500,46 @@ mod tests {
 
     #[tokio::test]
     async fn per_thread_quota_counts_runs_across_scheduler_cycles() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
         let executor = RecordingExecutor::default();
-        let mut coupling = test_coupling("gate", EventKind::TurnCompleted, "control");
+        let mut coupling = test_coupling("gate", crate::EventKind::TurnCompleted, "control");
         coupling.trigger_quota.per_thread = Some(2);
-        let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+        let coupling_set = crate::BoundCouplingSet::new("snapshot-a", vec![coupling]);
 
         let first = append_turn_completed(&store, &coordinates, "t1").await;
-        let first_receipt = CouplingScheduler::new(&store, &executor)
-            .run_batch(&coupling_set, first)
-            .await
-            .unwrap();
-        assert_eq!(first_receipt.runs[0].status, CouplingRunStatus::Completed);
+        let first_receipt =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor)
+                .run_batch(&coupling_set, first)
+                .await
+                .unwrap();
+        assert_eq!(
+            first_receipt.runs[0].status,
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Completed
+        );
 
         let second = append_turn_completed(&store, &coordinates, "t2").await;
-        let second_receipt = CouplingScheduler::new(&store, &executor)
-            .run_batch(&coupling_set, second)
-            .await
-            .unwrap();
-        assert_eq!(second_receipt.runs[0].status, CouplingRunStatus::Completed);
+        let second_receipt =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor)
+                .run_batch(&coupling_set, second)
+                .await
+                .unwrap();
+        assert_eq!(
+            second_receipt.runs[0].status,
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Completed
+        );
 
         let third = append_turn_completed(&store, &coordinates, "t3").await;
-        let third_receipt = CouplingScheduler::new(&store, &executor)
-            .run_batch(&coupling_set, third)
-            .await
-            .unwrap();
+        let third_receipt =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor)
+                .run_batch(&coupling_set, third)
+                .await
+                .unwrap();
 
-        assert_eq!(third_receipt.runs[0].status, CouplingRunStatus::Skipped);
+        assert_eq!(
+            third_receipt.runs[0].status,
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Skipped
+        );
         assert_eq!(
             third_receipt.runs[0].reason.as_deref(),
             Some("quota_exhausted")
@@ -1513,32 +1549,33 @@ mod tests {
 
     #[tokio::test]
     async fn per_turn_quota_still_resets_between_scheduler_cycles() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let store = InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
         let executor = RecordingExecutor::default();
-        let mut coupling = test_coupling("gate", EventKind::TurnCompleted, "control");
+        let mut coupling = test_coupling("gate", crate::EventKind::TurnCompleted, "control");
         coupling.trigger_quota.per_turn = Some(1);
-        let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+        let coupling_set = crate::BoundCouplingSet::new("snapshot-a", vec![coupling]);
 
         let first_batch = store
             .append_events(
-                &EventStreamId::for_thread(&coordinates),
+                &crate::EventStreamId::for_thread(&coordinates),
                 vec![
-                    NewEventRecord::witnessed(
+                    crate::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::TurnCompleted,
-                        json!({"turn_id": "t1"}),
+                        crate::EventKind::TurnCompleted,
+                        serde_json::json!({"turn_id": "t1"}),
                     ),
-                    NewEventRecord::witnessed(
+                    crate::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::TurnCompleted,
-                        json!({"turn_id": "t2"}),
+                        crate::EventKind::TurnCompleted,
+                        serde_json::json!({"turn_id": "t2"}),
                     ),
                 ],
             )
             .await
             .unwrap();
-        let scheduler = CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
 
         let first_receipt = scheduler
             .run_batch(&coupling_set, first_batch)
@@ -1551,7 +1588,10 @@ mod tests {
                 .iter()
                 .map(|run| run.status)
                 .collect::<Vec<_>>(),
-            vec![CouplingRunStatus::Completed, CouplingRunStatus::Skipped]
+            vec![
+                crate::kernel::coupling_scheduler::CouplingRunStatus::Completed,
+                crate::kernel::coupling_scheduler::CouplingRunStatus::Skipped
+            ]
         );
         assert_eq!(
             first_receipt.runs[1].reason.as_deref(),
@@ -1564,51 +1604,61 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(second_receipt.runs[0].status, CouplingRunStatus::Completed);
+        assert_eq!(
+            second_receipt.runs[0].status,
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Completed
+        );
         assert_eq!(executor.calls.lock().unwrap().len(), 2);
     }
 
     async fn append_turn_completed(
-        store: &InMemorySessionStore,
-        coordinates: &ThreadCoordinates,
+        store: &crate::InMemorySessionStore,
+        coordinates: &crate::ThreadCoordinates,
         turn_id: &str,
-    ) -> Vec<EventRecord> {
+    ) -> Vec<crate::EventRecord> {
         store
             .append_events(
-                &EventStreamId::for_thread(coordinates),
-                vec![NewEventRecord::witnessed(
+                &crate::EventStreamId::for_thread(coordinates),
+                vec![crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnCompleted,
-                    json!({"turn_id": turn_id}),
+                    crate::EventKind::TurnCompleted,
+                    serde_json::json!({"turn_id": turn_id}),
                 )],
             )
             .await
             .unwrap()
     }
 
-    fn test_coupling(id: &str, trigger_kind: EventKind, sink_stream: &str) -> BoundCoupling {
-        BoundCoupling {
+    fn test_coupling(
+        id: &str,
+        trigger_kind: crate::EventKind,
+        sink_stream: &str,
+    ) -> crate::BoundCoupling {
+        crate::BoundCoupling {
             id: id.to_string(),
             role: if sink_stream == "control" {
-                CouplingRole::Controller
+                crate::CouplingRole::Controller
             } else {
-                CouplingRole::Projection
+                crate::CouplingRole::Projection
             },
             trigger_kind,
             trigger_match: Default::default(),
             trigger_quota: Default::default(),
-            source_selectors: vec![BoundCouplingSelector {
+            source_selectors: vec![crate::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![EventKind::TurnCompleted],
+                kinds: vec![crate::EventKind::TurnCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: BoundCouplingSink {
+            sink: crate::BoundCouplingSink {
                 stream: sink_stream.to_string(),
-                kinds: vec![EventKind::PlacementDecision, EventKind::TurnCompleted],
+                kinds: vec![
+                    crate::EventKind::PlacementDecision,
+                    crate::EventKind::TurnCompleted,
+                ],
             },
             function_ref: format!("op://{id}/run@sha256:{}", "a".repeat(64)),
-            function: BoundCouplingFunction {
+            function: crate::BoundCouplingFunction {
                 name: id.to_string(),
                 artifact_hash: "a".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -1618,7 +1668,7 @@ mod tests {
                 format!("stream.write:{sink_stream}"),
             ],
             budget: Default::default(),
-            config: json!({}),
+            config: serde_json::json!({}),
             config_hash: "sha256:test".to_string(),
         }
     }

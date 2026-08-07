@@ -1,22 +1,16 @@
-use crate::{ImportPackageSource, validate_record_name};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet};
-use std::io;
-use std::path::PathBuf;
-use verlet_runtime_contracts::validate_json_schema_subset;
-use verlet_wasm::normalize_http_url;
-
 /// Typed failures produced while loading or normalizing an OpenAPI import.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenApiImportError {
     #[error("import package manifest not found at {path}")]
-    PackageNotFound { path: PathBuf },
+    PackageNotFound { path: std::path::PathBuf },
     #[error("failed to read import package {path}: {source}")]
-    ReadPackage { path: PathBuf, source: io::Error },
+    ReadPackage {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
     #[error("invalid import package {path}: {source}")]
     InvalidPackage {
-        path: PathBuf,
+        path: std::path::PathBuf,
         source: toml::de::Error,
     },
     #[error("invalid import package identity: {message}")]
@@ -32,7 +26,10 @@ pub enum OpenApiImportError {
     #[error("invalid spec sha256 {value:?}")]
     InvalidSpecHash { value: String },
     #[error("failed to read vendored OpenAPI spec {path}: {source}")]
-    ReadSpec { path: PathBuf, source: io::Error },
+    ReadSpec {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
     #[error("vendored OpenAPI spec sha256 mismatch: expected {expected}, got {actual}")]
     SpecHashMismatch { expected: String, actual: String },
     #[error("invalid OpenAPI JSON: {message}")]
@@ -132,7 +129,7 @@ pub enum OpenApiImportError {
 }
 
 /// Normalized, deterministic plan for one import package and published record.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationImportPlan {
     pub name: String,
     pub version: Option<String>,
@@ -142,7 +139,7 @@ pub struct OperationImportPlan {
 }
 
 impl OperationImportPlan {
-    pub fn from_package(package: &ImportPackageSource) -> Result<Self, OpenApiImportError> {
+    pub fn from_package(package: &crate::ImportPackageSource) -> Result<Self, OpenApiImportError> {
         let document: OpenApiDocument =
             serde_json::from_slice(&package.spec_bytes).map_err(|error| {
                 OpenApiImportError::InvalidDocument {
@@ -152,7 +149,7 @@ impl OperationImportPlan {
         normalize_document(package, document)
     }
 
-    pub fn capability_requests(&self) -> BTreeSet<String> {
+    pub fn capability_requests(&self) -> std::collections::BTreeSet<String> {
         self.operations
             .iter()
             .flat_map(|operation| operation.required_capabilities.iter().cloned())
@@ -161,7 +158,7 @@ impl OperationImportPlan {
 }
 
 /// Request-construction and ABI contract for one selected OpenAPI operation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImportedOperationPlan {
     pub id: u32,
     pub name: String,
@@ -174,13 +171,13 @@ pub struct ImportedOperationPlan {
     pub parameters: Vec<OperationParameterPlan>,
     pub request_body: Option<OperationRequestBodyPlan>,
     pub secret_headers: Vec<OperationSecretHeaderPlan>,
-    pub input_schema: Value,
-    pub output_schema: Value,
-    pub required_capabilities: BTreeSet<String>,
+    pub input_schema: serde_json::Value,
+    pub output_schema: serde_json::Value,
+    pub required_capabilities: std::collections::BTreeSet<String>,
 }
 
 /// Supported OpenAPI parameter locations used by the HTTP request renderer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationParameterLocation {
     Path,
@@ -189,44 +186,44 @@ pub enum OperationParameterLocation {
 }
 
 /// Normalized input mapping for one path, query, or header parameter.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationParameterPlan {
     pub name: String,
     pub input_property: String,
     pub location: OperationParameterLocation,
     pub required: bool,
-    pub schema: Value,
+    pub schema: serde_json::Value,
 }
 
 /// JSON request-body mapping for one imported operation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationRequestBodyPlan {
     pub required: bool,
     pub input_property: Option<String>,
-    pub schema: Value,
+    pub schema: serde_json::Value,
 }
 
 /// Secret-backed HTTP header mapping pinned into an imported artifact.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OperationSecretHeaderPlan {
     pub name: String,
     pub secret: String,
     pub prefix: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiDocument {
     openapi: String,
     info: OpenApiInfo,
     #[serde(default)]
     servers: Vec<OpenApiServer>,
-    paths: BTreeMap<String, OpenApiPathItem>,
+    paths: std::collections::BTreeMap<String, OpenApiPathItem>,
     #[serde(default)]
-    webhooks: Option<Value>,
+    webhooks: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiInfo {
     title: String,
@@ -235,7 +232,7 @@ struct OpenApiInfo {
     description: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiServer {
     url: String,
@@ -243,7 +240,7 @@ struct OpenApiServer {
     description: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiPathItem {
     #[serde(default)]
@@ -270,7 +267,7 @@ struct OpenApiPathItem {
     trace: Option<OpenApiOperation>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiOperation {
     #[serde(default, rename = "operationId")]
@@ -285,12 +282,12 @@ struct OpenApiOperation {
     parameters: Vec<OpenApiParameter>,
     #[serde(default, rename = "requestBody")]
     request_body: Option<OpenApiRequestBody>,
-    responses: BTreeMap<String, OpenApiResponse>,
+    responses: std::collections::BTreeMap<String, OpenApiResponse>,
     #[serde(default)]
-    callbacks: Option<Value>,
+    callbacks: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiParameter {
     name: String,
@@ -308,32 +305,32 @@ struct OpenApiParameter {
     explode: Option<bool>,
     #[serde(default, rename = "allowEmptyValue")]
     allow_empty_value: Option<bool>,
-    schema: Value,
+    schema: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiRequestBody {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     required: bool,
-    content: BTreeMap<String, OpenApiMediaType>,
+    content: std::collections::BTreeMap<String, OpenApiMediaType>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiResponse {
     description: String,
     #[serde(default)]
-    content: BTreeMap<String, OpenApiMediaType>,
+    content: std::collections::BTreeMap<String, OpenApiMediaType>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenApiMediaType {
     #[serde(default)]
-    schema: Option<Value>,
+    schema: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -346,7 +343,7 @@ struct CandidateOperation {
 }
 
 fn normalize_document(
-    package: &ImportPackageSource,
+    package: &crate::ImportPackageSource,
     document: OpenApiDocument,
 ) -> Result<OperationImportPlan, OpenApiImportError> {
     if !supported_openapi_version(&document.openapi) {
@@ -369,7 +366,7 @@ fn normalize_document(
             message: "server variables are unsupported in V1".to_string(),
         });
     }
-    let target = normalize_http_url(declared_server_url).map_err(|message| {
+    let target = verlet_wasm::normalize_http_url(declared_server_url).map_err(|message| {
         OpenApiImportError::InvalidServerUrl {
             url: declared_server_url.clone(),
             message,
@@ -391,8 +388,8 @@ fn normalize_document(
     );
     let mut candidates = collect_candidates(document.paths)?;
     let mut operations = Vec::with_capacity(package.manifest.operations.len());
-    let mut projected_names = BTreeSet::new();
-    let mut projected_surface_names = BTreeSet::new();
+    let mut projected_names = std::collections::BTreeSet::new();
+    let mut projected_surface_names = std::collections::BTreeSet::new();
     for (index, selection) in package.manifest.operations.iter().enumerate() {
         let position = candidates
             .iter()
@@ -405,7 +402,7 @@ fn normalize_document(
             .alias
             .clone()
             .unwrap_or_else(|| candidate.source_name.clone());
-        let normalized_name = validate_record_name(&name).map_err(|error| {
+        let normalized_name = crate::validate_record_name(&name).map_err(|error| {
             OpenApiImportError::InvalidOperationName {
                 name: name.clone(),
                 message: error.to_string(),
@@ -451,7 +448,7 @@ fn normalize_document(
 }
 
 fn collect_candidates(
-    paths: BTreeMap<String, OpenApiPathItem>,
+    paths: std::collections::BTreeMap<String, OpenApiPathItem>,
 ) -> Result<Vec<CandidateOperation>, OpenApiImportError> {
     let mut candidates = Vec::new();
     for (path, item) in paths {
@@ -512,8 +509,8 @@ fn normalize_operation(
         }
     }
     let mut parameters = Vec::with_capacity(parameter_rows.len());
-    let mut input_names = BTreeSet::new();
-    let mut header_names = BTreeSet::new();
+    let mut input_names = std::collections::BTreeSet::new();
+    let mut header_names = std::collections::BTreeSet::new();
     for parameter in parameter_rows {
         let normalized = normalize_parameter(&candidate.source_name, &candidate.path, parameter)?;
         if matches!(normalized.location, OperationParameterLocation::Header) {
@@ -561,14 +558,16 @@ fn normalize_operation(
     }
     validate_response_schemas(&candidate.source_name, &candidate.operation.responses)?;
     let input_schema = operation_input_schema(&parameters, request_body.as_ref());
-    validate_json_schema_subset(&input_schema, &format!("import operation {name} input")).map_err(
-        |error| OpenApiImportError::UnsupportedSchema {
-            operation_id: candidate.source_name.clone(),
-            message: error.to_string(),
-        },
-    )?;
+    verlet_runtime_contracts::validate_json_schema_subset(
+        &input_schema,
+        &format!("import operation {name} input"),
+    )
+    .map_err(|error| OpenApiImportError::UnsupportedSchema {
+        operation_id: candidate.source_name.clone(),
+        message: error.to_string(),
+    })?;
     let output_schema = operation_output_schema();
-    let mut required_capabilities = BTreeSet::from([format!(
+    let mut required_capabilities = std::collections::BTreeSet::from([format!(
         "{}:{}:{}",
         if private_destination {
             "net.http.private"
@@ -653,7 +652,7 @@ fn normalize_parameter(
             parameter: parameter.name,
         });
     }
-    validate_json_schema_subset(
+    verlet_runtime_contracts::validate_json_schema_subset(
         &parameter.schema,
         &format!(
             "import operation {operation_id} parameter {}",
@@ -716,8 +715,8 @@ fn normalize_request_body(
     let schema = request_body.content["application/json"]
         .schema
         .clone()
-        .unwrap_or_else(|| json!({"type": "object", "additionalProperties": true}));
-    validate_json_schema_subset(
+        .unwrap_or_else(|| serde_json::json!({"type": "object", "additionalProperties": true}));
+    verlet_runtime_contracts::validate_json_schema_subset(
         &schema,
         &format!("import operation {operation_id} request body"),
     )
@@ -734,13 +733,13 @@ fn normalize_request_body(
 
 fn validate_response_schemas(
     operation_id: &str,
-    responses: &BTreeMap<String, OpenApiResponse>,
+    responses: &std::collections::BTreeMap<String, OpenApiResponse>,
 ) -> Result<(), OpenApiImportError> {
     for response in responses.values() {
         let _ = &response.description;
         for media in response.content.values() {
             if let Some(schema) = &media.schema {
-                validate_json_schema_subset(
+                verlet_runtime_contracts::validate_json_schema_subset(
                     schema,
                     &format!("import operation {operation_id} response"),
                 )
@@ -787,19 +786,19 @@ fn normalize_auth(
 fn operation_input_schema(
     parameters: &[OperationParameterPlan],
     request_body: Option<&OperationRequestBodyPlan>,
-) -> Value {
+) -> serde_json::Value {
     if parameters.is_empty()
         && let Some(request_body) = request_body
         && request_body.input_property.is_none()
     {
         return request_body.schema.clone();
     }
-    let mut properties = Map::new();
+    let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for parameter in parameters {
         properties.insert(parameter.input_property.clone(), parameter.schema.clone());
         if parameter.required {
-            required.push(Value::String(parameter.input_property.clone()));
+            required.push(serde_json::Value::String(parameter.input_property.clone()));
         }
     }
     if let Some(request_body) = request_body {
@@ -810,10 +809,10 @@ fn operation_input_schema(
             .to_string();
         properties.insert(name.clone(), request_body.schema.clone());
         if request_body.required {
-            required.push(Value::String(name));
+            required.push(serde_json::Value::String(name));
         }
     }
-    json!({
+    serde_json::json!({
         "type": "object",
         "required": required,
         "properties": properties,
@@ -821,8 +820,8 @@ fn operation_input_schema(
     })
 }
 
-fn operation_output_schema() -> Value {
-    json!({
+fn operation_output_schema() -> serde_json::Value {
+    serde_json::json!({
         "type": "object",
         "required": ["status", "headers", "body", "truncated"],
         "properties": {
@@ -849,7 +848,7 @@ fn validate_path_placeholders(
         .iter()
         .filter(|parameter| matches!(parameter.location, OperationParameterLocation::Path))
         .map(|parameter| parameter.name.as_str())
-        .collect::<BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>();
     let mut rest = path;
     while let Some(start) = rest.find('{') {
         let after = &rest[start + 1..];
@@ -870,12 +869,12 @@ fn validate_path_placeholders(
     Ok(())
 }
 
-fn parameter_schema_is_primitive(schema: &Value) -> bool {
+fn parameter_schema_is_primitive(schema: &serde_json::Value) -> bool {
     match schema.get("type") {
-        Some(Value::String(value)) => {
+        Some(serde_json::Value::String(value)) => {
             matches!(value.as_str(), "string" | "number" | "integer" | "boolean")
         }
-        Some(Value::Array(values)) => values.iter().all(|value| {
+        Some(serde_json::Value::Array(values)) => values.iter().all(|value| {
             value.as_str().is_some_and(|value| {
                 matches!(value, "string" | "number" | "integer" | "boolean" | "null")
             })

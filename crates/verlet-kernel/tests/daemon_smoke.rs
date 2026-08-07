@@ -1,14 +1,7 @@
-use std::path::Path;
-use std::process::Stdio;
-use std::time::Duration;
-use tokio::process::{Child, Command};
-use uuid::Uuid;
-use verlet::{CodexTuiConnectConfig, CodexTuiTestClient};
-
 #[tokio::test]
 async fn daemon_run_serves_codex_remote_on_configured_unix_socket() {
-    let smoke_id = Uuid::now_v7().simple().to_string();
-    let root = Path::new("/tmp").join(format!("cdisd-{}", &smoke_id[..12]));
+    let smoke_id = uuid::Uuid::now_v7().simple().to_string();
+    let root = std::path::Path::new("/tmp").join(format!("cdisd-{}", &smoke_id[..12]));
     std::fs::create_dir_all(&root).unwrap();
     let socket = root.join("run/verlet.sock");
     let config_path = root.join("verlet.toml");
@@ -23,7 +16,7 @@ async fn daemon_run_serves_codex_remote_on_configured_unix_socket() {
     assert!(matches!(models["data"].as_array(), Some(models) if !models.is_empty()));
 
     let completed = client
-        .run_prompt("daemon smoke", Duration::from_secs(5))
+        .run_prompt("daemon smoke", std::time::Duration::from_secs(5))
         .await
         .unwrap();
     assert!(
@@ -49,7 +42,11 @@ async fn daemon_run_serves_codex_remote_on_configured_unix_socket() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-fn write_daemon_config(config_path: &Path, root: &Path, socket: &Path) {
+fn write_daemon_config(
+    config_path: &std::path::Path,
+    root: &std::path::Path,
+    socket: &std::path::Path,
+) {
     let text = format!(
         r#"
 [daemon.runtime]
@@ -74,15 +71,17 @@ fn escape_toml_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-async fn connect_daemon_client(socket: &Path) -> CodexTuiTestClient<tokio::net::UnixStream> {
+async fn connect_daemon_client(
+    socket: &std::path::Path,
+) -> verlet::CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
     for _ in 0..1_500 {
         if socket.exists() {
-            match CodexTuiTestClient::connect_unix(
+            match verlet::CodexTuiTestClient::connect_unix(
                 socket,
-                CodexTuiConnectConfig {
+                verlet::CodexTuiConnectConfig {
                     client_name: "verlet-daemon-smoke".to_string(),
-                    ..CodexTuiConnectConfig::default()
+                    ..verlet::CodexTuiConnectConfig::default()
                 },
             )
             .await
@@ -91,7 +90,7 @@ async fn connect_daemon_client(socket: &Path) -> CodexTuiTestClient<tokio::net::
                 Err(err) => last_error = Some(err.to_string()),
             }
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     panic!(
         "timed out waiting for daemon socket {}; last connect error: {}",
@@ -101,19 +100,19 @@ async fn connect_daemon_client(socket: &Path) -> CodexTuiTestClient<tokio::net::
 }
 
 struct DaemonChild {
-    child: Option<Child>,
+    child: Option<tokio::process::Child>,
 }
 
 impl DaemonChild {
-    async fn spawn(config_path: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_verlet"))
+    async fn spawn(config_path: &std::path::Path) -> Self {
+        let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
             .arg("daemon")
             .arg("run")
             .arg("--config")
             .arg(config_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
         Self { child: Some(child) }
@@ -122,7 +121,7 @@ impl DaemonChild {
     async fn stop(mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
         }
     }
 }

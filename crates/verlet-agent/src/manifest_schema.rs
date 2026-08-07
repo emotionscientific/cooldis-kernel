@@ -10,14 +10,7 @@
 //! plumbing, and alias resolution live in `agent::manifest`; the compiled
 //! plan produced from this schema is recorded there as well.
 
-use crate::tool_ref::PinnedToolRef;
-use crate::{VerletAgentError as VerletError, VerletResult};
-use serde::de::{self, DeserializeOwned, Deserializer};
-use serde::{Deserialize, Serialize, Serializer};
-use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
-use verlet_operations::{DeclaredSkillPackageRef, validate_record_name};
+use serde::Deserialize as _;
 
 /// Top-level sections reserved by the ontology but deferred from the V1
 /// schema. Compile rejects each by name so the error states the deferral
@@ -38,7 +31,7 @@ pub const KERNEL_ASSEMBLER_ANCHORED_WINDOW: &str = "kernel://assembler/anchored-
 /// The fully parsed and validated V1 manifest. Sections that may be omitted
 /// from the source document carry their decided defaults here; consumers
 /// never re-derive defaults.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestSchema {
     pub identity: AgentManifestIdentity,
@@ -69,7 +62,7 @@ impl AgentManifestSchema {
     /// Parse a manifest TOML document into the typed V1 schema and validate
     /// it. Reserved sections are rejected with errors naming the deferral;
     /// unknown keys anywhere fail closed.
-    pub fn from_toml_value(value: &toml::Value) -> VerletResult<Self> {
+    pub fn from_toml_value(value: &toml::Value) -> crate::VerletResult<Self> {
         let manifest = Self::from_toml_value_unvalidated(value)?;
         manifest.validate()?;
         Ok(manifest)
@@ -79,13 +72,15 @@ impl AgentManifestSchema {
     /// cross-field validation. This is only for kernel lowerers that fill in
     /// source-derived fields before running [`AgentManifestSchema::validate`].
     #[doc(hidden)]
-    pub fn from_toml_value_unvalidated(value: &toml::Value) -> VerletResult<Self> {
+    pub fn from_toml_value_unvalidated(value: &toml::Value) -> crate::VerletResult<Self> {
         let table = value.as_table().ok_or_else(|| {
-            VerletError::RuntimeFactory("agent manifest must be a TOML table".to_string())
+            crate::VerletAgentError::RuntimeFactory(
+                "agent manifest must be a TOML table".to_string(),
+            )
         })?;
         for key in table.keys() {
             if RESERVED_MANIFEST_SECTIONS.contains(&key.as_str()) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "agent manifest section {key:?} is reserved for a deferred V1 scope"
                 )));
             }
@@ -102,7 +97,7 @@ impl AgentManifestSchema {
                     | "policies"
                     | "runtime"
             ) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "unknown top-level agent manifest section {key:?}"
                 )));
             }
@@ -123,7 +118,7 @@ impl AgentManifestSchema {
             Some(section) => {
                 let context: AgentManifestContextToml = decode_section(section.clone(), "context")?;
                 if context.pipelines.len() != 1 {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "agent manifest context requires exactly one pipeline named \"default\", got {}",
                         context.pipelines.len()
                     )));
@@ -152,8 +147,8 @@ impl AgentManifestSchema {
     /// Cross-field validation: unique ids, budget-share arithmetic, grant
     /// shapes, ref shapes, override allowlist keys. Field-level shape errors
     /// are already rejected at parse time.
-    pub fn validate(&self) -> VerletResult<()> {
-        validate_record_name(&self.identity.name)?;
+    pub fn validate(&self) -> crate::VerletResult<()> {
+        verlet_operations::validate_record_name(&self.identity.name)?;
         if let Some(namespace) = &self.identity.namespace {
             validate_namespace(namespace)?;
         }
@@ -163,28 +158,28 @@ impl AgentManifestSchema {
         if let Some(kind) = &self.identity.kind
             && kind != "cooldis.agent-manifest"
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "agent manifest kind must be \"cooldis.agent-manifest\", got {kind:?}"
             )));
         }
         if let Some(schema_version) = self.identity.schema_version
             && schema_version != 1
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "agent manifest schema_version {schema_version} is not supported"
             )));
         }
 
         if self.model_profiles.is_empty() {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletAgentError::RuntimeFactory(
                 "agent manifest requires at least one model profile".to_string(),
             ));
         }
-        let mut model_ids = BTreeSet::new();
+        let mut model_ids = std::collections::BTreeSet::new();
         for profile in &self.model_profiles {
-            validate_record_name(&profile.id)?;
+            verlet_operations::validate_record_name(&profile.id)?;
             if !model_ids.insert(profile.id.clone()) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "duplicate model profile id {:?}",
                     profile.id
                 )));
@@ -204,20 +199,20 @@ impl AgentManifestSchema {
             }
             if let Some(retry) = &profile.retry {
                 if retry.max_attempts == 0 {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "model profile {:?} retry.max_attempts must be > 0",
                         profile.id
                     )));
                 }
                 if retry.backoff_ms == Some(0) {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "model profile {:?} retry.backoff_ms must be > 0",
                         profile.id
                     )));
                 }
             }
             if profile.params.max_tokens == Some(0) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "model profile {:?} params.max_tokens must be > 0",
                     profile.id
                 )));
@@ -232,16 +227,16 @@ impl AgentManifestSchema {
             }
         }
 
-        let mut tool_ids = BTreeSet::new();
-        let mut commands = BTreeSet::new();
-        let mut tool_names = BTreeSet::new();
+        let mut tool_ids = std::collections::BTreeSet::new();
+        let mut commands = std::collections::BTreeSet::new();
+        let mut tool_names = std::collections::BTreeSet::new();
         for tool in &self.tools {
             let (id, reference, grants) = match tool {
                 AgentManifestTool::Bash(tool) => {
-                    validate_record_name(&tool.id)?;
+                    verlet_operations::validate_record_name(&tool.id)?;
                     validate_surface("bash command", &tool.command)?;
                     if !commands.insert(tool.command.clone()) {
-                        return Err(VerletError::RuntimeFactory(format!(
+                        return Err(crate::VerletAgentError::RuntimeFactory(format!(
                             "duplicate bash command surface {:?}",
                             tool.command
                         )));
@@ -250,10 +245,10 @@ impl AgentManifestSchema {
                     (&tool.id, &tool.operation_ref, &tool.grants)
                 }
                 AgentManifestTool::Direct(tool) => {
-                    validate_record_name(&tool.id)?;
+                    verlet_operations::validate_record_name(&tool.id)?;
                     validate_surface("direct tool_name", &tool.tool_name)?;
                     if !tool_names.insert(tool.tool_name.clone()) {
-                        return Err(VerletError::RuntimeFactory(format!(
+                        return Err(crate::VerletAgentError::RuntimeFactory(format!(
                             "duplicate direct tool_name surface {:?}",
                             tool.tool_name
                         )));
@@ -262,14 +257,14 @@ impl AgentManifestSchema {
                     (&tool.id, &tool.operation_ref, &tool.grants)
                 }
                 AgentManifestTool::ProtocolImport(tool) => {
-                    validate_record_name(&tool.id)?;
+                    verlet_operations::validate_record_name(&tool.id)?;
                     validate_ref_scheme("protocol tool server_ref", &tool.server_ref, "mcp://")?;
                     if tool
                         .server_ref
                         .strip_prefix("mcp://")
                         .is_some_and(|body| body.contains('@'))
                     {
-                        return Err(VerletError::RuntimeFactory(format!(
+                        return Err(crate::VerletAgentError::RuntimeFactory(format!(
                             "protocol tool server_ref {:?} is content-addressed, but protocol \
                              source refs name placement by configured source; the only legal \
                              form is mcp://<source-name>. Content-addressing belongs to per-tool \
@@ -278,7 +273,7 @@ impl AgentManifestSchema {
                         )));
                     }
                     if tool.expose.contains(&AgentManifestToolSurface::BashTool) {
-                        return Err(VerletError::RuntimeFactory(format!(
+                        return Err(crate::VerletAgentError::RuntimeFactory(format!(
                             "protocol tool import {:?} expose surface \"bash_tool\" is deferred; \
                              live universes mount as the search surface",
                             tool.id
@@ -290,7 +285,7 @@ impl AgentManifestSchema {
                     if tool.expose.contains(&AgentManifestToolSurface::DirectTool)
                         && tool.pin.is_none()
                     {
-                        return Err(VerletError::RuntimeFactory(format!(
+                        return Err(crate::VerletAgentError::RuntimeFactory(format!(
                             "protocol tool import {:?} declares expose = [\"direct_tool\"] \
                              without a pin; a live universe contract cannot back a tool row — \
                              pin the witnessed contract (mcptool://<server>/<tool>@sha256:<hash>) \
@@ -301,21 +296,21 @@ impl AgentManifestSchema {
                     if tool.pin.is_some()
                         && !tool.expose.contains(&AgentManifestToolSurface::DirectTool)
                     {
-                        return Err(VerletError::RuntimeFactory(format!(
+                        return Err(crate::VerletAgentError::RuntimeFactory(format!(
                             "protocol tool import {:?} declares a pin without expose = [\"direct_tool\"]",
                             tool.id
                         )));
                     }
                     if let Some(pin) = &tool.pin {
-                        let parsed = PinnedToolRef::parse(pin)?;
+                        let parsed = crate::tool_ref::PinnedToolRef::parse(pin)?;
                         if !tool_names.insert(parsed.tool_name.clone()) {
-                            return Err(VerletError::RuntimeFactory(format!(
+                            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                                 "duplicate direct tool_name surface {:?}",
                                 parsed.tool_name
                             )));
                         }
                         if parsed.server_ref() != tool.server_ref {
-                            return Err(VerletError::RuntimeFactory(format!(
+                            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                                 "protocol tool import {:?} pin names server {:?} but the import \
                                  declares server_ref {:?}",
                                 tool.id,
@@ -328,7 +323,7 @@ impl AgentManifestSchema {
                         if include_tools.is_empty()
                             || include_tools.iter().any(|name| name.trim().is_empty())
                         {
-                            return Err(VerletError::RuntimeFactory(format!(
+                            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                                 "protocol tool import {:?} include_tools must be non-empty tool names",
                                 tool.id
                             )));
@@ -339,18 +334,18 @@ impl AgentManifestSchema {
             };
             let _ = reference;
             if !tool_ids.insert(id.clone()) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "duplicate tool id {id:?}"
                 )));
             }
             validate_grants(id, grants)?;
         }
 
-        let mut resource_names = BTreeSet::new();
+        let mut resource_names = std::collections::BTreeSet::new();
         for resource in &self.resources {
-            validate_record_name(&resource.name)?;
+            verlet_operations::validate_record_name(&resource.name)?;
             if !resource_names.insert(resource.name.clone()) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "duplicate resource name {:?}",
                     resource.name
                 )));
@@ -376,32 +371,32 @@ impl AgentManifestSchema {
         validate_couplings(&self.couplings)?;
 
         if self.policies.budgets.max_turns == Some(0) {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletAgentError::RuntimeFactory(
                 "policies.budgets.max_turns must be > 0".to_string(),
             ));
         }
         if self.policies.budgets.max_tool_calls_per_turn == Some(0) {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletAgentError::RuntimeFactory(
                 "policies.budgets.max_tool_calls_per_turn must be > 0".to_string(),
             ));
         }
         if self.runtime.turn_timeout_ms == Some(0) {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletAgentError::RuntimeFactory(
                 "runtime.turn_timeout_ms must be > 0".to_string(),
             ));
         }
         if self.runtime.cancellation_grace_ms == Some(0) {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletAgentError::RuntimeFactory(
                 "runtime.cancellation_grace_ms must be > 0".to_string(),
             ));
         }
         if self.runtime.max_tool_rounds == Some(AgentManifestMaxToolRounds::Limited(0)) {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletAgentError::RuntimeFactory(
                 "runtime.max_tool_rounds must be > 0 or \"unlimited\"".to_string(),
             ));
         }
         if self.runtime.compaction.auto_at_text_bytes == Some(0) {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletAgentError::RuntimeFactory(
                 "runtime.compaction.auto_at_text_bytes must be > 0".to_string(),
             ));
         }
@@ -453,7 +448,7 @@ pub fn default_context_pipeline() -> AgentManifestContextPipeline {
 /// Durable name and version envelope (audit section 1). `kind` is the object
 /// discriminator `cooldis.agent-manifest`, never the agent's role; roles live
 /// in `labels`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestIdentity {
     pub name: String,
@@ -470,14 +465,14 @@ pub struct AgentManifestIdentity {
     #[serde(default)]
     pub schema_version: Option<u32>,
     #[serde(default)]
-    pub labels: BTreeMap<String, String>,
+    pub labels: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub publisher: Option<AgentManifestPublisher>,
 }
 
 /// Opaque publisher metadata (audit section 1). Verlet V0 does not
 /// authenticate publishers; product auth projects into this later.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestPublisher {
     pub id: String,
@@ -487,7 +482,7 @@ pub struct AgentManifestPublisher {
 
 /// One named model/provider profile (audit section 2). The manifest stores
 /// credential references and policy, never secret material.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestModelProfile {
     pub id: String,
@@ -506,7 +501,7 @@ pub struct AgentManifestModelProfile {
     pub fallbacks: Vec<AgentManifestModelFallback>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestModelParams {
     #[serde(default)]
@@ -518,14 +513,14 @@ pub struct AgentManifestModelParams {
 }
 
 /// A `credential://...` reference resolved inside the runtime boundary.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCredentialRef {
     #[serde(rename = "ref")]
     pub reference: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestModelRetryPolicy {
     pub max_attempts: u32,
@@ -533,7 +528,7 @@ pub struct AgentManifestModelRetryPolicy {
     pub backoff_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestModelFallback {
     pub provider_ref: String,
@@ -542,7 +537,7 @@ pub struct AgentManifestModelFallback {
 
 /// The three V1 tool declaration types (audit section 4). Wasm/V8/MCP are
 /// implementation or import substrates behind these, never manifest types.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum AgentManifestTool {
     #[serde(rename = "bash_tool")]
@@ -553,7 +548,18 @@ pub enum AgentManifestTool {
     ProtocolImport(AgentManifestProtocolToolImport),
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum EffectClass {
     Pure,
@@ -569,7 +575,7 @@ impl EffectClass {
 }
 
 /// A command exposed inside virtual bash, backed by a published operation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestBashTool {
     pub id: String,
@@ -585,7 +591,7 @@ pub struct AgentManifestBashTool {
 }
 
 /// A structured model/tool-router call exposed outside bash.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestDirectTool {
     pub id: String,
@@ -603,7 +609,7 @@ pub struct AgentManifestDirectTool {
 /// the manifest declares the universe, its filters, and (for direct rows)
 /// the pinned contract. The lexicon law governs: nothing mutable backs a
 /// tool row, so `expose = ["direct_tool"]` without a `pin` fails compile.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestProtocolToolImport {
     pub id: String,
@@ -634,7 +640,7 @@ pub struct AgentManifestProtocolToolImport {
 /// One effect grant on a manifest tool or coupling row. The untagged string
 /// variant preserves the exact V1 wire shape and content hash for manifests
 /// that do not opt into expiry.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum AgentManifestGrant {
     Capability(String),
@@ -670,20 +676,20 @@ impl From<&str> for AgentManifestGrant {
 }
 
 /// Absolute UTC expiry attached to one manifest capability grant.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestGrantExpiry {
     pub capability: String,
     pub expires_at: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestToolProtocol {
     #[serde(rename = "mcp")]
     Mcp,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestToolSurface {
     #[serde(rename = "direct_tool")]
     DirectTool,
@@ -693,7 +699,7 @@ pub enum AgentManifestToolSurface {
 
 /// A declared read-only artifact (audit section 5). Declaring a resource
 /// grants nothing by itself: visibility comes from a pipeline source.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestResource {
     pub name: String,
@@ -708,7 +714,7 @@ pub struct AgentManifestResource {
     pub mode: AgentManifestResourceMode,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestResourceKind {
     #[serde(rename = "blob")]
     Blob,
@@ -718,14 +724,14 @@ pub enum AgentManifestResourceKind {
     Skill,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestResourceMount {
     #[default]
     #[serde(rename = "context")]
     Context,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestResourceMode {
     #[default]
     #[serde(rename = "read")]
@@ -737,7 +743,7 @@ pub enum AgentManifestResourceMode {
 /// The requirement deliberately contains no host path. `guest_path` is the
 /// absolute path visible inside virtual bash and mounted operations;
 /// `min_mode` is the least authority an operator binding must provide.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestWorkspaceRequirement {
     pub guest_path: String,
@@ -747,7 +753,7 @@ pub struct AgentManifestWorkspaceRequirement {
 
 /// Layer-2 declaration for conventional workspace skill discovery.
 /// Discovery is intentionally opt-in and never creates a separate mount.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestSkills {
     #[serde(default)]
@@ -777,7 +783,18 @@ fn default_skill_discovery_path() -> String {
 
 /// Access modes shared by workspace requirements, operator bindings, and
 /// resolved mount receipts. Read-write satisfies a read-only mode floor.
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum AgentManifestWorkspaceMode {
     #[default]
     #[serde(rename = "ro")]
@@ -790,7 +807,7 @@ pub enum AgentManifestWorkspaceMode {
 /// propose; the kernel performs the deterministic merge, the final budget
 /// fit, and the receipt. V1 accepts exactly one pipeline with id "default"
 /// and only `kernel://` assembler refs.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestContextPipeline {
     pub id: String,
@@ -801,7 +818,7 @@ pub struct AgentManifestContextPipeline {
 /// budget share. Validation: source ids unique, at most one `rest` share,
 /// fractional shares sum to <= 1, pinned sources excluded from budget
 /// arithmetic.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestContextSource {
     pub id: String,
@@ -818,7 +835,7 @@ pub struct AgentManifestContextSource {
 }
 
 /// Selector shape shared with future couplings (stream, kind, scope, since).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestContextSelector {
     #[serde(default)]
@@ -833,7 +850,7 @@ pub struct AgentManifestContextSelector {
 
 /// A declared projection or controller coupling. The role is inferred by the
 /// binder from resolved source/sink stream relation; authors never declare it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCoupling {
     pub id: String,
@@ -846,20 +863,20 @@ pub struct AgentManifestCoupling {
     #[serde(default)]
     pub budget: AgentManifestCouplingBudget,
     #[serde(default)]
-    pub config: JsonValue,
+    pub config: serde_json::Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingTrigger {
     pub kind: String,
     #[serde(default, rename = "match")]
-    pub match_fields: BTreeMap<String, JsonValue>,
+    pub match_fields: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub quota: AgentManifestCouplingQuota,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingQuota {
     /// Maximum non-skipped coupling runs admitted during one scheduler cycle.
@@ -872,13 +889,13 @@ pub struct AgentManifestCouplingQuota {
     pub per_thread: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingSource {
     pub selectors: Vec<AgentManifestCouplingSelector>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingSelector {
     pub stream: String,
@@ -890,7 +907,7 @@ pub struct AgentManifestCouplingSelector {
     pub since: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingSink {
     pub stream: String,
@@ -898,7 +915,7 @@ pub struct AgentManifestCouplingSink {
     pub kind: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingBudget {
     #[serde(default)]
@@ -909,14 +926,14 @@ pub struct AgentManifestCouplingBudget {
 
 /// A fractional share of the context budget, or the single `"rest"` source
 /// that takes whatever remains.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum AgentManifestBudgetShare {
     Fraction(f64),
     Rest(AgentManifestBudgetRest),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestBudgetRest {
     #[serde(rename = "rest")]
     Rest,
@@ -925,7 +942,7 @@ pub enum AgentManifestBudgetRest {
 /// Thread-level authority boundary (audit section 10). The manifest declares
 /// requirements, the operator grants them, the runtime enforces fail-closed.
 /// Effect grants live on tool bindings, not here.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestPolicies {
     #[serde(default)]
@@ -938,7 +955,7 @@ pub struct AgentManifestPolicies {
     pub budgets: AgentManifestPolicyBudgets,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestNetworkPolicy {
     #[default]
     #[serde(rename = "deny")]
@@ -948,7 +965,7 @@ pub enum AgentManifestNetworkPolicy {
     DeclaredOrigins,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestFilesystemPolicy {
     #[default]
     #[serde(rename = "vfs")]
@@ -957,7 +974,7 @@ pub enum AgentManifestFilesystemPolicy {
     None,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestPolicyBudgets {
     #[serde(default)]
@@ -969,7 +986,7 @@ pub struct AgentManifestPolicyBudgets {
 /// Defaults applied when a thread starts from the manifest (audit section
 /// 15). V1 ships exactly these keys; unknown `[runtime]` keys fail closed.
 /// Anything not in the override allowlist is fixed by the manifest.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestRuntimeDefaults {
     #[serde(default = "default_runtime_cwd")]
@@ -1011,10 +1028,10 @@ pub enum AgentManifestMaxToolRounds {
     Unlimited,
 }
 
-impl Serialize for AgentManifestMaxToolRounds {
+impl serde::Serialize for AgentManifestMaxToolRounds {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer,
+        S: serde::Serializer,
     {
         match self {
             Self::Limited(rounds) => serializer.serialize_u64(*rounds as u64),
@@ -1023,14 +1040,14 @@ impl Serialize for AgentManifestMaxToolRounds {
     }
 }
 
-impl<'de> Deserialize<'de> for AgentManifestMaxToolRounds {
+impl<'de> serde::Deserialize<'de> for AgentManifestMaxToolRounds {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>,
+        D: serde::de::Deserializer<'de>,
     {
         struct MaxToolRoundsVisitor;
 
-        impl de::Visitor<'_> for MaxToolRoundsVisitor {
+        impl serde::de::Visitor<'_> for MaxToolRoundsVisitor {
             type Value = AgentManifestMaxToolRounds;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1039,7 +1056,7 @@ impl<'de> Deserialize<'de> for AgentManifestMaxToolRounds {
 
             fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
             where
-                E: de::Error,
+                E: serde::de::Error,
             {
                 usize::try_from(value)
                     .map(AgentManifestMaxToolRounds::Limited)
@@ -1048,7 +1065,7 @@ impl<'de> Deserialize<'de> for AgentManifestMaxToolRounds {
 
             fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
             where
-                E: de::Error,
+                E: serde::de::Error,
             {
                 u64::try_from(value)
                     .map_err(|_| E::custom("max_tool_rounds cannot be negative"))
@@ -1057,7 +1074,7 @@ impl<'de> Deserialize<'de> for AgentManifestMaxToolRounds {
 
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
-                E: de::Error,
+                E: serde::de::Error,
             {
                 if value == "unlimited" {
                     Ok(AgentManifestMaxToolRounds::Unlimited)
@@ -1082,7 +1099,7 @@ fn default_runtime_streaming() -> bool {
 /// Compaction is a built-in coupling in V1, configured here rather than
 /// declared under the deferred `[[couplings]]` section. `None` means the
 /// kernel default threshold.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCompactionDefaults {
     #[serde(default)]
@@ -1090,14 +1107,14 @@ pub struct AgentManifestCompactionDefaults {
 }
 
 /// Deny-by-default override allowlist for `thread/start` callers.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestRuntimeOverridePolicy {
     #[serde(default)]
     pub allow: Vec<AgentManifestRuntimeOverrideKey>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestRuntimeOverrideKey {
     #[serde(rename = "default_cwd")]
     DefaultCwd,
@@ -1117,7 +1134,7 @@ pub enum AgentManifestRuntimeOverrideKey {
 /// `verlet agent plan` is offline-allowed and may record unresolved refs
 /// explicitly; `verlet agent publish` fails closed on any unresolved
 /// operation, resource, or alias ref.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentManifestResolvedRef {
     pub declared: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1127,7 +1144,7 @@ pub struct AgentManifestResolvedRef {
     pub status: AgentManifestRefStatus,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentManifestRefStatus {
     #[serde(rename = "resolved")]
     Resolved,
@@ -1138,12 +1155,12 @@ pub enum AgentManifestRefStatus {
 }
 
 impl AgentManifestResolvedRef {
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         validate_compile_time_artifact_ref(&self.declared)?;
         match self.status {
             AgentManifestRefStatus::Resolved => {
                 let Some(content_hash) = &self.content_hash else {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "resolved artifact ref {:?} is missing content_hash",
                         self.declared
                     )));
@@ -1156,13 +1173,13 @@ impl AgentManifestResolvedRef {
                 let expected_hash = content_hash_from_ref(resolved)
                     .or_else(|| content_hash_from_ref(&self.declared))
                     .ok_or_else(|| {
-                        VerletError::RuntimeFactory(format!(
+                        crate::VerletAgentError::RuntimeFactory(format!(
                             "resolved artifact ref {:?} must resolve to a content-addressed ref",
                             self.declared
                         ))
                     })?;
                 if content_hash != &expected_hash {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "resolved artifact ref {:?} records content_hash {}, expected {}",
                         self.declared, content_hash, expected_hash
                     )));
@@ -1170,7 +1187,7 @@ impl AgentManifestResolvedRef {
             }
             AgentManifestRefStatus::UnresolvedOffline => {
                 if self.resolved.is_some() || self.content_hash.is_some() {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "unresolved artifact ref {:?} must not include resolved content",
                         self.declared
                     )));
@@ -1181,37 +1198,45 @@ impl AgentManifestResolvedRef {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentManifestContextToml {
     #[serde(default)]
     pipelines: Vec<AgentManifestContextPipeline>,
 }
 
-fn required_section<T: DeserializeOwned>(value: &toml::Value, name: &str) -> VerletResult<T> {
-    let section = value
-        .get(name)
-        .ok_or_else(|| VerletError::RuntimeFactory(format!("agent manifest requires [{name}]")))?;
+fn required_section<T: serde::de::DeserializeOwned>(
+    value: &toml::Value,
+    name: &str,
+) -> crate::VerletResult<T> {
+    let section = value.get(name).ok_or_else(|| {
+        crate::VerletAgentError::RuntimeFactory(format!("agent manifest requires [{name}]"))
+    })?;
     decode_section(section.clone(), name)
 }
 
-fn optional_section<T: DeserializeOwned>(
+fn optional_section<T: serde::de::DeserializeOwned>(
     value: &toml::Value,
     name: &str,
-) -> VerletResult<Option<T>> {
+) -> crate::VerletResult<Option<T>> {
     value
         .get(name)
         .map(|section| decode_section(section.clone(), name))
         .transpose()
 }
 
-fn decode_section<T: DeserializeOwned>(value: toml::Value, name: &str) -> VerletResult<T> {
+fn decode_section<T: serde::de::DeserializeOwned>(
+    value: toml::Value,
+    name: &str,
+) -> crate::VerletResult<T> {
     value.try_into().map_err(|err| {
-        VerletError::RuntimeFactory(format!("invalid agent manifest [{name}] section: {err}"))
+        crate::VerletAgentError::RuntimeFactory(format!(
+            "invalid agent manifest [{name}] section: {err}"
+        ))
     })
 }
 
-fn reject_reserved_resource_kinds(value: &toml::Value) -> VerletResult<()> {
+fn reject_reserved_resource_kinds(value: &toml::Value) -> crate::VerletResult<()> {
     let Some(resources) = value.get("resources").and_then(toml::Value::as_array) else {
         return Ok(());
     };
@@ -1219,7 +1244,7 @@ fn reject_reserved_resource_kinds(value: &toml::Value) -> VerletResult<()> {
         if let Some(kind) = resource.get("kind").and_then(toml::Value::as_str)
             && RESERVED_RESOURCE_KINDS.contains(&kind)
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "resource kind {kind:?} is reserved for a deferred V1 resource scope"
             )));
         }
@@ -1227,7 +1252,7 @@ fn reject_reserved_resource_kinds(value: &toml::Value) -> VerletResult<()> {
     Ok(())
 }
 
-fn validate_raw_effect_classes(value: &toml::Value) -> VerletResult<()> {
+fn validate_raw_effect_classes(value: &toml::Value) -> crate::VerletResult<()> {
     let Some(tools) = value.get("tools").and_then(toml::Value::as_array) else {
         return Ok(());
     };
@@ -1243,12 +1268,12 @@ fn validate_raw_effect_classes(value: &toml::Value) -> VerletResult<()> {
         match effect_class.as_str() {
             Some("pure" | "idempotent" | "at-most-once") => {}
             Some(effect_class) => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "tool {tool_id:?} effect_class {effect_class:?} is unknown; expected pure, idempotent, or at-most-once"
                 )));
             }
             None => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "tool {tool_id:?} effect_class must be a string, got {}",
                     toml_value_kind(effect_class)
                 )));
@@ -1258,7 +1283,7 @@ fn validate_raw_effect_classes(value: &toml::Value) -> VerletResult<()> {
     Ok(())
 }
 
-fn validate_raw_grant_shapes(value: &toml::Value) -> VerletResult<()> {
+fn validate_raw_grant_shapes(value: &toml::Value) -> crate::VerletResult<()> {
     for (section, subject_kind) in [("tools", "tool"), ("couplings", "coupling")] {
         let Some(subjects) = value.get(section).and_then(toml::Value::as_array) else {
             continue;
@@ -1277,7 +1302,7 @@ fn validate_raw_grant_shapes(value: &toml::Value) -> VerletResult<()> {
                     continue;
                 }
                 let Some(grant) = grant.as_table() else {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "{subject_kind} {subject_id:?} grant {grant_index} must be a capability string or an expiry object, got {}",
                         toml_value_kind(grant)
                     )));
@@ -1286,7 +1311,7 @@ fn validate_raw_grant_shapes(value: &toml::Value) -> VerletResult<()> {
                     .keys()
                     .find(|field| !matches!(field.as_str(), "capability" | "expires_at"))
                 {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "{subject_kind} {subject_id:?} grant {grant_index} object has unknown field {field:?}"
                     )));
                 }
@@ -1299,13 +1324,13 @@ fn validate_raw_grant_shapes(value: &toml::Value) -> VerletResult<()> {
                             } else {
                                 "a string"
                             };
-                            return Err(VerletError::RuntimeFactory(format!(
+                            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                                 "{subject_kind} {subject_id:?} grant {grant_index} {field} must be {expected}, got {}",
                                 toml_value_kind(value)
                             )));
                         }
                         None => {
-                            return Err(VerletError::RuntimeFactory(format!(
+                            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                                 "{subject_kind} {subject_id:?} grant {grant_index} object requires {field:?}"
                             )));
                         }
@@ -1329,29 +1354,31 @@ fn toml_value_kind(value: &toml::Value) -> &'static str {
     }
 }
 
-fn validate_ref_scheme(label: &str, value: &str, scheme: &str) -> VerletResult<()> {
+fn validate_ref_scheme(label: &str, value: &str, scheme: &str) -> crate::VerletResult<()> {
     let rest = value.strip_prefix(scheme).ok_or_else(|| {
-        VerletError::RuntimeFactory(format!("{label} {value:?} must start with {scheme}"))
+        crate::VerletAgentError::RuntimeFactory(format!(
+            "{label} {value:?} must start with {scheme}"
+        ))
     })?;
     if rest.is_empty() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "{label} {value:?} must include a reference body"
         )));
     }
     Ok(())
 }
 
-fn validate_skill_resource_ref(value: &str) -> VerletResult<()> {
-    DeclaredSkillPackageRef::parse(value)
+fn validate_skill_resource_ref(value: &str) -> crate::VerletResult<()> {
+    verlet_operations::DeclaredSkillPackageRef::parse(value)
         .map(|_| ())
-        .map_err(|err| VerletError::RuntimeFactory(err.to_string()))
+        .map_err(|err| crate::VerletAgentError::RuntimeFactory(err.to_string()))
 }
 
-fn validate_artifact_ref(value: &str) -> VerletResult<()> {
+fn validate_artifact_ref(value: &str) -> crate::VerletResult<()> {
     if value.starts_with("skill://") {
-        return DeclaredSkillPackageRef::parse(value)
+        return verlet_operations::DeclaredSkillPackageRef::parse(value)
             .map(|_| ())
-            .map_err(|err| VerletError::RuntimeFactory(err.to_string()));
+            .map_err(|err| crate::VerletAgentError::RuntimeFactory(err.to_string()));
     }
     if (value.starts_with("op://") && value.len() > "op://".len())
         || (value.starts_with("mcp://") && value.len() > "mcp://".len())
@@ -1359,19 +1386,21 @@ fn validate_artifact_ref(value: &str) -> VerletResult<()> {
     {
         Ok(())
     } else {
-        Err(VerletError::RuntimeFactory(format!(
+        Err(crate::VerletAgentError::RuntimeFactory(format!(
             "agent artifact ref {value:?} must start with op://, mcp://, resource://, or skill://"
         )))
     }
 }
 
-fn validate_compile_time_artifact_ref(value: &str) -> VerletResult<()> {
+fn validate_compile_time_artifact_ref(value: &str) -> crate::VerletResult<()> {
     if value.starts_with("skill://") {
-        return match DeclaredSkillPackageRef::parse(value)? {
-            DeclaredSkillPackageRef::Floating { .. } => Err(VerletError::RuntimeFactory(format!(
-                "floating skill ref {value:?} resolves only at bind time and must not appear in compile-time resolved_refs"
-            ))),
-            DeclaredSkillPackageRef::Pinned(_) => Ok(()),
+        return match verlet_operations::DeclaredSkillPackageRef::parse(value)? {
+            verlet_operations::DeclaredSkillPackageRef::Floating { .. } => {
+                Err(crate::VerletAgentError::RuntimeFactory(format!(
+                    "floating skill ref {value:?} resolves only at bind time and must not appear in compile-time resolved_refs"
+                )))
+            }
+            verlet_operations::DeclaredSkillPackageRef::Pinned(_) => Ok(()),
         };
     }
     validate_artifact_ref(value)
@@ -1379,9 +1408,9 @@ fn validate_compile_time_artifact_ref(value: &str) -> VerletResult<()> {
 
 fn content_hash_from_ref(reference: &str) -> Option<String> {
     if reference.starts_with("skill://") {
-        return match DeclaredSkillPackageRef::parse(reference).ok()? {
-            DeclaredSkillPackageRef::Floating { .. } => None,
-            DeclaredSkillPackageRef::Pinned(reference) => {
+        return match verlet_operations::DeclaredSkillPackageRef::parse(reference).ok()? {
+            verlet_operations::DeclaredSkillPackageRef::Floating { .. } => None,
+            verlet_operations::DeclaredSkillPackageRef::Pinned(reference) => {
                 Some(format!("sha256:{}", reference.artifact_hash))
             }
         };
@@ -1402,14 +1431,16 @@ fn content_hash_from_ref(reference: &str) -> Option<String> {
     Some(content_hash)
 }
 
-fn validate_hash_label(label: &str, value: &str) -> VerletResult<()> {
+fn validate_hash_label(label: &str, value: &str) -> crate::VerletResult<()> {
     let Some(hash) = value.strip_prefix("sha256:") else {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "{label} must start with sha256:"
         )));
     };
     validate_hex_hash(hash).map_err(|err| {
-        VerletError::RuntimeFactory(format!("{label} must be sha256:<64 lowercase hex>: {err}"))
+        crate::VerletAgentError::RuntimeFactory(format!(
+            "{label} must be sha256:<64 lowercase hex>: {err}"
+        ))
     })
 }
 
@@ -1426,19 +1457,19 @@ fn validate_hex_hash(value: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn validate_surface(label: &str, value: &str) -> VerletResult<()> {
+fn validate_surface(label: &str, value: &str) -> crate::VerletResult<()> {
     if value.trim().is_empty() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "{label} cannot be empty"
         )));
     }
     Ok(())
 }
 
-fn validate_grants(id: &str, grants: &[AgentManifestGrant]) -> VerletResult<()> {
+fn validate_grants(id: &str, grants: &[AgentManifestGrant]) -> crate::VerletResult<()> {
     for grant in grants {
         if grant.capability().trim().is_empty() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "tool {id:?} has an empty grant"
             )));
         }
@@ -1449,12 +1480,12 @@ fn validate_grants(id: &str, grants: &[AgentManifestGrant]) -> VerletResult<()> 
     Ok(())
 }
 
-fn validate_couplings(couplings: &[AgentManifestCoupling]) -> VerletResult<()> {
-    let mut ids = BTreeSet::new();
+fn validate_couplings(couplings: &[AgentManifestCoupling]) -> crate::VerletResult<()> {
+    let mut ids = std::collections::BTreeSet::new();
     for coupling in couplings {
         validate_coupling_id(&coupling.id)?;
         if !ids.insert(coupling.id.clone()) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "duplicate coupling id {:?}",
                 coupling.id
             )));
@@ -1471,17 +1502,17 @@ fn validate_couplings(couplings: &[AgentManifestCoupling]) -> VerletResult<()> {
             coupling.trigger.quota.per_thread,
         )?;
         if coupling.source.selectors.is_empty() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "coupling {:?} source requires at least one selector",
                 coupling.id
             )));
         }
-        let mut source_streams = BTreeSet::new();
+        let mut source_streams = std::collections::BTreeSet::new();
         for selector in &coupling.source.selectors {
             validate_coupling_stream("coupling source stream", &selector.stream)?;
             source_streams.insert(selector.stream.clone());
             if selector.kind.is_empty() {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "coupling {:?} source selector for stream {:?} requires at least one kind",
                     coupling.id, selector.stream
                 )));
@@ -1492,13 +1523,13 @@ fn validate_couplings(couplings: &[AgentManifestCoupling]) -> VerletResult<()> {
         }
         validate_coupling_stream("coupling sink stream", &coupling.sink.stream)?;
         if source_streams.contains(&coupling.sink.stream) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "coupling {:?} sink must not equal selected source stream {:?}",
                 coupling.id, coupling.sink.stream
             )));
         }
         if coupling.sink.kind.is_empty() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "coupling {:?} sink requires at least one kind",
                 coupling.id
             )));
@@ -1515,23 +1546,23 @@ fn validate_couplings(couplings: &[AgentManifestCoupling]) -> VerletResult<()> {
     Ok(())
 }
 
-fn validate_coupling_id(id: &str) -> VerletResult<()> {
+fn validate_coupling_id(id: &str) -> crate::VerletResult<()> {
     if id.is_empty()
         || !id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
     {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "coupling id {id:?} must use ASCII letters, numbers, '.', '_', '-', or ':'"
         )));
     }
     Ok(())
 }
 
-fn validate_coupling_grants(id: &str, grants: &[AgentManifestGrant]) -> VerletResult<()> {
+fn validate_coupling_grants(id: &str, grants: &[AgentManifestGrant]) -> crate::VerletResult<()> {
     for grant in grants {
         if grant.capability().trim().is_empty() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "coupling {id:?} has an empty grant"
             )));
         }
@@ -1546,12 +1577,12 @@ fn validate_grant_expiry(
     subject_kind: &str,
     subject_id: &str,
     expiry: &AgentManifestGrantExpiry,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     let parsed = expiry
         .expires_at
         .parse::<toml::value::Datetime>()
         .map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletAgentError::RuntimeFactory(format!(
                 "{subject_kind} {subject_id:?} grant {:?} expires_at must be an RFC3339 UTC instant: {err}",
                 expiry.capability
             ))
@@ -1561,7 +1592,7 @@ fn validate_grant_expiry(
         Some(toml::value::Offset::Z | toml::value::Offset::Custom { minutes: 0 })
     );
     if parsed.date.is_none() || parsed.time.is_none() || !is_utc {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "{subject_kind} {subject_id:?} grant {:?} expires_at must be an RFC3339 UTC instant",
             expiry.capability
         )));
@@ -1569,51 +1600,55 @@ fn validate_grant_expiry(
     Ok(())
 }
 
-fn validate_coupling_stream(label: &str, stream: &str) -> VerletResult<()> {
+fn validate_coupling_stream(label: &str, stream: &str) -> crate::VerletResult<()> {
     if matches!(stream, "thread" | "control") {
         return Ok(());
     }
     if let Some(name) = stream.strip_prefix("derived:") {
-        validate_record_name(name).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        verlet_operations::validate_record_name(name).map_err(|err| {
+            crate::VerletAgentError::RuntimeFactory(format!(
                 "{label} {stream:?} has invalid derived name: {err}"
             ))
         })?;
         return Ok(());
     }
-    Err(VerletError::RuntimeFactory(format!(
+    Err(crate::VerletAgentError::RuntimeFactory(format!(
         "{label} {stream:?} must be thread, control, or derived:<name>"
     )))
 }
 
-fn validate_coupling_event_kind(label: &str, kind: &str) -> VerletResult<()> {
+fn validate_coupling_event_kind(label: &str, kind: &str) -> crate::VerletResult<()> {
     if kind.trim().is_empty() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "{label} cannot be empty"
         )));
     }
     Ok(())
 }
 
-fn validate_positive_optional_u32(label: &str, value: Option<u32>) -> VerletResult<()> {
+fn validate_positive_optional_u32(label: &str, value: Option<u32>) -> crate::VerletResult<()> {
     if value == Some(0) {
-        return Err(VerletError::RuntimeFactory(format!("{label} must be > 0")));
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
+            "{label} must be > 0"
+        )));
     }
     Ok(())
 }
 
-fn validate_positive_optional_u64(label: &str, value: Option<u64>) -> VerletResult<()> {
+fn validate_positive_optional_u64(label: &str, value: Option<u64>) -> crate::VerletResult<()> {
     if value == Some(0) {
-        return Err(VerletError::RuntimeFactory(format!("{label} must be > 0")));
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
+            "{label} must be > 0"
+        )));
     }
     Ok(())
 }
 
 fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
-    D: Deserializer<'de>,
+    D: serde::de::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
+    #[derive(serde::Deserialize)]
     #[serde(untagged)]
     enum StringList {
         One(String),
@@ -1624,7 +1659,9 @@ where
         StringList::One(value) => Ok(vec![value]),
         StringList::Many(values) => {
             if values.iter().any(|value| value.trim().is_empty()) {
-                return Err(de::Error::custom("kind list entries cannot be empty"));
+                return Err(serde::de::Error::custom(
+                    "kind list entries cannot be empty",
+                ));
             }
             Ok(values)
         }
@@ -1633,37 +1670,39 @@ where
 
 fn validate_workspace_requirement(
     workspace: &AgentManifestWorkspaceRequirement,
-) -> VerletResult<()> {
-    let path = Path::new(&workspace.guest_path);
+) -> crate::VerletResult<()> {
+    let path = std::path::Path::new(&workspace.guest_path);
     if !path.is_absolute() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "workspace guest_path {:?} must be absolute",
             workspace.guest_path
         )));
     }
-    if path == Path::new("/") {
-        return Err(VerletError::RuntimeFactory(
+    if path == std::path::Path::new("/") {
+        return Err(crate::VerletAgentError::RuntimeFactory(
             "workspace guest_path must not be /".to_string(),
         ));
     }
-    if path.starts_with(Path::new("/skills")) {
-        return Err(VerletError::RuntimeFactory(
+    if path.starts_with(std::path::Path::new("/skills")) {
+        return Err(crate::VerletAgentError::RuntimeFactory(
             "workspace guest_path /skills and its descendants are reserved for skill resources"
                 .to_string(),
         ));
     }
-    if path.starts_with(Path::new("/spill")) {
-        return Err(VerletError::RuntimeFactory(
+    if path.starts_with(std::path::Path::new("/spill")) {
+        return Err(crate::VerletAgentError::RuntimeFactory(
             "workspace guest_path /spill and its descendants are reserved for tool output spill"
                 .to_string(),
         ));
     }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-        || path.components().collect::<PathBuf>() != path
+    if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) || path.components().collect::<std::path::PathBuf>() != path
     {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "workspace guest_path {:?} must be normalized",
             workspace.guest_path
         )));
@@ -1674,16 +1713,16 @@ fn validate_workspace_requirement(
 fn validate_skill_discovery(
     skills: &AgentManifestSkills,
     workspace: Option<&AgentManifestWorkspaceRequirement>,
-) -> VerletResult<()> {
-    let path = Path::new(&skills.path);
+) -> crate::VerletResult<()> {
+    let path = std::path::Path::new(&skills.path);
     if skills.path.is_empty() || path.is_absolute() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "agent manifest skills.path {:?} must be a non-empty workspace-relative path",
             skills.path
         )));
     }
     if skills.path.chars().any(char::is_control) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "agent manifest skills.path {:?} must be a workspace-relative path without control characters",
             skills.path
         )));
@@ -1691,16 +1730,18 @@ fn validate_skill_discovery(
     if path.components().any(|component| {
         matches!(
             component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
         )
     }) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "agent manifest skills.path {:?} must not contain `..` and must remain workspace-relative",
             skills.path
         )));
     }
     if skills.discover && workspace.is_none() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletAgentError::RuntimeFactory(
             "agent manifest skills.discover = true requires a workspace requirement ([workspace]) so bind can resolve the discovery scope"
                 .to_string(),
         ));
@@ -1708,25 +1749,25 @@ fn validate_skill_discovery(
     Ok(())
 }
 
-fn validate_context_pipeline(context: &AgentManifestContextPipeline) -> VerletResult<()> {
+fn validate_context_pipeline(context: &AgentManifestContextPipeline) -> crate::VerletResult<()> {
     if context.id != "default" {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "agent manifest context pipeline id must be \"default\", got {:?}",
             context.id
         )));
     }
     if context.sources.is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletAgentError::RuntimeFactory(
             "agent manifest context pipeline requires at least one source".to_string(),
         ));
     }
-    let mut source_ids = BTreeSet::new();
+    let mut source_ids = std::collections::BTreeSet::new();
     let mut rest_count = 0usize;
     let mut fraction_sum = 0.0f64;
     for source in &context.sources {
-        validate_record_name(&source.id)?;
+        verlet_operations::validate_record_name(&source.id)?;
         if !source_ids.insert(source.id.clone()) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "duplicate context source id {:?}",
                 source.id
             )));
@@ -1737,33 +1778,33 @@ fn validate_context_pipeline(context: &AgentManifestContextPipeline) -> VerletRe
                 | KERNEL_ASSEMBLER_RECORD_SELECT
                 | KERNEL_ASSEMBLER_ANCHORED_WINDOW
         ) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "context source {:?} assembler {:?} is not a V1 kernel assembler",
                 source.id, source.assembler
             )));
         }
         if source.assembler == KERNEL_ASSEMBLER_STATIC && source.input.is_none() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "static context source {:?} requires input",
                 source.id
             )));
         }
         match (source.pinned, source.budget_share) {
             (true, Some(_)) => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "pinned context source {:?} must not declare budget_share",
                     source.id
                 )));
             }
             (false, None) => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "context source {:?} must declare budget_share",
                     source.id
                 )));
             }
             (_, Some(AgentManifestBudgetShare::Fraction(value))) => {
                 if !(value > 0.0 && value <= 1.0) {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletAgentError::RuntimeFactory(format!(
                         "context source {:?} budget_share fraction must be in (0, 1]",
                         source.id
                     )));
@@ -1777,46 +1818,48 @@ fn validate_context_pipeline(context: &AgentManifestContextPipeline) -> VerletRe
         }
     }
     if rest_count > 1 {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletAgentError::RuntimeFactory(
             "context pipeline may declare at most one rest budget_share".to_string(),
         ));
     }
     if fraction_sum > 1.0 {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "context budget_share fractions sum to {fraction_sum}, expected <= 1.0"
         )));
     }
     Ok(())
 }
 
-pub fn validate_namespace(value: &str) -> VerletResult<String> {
+pub fn validate_namespace(value: &str) -> crate::VerletResult<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletAgentError::RuntimeFactory(
             "agent namespace cannot be empty".to_string(),
         ));
     }
     for segment in trimmed.split('/') {
-        validate_record_name(segment).map_err(|err| {
-            VerletError::RuntimeFactory(format!("invalid agent namespace segment: {err}"))
+        verlet_operations::validate_record_name(segment).map_err(|err| {
+            crate::VerletAgentError::RuntimeFactory(format!(
+                "invalid agent namespace segment: {err}"
+            ))
         })?;
     }
     Ok(trimmed.to_string())
 }
 
-pub fn validate_version(value: &str) -> VerletResult<()> {
+pub fn validate_version(value: &str) -> crate::VerletResult<()> {
     if value.is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletAgentError::RuntimeFactory(
             "agent version cannot be empty".to_string(),
         ));
     }
     if value.contains('/') || value.contains('\\') {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "agent version {value:?} must not contain path separators"
         )));
     }
     if value.starts_with('.') {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "agent version {value:?} must not start with dot"
         )));
     }
@@ -1824,7 +1867,7 @@ pub fn validate_version(value: &str) -> VerletResult<()> {
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
     {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletAgentError::RuntimeFactory(format!(
             "agent version {value:?} contains unsupported characters"
         )));
     }

@@ -1,30 +1,23 @@
-use std::sync::Arc;
-use tokio::time::{Duration, timeout};
-use verlet::{
-    TenantRegistration, TenantRuntimeContext, ThreadEvent, ThreadStartRequest, ThreadTopology,
-    VerletSupervisor, VirtualBashRuntimeFactory,
-};
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let supervisor = VerletSupervisor::new();
+    let supervisor = verlet::VerletSupervisor::new();
     supervisor
-        .register_tenant(TenantRegistration {
-            context: TenantRuntimeContext::local(
+        .register_tenant(verlet::TenantRegistration {
+            context: verlet::TenantRuntimeContext::local(
                 "tenant-smoke",
                 "/tmp/verlet-vbash-runtime",
                 "/tmp/verlet-vbash-state",
             ),
-            runtime_factory: Arc::new(VirtualBashRuntimeFactory::default()),
+            runtime_factory: std::sync::Arc::new(verlet::VirtualBashRuntimeFactory::default()),
         })
         .await?;
 
     let thread = supervisor
-        .start_thread(ThreadStartRequest {
+        .start_thread(verlet::ThreadStartRequest {
             tenant_id: "tenant-smoke".to_string(),
             user_id: "user-smoke".to_string(),
             session_id: "session-smoke".to_string(),
-            topology: ThreadTopology::root(),
+            topology: verlet::ThreadTopology::root(),
             metadata: Default::default(),
         })
         .await?;
@@ -39,11 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    let output = timeout(Duration::from_secs(30), async {
+    let output = tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             match events.recv().await? {
-                ThreadEvent::Output { text, .. } => break Ok::<_, broadcast_error>(text),
-                ThreadEvent::Failed { message, .. } => {
+                verlet::ThreadEvent::Output { text, .. } => break Ok::<_, broadcast_error>(text),
+                verlet::ThreadEvent::Failed { message, .. } => {
                     break Err(broadcast_error::failed(message));
                 }
                 _ => {}

@@ -1,19 +1,18 @@
-use super::*;
-use crate::daemon::identity::{IdentityMode, PrincipalId};
-
-fn temp_root(name: &str) -> PathBuf {
+fn temp_root(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "verlet-daemon-config-{name}-{}",
         uuid::Uuid::now_v7()
     ))
 }
 
-fn merge_daemon_identity_layers(layers: &[&str]) -> VerletResult<VerletDaemonConfig> {
-    let mut config = VerletDaemonConfig::default();
+fn merge_daemon_identity_layers(
+    layers: &[&str],
+) -> crate::VerletResult<crate::daemon::daemon_config::VerletDaemonConfig> {
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     for text in layers {
-        let presence = daemon_config_presence(text)?;
-        let layer = decode_daemon_config(text)?;
-        merge_daemon_config_layer(&mut config, layer, presence);
+        let presence = crate::daemon::daemon_config::daemon_config_presence(text)?;
+        let layer = crate::daemon::daemon_config::decode_daemon_config(text)?;
+        crate::daemon::daemon_config::merge_daemon_config_layer(&mut config, layer, presence);
     }
     config.validate()?;
     Ok(config)
@@ -28,13 +27,15 @@ fn daemon_identity_presence_tracks_supported_nesting_forms() {
         "identity = {}\n",
     ] {
         assert!(
-            daemon_config_presence(text).unwrap().identity,
+            crate::daemon::daemon_config::daemon_config_presence(text)
+                .unwrap()
+                .identity,
             "identity section should be present in {text:?}"
         );
     }
 
     assert!(
-        !daemon_config_presence("[daemon.runtime]\ncwd = \"work\"\n")
+        !crate::daemon::daemon_config::daemon_config_presence("[daemon.runtime]\ncwd = \"work\"\n")
             .unwrap()
             .identity
     );
@@ -71,7 +72,7 @@ console_principal = "operator-managed"
     .unwrap();
     assert_eq!(
         managed_to_empty_local.identity,
-        synthesized_local_daemon_identity_config()
+        crate::daemon::daemon_config::synthesized_local_daemon_identity_config()
     );
 
     let partial_managed_overlay = merge_daemon_identity_layers(&[
@@ -109,16 +110,21 @@ console_principal = "operator-managed"
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
-    assert_eq!(loaded.config.identity.mode, IdentityMode::Managed);
+    assert_eq!(
+        loaded.config.identity.mode,
+        crate::daemon::identity::IdentityMode::Managed
+    );
     assert_eq!(
         loaded.config.identity.tenant_id.as_deref(),
         Some("tenant-managed")
     );
     assert_eq!(
         loaded.config.identity.console_principal,
-        Some(PrincipalId::new("operator-managed"))
+        Some(crate::daemon::identity::PrincipalId::new(
+            "operator-managed"
+        ))
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -139,7 +145,7 @@ console_principal = "operator-managed"
     )
     .unwrap();
 
-    let error = load_verlet_daemon_config(Some(&path)).unwrap_err();
+    let error = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap_err();
 
     assert!(
         error
@@ -166,7 +172,7 @@ console_principal = "operator-managed"
     )
     .unwrap();
 
-    let error = load_verlet_daemon_config(Some(&path)).unwrap_err();
+    let error = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap_err();
 
     assert!(
         error
@@ -193,7 +199,7 @@ console_principal = "operator-managed"
 "#,
     )
     .unwrap();
-    let error = load_verlet_daemon_config(Some(&path)).unwrap_err();
+    let error = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap_err();
     assert!(error.to_string().contains(
         "managed mode requires [daemon.identity] tenant_id; see docs/adr/0008-identity-plane-v0.md D5"
     ));
@@ -207,7 +213,7 @@ tenant_id = "tenant-managed"
 "#,
     )
     .unwrap();
-    let error = load_verlet_daemon_config(Some(&path)).unwrap_err();
+    let error = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap_err();
     assert!(error.to_string().contains(
         "managed mode requires [daemon.identity] console_principal; see docs/adr/0008-identity-plane-v0.md D5"
     ));
@@ -241,7 +247,11 @@ console_principal = "operator-overlay"
     )
     .unwrap();
 
-    let error = load_verlet_daemon_config_layers(&[base, overlay], root.clone()).unwrap_err();
+    let error = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
+        &[base, overlay],
+        root.clone(),
+    )
+    .unwrap_err();
 
     assert!(
         error
@@ -259,11 +269,11 @@ fn local_daemon_identity_without_section_synthesizes_current_defaults() {
     let path = root.join("verlet.toml");
     std::fs::write(&path, "[daemon.runtime]\ncwd = \"work\"\n").unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
     assert_eq!(
         loaded.config.identity,
-        synthesized_local_daemon_identity_config()
+        crate::daemon::daemon_config::synthesized_local_daemon_identity_config()
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -305,9 +315,11 @@ console_principal = "operator-overlay"
     )
     .unwrap();
 
-    let without_identity_overlay =
-        load_verlet_daemon_config_layers(&[base.clone(), unrelated_overlay.clone()], root.clone())
-            .unwrap();
+    let without_identity_overlay = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
+        &[base.clone(), unrelated_overlay.clone()],
+        root.clone(),
+    )
+    .unwrap();
     assert_eq!(
         without_identity_overlay
             .config
@@ -318,17 +330,17 @@ console_principal = "operator-overlay"
     );
     assert_eq!(
         without_identity_overlay.config.identity.console_principal,
-        Some(PrincipalId::new("operator-base"))
+        Some(crate::daemon::identity::PrincipalId::new("operator-base"))
     );
 
-    let with_identity_overlay = load_verlet_daemon_config_layers(
+    let with_identity_overlay = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
         &[base, unrelated_overlay, identity_overlay],
         root.clone(),
     )
     .unwrap();
     assert_eq!(
         with_identity_overlay.config.identity.mode,
-        IdentityMode::Managed
+        crate::daemon::identity::IdentityMode::Managed
     );
     assert_eq!(
         with_identity_overlay.config.identity.tenant_id.as_deref(),
@@ -336,7 +348,9 @@ console_principal = "operator-overlay"
     );
     assert_eq!(
         with_identity_overlay.config.identity.console_principal,
-        Some(PrincipalId::new("operator-overlay"))
+        Some(crate::daemon::identity::PrincipalId::new(
+            "operator-overlay"
+        ))
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -387,7 +401,7 @@ agent_ref = "agent://karl-dev@latest"
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
     assert_eq!(loaded.path.as_deref(), Some(path.as_path()));
     assert_eq!(loaded.config.runtime.cwd, Some(root.join("work")));
@@ -404,15 +418,15 @@ agent_ref = "agent://karl-dev@latest"
     assert_eq!(placement.config["region"], serde_json::json!("us-west"));
     assert_eq!(
         loaded.config.runtime.workspace,
-        Some(AgentManifestWorkspaceBinding {
+        Some(crate::AgentManifestWorkspaceBinding {
             host_path: root.join("host-workspace"),
-            mode: AgentManifestWorkspaceMode::ReadWrite,
+            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
         })
     );
     assert_eq!(loaded.config.provider.env_file, Some(root.join(".env")));
     assert_eq!(
         loaded.config.io.ingress.persistence.mode,
-        IngressPersistenceMode::BestEffortDirect
+        verlet_io_core::IngressPersistenceMode::BestEffortDirect
     );
     assert_eq!(loaded.config.io.routes[0].id, "chat-tui");
     assert_eq!(
@@ -444,7 +458,7 @@ egress_retry = { max_attempts = 7, base_backoff_ms = 250 }
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
     let route = &loaded.config.io.routes[0];
 
     assert_eq!(route.egress_projection.len(), 2);
@@ -464,26 +478,31 @@ egress_retry = { max_attempts = 7, base_backoff_ms = 250 }
 
 #[test]
 fn invalid_egress_projection_regex_reports_rule_index() {
-    let mut config = VerletDaemonConfig::default();
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "telegram-main".to_string(),
-        kind: "websocket.tui".to_string(),
-        enabled: true,
-        policy: None,
-        content_policies: None,
-        threading: None,
-        agent_ref: None,
-        coalesce_bursts: None,
-        ingress: None,
-        egress_projection: vec![VerletEgressProjectionRuleConfig {
-            pattern: "[bad".to_string(),
-            action: "sticker".to_string(),
-        }],
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: None,
-        metadata: BTreeMap::new(),
-    });
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "telegram-main".to_string(),
+            kind: "websocket.tui".to_string(),
+            enabled: true,
+            policy: None,
+            content_policies: None,
+            threading: None,
+            agent_ref: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: vec![
+                crate::daemon::daemon_config::VerletEgressProjectionRuleConfig {
+                    pattern: "[bad".to_string(),
+                    action: "sticker".to_string(),
+                },
+            ],
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let errors = config.validation_errors();
 
@@ -496,23 +515,26 @@ fn invalid_egress_projection_regex_reports_rule_index() {
 
 #[test]
 fn validates_route_agent_ref_syntax() {
-    let mut config = VerletDaemonConfig::default();
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "telegram-main".to_string(),
-        kind: "websocket.tui".to_string(),
-        enabled: true,
-        policy: None,
-        content_policies: None,
-        threading: None,
-        agent_ref: Some("karl-dev".to_string()),
-        coalesce_bursts: None,
-        ingress: None,
-        egress_projection: Vec::new(),
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: None,
-        metadata: BTreeMap::new(),
-    });
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "telegram-main".to_string(),
+            kind: "websocket.tui".to_string(),
+            enabled: true,
+            policy: None,
+            content_policies: None,
+            threading: None,
+            agent_ref: Some("karl-dev".to_string()),
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let errors = config.validation_errors();
 
@@ -525,26 +547,29 @@ fn validates_route_agent_ref_syntax() {
 
 #[test]
 fn validates_coalesce_bursts_route_config() {
-    let mut config = VerletDaemonConfig::default();
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "coalesce-main".to_string(),
-        kind: "websocket.tui".to_string(),
-        enabled: true,
-        policy: Some("steer_when_active".to_string()),
-        content_policies: None,
-        threading: None,
-        agent_ref: None,
-        coalesce_bursts: Some(VerletCoalesceBurstsConfig {
-            window_ms: 0,
-            max_batch: 0,
-        }),
-        ingress: None,
-        egress_projection: Vec::new(),
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: None,
-        metadata: BTreeMap::new(),
-    });
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "coalesce-main".to_string(),
+            kind: "websocket.tui".to_string(),
+            enabled: true,
+            policy: Some("steer_when_active".to_string()),
+            content_policies: None,
+            threading: None,
+            agent_ref: None,
+            coalesce_bursts: Some(crate::daemon::daemon_config::VerletCoalesceBurstsConfig {
+                window_ms: 0,
+                max_batch: 0,
+            }),
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let errors = config.validation_errors();
 
@@ -571,7 +596,7 @@ agents = "{}"
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
     assert_eq!(
         loaded.config.registries.operations,
@@ -584,7 +609,7 @@ agents = "{}"
     loaded.config.validate().unwrap();
 
     let encoded = toml::to_string(&loaded.config).unwrap();
-    let decoded = decode_daemon_config(&encoded).unwrap();
+    let decoded = crate::daemon::daemon_config::decode_daemon_config(&encoded).unwrap();
     assert_eq!(decoded.registries, loaded.config.registries);
 
     let _ = std::fs::remove_dir_all(root);
@@ -598,7 +623,7 @@ fn discovers_project_root_from_nearest_config_then_dot_verlet() {
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::create_dir_all(workspace.join(".verlet")).unwrap();
 
-    let discovered = discover_verlet_project(&nested).unwrap();
+    let discovered = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
     assert_eq!(discovered.root, workspace);
     assert_eq!(discovered.config_path, None);
 
@@ -607,7 +632,8 @@ fn discovers_project_root_from_nearest_config_then_dot_verlet() {
     std::fs::create_dir_all(&configured_nested).unwrap();
     std::fs::write(configured.join("verlet.toml"), "").unwrap();
 
-    let discovered = discover_verlet_project(&configured_nested).unwrap();
+    let discovered =
+        crate::daemon::daemon_config::discover_verlet_project(&configured_nested).unwrap();
     assert_eq!(discovered.root, configured);
     assert_eq!(
         discovered.config_path,
@@ -628,8 +654,10 @@ fn project_discovery_prefers_new_config_then_falls_back_to_legacy_config() {
 
     let mut warnings = Vec::new();
     let legacy_only =
-        discover_verlet_project_with_warning(&nested, |warning| warnings.push(warning.to_string()))
-            .unwrap();
+        crate::daemon::daemon_config::discover_verlet_project_with_warning(&nested, |warning| {
+            warnings.push(warning.to_string())
+        })
+        .unwrap();
     assert_eq!(legacy_only.config_path.as_deref(), Some(legacy.as_path()));
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains(legacy.to_string_lossy().as_ref()));
@@ -637,8 +665,10 @@ fn project_discovery_prefers_new_config_then_falls_back_to_legacy_config() {
     std::fs::write(&canonical, "").unwrap();
     warnings.clear();
     let both =
-        discover_verlet_project_with_warning(&nested, |warning| warnings.push(warning.to_string()))
-            .unwrap();
+        crate::daemon::daemon_config::discover_verlet_project_with_warning(&nested, |warning| {
+            warnings.push(warning.to_string())
+        })
+        .unwrap();
     assert_eq!(both.config_path.as_deref(), Some(canonical.as_path()));
     assert!(warnings.is_empty());
 
@@ -658,8 +688,10 @@ fn project_discovery_nearest_legacy_config_beats_ancestor_canonical_config() {
 
     let mut warnings = Vec::new();
     let discovered =
-        discover_verlet_project_with_warning(&nested, |warning| warnings.push(warning.to_string()))
-            .unwrap();
+        crate::daemon::daemon_config::discover_verlet_project_with_warning(&nested, |warning| {
+            warnings.push(warning.to_string())
+        })
+        .unwrap();
 
     assert_eq!(discovered.root, project);
     assert_eq!(
@@ -684,8 +716,10 @@ fn project_discovery_nearest_legacy_state_dir_beats_ancestor_canonical_state_dir
 
     let mut warnings = Vec::new();
     let discovered =
-        discover_verlet_project_with_warning(&nested, |warning| warnings.push(warning.to_string()))
-            .unwrap();
+        crate::daemon::daemon_config::discover_verlet_project_with_warning(&nested, |warning| {
+            warnings.push(warning.to_string())
+        })
+        .unwrap();
 
     assert_eq!(discovered.root, project);
     assert_eq!(discovered.config_path, None);
@@ -752,7 +786,7 @@ stream = true
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config_layers(
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
         &[
             user_config.clone(),
             project_config.clone(),
@@ -776,7 +810,7 @@ stream = true
     );
     assert_eq!(
         loaded.config.runtime.placement,
-        Some(AgentManifestPlacementBinding::default())
+        Some(crate::AgentManifestPlacementBinding::default())
     );
     assert_eq!(
         loaded.config.registries.agents,
@@ -822,15 +856,18 @@ cwd = "workspace"
     )
     .unwrap();
 
-    let loaded =
-        load_verlet_daemon_config_layers(&[lower_config, higher_config], root.clone()).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
+        &[lower_config, higher_config],
+        root.clone(),
+    )
+    .unwrap();
 
     assert_eq!(
         loaded.config.runtime.placement,
-        Some(AgentManifestPlacementBinding {
+        Some(crate::AgentManifestPlacementBinding {
             target: crate::PlacementTarget::Sandbox,
             executor_ref: None,
-            config: BTreeMap::new(),
+            config: std::collections::BTreeMap::new(),
         })
     );
     assert_eq!(
@@ -869,14 +906,17 @@ mode = "rw"
     )
     .unwrap();
 
-    let loaded =
-        load_verlet_daemon_config_layers(&[lower_config, higher_config], root.clone()).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
+        &[lower_config, higher_config],
+        root.clone(),
+    )
+    .unwrap();
 
     assert_eq!(
         loaded.config.runtime.workspace,
-        Some(AgentManifestWorkspaceBinding {
+        Some(crate::AgentManifestWorkspaceBinding {
             host_path: higher_root.join("writable"),
-            mode: AgentManifestWorkspaceMode::ReadWrite,
+            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
         })
     );
     let _ = std::fs::remove_dir_all(root);
@@ -897,7 +937,7 @@ load_all_active_when_unbound = true
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
     assert_eq!(
         loaded.config.operations.global_operation_names,
@@ -906,7 +946,7 @@ load_all_active_when_unbound = true
     assert!(loaded.config.operations.load_all_active_when_unbound);
 
     let encoded = toml::to_string(&loaded.config).unwrap();
-    let decoded = decode_daemon_config(&encoded).unwrap();
+    let decoded = crate::daemon::daemon_config::decode_daemon_config(&encoded).unwrap();
     assert_eq!(decoded.operations, loaded.config.operations);
 
     let _ = std::fs::remove_dir_all(root);
@@ -936,7 +976,11 @@ lease_ttl_secs = 90
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config_layers(&[base, overlay], root.clone()).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
+        &[base, overlay],
+        root.clone(),
+    )
+    .unwrap();
     assert_eq!(
         loaded.config.sync.listen.as_deref(),
         Some("ws://127.0.0.1:0")
@@ -969,7 +1013,7 @@ sqlite_path = "queue.sqlite"
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
     assert_eq!(
         loaded.config.app_server.listen,
@@ -989,32 +1033,40 @@ sqlite_path = "queue.sqlite"
 
 #[test]
 fn default_daemon_socket_prefers_user_runtime_directory() {
-    let path = default_daemon_socket_path_from_env(|key| match key {
-        "XDG_RUNTIME_DIR" => Some(OsString::from("/run/user/501")),
-        "HOME" => Some(OsString::from("/Users/me")),
+    let path = crate::daemon::daemon_config::default_daemon_socket_path_from_env(|key| match key {
+        "XDG_RUNTIME_DIR" => Some(std::ffi::OsString::from("/run/user/501")),
+        "HOME" => Some(std::ffi::OsString::from("/Users/me")),
         _ => None,
     });
 
-    assert_eq!(path, PathBuf::from("/run/user/501/verlet/verlet.sock"));
-    assert_ne!(unix_listen_url(path), "unix:///tmp/verlet.sock");
+    assert_eq!(
+        path,
+        std::path::PathBuf::from("/run/user/501/verlet/verlet.sock")
+    );
+    assert_ne!(
+        crate::daemon::daemon_config::unix_listen_url(path),
+        "unix:///tmp/verlet.sock"
+    );
 }
 
 #[test]
 fn default_daemon_socket_uses_user_state_when_runtime_dir_is_absent() {
-    let path = default_daemon_socket_path_from_env(|key| match key {
-        "HOME" => Some(OsString::from("/Users/me")),
+    let path = crate::daemon::daemon_config::default_daemon_socket_path_from_env(|key| match key {
+        "HOME" => Some(std::ffi::OsString::from("/Users/me")),
         _ => None,
     });
 
     if cfg!(target_os = "macos") {
         assert_eq!(
             path,
-            PathBuf::from("/Users/me/Library/Application Support/verlet/run/verlet.sock")
+            std::path::PathBuf::from(
+                "/Users/me/Library/Application Support/verlet/run/verlet.sock"
+            )
         );
     } else {
         assert_eq!(
             path,
-            PathBuf::from("/Users/me/.local/state/verlet/run/verlet.sock")
+            std::path::PathBuf::from("/Users/me/.local/state/verlet/run/verlet.sock")
         );
     }
 }
@@ -1025,7 +1077,7 @@ fn default_daemon_socket_reuses_existing_legacy_runtime_directory() {
     let legacy_dir = root.join(concat!("cool", "dis"));
     std::fs::create_dir_all(&legacy_dir).unwrap();
 
-    let path = default_daemon_socket_path_from_env(|key| match key {
+    let path = crate::daemon::daemon_config::default_daemon_socket_path_from_env(|key| match key {
         "XDG_RUNTIME_DIR" => Some(root.as_os_str().to_os_string()),
         _ => None,
     });
@@ -1048,7 +1100,7 @@ listen = "unix://run/verlet.sock"
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
     assert_eq!(
         loaded.config.app_server.listen,
@@ -1071,7 +1123,7 @@ listen = "unix://run/sync.sock"
     )
     .unwrap();
 
-    let loaded = load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
     assert_eq!(
         loaded.config.sync.listen,
@@ -1082,26 +1134,29 @@ listen = "unix://run/sync.sock"
 
 #[test]
 fn validates_bad_queue_and_route_config() {
-    let mut config = VerletDaemonConfig::default();
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     config.app_server.listen = "tcp://127.0.0.1:9999".to_string();
     config.io.ingress.queue.dsn = Some("postgres://db".to_string());
-    config.io.ingress.queue.sqlite_path = Some(PathBuf::from("queue.sqlite"));
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "".to_string(),
-        kind: "".to_string(),
-        enabled: true,
-        policy: None,
-        content_policies: None,
-        threading: None,
-        agent_ref: None,
-        coalesce_bursts: None,
-        ingress: None,
-        egress_projection: Vec::new(),
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: None,
-        metadata: BTreeMap::new(),
-    });
+    config.io.ingress.queue.sqlite_path = Some(std::path::PathBuf::from("queue.sqlite"));
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "".to_string(),
+            kind: "".to_string(),
+            enabled: true,
+            policy: None,
+            content_policies: None,
+            threading: None,
+            agent_ref: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let errors = config.validation_errors();
 
@@ -1124,19 +1179,25 @@ fn validates_bad_queue_and_route_config() {
 
 #[test]
 fn renders_launchd_and_systemd_services() {
-    let spec = VerletDaemonServiceSpec::new(
-        PathBuf::from("/usr/local/bin/verlet"),
-        PathBuf::from("/Users/me/verlet.toml"),
+    let spec = crate::daemon::daemon_config::VerletDaemonServiceSpec::new(
+        std::path::PathBuf::from("/usr/local/bin/verlet"),
+        std::path::PathBuf::from("/Users/me/verlet.toml"),
     )
     .with_label("com.example.verlet")
     .with_working_directory("/Users/me/project");
 
-    let launchd = render_verlet_daemon_service(VerletDaemonServiceTarget::Launchd, &spec);
+    let launchd = crate::daemon::daemon_config::render_verlet_daemon_service(
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Launchd,
+        &spec,
+    );
     assert!(launchd.contains("<string>com.example.verlet</string>"));
     assert!(launchd.contains("<string>daemon</string>"));
     assert!(launchd.contains("<string>--config</string>"));
 
-    let systemd = render_verlet_daemon_service(VerletDaemonServiceTarget::Systemd, &spec);
+    let systemd = crate::daemon::daemon_config::render_verlet_daemon_service(
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Systemd,
+        &spec,
+    );
     assert!(
         systemd
             .contains("ExecStart=/usr/local/bin/verlet daemon run --config /Users/me/verlet.toml")
@@ -1146,21 +1207,21 @@ fn renders_launchd_and_systemd_services() {
 
 #[test]
 fn service_install_paths_are_user_scoped() {
-    let home = PathBuf::from("/Users/me");
+    let home = std::path::PathBuf::from("/Users/me");
 
-    let launchd = verlet_daemon_service_install_path_for_home(
-        VerletDaemonServiceTarget::Launchd,
+    let launchd = crate::daemon::daemon_config::verlet_daemon_service_install_path_for_home(
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Launchd,
         "com.example.verlet",
         &home,
     )
     .unwrap();
     assert_eq!(
         launchd,
-        PathBuf::from("/Users/me/Library/LaunchAgents/com.example.verlet.plist")
+        std::path::PathBuf::from("/Users/me/Library/LaunchAgents/com.example.verlet.plist")
     );
 
-    let systemd = verlet_daemon_service_install_path_for_home(
-        VerletDaemonServiceTarget::Systemd,
+    let systemd = crate::daemon::daemon_config::verlet_daemon_service_install_path_for_home(
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Systemd,
         "verlet",
         &home,
     )
@@ -1170,38 +1231,44 @@ fn service_install_paths_are_user_scoped() {
 
 #[test]
 fn service_labels_reject_paths() {
-    let err =
-        verlet_daemon_service_file_name(VerletDaemonServiceTarget::Launchd, "../bad").unwrap_err();
+    let err = crate::daemon::daemon_config::verlet_daemon_service_file_name(
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Launchd,
+        "../bad",
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("service label"));
 }
 
 #[test]
 fn validates_telegram_route_shape() {
-    let mut config = VerletDaemonConfig::default();
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "telegram-main".to_string(),
-        kind: "telegram.bot".to_string(),
-        enabled: true,
-        policy: None,
-        content_policies: None,
-        threading: None,
-        agent_ref: None,
-        coalesce_bursts: None,
-        ingress: None,
-        egress_projection: Vec::new(),
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: Some(VerletTelegramRouteConfig {
-            listen: Some("127.0.0.1:9000".to_string()),
-            path: "telegram".to_string(),
-            secret_token: Some("secret".to_string()),
-            secret_token_env: None,
-            bot_token: None,
-            bot_token_env: None,
-            api_base: None,
-        }),
-        metadata: BTreeMap::new(),
-    });
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "telegram-main".to_string(),
+            kind: "telegram.bot".to_string(),
+            enabled: true,
+            policy: None,
+            content_policies: None,
+            threading: None,
+            agent_ref: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: Some(crate::daemon::daemon_config::VerletTelegramRouteConfig {
+                listen: Some("127.0.0.1:9000".to_string()),
+                path: "telegram".to_string(),
+                secret_token: Some("secret".to_string()),
+                secret_token_env: None,
+                bot_token: None,
+                bot_token_env: None,
+                api_base: None,
+            }),
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let errors = config.validation_errors();
     assert!(errors.iter().any(|error| error.contains("path")));
@@ -1209,31 +1276,34 @@ fn validates_telegram_route_shape() {
 
 #[test]
 fn enabled_telegram_route_requires_webhook_secret() {
-    let mut config = VerletDaemonConfig::default();
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "telegram-main".to_string(),
-        kind: "telegram.bot".to_string(),
-        enabled: true,
-        policy: None,
-        content_policies: None,
-        threading: None,
-        agent_ref: None,
-        coalesce_bursts: None,
-        ingress: None,
-        egress_projection: Vec::new(),
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: Some(VerletTelegramRouteConfig {
-            listen: Some("127.0.0.1:9000".to_string()),
-            path: "/telegram".to_string(),
-            secret_token: None,
-            secret_token_env: None,
-            bot_token: None,
-            bot_token_env: None,
-            api_base: None,
-        }),
-        metadata: BTreeMap::new(),
-    });
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "telegram-main".to_string(),
+            kind: "telegram.bot".to_string(),
+            enabled: true,
+            policy: None,
+            content_policies: None,
+            threading: None,
+            agent_ref: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: Some(crate::daemon::daemon_config::VerletTelegramRouteConfig {
+                listen: Some("127.0.0.1:9000".to_string()),
+                path: "/telegram".to_string(),
+                secret_token: None,
+                secret_token_env: None,
+                bot_token: None,
+                bot_token_env: None,
+                api_base: None,
+            }),
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let err = config.validate().unwrap_err().to_string();
     assert!(err.contains("io.routes.telegram-main.telegram"));
@@ -1245,26 +1315,29 @@ fn enabled_telegram_route_requires_webhook_secret() {
 
 #[test]
 fn invalid_content_policy_names_field() {
-    let mut config = VerletDaemonConfig::default();
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "telegram-main".to_string(),
-        kind: "telegram.bot".to_string(),
-        enabled: false,
-        policy: None,
-        content_policies: Some(BTreeMap::from([(
-            "external.event".to_string(),
-            "wake_everything".to_string(),
-        )])),
-        agent_ref: None,
-        threading: None,
-        coalesce_bursts: None,
-        ingress: None,
-        egress_projection: Vec::new(),
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: None,
-        metadata: BTreeMap::new(),
-    });
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "telegram-main".to_string(),
+            kind: "telegram.bot".to_string(),
+            enabled: false,
+            policy: None,
+            content_policies: Some(std::collections::BTreeMap::from([(
+                "external.event".to_string(),
+                "wake_everything".to_string(),
+            )])),
+            agent_ref: None,
+            threading: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let errors = config.validation_errors();
 
@@ -1276,26 +1349,29 @@ fn invalid_content_policy_names_field() {
 
 #[test]
 fn valid_content_policies_are_route_kind_lenient() {
-    let mut config = VerletDaemonConfig::default();
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "tui-main".to_string(),
-        kind: "websocket.tui".to_string(),
-        enabled: true,
-        policy: Some("queue_per_conversation".to_string()),
-        content_policies: Some(BTreeMap::from([(
-            "external.event".to_string(),
-            "observe_only".to_string(),
-        )])),
-        agent_ref: None,
-        threading: None,
-        coalesce_bursts: None,
-        ingress: None,
-        egress_projection: Vec::new(),
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: None,
-        metadata: BTreeMap::new(),
-    });
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "tui-main".to_string(),
+            kind: "websocket.tui".to_string(),
+            enabled: true,
+            policy: Some("queue_per_conversation".to_string()),
+            content_policies: Some(std::collections::BTreeMap::from([(
+                "external.event".to_string(),
+                "observe_only".to_string(),
+            )])),
+            agent_ref: None,
+            threading: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let errors = config.validation_errors();
 
@@ -1309,26 +1385,29 @@ fn valid_content_policies_are_route_kind_lenient() {
 
 #[test]
 fn content_policy_coalesce_requires_coalesce_config() {
-    let mut config = VerletDaemonConfig::default();
-    config.io.routes.push(VerletIoRouteConfig {
-        id: "event-main".to_string(),
-        kind: "websocket.tui".to_string(),
-        enabled: true,
-        policy: None,
-        content_policies: Some(BTreeMap::from([(
-            "external.event".to_string(),
-            "coalesce_bursts".to_string(),
-        )])),
-        agent_ref: None,
-        threading: None,
-        coalesce_bursts: None,
-        ingress: None,
-        egress_projection: Vec::new(),
-        typing_simulation: None,
-        egress_retry: VerletEgressRetryConfig::default(),
-        telegram: None,
-        metadata: BTreeMap::new(),
-    });
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    config
+        .io
+        .routes
+        .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+            id: "event-main".to_string(),
+            kind: "websocket.tui".to_string(),
+            enabled: true,
+            policy: None,
+            content_policies: Some(std::collections::BTreeMap::from([(
+                "external.event".to_string(),
+                "coalesce_bursts".to_string(),
+            )])),
+            agent_ref: None,
+            threading: None,
+            coalesce_bursts: None,
+            ingress: None,
+            egress_projection: Vec::new(),
+            typing_simulation: None,
+            egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+            telegram: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
     let errors = config.validation_errors();
 
@@ -1340,24 +1419,27 @@ fn content_policy_coalesce_requires_coalesce_config() {
 
 #[test]
 fn validates_single_clock_tick_route() {
-    let mut config = VerletDaemonConfig::default();
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     for id in ["clock-main", "clock-backup"] {
-        config.io.routes.push(VerletIoRouteConfig {
-            id: id.to_string(),
-            kind: "clock.tick".to_string(),
-            enabled: true,
-            policy: None,
-            content_policies: None,
-            threading: None,
-            agent_ref: None,
-            coalesce_bursts: None,
-            ingress: None,
-            egress_projection: Vec::new(),
-            typing_simulation: None,
-            egress_retry: VerletEgressRetryConfig::default(),
-            telegram: None,
-            metadata: BTreeMap::new(),
-        });
+        config
+            .io
+            .routes
+            .push(crate::daemon::daemon_config::VerletIoRouteConfig {
+                id: id.to_string(),
+                kind: "clock.tick".to_string(),
+                enabled: true,
+                policy: None,
+                content_policies: None,
+                threading: None,
+                agent_ref: None,
+                coalesce_bursts: None,
+                ingress: None,
+                egress_projection: Vec::new(),
+                typing_simulation: None,
+                egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+                telegram: None,
+                metadata: std::collections::BTreeMap::new(),
+            });
     }
 
     let errors = config.validation_errors();

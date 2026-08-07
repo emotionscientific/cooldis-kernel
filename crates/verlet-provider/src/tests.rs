@@ -1,17 +1,16 @@
-use super::*;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::oneshot;
-use tokio::time::Duration;
-use verlet_history::{CacheControl, ThinkingMetadata, ThinkingProvider};
+use crate::ProviderClient as _;
+use crate::ProviderWireAdapter as _;
+use base64::Engine as _;
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
-fn base_request(api: ProviderApi) -> ProviderRequest {
-    let mut request = ProviderRequest::new(api, "provider", "model-test");
-    request.system = vec![SystemBlock::text("base")];
-    request.tools = vec![ToolDefinition::new(
+fn base_request(api: verlet_history::ProviderApi) -> crate::ProviderRequest {
+    let mut request = crate::ProviderRequest::new(api, "provider", "model-test");
+    request.system = vec![crate::SystemBlock::text("base")];
+    request.tools = vec![crate::ToolDefinition::new(
         "bash",
         "run command",
-        json!({"type":"object","properties":{"command":{"type":"string"}}}),
+        serde_json::json!({"type":"object","properties":{"command":{"type":"string"}}}),
     )];
     request
 }
@@ -19,28 +18,32 @@ fn base_request(api: ProviderApi) -> ProviderRequest {
 #[test]
 fn provider_endpoint_openai_helpers_accept_root_or_v1_base_urls() {
     assert_eq!(
-        ProviderEndpoint::openai_responses("https://api.example.test", "token").url,
+        crate::ProviderEndpoint::openai_responses("https://api.example.test", "token").url,
         "https://api.example.test/v1/responses"
     );
     assert_eq!(
-        ProviderEndpoint::openai_responses("https://api.example.test/v1", "token").url,
+        crate::ProviderEndpoint::openai_responses("https://api.example.test/v1", "token").url,
         "https://api.example.test/v1/responses"
     );
     assert_eq!(
-        ProviderEndpoint::openai_chat_completions("https://api.example.invalid/v1", "token").url,
+        crate::ProviderEndpoint::openai_chat_completions("https://api.example.invalid/v1", "token")
+            .url,
         "https://api.example.invalid/v1/chat/completions"
     );
     assert_eq!(
-        ProviderEndpoint::anthropic_messages("https://api.anthropic.com", "token").url,
+        crate::ProviderEndpoint::anthropic_messages("https://api.anthropic.com", "token").url,
         "https://api.anthropic.com/v1/messages"
     );
     assert_eq!(
-        ProviderEndpoint::anthropic_messages("https://proxy.example.test/anthropic/v1", "token")
-            .url,
+        crate::ProviderEndpoint::anthropic_messages(
+            "https://proxy.example.test/anthropic/v1",
+            "token"
+        )
+        .url,
         "https://proxy.example.test/anthropic/v1/messages"
     );
     assert_eq!(
-        ProviderEndpoint::anthropic_bedrock(
+        crate::ProviderEndpoint::anthropic_bedrock(
             "us-east-1",
             "anthropic.claude-sonnet-4-5-20250929-v1:0",
             "akid",
@@ -54,7 +57,7 @@ fn provider_endpoint_openai_helpers_accept_root_or_v1_base_urls() {
 
 #[test]
 fn aws_sigv4_canonical_uri_double_encodes_escaped_model_suffix() {
-    let endpoint = ProviderEndpoint::anthropic_bedrock(
+    let endpoint = crate::ProviderEndpoint::anthropic_bedrock(
         "us-east-1",
         "anthropic.claude-sonnet-4-5-20250929-v1:0",
         "akid",
@@ -64,14 +67,14 @@ fn aws_sigv4_canonical_uri_double_encodes_escaped_model_suffix() {
     let url = reqwest::Url::parse(&endpoint.url).unwrap();
 
     assert_eq!(
-        canonical_uri(&url),
+        crate::canonical_uri(&url),
         "/model/anthropic.claude-sonnet-4-5-20250929-v1%253A0/invoke"
     );
 }
 
 #[test]
 fn provider_capabilities_are_explicit_and_queryable() {
-    let responses = OpenAIResponsesAdapter::default().capabilities();
+    let responses = crate::OpenAIResponsesAdapter::default().capabilities();
     assert!(responses.supports_tools);
     assert!(responses.supports_streaming);
     assert!(responses.supports_reasoning);
@@ -80,69 +83,72 @@ fn provider_capabilities_are_explicit_and_queryable() {
     assert!(
         responses
             .supported_abi_projections
-            .contains(&ProviderAbiProjection::LlmTool)
+            .contains(&crate::ProviderAbiProjection::LlmTool)
     );
 
-    let chat = OpenAIChatCompletionsAdapter.capabilities();
+    let chat = crate::OpenAIChatCompletionsAdapter.capabilities();
     assert!(chat.supports_tools);
     assert!(chat.supports_streaming);
     assert!(chat.supports_reasoning);
     assert!(!chat.supports_images);
 
-    let anthropic = AnthropicMessagesAdapter.capabilities();
+    let anthropic = crate::AnthropicMessagesAdapter.capabilities();
     assert!(anthropic.supports_cache_control);
     assert!(anthropic.supports_reasoning);
     assert!(anthropic.supports_images);
 
-    let bedrock = AnthropicBedrockMessagesAdapter.capabilities();
+    let bedrock = crate::AnthropicBedrockMessagesAdapter.capabilities();
     assert!(bedrock.supports_cache_control);
     assert!(bedrock.supports_reasoning);
     assert!(bedrock.supports_images);
     assert!(bedrock.supports_streaming);
 
-    let local = LocalOfflineProviderClient::new("local_offline", "echo")
+    let local = crate::LocalOfflineProviderClient::new("local_offline", "echo")
         .capabilities()
         .unwrap();
-    assert_eq!(local.api, ProviderApi::Other("local_offline".to_string()));
+    assert_eq!(
+        local.api,
+        verlet_history::ProviderApi::Other("local_offline".to_string())
+    );
     assert_eq!(
         local.supported_abi_projections,
-        BTreeSet::from([ProviderAbiProjection::Text])
+        std::collections::BTreeSet::from([crate::ProviderAbiProjection::Text])
     );
     assert!(!local.supports_tools);
 }
 
 #[test]
 fn openai_responses_budget_thinking_fails_closed() {
-    let mut request = base_request(ProviderApi::OpenAIResponses);
-    request.thinking = Some(ThinkingConfig::Budget {
+    let mut request = base_request(verlet_history::ProviderApi::OpenAIResponses);
+    request.thinking = Some(crate::ThinkingConfig::Budget {
         budget_tokens: 1024,
     });
     for body in [
-        OpenAIResponsesAdapter::default().build_request_body(&request),
-        OpenAIResponsesAdapter::default().build_stream_request_body(&request),
+        crate::OpenAIResponsesAdapter::default().build_request_body(&request),
+        crate::OpenAIResponsesAdapter::default().build_stream_request_body(&request),
     ] {
         assert!(matches!(
             body.unwrap_err(),
-            ProviderError::UnsupportedCapability {
+            crate::ProviderError::UnsupportedCapability {
                 capability: "thinking_budget",
                 ..
             }
         ));
     }
 
-    request.thinking = Some(ThinkingConfig::Effort {
-        effort: ThinkingEffort::High,
+    request.thinking = Some(crate::ThinkingConfig::Effort {
+        effort: crate::ThinkingEffort::High,
     });
-    let body = OpenAIResponsesAdapter::default()
+    let body = crate::OpenAIResponsesAdapter::default()
         .build_request_body(&request)
         .unwrap();
     assert_eq!(
         body["reasoning"]["effort"],
-        json!(ThinkingEffort::High.as_openai_wire())
+        serde_json::json!(crate::ThinkingEffort::High.as_openai_wire())
     );
 
     request.thinking = None;
-    let body = OpenAIResponsesAdapter::default()
+    let body = crate::OpenAIResponsesAdapter::default()
         .build_request_body(&request)
         .unwrap();
     assert!(body.get("reasoning").is_none());
@@ -150,33 +156,33 @@ fn openai_responses_budget_thinking_fails_closed() {
 
 #[test]
 fn unsupported_provider_capabilities_fail_closed() {
-    let mut cached = base_request(ProviderApi::OpenAIResponses);
-    cached.system = vec![SystemBlock::cached("base")];
-    let err = OpenAIResponsesAdapter::default()
+    let mut cached = base_request(verlet_history::ProviderApi::OpenAIResponses);
+    cached.system = vec![crate::SystemBlock::cached("base")];
+    let err = crate::OpenAIResponsesAdapter::default()
         .build_request_body(&cached)
         .unwrap_err();
     assert!(matches!(
         err,
-        ProviderError::UnsupportedCapability {
+        crate::ProviderError::UnsupportedCapability {
             capability: "cache_control",
             ..
         }
     ));
 
-    let mut image = base_request(ProviderApi::OpenAIChatCompletions);
-    image.messages = vec![CanonicalMessage::User {
-        content: vec![CanonicalContent::Image {
+    let mut image = base_request(verlet_history::ProviderApi::OpenAIChatCompletions);
+    image.messages = vec![verlet_history::CanonicalMessage::User {
+        content: vec![verlet_history::CanonicalContent::Image {
             data: "aW1hZ2U=".to_string(),
             mime_type: "image/png".to_string(),
         }],
         timestamp_ms: 0,
     }];
-    let err = OpenAIChatCompletionsAdapter
+    let err = crate::OpenAIChatCompletionsAdapter
         .build_request_body(&image)
         .unwrap_err();
     assert!(matches!(
         err,
-        ProviderError::UnsupportedCapability {
+        crate::ProviderError::UnsupportedCapability {
             capability: "images",
             ..
         }
@@ -186,28 +192,28 @@ fn unsupported_provider_capabilities_fail_closed() {
 #[test]
 fn openai_chat_thinking_request_mapping_covers_efforts_and_provider_gate() {
     for effort in [
-        ThinkingEffort::Low,
-        ThinkingEffort::Medium,
-        ThinkingEffort::High,
+        crate::ThinkingEffort::Low,
+        crate::ThinkingEffort::Medium,
+        crate::ThinkingEffort::High,
     ] {
         for (provider, zhipu_convention) in [("openai_compatible", true), ("provider", false)] {
-            let mut request = base_request(ProviderApi::OpenAIChatCompletions);
+            let mut request = base_request(verlet_history::ProviderApi::OpenAIChatCompletions);
             request.provider = provider.to_string();
-            request.thinking = Some(ThinkingConfig::Effort {
+            request.thinking = Some(crate::ThinkingConfig::Effort {
                 effort: effort.clone(),
             });
 
-            let complete_body = OpenAIChatCompletionsAdapter
+            let complete_body = crate::OpenAIChatCompletionsAdapter
                 .build_request_body(&request)
                 .unwrap();
-            let stream_body = OpenAIChatCompletionsAdapter
+            let stream_body = crate::OpenAIChatCompletionsAdapter
                 .build_stream_request_body(&request)
                 .unwrap();
 
             for body in [complete_body, stream_body] {
                 assert_eq!(body["reasoning_effort"], effort.as_openai_wire());
                 if zhipu_convention {
-                    assert_eq!(body["thinking"], json!({"type": "enabled"}));
+                    assert_eq!(body["thinking"], serde_json::json!({"type": "enabled"}));
                 } else {
                     assert!(body.get("thinking").is_none());
                 }
@@ -220,40 +226,40 @@ fn openai_chat_thinking_request_mapping_covers_efforts_and_provider_gate() {
 fn openai_chat_thinking_request_mapping_fails_closed_for_unsupported_modes() {
     for (thinking, expected_capability) in [
         (
-            ThinkingConfig::Budget {
+            crate::ThinkingConfig::Budget {
                 budget_tokens: 1024,
             },
             "thinking_budget",
         ),
         (
-            ThinkingConfig::Effort {
-                effort: ThinkingEffort::XHigh,
+            crate::ThinkingConfig::Effort {
+                effort: crate::ThinkingEffort::XHigh,
             },
             "thinking_effort",
         ),
         (
-            ThinkingConfig::Effort {
-                effort: ThinkingEffort::Max,
+            crate::ThinkingConfig::Effort {
+                effort: crate::ThinkingEffort::Max,
             },
             "thinking_effort",
         ),
         (
-            ThinkingConfig::Effort {
-                effort: ThinkingEffort::Other("extreme".to_string()),
+            crate::ThinkingConfig::Effort {
+                effort: crate::ThinkingEffort::Other("extreme".to_string()),
             },
             "thinking_effort",
         ),
     ] {
-        let mut request = base_request(ProviderApi::OpenAIChatCompletions);
+        let mut request = base_request(verlet_history::ProviderApi::OpenAIChatCompletions);
         request.thinking = Some(thinking);
 
         for body in [
-            OpenAIChatCompletionsAdapter.build_request_body(&request),
-            OpenAIChatCompletionsAdapter.build_stream_request_body(&request),
+            crate::OpenAIChatCompletionsAdapter.build_request_body(&request),
+            crate::OpenAIChatCompletionsAdapter.build_stream_request_body(&request),
         ] {
             assert!(matches!(
                 body.unwrap_err(),
-                ProviderError::UnsupportedCapability {
+                crate::ProviderError::UnsupportedCapability {
                     capability,
                     ..
                 } if capability == expected_capability
@@ -265,26 +271,29 @@ fn openai_chat_thinking_request_mapping_fails_closed_for_unsupported_modes() {
 #[test]
 fn openai_chat_disabled_thinking_only_serializes_for_zhipu_convention_providers() {
     for (provider, expected_thinking) in [
-        ("openai_compatible", Some(json!({"type": "disabled"}))),
-        ("zhipu", Some(json!({"type": "disabled"}))),
-        ("glm", Some(json!({"type": "disabled"}))),
+        (
+            "openai_compatible",
+            Some(serde_json::json!({"type": "disabled"})),
+        ),
+        ("zhipu", Some(serde_json::json!({"type": "disabled"}))),
+        ("glm", Some(serde_json::json!({"type": "disabled"}))),
         ("provider", None),
     ] {
-        let mut request = base_request(ProviderApi::OpenAIChatCompletions);
+        let mut request = base_request(verlet_history::ProviderApi::OpenAIChatCompletions);
         request.provider = provider.to_string();
-        request.thinking = Some(ThinkingConfig::Disabled);
+        request.thinking = Some(crate::ThinkingConfig::Disabled);
 
-        let body = OpenAIChatCompletionsAdapter
+        let body = crate::OpenAIChatCompletionsAdapter
             .build_request_body(&request)
             .unwrap();
         assert_eq!(body.get("thinking"), expected_thinking.as_ref());
         assert!(body.get("reasoning_effort").is_none());
     }
 
-    let mut request = base_request(ProviderApi::OpenAIChatCompletions);
+    let mut request = base_request(verlet_history::ProviderApi::OpenAIChatCompletions);
     request.provider = "openai_compatible".to_string();
     request.thinking = None;
-    let body = OpenAIChatCompletionsAdapter
+    let body = crate::OpenAIChatCompletionsAdapter
         .build_request_body(&request)
         .unwrap();
     assert!(body.get("thinking").is_none());
@@ -294,23 +303,23 @@ fn openai_chat_disabled_thinking_only_serializes_for_zhipu_convention_providers(
 #[test]
 fn provider_context_compilation_is_deterministic() {
     let messages = vec![
-        CanonicalMessage::user_text("old"),
-        CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::user_text("old"),
+        verlet_history::CanonicalMessage::assistant(
             "openai",
-            ProviderApi::OpenAIResponses,
+            verlet_history::ProviderApi::OpenAIResponses,
             "gpt-test",
-            vec![CanonicalContent::text("middle")],
-            CanonicalStopReason::EndTurn,
+            vec![verlet_history::CanonicalContent::text("middle")],
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
-        CanonicalMessage::user_text("abcdef"),
+        verlet_history::CanonicalMessage::user_text("abcdef"),
     ];
-    let policy = ProviderContextPolicy {
+    let policy = crate::ProviderContextPolicy {
         max_messages: Some(2),
         max_text_bytes: Some(5),
     };
 
-    let first = compile_provider_context(messages.clone(), &policy);
-    let second = compile_provider_context(messages, &policy);
+    let first = crate::compile_provider_context(messages.clone(), &policy);
+    let second = crate::compile_provider_context(messages, &policy);
 
     assert_eq!(first, second);
     assert_eq!(first.dropped_messages, 1);
@@ -318,31 +327,31 @@ fn provider_context_compilation_is_deterministic() {
     assert_eq!(first.truncated_text_bytes, 7);
     assert!(matches!(
         &first.messages[1],
-        CanonicalMessage::User { content, .. }
+        verlet_history::CanonicalMessage::User { content, .. }
             if matches!(
                 &content[0],
-                CanonicalContent::Text { text, .. } if text == "bcdef"
+                verlet_history::CanonicalContent::Text { text, .. } if text == "bcdef"
             )
     ));
 
     let tool_messages = vec![
-        CanonicalMessage::user_text("question"),
-        CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::user_text("question"),
+        verlet_history::CanonicalMessage::assistant(
             "openai",
-            ProviderApi::OpenAIResponses,
+            verlet_history::ProviderApi::OpenAIResponses,
             "gpt-test",
-            vec![CanonicalContent::tool_call(
+            vec![verlet_history::CanonicalContent::tool_call(
                 "call_1",
                 "bash",
-                json!({"command": "pwd"}),
+                serde_json::json!({"command": "pwd"}),
             )],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result("call_1", "bash", "ok", false),
+        verlet_history::CanonicalMessage::tool_result("call_1", "bash", "ok", false),
     ];
-    let tool_compiled = compile_provider_context(
+    let tool_compiled = crate::compile_provider_context(
         tool_messages,
-        &ProviderContextPolicy {
+        &crate::ProviderContextPolicy {
             max_messages: Some(1),
             max_text_bytes: None,
         },
@@ -351,44 +360,48 @@ fn provider_context_compilation_is_deterministic() {
     assert_eq!(tool_compiled.messages.len(), 2);
     assert!(matches!(
         tool_compiled.messages[0],
-        CanonicalMessage::Assistant { .. }
+        verlet_history::CanonicalMessage::Assistant { .. }
     ));
     assert!(matches!(
         tool_compiled.messages[1],
-        CanonicalMessage::ToolResult { .. }
+        verlet_history::CanonicalMessage::ToolResult { .. }
     ));
 }
 
 #[tokio::test]
 async fn local_offline_provider_is_deterministic_and_capability_limited() {
-    let client = LocalOfflineProviderClient::new("local_offline", "echo");
-    let mut request = ProviderRequest::new(
-        ProviderApi::Other("local_offline".to_string()),
+    let client = crate::LocalOfflineProviderClient::new("local_offline", "echo");
+    let mut request = crate::ProviderRequest::new(
+        verlet_history::ProviderApi::Other("local_offline".to_string()),
         "local_offline",
         "echo",
     );
-    request.messages = vec![CanonicalMessage::user_text("hello local")];
+    request.messages = vec![verlet_history::CanonicalMessage::user_text("hello local")];
 
     let response = client.complete(&request).await.unwrap();
     assert_eq!(
         response.content,
-        vec![CanonicalContent::text("local:hello local")]
+        vec![verlet_history::CanonicalContent::text("local:hello local")]
     );
 
     let stream_err = client.stream(&request).await.unwrap_err();
     assert!(matches!(
         stream_err,
-        ProviderError::UnsupportedCapability {
+        crate::ProviderError::UnsupportedCapability {
             capability: "streaming",
             ..
         }
     ));
 
-    request.tools = vec![ToolDefinition::new("bash", "run", json!({"type":"object"}))];
+    request.tools = vec![crate::ToolDefinition::new(
+        "bash",
+        "run",
+        serde_json::json!({"type":"object"}),
+    )];
     let tool_err = client.complete(&request).await.unwrap_err();
     assert!(matches!(
         tool_err,
-        ProviderError::UnsupportedCapability {
+        crate::ProviderError::UnsupportedCapability {
             capability: "tools",
             ..
         }
@@ -397,34 +410,38 @@ async fn local_offline_provider_is_deterministic_and_capability_limited() {
 
 #[test]
 fn openai_responses_replays_reasoning_and_function_state() {
-    let mut request = base_request(ProviderApi::OpenAIResponses);
-    request.thinking = Some(ThinkingConfig::Effort {
-        effort: ThinkingEffort::Medium,
+    let mut request = base_request(verlet_history::ProviderApi::OpenAIResponses);
+    request.thinking = Some(crate::ThinkingConfig::Effort {
+        effort: crate::ThinkingEffort::Medium,
     });
     request.messages = vec![
-        CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::assistant(
             "openai",
-            ProviderApi::OpenAIResponses,
+            verlet_history::ProviderApi::OpenAIResponses,
             "gpt-test",
             vec![
-                CanonicalContent::Thinking {
+                verlet_history::CanonicalContent::Thinking {
                     text: "summary".to_string(),
-                    provider: ThinkingProvider::OpenAIResponses,
-                    metadata: ThinkingMetadata::OpenAIResponses {
+                    provider: verlet_history::ThinkingProvider::OpenAIResponses,
+                    metadata: verlet_history::ThinkingMetadata::OpenAIResponses {
                         item_id: Some("rs_1".to_string()),
                         output_index: Some(0),
                         summary_index: 0,
                         encrypted_content: Some("enc".to_string()),
                     },
                 },
-                CanonicalContent::tool_call("call_1|fc_1", "bash", json!({"command":"echo hi"})),
+                verlet_history::CanonicalContent::tool_call(
+                    "call_1|fc_1",
+                    "bash",
+                    serde_json::json!({"command":"echo hi"}),
+                ),
             ],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result("call_1|fc_1", "bash", "hi", false),
+        verlet_history::CanonicalMessage::tool_result("call_1|fc_1", "bash", "hi", false),
     ];
 
-    let body = OpenAIResponsesAdapter::default()
+    let body = crate::OpenAIResponsesAdapter::default()
         .build_request_body(&request)
         .unwrap();
 
@@ -442,23 +459,23 @@ fn openai_responses_replays_reasoning_and_function_state() {
 
 #[test]
 fn openai_chat_fans_tool_results_into_tool_messages() {
-    let mut request = base_request(ProviderApi::OpenAIChatCompletions);
+    let mut request = base_request(verlet_history::ProviderApi::OpenAIChatCompletions);
     request.messages = vec![
-        CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::assistant(
             "openai",
-            ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
             "gpt-test",
-            vec![CanonicalContent::tool_call(
+            vec![verlet_history::CanonicalContent::tool_call(
                 "call_1",
                 "bash",
-                json!({"command":"pwd"}),
+                serde_json::json!({"command":"pwd"}),
             )],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result("call_1", "bash", "/tmp", false),
+        verlet_history::CanonicalMessage::tool_result("call_1", "bash", "/tmp", false),
     ];
 
-    let body = OpenAIChatCompletionsAdapter
+    let body = crate::OpenAIChatCompletionsAdapter
         .build_request_body(&request)
         .unwrap();
 
@@ -474,38 +491,38 @@ fn openai_chat_fans_tool_results_into_tool_messages() {
 
 #[test]
 fn openai_chat_drops_thinking_history_from_wire_replay() {
-    let mut request = base_request(ProviderApi::OpenAIChatCompletions);
+    let mut request = base_request(verlet_history::ProviderApi::OpenAIChatCompletions);
     request.provider = "provider".to_string();
     request.thinking = None;
     request.messages = vec![
-        CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::assistant(
             "provider",
-            ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
             "chat-test",
             vec![
-                CanonicalContent::Thinking {
+                verlet_history::CanonicalContent::Thinking {
                     text: "plan first".to_string(),
-                    provider: ThinkingProvider::OpenAICompatible,
-                    metadata: ThinkingMetadata::None,
+                    provider: verlet_history::ThinkingProvider::OpenAICompatible,
+                    metadata: verlet_history::ThinkingMetadata::None,
                 },
-                CanonicalContent::text("answer"),
+                verlet_history::CanonicalContent::text("answer"),
             ],
-            CanonicalStopReason::EndTurn,
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
-        CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::assistant(
             "provider",
-            ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
             "chat-test",
-            vec![CanonicalContent::Thinking {
+            vec![verlet_history::CanonicalContent::Thinking {
                 text: "thinking only".to_string(),
-                provider: ThinkingProvider::OpenAICompatible,
-                metadata: ThinkingMetadata::None,
+                provider: verlet_history::ThinkingProvider::OpenAICompatible,
+                metadata: verlet_history::ThinkingMetadata::None,
             }],
-            CanonicalStopReason::EndTurn,
+            verlet_history::CanonicalStopReason::EndTurn,
         ),
     ];
 
-    let body = OpenAIChatCompletionsAdapter
+    let body = crate::OpenAIChatCompletionsAdapter
         .build_request_body(&request)
         .unwrap();
 
@@ -519,29 +536,32 @@ fn openai_chat_drops_thinking_history_from_wire_replay() {
 
 #[test]
 fn anthropic_preserves_cache_and_thinking_signature() {
-    let mut request = base_request(ProviderApi::AnthropicMessages);
-    request.system = vec![SystemBlock::cached("base")];
-    request.thinking = Some(ThinkingConfig::Budget {
+    let mut request = base_request(verlet_history::ProviderApi::AnthropicMessages);
+    request.system = vec![crate::SystemBlock::cached("base")];
+    request.thinking = Some(crate::ThinkingConfig::Budget {
         budget_tokens: 2048,
     });
-    request.messages = vec![CanonicalMessage::assistant(
+    request.messages = vec![verlet_history::CanonicalMessage::assistant(
         "anthropic",
-        ProviderApi::AnthropicMessages,
+        verlet_history::ProviderApi::AnthropicMessages,
         "claude-test",
         vec![
-            CanonicalContent::Thinking {
+            verlet_history::CanonicalContent::Thinking {
                 text: "reason".to_string(),
-                provider: ThinkingProvider::Anthropic,
-                metadata: ThinkingMetadata::Anthropic {
+                provider: verlet_history::ThinkingProvider::Anthropic,
+                metadata: verlet_history::ThinkingMetadata::Anthropic {
                     signature: Some("sig".to_string()),
                 },
             },
-            CanonicalContent::cached_text("answer", CacheControl::ephemeral()),
+            verlet_history::CanonicalContent::cached_text(
+                "answer",
+                verlet_history::CacheControl::ephemeral(),
+            ),
         ],
-        CanonicalStopReason::EndTurn,
+        verlet_history::CanonicalStopReason::EndTurn,
     )];
 
-    let body = AnthropicMessagesAdapter
+    let body = crate::AnthropicMessagesAdapter
         .build_request_body(&request)
         .unwrap();
 
@@ -558,11 +578,11 @@ fn anthropic_preserves_cache_and_thinking_signature() {
 
 #[test]
 fn anthropic_bedrock_request_uses_invoke_model_body_shape() {
-    let mut request = base_request(ProviderApi::AnthropicMessages);
+    let mut request = base_request(verlet_history::ProviderApi::AnthropicMessages);
     request.model = "anthropic.claude-sonnet-4-5-20250929-v1:0".to_string();
-    request.messages = vec![CanonicalMessage::user_text("hello")];
+    request.messages = vec![verlet_history::CanonicalMessage::user_text("hello")];
 
-    let body = AnthropicBedrockMessagesAdapter
+    let body = crate::AnthropicBedrockMessagesAdapter
         .build_request_body(&request)
         .unwrap();
 
@@ -574,10 +594,10 @@ fn anthropic_bedrock_request_uses_invoke_model_body_shape() {
 
 #[test]
 fn anthropic_bedrock_streaming_uses_response_stream_endpoint_and_body_shape() {
-    let mut request = base_request(ProviderApi::AnthropicMessages);
-    request.messages = vec![CanonicalMessage::user_text("hello")];
+    let mut request = base_request(verlet_history::ProviderApi::AnthropicMessages);
+    request.messages = vec![verlet_history::CanonicalMessage::user_text("hello")];
 
-    let body = AnthropicBedrockMessagesAdapter
+    let body = crate::AnthropicBedrockMessagesAdapter
         .build_stream_request_body(&request)
         .unwrap();
 
@@ -585,7 +605,7 @@ fn anthropic_bedrock_streaming_uses_response_stream_endpoint_and_body_shape() {
     assert!(body.get("model").is_none());
     assert!(body.get("stream").is_none());
     assert_eq!(
-        AnthropicBedrockMessagesAdapter.stream_endpoint_url(
+        crate::AnthropicBedrockMessagesAdapter.stream_endpoint_url(
             "https://bedrock-runtime.us-east-1.amazonaws.com/model/claude/invoke"
         ),
         "https://bedrock-runtime.us-east-1.amazonaws.com/model/claude/invoke-with-response-stream"
@@ -609,12 +629,14 @@ const BEDROCK_GOLDEN_MULTI_FRAME_HEX: &str = concat!(
 #[test]
 fn aws_eventstream_decoder_accepts_golden_multi_frame_fixture() {
     let bytes = hex::decode(BEDROCK_GOLDEN_MULTI_FRAME_HEX).unwrap();
-    let frames = decode_aws_eventstream_frames(&bytes).unwrap();
+    let frames = crate::decode_aws_eventstream_frames(&bytes).unwrap();
 
     assert_eq!(frames.len(), 2);
     assert_eq!(
         frames[0].headers.get(":event-type"),
-        Some(&AwsEventStreamHeaderValue::String("chunk".to_string()))
+        Some(&crate::AwsEventStreamHeaderValue::String(
+            "chunk".to_string()
+        ))
     );
     assert!(decoded_bedrock_chunk_payload(&frames[0].payload).contains("message_start"));
     assert!(decoded_bedrock_chunk_payload(&frames[1].payload).contains("content_block_delta"));
@@ -623,7 +645,7 @@ fn aws_eventstream_decoder_accepts_golden_multi_frame_fixture() {
 #[test]
 fn aws_eventstream_decoder_handles_split_read_boundary() {
     let bytes = hex::decode(BEDROCK_GOLDEN_MULTI_FRAME_HEX).unwrap();
-    let mut decoder = AwsEventStreamDecoder::new();
+    let mut decoder = crate::AwsEventStreamDecoder::new();
 
     assert!(decoder.push(&bytes[..31]).unwrap().is_empty());
     let frames = decoder.push(&bytes[31..]).unwrap();
@@ -637,22 +659,22 @@ fn aws_eventstream_decoder_rejects_corrupt_crc() {
     let last = bytes.last_mut().unwrap();
     *last ^= 0xff;
 
-    let err = decode_aws_eventstream_frames(&bytes).unwrap_err();
+    let err = crate::decode_aws_eventstream_frames(&bytes).unwrap_err();
     assert!(matches!(
         err,
-        ProviderError::Decode(message) if message.contains("message CRC mismatch")
+        crate::ProviderError::Decode(message) if message.contains("message CRC mismatch")
     ));
 }
 
 #[test]
 fn aws_eventstream_decoder_rejects_truncated_prelude() {
-    let mut decoder = AwsEventStreamDecoder::new();
+    let mut decoder = crate::AwsEventStreamDecoder::new();
     assert!(decoder.push(&[0, 0, 0, 16, 0]).unwrap().is_empty());
 
     let err = decoder.finish().unwrap_err();
     assert!(matches!(
         err,
-        ProviderError::Decode(message) if message.contains("truncated AWS eventstream prelude")
+        crate::ProviderError::Decode(message) if message.contains("truncated AWS eventstream prelude")
     ));
 }
 
@@ -661,7 +683,7 @@ async fn anthropic_bedrock_http_stream_decodes_events_and_signs_stream_endpoint(
     let eventstream_body = bedrock_eventstream_body(ANTHROPIC_STREAM_EVENT_JSONS);
     let (base_url, request_rx) =
         serve_fake_http_response(eventstream_body.clone(), Some(eventstream_body.len())).await;
-    let endpoint = ProviderEndpoint::anthropic_bedrock_with_base_url(
+    let endpoint = crate::ProviderEndpoint::anthropic_bedrock_with_base_url(
         base_url,
         "us-east-1",
         "anthropic.claude-test-v1:0",
@@ -669,31 +691,31 @@ async fn anthropic_bedrock_http_stream_decodes_events_and_signs_stream_endpoint(
         "secret",
         Some("session-token".to_string()),
     );
-    let client = ProviderHttpClient::with_http(
+    let client = crate::ProviderHttpClient::with_http(
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(tokio::time::Duration::from_secs(30))
             .build()
             .unwrap(),
         endpoint,
-        Arc::new(AnthropicBedrockMessagesAdapter),
+        std::sync::Arc::new(crate::AnthropicBedrockMessagesAdapter),
     );
-    let mut request = ProviderRequest::new(
-        ProviderApi::AnthropicMessages,
+    let mut request = crate::ProviderRequest::new(
+        verlet_history::ProviderApi::AnthropicMessages,
         "anthropic_bedrock",
         "anthropic.claude-test-v1:0",
     );
     request.max_tokens = 32;
-    request.messages = vec![CanonicalMessage::user_text("hello")];
+    request.messages = vec![verlet_history::CanonicalMessage::user_text("hello")];
 
     let events = client.stream(&request).await.unwrap();
-    let parity_events = AnthropicMessagesAdapter
+    let parity_events = crate::AnthropicMessagesAdapter
         .decode_sse_events(ANTHROPIC_STREAM_SSE)
         .unwrap();
     assert_eq!(events, parity_events);
     assert_eq!(stream_text(&events), "COOL_OK");
 
-    let terminal = AnthropicBedrockMessagesAdapter
-        .decode_response_body(&json!({
+    let terminal = crate::AnthropicBedrockMessagesAdapter
+        .decode_response_body(&serde_json::json!({
             "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "COOL_OK"}],
             "usage": {"input_tokens": 3, "output_tokens": 4}
@@ -720,10 +742,10 @@ async fn anthropic_bedrock_http_stream_decodes_events_and_signs_stream_endpoint(
 #[test]
 fn anthropic_bedrock_eventstream_decodes_raw_chunk_payloads() {
     let body = bedrock_raw_eventstream_body(ANTHROPIC_STREAM_EVENT_JSONS);
-    let events = AnthropicBedrockMessagesAdapter
+    let events = crate::AnthropicBedrockMessagesAdapter
         .decode_stream_response(&body)
         .unwrap();
-    let parity_events = AnthropicMessagesAdapter
+    let parity_events = crate::AnthropicMessagesAdapter
         .decode_sse_events(ANTHROPIC_STREAM_SSE)
         .unwrap();
 
@@ -733,10 +755,10 @@ fn anthropic_bedrock_eventstream_decodes_raw_chunk_payloads() {
 #[test]
 fn anthropic_bedrock_eventstream_decodes_top_level_bytes_payloads() {
     let body = bedrock_top_level_bytes_eventstream_body(ANTHROPIC_STREAM_EVENT_JSONS);
-    let events = AnthropicBedrockMessagesAdapter
+    let events = crate::AnthropicBedrockMessagesAdapter
         .decode_stream_response(&body)
         .unwrap();
-    let parity_events = AnthropicMessagesAdapter
+    let parity_events = crate::AnthropicMessagesAdapter
         .decode_sse_events(ANTHROPIC_STREAM_SSE)
         .unwrap();
 
@@ -748,7 +770,7 @@ async fn anthropic_bedrock_mid_stream_disconnect_returns_terminal_error() {
     let eventstream_body = bedrock_eventstream_body(ANTHROPIC_STREAM_EVENT_JSONS);
     let partial = eventstream_body[..25].to_vec();
     let (base_url, _request_rx) = serve_fake_http_response(partial, None).await;
-    let endpoint = ProviderEndpoint::anthropic_bedrock_with_base_url(
+    let endpoint = crate::ProviderEndpoint::anthropic_bedrock_with_base_url(
         base_url,
         "us-east-1",
         "anthropic.claude-test-v1:0",
@@ -756,43 +778,43 @@ async fn anthropic_bedrock_mid_stream_disconnect_returns_terminal_error() {
         "secret",
         None,
     );
-    let client = ProviderHttpClient::with_http(
+    let client = crate::ProviderHttpClient::with_http(
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(tokio::time::Duration::from_secs(30))
             .build()
             .unwrap(),
         endpoint,
-        Arc::new(AnthropicBedrockMessagesAdapter),
+        std::sync::Arc::new(crate::AnthropicBedrockMessagesAdapter),
     );
-    let mut request = ProviderRequest::new(
-        ProviderApi::AnthropicMessages,
+    let mut request = crate::ProviderRequest::new(
+        verlet_history::ProviderApi::AnthropicMessages,
         "anthropic_bedrock",
         "anthropic.claude-test-v1:0",
     );
-    request.messages = vec![CanonicalMessage::user_text("hello")];
+    request.messages = vec![verlet_history::CanonicalMessage::user_text("hello")];
 
     let err = client.stream(&request).await.unwrap_err();
     assert!(matches!(
         err,
-        ProviderError::Decode(message) if message.contains("truncated AWS eventstream frame")
+        crate::ProviderError::Decode(message) if message.contains("truncated AWS eventstream frame")
     ));
 }
 
 #[test]
 fn tool_call_result_pairing_survives_provider_switch_transforms() {
     let canonical_messages = vec![
-        CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::assistant(
             "openai",
-            ProviderApi::OpenAIResponses,
+            verlet_history::ProviderApi::OpenAIResponses,
             "gpt-test",
-            vec![CanonicalContent::tool_call(
+            vec![verlet_history::CanonicalContent::tool_call(
                 "call_from_openai|fc_item_with_extra_provider_state",
                 "bash",
-                json!({"command":"pwd"}),
+                serde_json::json!({"command":"pwd"}),
             )],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result(
+        verlet_history::CanonicalMessage::tool_result(
             "call_from_openai|fc_item_with_extra_provider_state",
             "bash",
             "/tmp",
@@ -800,9 +822,9 @@ fn tool_call_result_pairing_survives_provider_switch_transforms() {
         ),
     ];
 
-    let mut anthropic_request = base_request(ProviderApi::AnthropicMessages);
+    let mut anthropic_request = base_request(verlet_history::ProviderApi::AnthropicMessages);
     anthropic_request.messages = canonical_messages.clone();
-    let anthropic_body = AnthropicMessagesAdapter
+    let anthropic_body = crate::AnthropicMessagesAdapter
         .build_request_body(&anthropic_request)
         .unwrap();
     let anthropic_tool_use_id = anthropic_body["messages"][0]["content"][0]["id"]
@@ -822,22 +844,22 @@ fn tool_call_result_pairing_survives_provider_switch_transforms() {
         "/tmp"
     );
 
-    let mut responses_request = base_request(ProviderApi::OpenAIResponses);
+    let mut responses_request = base_request(verlet_history::ProviderApi::OpenAIResponses);
     responses_request.messages = vec![
-        CanonicalMessage::assistant(
+        verlet_history::CanonicalMessage::assistant(
             "anthropic",
-            ProviderApi::AnthropicMessages,
+            verlet_history::ProviderApi::AnthropicMessages,
             "claude-test",
-            vec![CanonicalContent::tool_call(
+            vec![verlet_history::CanonicalContent::tool_call(
                 "toolu_01abcdef",
                 "bash",
-                json!({"command":"ls"}),
+                serde_json::json!({"command":"ls"}),
             )],
-            CanonicalStopReason::ToolUse,
+            verlet_history::CanonicalStopReason::ToolUse,
         ),
-        CanonicalMessage::tool_result("toolu_01abcdef", "bash", "file.txt", false),
+        verlet_history::CanonicalMessage::tool_result("toolu_01abcdef", "bash", "file.txt", false),
     ];
-    let responses_body = OpenAIResponsesAdapter::default()
+    let responses_body = crate::OpenAIResponsesAdapter::default()
         .build_request_body(&responses_request)
         .unwrap();
     assert_eq!(responses_body["input"][0]["call_id"], "toolu_01abcdef");
@@ -847,8 +869,8 @@ fn tool_call_result_pairing_survives_provider_switch_transforms() {
 
 #[test]
 fn decodes_provider_responses_to_canonical_content() {
-    let openai = OpenAIResponsesAdapter::default()
-            .decode_response_body(&json!({
+    let openai = crate::OpenAIResponsesAdapter::default()
+            .decode_response_body(&serde_json::json!({
                 "status": "completed",
                 "output": [
                     {"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"why"}],"encrypted_content":"enc"},
@@ -858,11 +880,14 @@ fn decodes_provider_responses_to_canonical_content() {
                 "usage": {"input_tokens": 10, "output_tokens": 3}
             }))
             .unwrap();
-    assert_eq!(openai.stop_reason, CanonicalStopReason::ToolUse);
+    assert_eq!(
+        openai.stop_reason,
+        verlet_history::CanonicalStopReason::ToolUse
+    );
     assert_eq!(openai.content.len(), 3);
 
-    let chat = OpenAIChatCompletionsAdapter
-            .decode_response_body(&json!({
+    let chat = crate::OpenAIChatCompletionsAdapter
+            .decode_response_body(&serde_json::json!({
                 "choices": [{
                     "finish_reason": "tool_calls",
                     "message": {
@@ -872,10 +897,13 @@ fn decodes_provider_responses_to_canonical_content() {
                 "usage": {"prompt_tokens": 4, "completion_tokens": 5}
             }))
             .unwrap();
-    assert_eq!(chat.stop_reason, CanonicalStopReason::ToolUse);
+    assert_eq!(
+        chat.stop_reason,
+        verlet_history::CanonicalStopReason::ToolUse
+    );
 
-    let chat_thinking = OpenAIChatCompletionsAdapter
-        .decode_response_body(&json!({
+    let chat_thinking = crate::OpenAIChatCompletionsAdapter
+        .decode_response_body(&serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
                 "message": {
@@ -889,16 +917,19 @@ fn decodes_provider_responses_to_canonical_content() {
     assert_eq!(chat_thinking.content.len(), 2);
     assert!(matches!(
         &chat_thinking.content[0],
-        CanonicalContent::Thinking {
+        verlet_history::CanonicalContent::Thinking {
             text,
-            provider: ThinkingProvider::OpenAICompatible,
-            metadata: ThinkingMetadata::None,
+            provider: verlet_history::ThinkingProvider::OpenAICompatible,
+            metadata: verlet_history::ThinkingMetadata::None,
         } if text == "plan first"
     ));
-    assert_eq!(chat_thinking.content[1], CanonicalContent::text("answer"));
+    assert_eq!(
+        chat_thinking.content[1],
+        verlet_history::CanonicalContent::text("answer")
+    );
 
-    let chat_thinking_only = OpenAIChatCompletionsAdapter
-        .decode_response_body(&json!({
+    let chat_thinking_only = crate::OpenAIChatCompletionsAdapter
+        .decode_response_body(&serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
                 "message": {
@@ -910,15 +941,15 @@ fn decodes_provider_responses_to_canonical_content() {
     assert_eq!(chat_thinking_only.content.len(), 1);
     assert!(matches!(
         &chat_thinking_only.content[0],
-        CanonicalContent::Thinking {
+        verlet_history::CanonicalContent::Thinking {
             text,
-            provider: ThinkingProvider::OpenAICompatible,
-            metadata: ThinkingMetadata::None,
+            provider: verlet_history::ThinkingProvider::OpenAICompatible,
+            metadata: verlet_history::ThinkingMetadata::None,
         } if text == "tool plan"
     ));
 
-    let anthropic = AnthropicMessagesAdapter
-        .decode_response_body(&json!({
+    let anthropic = crate::AnthropicMessagesAdapter
+        .decode_response_body(&serde_json::json!({
             "stop_reason": "end_turn",
             "content": [{"type":"thinking","thinking":"why","signature":"sig"}],
             "usage": {"input_tokens": 7, "output_tokens": 8, "cache_read_input_tokens": 9}
@@ -927,8 +958,8 @@ fn decodes_provider_responses_to_canonical_content() {
     assert_eq!(anthropic.usage.cache_read_input_tokens, 9);
     assert!(matches!(
         anthropic.content[0],
-        CanonicalContent::Thinking {
-            provider: ThinkingProvider::Anthropic,
+        verlet_history::CanonicalContent::Thinking {
+            provider: verlet_history::ThinkingProvider::Anthropic,
             ..
         }
     ));
@@ -945,29 +976,29 @@ fn parses_openai_responses_sse_text_and_done() {
         "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n",
     );
 
-    let events = OpenAIResponsesAdapter::default()
+    let events = crate::OpenAIResponsesAdapter::default()
         .decode_sse_events(sse)
         .unwrap();
 
     assert_eq!(
         events,
         vec![
-            ProviderStreamEvent::TextDelta {
+            crate::ProviderStreamEvent::TextDelta {
                 text: "COOL".to_string()
             },
-            ProviderStreamEvent::TextDelta {
+            crate::ProviderStreamEvent::TextDelta {
                 text: "_OK".to_string()
             },
-            ProviderStreamEvent::Usage {
-                usage: CanonicalUsage {
+            crate::ProviderStreamEvent::Usage {
+                usage: verlet_history::CanonicalUsage {
                     input_tokens: 1,
                     output_tokens: 2,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                 }
             },
-            ProviderStreamEvent::Done {
-                stop_reason: CanonicalStopReason::EndTurn
+            crate::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn
             },
         ]
     );
@@ -986,13 +1017,13 @@ fn parses_openai_responses_sse_tool_call_delta_and_completed_item() {
         "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n",
     );
 
-    let events = OpenAIResponsesAdapter::default()
+    let events = crate::OpenAIResponsesAdapter::default()
         .decode_sse_events(sse)
         .unwrap();
 
     assert!(matches!(
         &events[0],
-        ProviderStreamEvent::ToolCallDelta {
+        crate::ProviderStreamEvent::ToolCallDelta {
             id,
             arguments_delta,
             ..
@@ -1000,14 +1031,14 @@ fn parses_openai_responses_sse_tool_call_delta_and_completed_item() {
     ));
     assert!(matches!(
         &events[2],
-        ProviderStreamEvent::Content {
-            content: CanonicalContent::ToolCall { id, name, arguments }
+        crate::ProviderStreamEvent::Content {
+            content: verlet_history::CanonicalContent::ToolCall { id, name, arguments }
         } if id == "call_1|fc_1" && name == "bash" && arguments["command"] == "pwd"
     ));
     assert!(matches!(
         events.last(),
-        Some(ProviderStreamEvent::Done {
-            stop_reason: CanonicalStopReason::EndTurn
+        Some(crate::ProviderStreamEvent::Done {
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn
         })
     ));
 }
@@ -1021,15 +1052,17 @@ fn parses_openai_chat_sse_text_tool_usage_and_done() {
         "data: [DONE]\n\n",
     );
 
-    let events = OpenAIChatCompletionsAdapter.decode_sse_events(sse).unwrap();
+    let events = crate::OpenAIChatCompletionsAdapter
+        .decode_sse_events(sse)
+        .unwrap();
 
     assert!(matches!(
         &events[0],
-        ProviderStreamEvent::TextDelta { text } if text == "hi"
+        crate::ProviderStreamEvent::TextDelta { text } if text == "hi"
     ));
     assert!(matches!(
         &events[1],
-        ProviderStreamEvent::ToolCallDelta {
+        crate::ProviderStreamEvent::ToolCallDelta {
             id,
             name: Some(name),
             arguments_delta,
@@ -1037,13 +1070,13 @@ fn parses_openai_chat_sse_text_tool_usage_and_done() {
     ));
     assert!(events.iter().any(|event| matches!(
         event,
-        ProviderStreamEvent::Usage { usage }
+        crate::ProviderStreamEvent::Usage { usage }
             if usage.input_tokens == 2 && usage.output_tokens == 3
     )));
     assert!(matches!(
         events.last(),
-        Some(ProviderStreamEvent::Done {
-            stop_reason: CanonicalStopReason::ToolUse
+        Some(crate::ProviderStreamEvent::Done {
+            stop_reason: verlet_history::CanonicalStopReason::ToolUse
         })
     ));
 }
@@ -1059,28 +1092,30 @@ fn parses_openai_chat_sse_reasoning_content_deltas_in_order() {
         "data: [DONE]\n\n",
     );
 
-    let events = OpenAIChatCompletionsAdapter.decode_sse_events(sse).unwrap();
+    let events = crate::OpenAIChatCompletionsAdapter
+        .decode_sse_events(sse)
+        .unwrap();
 
     assert_eq!(
         events,
         vec![
-            ProviderStreamEvent::ThinkingDelta {
+            crate::ProviderStreamEvent::ThinkingDelta {
                 text: "plan ".to_string()
             },
-            ProviderStreamEvent::TextDelta {
+            crate::ProviderStreamEvent::TextDelta {
                 text: "hi".to_string()
             },
-            ProviderStreamEvent::ThinkingDelta {
+            crate::ProviderStreamEvent::ThinkingDelta {
                 text: "check".to_string()
             },
-            ProviderStreamEvent::ThinkingDelta {
+            crate::ProviderStreamEvent::ThinkingDelta {
                 text: " same".to_string()
             },
-            ProviderStreamEvent::TextDelta {
+            crate::ProviderStreamEvent::TextDelta {
                 text: " there".to_string()
             },
-            ProviderStreamEvent::Done {
-                stop_reason: CanonicalStopReason::EndTurn
+            crate::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn
             },
         ]
     );
@@ -1101,35 +1136,37 @@ fn parses_anthropic_sse_text_usage_and_done() {
         "data: {\"type\":\"message_stop\"}\n\n",
     );
 
-    let events = AnthropicMessagesAdapter.decode_sse_events(sse).unwrap();
+    let events = crate::AnthropicMessagesAdapter
+        .decode_sse_events(sse)
+        .unwrap();
 
     assert_eq!(
         events,
         vec![
-            ProviderStreamEvent::Usage {
-                usage: CanonicalUsage {
+            crate::ProviderStreamEvent::Usage {
+                usage: verlet_history::CanonicalUsage {
                     input_tokens: 3,
                     output_tokens: 0,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                 }
             },
-            ProviderStreamEvent::TextDelta {
+            crate::ProviderStreamEvent::TextDelta {
                 text: "COOL".to_string()
             },
-            ProviderStreamEvent::TextDelta {
+            crate::ProviderStreamEvent::TextDelta {
                 text: "_OK".to_string()
             },
-            ProviderStreamEvent::Usage {
-                usage: CanonicalUsage {
+            crate::ProviderStreamEvent::Usage {
+                usage: verlet_history::CanonicalUsage {
                     input_tokens: 0,
                     output_tokens: 4,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                 }
             },
-            ProviderStreamEvent::Done {
-                stop_reason: CanonicalStopReason::EndTurn
+            crate::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn
             },
         ]
     );
@@ -1150,11 +1187,13 @@ fn parses_anthropic_sse_tool_use_delta() {
         "data: {\"type\":\"message_stop\"}\n\n",
     );
 
-    let events = AnthropicMessagesAdapter.decode_sse_events(sse).unwrap();
+    let events = crate::AnthropicMessagesAdapter
+        .decode_sse_events(sse)
+        .unwrap();
 
     assert!(matches!(
         &events[0],
-        ProviderStreamEvent::ToolCallDelta {
+        crate::ProviderStreamEvent::ToolCallDelta {
             id,
             name: Some(name),
             arguments_delta,
@@ -1162,7 +1201,7 @@ fn parses_anthropic_sse_tool_use_delta() {
     ));
     assert!(matches!(
         &events[1],
-        ProviderStreamEvent::ToolCallDelta {
+        crate::ProviderStreamEvent::ToolCallDelta {
             id,
             arguments_delta,
             ..
@@ -1170,16 +1209,16 @@ fn parses_anthropic_sse_tool_use_delta() {
     ));
     assert!(matches!(
         events.last(),
-        Some(ProviderStreamEvent::Done {
-            stop_reason: CanonicalStopReason::ToolUse
+        Some(crate::ProviderStreamEvent::Done {
+            stop_reason: verlet_history::CanonicalStopReason::ToolUse
         })
     ));
 }
 
 #[test]
 fn malformed_tool_arguments_are_rejected_at_wire_edge() {
-    let chat = OpenAIChatCompletionsAdapter
-            .decode_response_body(&json!({
+    let chat = crate::OpenAIChatCompletionsAdapter
+            .decode_response_body(&serde_json::json!({
                 "choices": [{
                     "finish_reason": "tool_calls",
                     "message": {
@@ -1189,11 +1228,11 @@ fn malformed_tool_arguments_are_rejected_at_wire_edge() {
             }))
             .unwrap_err();
     assert!(
-        matches!(chat, ProviderError::Decode(message) if message.contains("invalid chat tool call arguments"))
+        matches!(chat, crate::ProviderError::Decode(message) if message.contains("invalid chat tool call arguments"))
     );
 
-    let responses = OpenAIResponsesAdapter::default()
-        .decode_response_body(&json!({
+    let responses = crate::OpenAIResponsesAdapter::default()
+        .decode_response_body(&serde_json::json!({
             "status": "completed",
             "output": [{
                 "id":"fc_1",
@@ -1205,7 +1244,7 @@ fn malformed_tool_arguments_are_rejected_at_wire_edge() {
         }))
         .unwrap_err();
     assert!(
-        matches!(responses, ProviderError::Decode(message) if message.contains("invalid OpenAI Responses function arguments"))
+        matches!(responses, crate::ProviderError::Decode(message) if message.contains("invalid OpenAI Responses function arguments"))
     );
 }
 
@@ -1234,7 +1273,7 @@ fn bedrock_eventstream_body(anthropic_events: &[&str]) -> Vec<u8> {
     let mut body = Vec::new();
     for event in anthropic_events {
         let bytes = base64::engine::general_purpose::STANDARD.encode(event.as_bytes());
-        let payload = json!({ "chunk": { "bytes": bytes } }).to_string();
+        let payload = serde_json::json!({ "chunk": { "bytes": bytes } }).to_string();
         body.extend(test_eventstream_frame(payload.as_bytes()));
     }
     body
@@ -1252,17 +1291,17 @@ fn bedrock_top_level_bytes_eventstream_body(anthropic_events: &[&str]) -> Vec<u8
     let mut body = Vec::new();
     for event in anthropic_events {
         let bytes = base64::engine::general_purpose::STANDARD.encode(event.as_bytes());
-        let payload = json!({ "bytes": bytes }).to_string();
+        let payload = serde_json::json!({ "bytes": bytes }).to_string();
         body.extend(test_eventstream_frame(payload.as_bytes()));
     }
     body
 }
 
 fn decoded_bedrock_chunk_payload(payload: &[u8]) -> String {
-    let value: Value = serde_json::from_slice(payload).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(payload).unwrap();
     let bytes = value
         .pointer("/chunk/bytes")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .unwrap();
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(bytes)
@@ -1281,10 +1320,10 @@ fn test_eventstream_frame(payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::new();
     frame.extend_from_slice(&(total_length as u32).to_be_bytes());
     frame.extend_from_slice(&(headers.len() as u32).to_be_bytes());
-    frame.extend_from_slice(&crc32(&frame).to_be_bytes());
+    frame.extend_from_slice(&crate::crc32(&frame).to_be_bytes());
     frame.extend_from_slice(&headers);
     frame.extend_from_slice(payload);
-    frame.extend_from_slice(&crc32(&frame).to_be_bytes());
+    frame.extend_from_slice(&crate::crc32(&frame).to_be_bytes());
     frame
 }
 
@@ -1301,10 +1340,10 @@ fn test_eventstream_string_header(name: &str, value: &str) -> Vec<u8> {
 async fn serve_fake_http_response(
     response_body: Vec<u8>,
     content_length: Option<usize>,
-) -> (String, oneshot::Receiver<String>) {
+) -> (String, tokio::sync::oneshot::Receiver<String>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (request_tx, request_rx) = oneshot::channel();
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_http_request(&mut socket).await;
@@ -1357,21 +1396,21 @@ fn http_content_length(headers: &[u8]) -> Option<usize> {
     })
 }
 
-fn stream_text(events: &[ProviderStreamEvent]) -> String {
+fn stream_text(events: &[crate::ProviderStreamEvent]) -> String {
     events
         .iter()
         .filter_map(|event| match event {
-            ProviderStreamEvent::TextDelta { text } => Some(text.as_str()),
+            crate::ProviderStreamEvent::TextDelta { text } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("")
 }
 
-fn stream_usage(events: &[ProviderStreamEvent]) -> CanonicalUsage {
-    let mut usage = CanonicalUsage::default();
+fn stream_usage(events: &[crate::ProviderStreamEvent]) -> verlet_history::CanonicalUsage {
+    let mut usage = verlet_history::CanonicalUsage::default();
     for event in events {
-        if let ProviderStreamEvent::Usage { usage: next } = event {
+        if let crate::ProviderStreamEvent::Usage { usage: next } = event {
             usage.input_tokens += next.input_tokens;
             usage.output_tokens += next.output_tokens;
             usage.cache_creation_input_tokens += next.cache_creation_input_tokens;
@@ -1381,22 +1420,24 @@ fn stream_usage(events: &[ProviderStreamEvent]) -> CanonicalUsage {
     usage
 }
 
-fn stream_stop_reason(events: &[ProviderStreamEvent]) -> CanonicalStopReason {
+fn stream_stop_reason(
+    events: &[crate::ProviderStreamEvent],
+) -> verlet_history::CanonicalStopReason {
     events
         .iter()
         .rev()
         .find_map(|event| match event {
-            ProviderStreamEvent::Done { stop_reason } => Some(*stop_reason),
+            crate::ProviderStreamEvent::Done { stop_reason } => Some(*stop_reason),
             _ => None,
         })
-        .unwrap_or(CanonicalStopReason::EndTurn)
+        .unwrap_or(verlet_history::CanonicalStopReason::EndTurn)
 }
 
-fn test_content_text(content: &[CanonicalContent]) -> String {
+fn test_content_text(content: &[verlet_history::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()

@@ -1,73 +1,32 @@
-use super::runtime_utils::{
-    emit_thread_interaction, latest_message_text, thread_interaction_preview,
-    wait_until_thread_settled,
-};
-use super::{
-    RuntimeHost, RuntimeHostInner, RuntimeThreadHandle, TurnInput, VerletError, VerletResult,
-    append_thread_joined_first_wins,
-};
-use crate::agent::contracts::{
-    CompiledThreadContract, THREAD_HANDLE_KIND, ThreadContractCompiler, ThreadContractReference,
-    ThreadContractSource, ThreadDeclaration, ThreadHandle, ThreadInitialTurn,
-    ThreadPropagatorSelection, ThreadReceiptSet, sha256_hex,
-};
-use crate::agent::manifest_bind::{BoundCouplingSet, coupling_set_content_hash};
-use crate::daemon::remote_store::placement::{
-    RemoteThreadExecutor, RemoteThreadSpawnRequest, RemoteThreadSubmitRequest,
-};
-use crate::kernel::admission::{AdmissionGateContext, KERNEL_THREAD_SUBMIT_SURFACE};
-use crate::kernel::history::{
-    EventKind, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStreamId,
-    NewEventRecord, SessionContext, ThreadSpawnedPayload,
-};
-use crate::kernel::mandate_lifecycle::{
-    ActiveMandate, MandateRevokeReceipt, MandateStartReceipt, MandateStartRequest,
-    list_active_mandates, revoke_mandate, start_mandate,
-};
-use crate::kernel::runtime_host::{
-    THREAD_AGENT_MANIFEST_HASH_METADATA, THREAD_BOUND_COUPLING_SET_METADATA,
-    THREAD_SPAWN_GRANTED_METADATA, THREAD_SPAWN_INPUTS_HASH_METADATA,
-};
-use crate::kernel::thread_spawn_projector::{
-    ThreadTaskNameResolutionReceipt, fold_thread_task_name_resolution,
-};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::sync::{Arc, Weak};
-use std::time::Duration;
-use verlet_runtime_contracts::{
-    DispatchId, HandleId, RuntimeEventId, ThreadCheckpointId, ThreadContext, ThreadCoordinates,
-    ThreadId, ThreadInteractionKind, ThreadLifecycleStatus, ThreadSignalId, ThreadStatus,
-    ThreadTopology, TurnSubmissionMode,
-};
-
 #[derive(Clone)]
 pub struct RuntimeKernelControl {
-    inner: Weak<RuntimeHostInner>,
+    inner: std::sync::Weak<crate::kernel::runtime_host::RuntimeHostInner>,
 }
 
 impl RuntimeKernelControl {
-    pub(super) fn new(inner: Weak<RuntimeHostInner>) -> Self {
+    pub(super) fn new(
+        inner: std::sync::Weak<crate::kernel::runtime_host::RuntimeHostInner>,
+    ) -> Self {
         Self { inner }
     }
 }
 
 async fn append_thread_spawned_event(
-    parent: &RuntimeThreadHandle,
-    caller: &ThreadContext,
-    child: &ThreadContext,
+    parent: &crate::kernel::runtime_host::RuntimeThreadHandle,
+    caller: &verlet_runtime_contracts::ThreadContext,
+    child: &verlet_runtime_contracts::ThreadContext,
     witness: ThreadSpawnWitness,
-) -> VerletResult<EventRecord> {
+) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
     let metadata = &child.metadata;
     let child_manifest_hash = metadata
-        .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+        .get(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
         .cloned()
         .unwrap_or_else(|| "unbound".to_string());
     let granted = metadata
-        .get(THREAD_SPAWN_GRANTED_METADATA)
+        .get(crate::kernel::runtime_host::THREAD_SPAWN_GRANTED_METADATA)
         .map(|raw| {
             serde_json::from_str::<Vec<String>>(raw).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "thread_spawn granted metadata is invalid: {err}"
                 ))
             })
@@ -75,27 +34,31 @@ async fn append_thread_spawned_event(
         .transpose()?
         .unwrap_or_default();
     let inputs_hash = metadata
-        .get(THREAD_SPAWN_INPUTS_HASH_METADATA)
+        .get(crate::kernel::runtime_host::THREAD_SPAWN_INPUTS_HASH_METADATA)
         .cloned()
         .unwrap_or_else(|| {
             format!(
                 "sha256:{}",
-                sha256_hex(child.coordinates.thread_id.to_string().as_bytes())
+                crate::agent::contracts::sha256_hex(
+                    child.coordinates.thread_id.to_string().as_bytes()
+                )
             )
         });
     let child_policy_hash = metadata
-        .get(THREAD_BOUND_COUPLING_SET_METADATA)
+        .get(crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA)
         .map(|raw| {
-            serde_json::from_str::<BoundCouplingSet>(raw)
+            serde_json::from_str::<crate::agent::manifest_bind::BoundCouplingSet>(raw)
                 .map_err(|err| {
-                    VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "thread bound coupling set is invalid: {err}"
                     ))
                 })
-                .and_then(|coupling_set| coupling_set_content_hash(&coupling_set))
+                .and_then(|coupling_set| {
+                    crate::agent::manifest_bind::coupling_set_content_hash(&coupling_set)
+                })
         })
         .transpose()?;
-    let payload = ThreadSpawnedPayload {
+    let payload = crate::kernel::history::ThreadSpawnedPayload {
         parent_thread_id: caller.coordinates.thread_id,
         parent_turn_id: witness.parent_turn_id.clone(),
         child_thread_id: child.coordinates.thread_id,
@@ -106,12 +69,14 @@ async fn append_thread_spawned_event(
         fork: None,
     };
     let mut value = serde_json::to_value(payload).map_err(|err| {
-        VerletError::History(format!("thread.spawned payload codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "thread.spawned payload codec failed: {err}"
+        ))
     })?;
     if let Some(object) = value.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(EventKind::ThreadSpawned.payload_schema_id()),
+            serde_json::json!(crate::kernel::history::EventKind::ThreadSpawned.payload_schema_id()),
         );
         if let Some(correlation_id) = &witness.correlation_id {
             object.insert(
@@ -120,14 +85,17 @@ async fn append_thread_spawned_event(
             );
         }
     }
-    let mut record =
-        NewEventRecord::witnessed(caller.coordinates.clone(), EventKind::ThreadSpawned, value);
+    let mut record = crate::kernel::history::NewEventRecord::witnessed(
+        caller.coordinates.clone(),
+        crate::kernel::history::EventKind::ThreadSpawned,
+        value,
+    );
     if let (Some(stream_id), Some(event_id)) = (witness.request_stream_id, witness.request_event_id)
     {
-        record.provenance = EventProvenance {
+        record.provenance = crate::kernel::history::EventProvenance {
             source_streams: vec![stream_id],
             source_event_ids: vec![event_id],
-            ..EventProvenance::default()
+            ..crate::kernel::history::EventProvenance::default()
         };
     }
     parent.append_control_event(record).await
@@ -137,119 +105,121 @@ async fn append_thread_spawned_event(
 pub struct ThreadSpawnWitness {
     pub parent_turn_id: Option<String>,
     pub correlation_id: Option<String>,
-    pub request_stream_id: Option<EventStreamId>,
-    pub request_event_id: Option<EventRecordId>,
+    pub request_stream_id: Option<crate::kernel::history::EventStreamId>,
+    pub request_event_id: Option<crate::kernel::history::EventRecordId>,
     pub submitted_turn_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentProcessSpawnReceipt {
     pub operation: String,
-    pub caller_thread_id: ThreadId,
-    pub thread_id: ThreadId,
-    pub parent_thread_id: ThreadId,
-    pub status: ThreadStatus,
+    pub caller_thread_id: verlet_runtime_contracts::ThreadId,
+    pub thread_id: verlet_runtime_contracts::ThreadId,
+    pub parent_thread_id: verlet_runtime_contracts::ThreadId,
+    pub status: verlet_runtime_contracts::ThreadStatus,
     pub task_name: Option<String>,
     pub submitted_turn_id: String,
-    pub handle: HandleId,
-    pub dispatch_id: DispatchId,
+    pub handle: verlet_runtime_contracts::HandleId,
+    pub dispatch_id: verlet_runtime_contracts::DispatchId,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentProcessSubmitReceipt {
     pub operation: String,
-    pub caller_thread_id: ThreadId,
-    pub target_thread_id: ThreadId,
-    pub interaction_id: RuntimeEventId,
-    pub status: ThreadStatus,
+    pub caller_thread_id: verlet_runtime_contracts::ThreadId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
+    pub interaction_id: verlet_runtime_contracts::RuntimeEventId,
+    pub status: verlet_runtime_contracts::ThreadStatus,
     pub turn_id: String,
-    pub dispatch_id: DispatchId,
+    pub dispatch_id: verlet_runtime_contracts::DispatchId,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentProcessWaitReceipt {
     pub operation: String,
-    pub caller_thread_id: ThreadId,
-    pub target_thread_id: ThreadId,
-    pub status: ThreadStatus,
+    pub caller_thread_id: verlet_runtime_contracts::ThreadId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
+    pub status: verlet_runtime_contracts::ThreadStatus,
     pub timed_out: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_interaction_id: Option<RuntimeEventId>,
+    pub result_interaction_id: Option<verlet_runtime_contracts::RuntimeEventId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentProcessLifecycleReceipt {
     pub operation: String,
-    pub caller_thread_id: ThreadId,
-    pub target_thread_id: ThreadId,
-    pub status: ThreadLifecycleStatus,
+    pub caller_thread_id: verlet_runtime_contracts::ThreadId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
+    pub status: verlet_runtime_contracts::ThreadLifecycleStatus,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentProcessCheckpointReceipt {
     pub operation: String,
-    pub caller_thread_id: ThreadId,
-    pub target_thread_id: ThreadId,
-    pub checkpoint_id: ThreadCheckpointId,
+    pub caller_thread_id: verlet_runtime_contracts::ThreadId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
+    pub checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
     pub label: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentProcessStatusReceipt {
     pub operation: String,
-    pub caller_thread_id: ThreadId,
-    pub target_thread_id: ThreadId,
+    pub caller_thread_id: verlet_runtime_contracts::ThreadId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_thread_id: Option<ThreadId>,
-    pub status: ThreadStatus,
+    pub parent_thread_id: Option<verlet_runtime_contracts::ThreadId>,
+    pub status: verlet_runtime_contracts::ThreadStatus,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentProcessChildRef {
-    pub thread_id: ThreadId,
+    pub thread_id: verlet_runtime_contracts::ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_thread_id: Option<ThreadId>,
-    pub status: ThreadStatus,
+    pub parent_thread_id: Option<verlet_runtime_contracts::ThreadId>,
+    pub status: verlet_runtime_contracts::ThreadStatus,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentProcessChildrenReceipt {
     pub operation: String,
-    pub caller_thread_id: ThreadId,
-    pub target_thread_id: ThreadId,
+    pub caller_thread_id: verlet_runtime_contracts::ThreadId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
     pub children: Vec<AgentProcessChildRef>,
 }
 
 fn compile_declaration_contract(
-    reference: &ThreadContractReference,
-) -> VerletResult<CompiledThreadContract> {
+    reference: &crate::agent::contracts::ThreadContractReference,
+) -> crate::kernel::runtime_host::VerletResult<crate::agent::contracts::CompiledThreadContract> {
     if let Some(compiled) = &reference.compiled {
         compiled.validate()?;
         return Ok(compiled.clone());
     }
     if let Some(source) = &reference.inline {
-        return Ok(ThreadContractCompiler::compile(
-            &ThreadContractSource::markdown(source.clone()),
+        return Ok(crate::agent::contracts::ThreadContractCompiler::compile(
+            &crate::agent::contracts::ThreadContractSource::markdown(source.clone()),
         )?);
     }
     if let Some(ref_path) = &reference.ref_path {
-        return Err(VerletError::RuntimeExecution(format!(
-            "thread contract ref {ref_path:?} must be resolved before RuntimeKernelControl::declare_thread"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!(
+                "thread contract ref {ref_path:?} must be resolved before RuntimeKernelControl::declare_thread"
+            ),
+        ));
     }
-    Err(VerletError::RuntimeExecution(
+    Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
         "thread contract reference is empty".to_string(),
     ))
 }
 
 fn declaration_turn_input(
-    contract: &CompiledThreadContract,
-    initial_turn: &ThreadInitialTurn,
+    contract: &crate::agent::contracts::CompiledThreadContract,
+    initial_turn: &crate::agent::contracts::ThreadInitialTurn,
     inputs: &serde_json::Value,
-) -> VerletResult<TurnInput> {
-    let mut input = TurnInput::text(initial_turn.content.clone())
+) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::TurnInput> {
+    let mut input = crate::kernel::runtime_host::TurnInput::text(initial_turn.content.clone())
         .with_metadata("thread_contract_name", contract.name.clone())
         .with_metadata("thread_contract_hash", contract.contract_hash()?)
         .with_metadata("thread_contract_source_hash", contract.source_hash.clone())
@@ -258,7 +228,7 @@ fn declaration_turn_input(
         .with_metadata("agent_contract_source_hash", contract.source_hash.clone());
     if !inputs.as_object().is_some_and(|object| object.is_empty()) {
         let input_json = serde_json::to_string(inputs).map_err(|err| {
-            VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "thread declaration inputs could not be encoded: {err}"
             ))
         })?;
@@ -269,21 +239,25 @@ fn declaration_turn_input(
 }
 
 impl RuntimeKernelControl {
-    fn host(&self) -> VerletResult<RuntimeHost> {
+    fn host(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeHost> {
         let inner = self.inner.upgrade().ok_or_else(|| {
-            VerletError::RuntimeExecution("runtime host is no longer available".to_string())
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                "runtime host is no longer available".to_string(),
+            )
         })?;
-        Ok(RuntimeHost { inner })
+        Ok(crate::kernel::runtime_host::RuntimeHost { inner })
     }
 
     // lexicon-allow: subagent - public compatibility method for existing agent-process callers.
     pub async fn spawn_subagent(
         &self,
-        caller: &ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: TurnInput,
-        metadata: BTreeMap<String, String>,
-    ) -> VerletResult<AgentProcessSpawnReceipt> {
+        input: crate::kernel::runtime_host::TurnInput,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         self.spawn_child_with_witness(
             caller,
             task_name,
@@ -296,13 +270,13 @@ impl RuntimeKernelControl {
 
     pub async fn dispatch_thread_spawn(
         &self,
-        caller: &ThreadContext,
-        dispatch_id: DispatchId,
+        caller: &verlet_runtime_contracts::ThreadContext,
+        dispatch_id: verlet_runtime_contracts::DispatchId,
         task_name: String,
         message: String,
         agent_ref: Option<String>,
-        agent_resolver: Option<Arc<dyn crate::KernelThreadSpawnAgentResolver>>,
-    ) -> VerletResult<AgentProcessSpawnReceipt> {
+        agent_resolver: Option<std::sync::Arc<dyn crate::KernelThreadSpawnAgentResolver>>,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
         let child_agent_ref = agent_ref
             .or_else(|| {
@@ -332,17 +306,19 @@ impl RuntimeKernelControl {
                 false,
             )
             .await?;
-        let thread_id = ThreadId::parse_str(&dispatched.handle.id).map_err(|err| {
-            VerletError::History(format!("thread dispatch returned invalid handle: {err}"))
-        })?;
+        let thread_id = verlet_runtime_contracts::ThreadId::parse_str(&dispatched.handle.id)
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "thread dispatch returned invalid handle: {err}"
+                ))
+            })?;
         let host = self.host()?;
         let status = match host.get_thread(thread_id).await {
             Ok(thread) => thread.status(),
-            Err(VerletError::ThreadNotFound(_)) => {
-                let executor = host
-                    .remote_thread_executor()
-                    .await
-                    .ok_or_else(|| VerletError::ThreadNotFound(thread_id))?;
+            Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_)) => {
+                let executor = host.remote_thread_executor().await.ok_or_else(|| {
+                    crate::kernel::runtime_host::VerletError::ThreadNotFound(thread_id)
+                })?;
                 executor.observe(thread_id).await?.status
             }
             Err(error) => return Err(error),
@@ -366,11 +342,13 @@ impl RuntimeKernelControl {
     /// keep that identity out of model-visible projections.
     pub async fn resolve_child_task_name(
         &self,
-        caller: &ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         task_name: &str,
-    ) -> VerletResult<ThreadTaskNameResolutionReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::thread_spawn_projector::ThreadTaskNameResolutionReceipt,
+    > {
         if task_name.trim().is_empty() {
-            return Err(VerletError::RuntimeExecution(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                 "thread task_name must not be empty".to_string(),
             ));
         }
@@ -378,37 +356,40 @@ impl RuntimeKernelControl {
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
         let events = parent.read_control_events().await?;
-        fold_thread_task_name_resolution(&events, &caller.coordinates, task_name)?.ok_or_else(
-            || {
-                VerletError::RuntimeExecution(format!(
-                    "thread task_name {task_name:?} was not found under this parent"
-                ))
-            },
-        )
+        crate::kernel::thread_spawn_projector::fold_thread_task_name_resolution(
+            &events,
+            &caller.coordinates,
+            task_name,
+        )?
+        .ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                "thread task_name {task_name:?} was not found under this parent"
+            ))
+        })
     }
 
     pub async fn spawn_child_with_witness(
         &self,
-        caller: &ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: TurnInput,
-        metadata: BTreeMap<String, String>,
+        input: crate::kernel::runtime_host::TurnInput,
+        metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
-    ) -> VerletResult<AgentProcessSpawnReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         self.spawn_child_cancellation_safe(caller, task_name, input, metadata, witness, None)
             .await
     }
 
     pub(crate) async fn spawn_bound_child_with_witness(
         &self,
-        caller: &ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: TurnInput,
-        metadata: BTreeMap<String, String>,
+        input: crate::kernel::runtime_host::TurnInput,
+        metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
-    ) -> VerletResult<AgentProcessSpawnReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         self.spawn_child_cancellation_safe(
             caller,
             task_name,
@@ -422,13 +403,13 @@ impl RuntimeKernelControl {
 
     async fn spawn_child_cancellation_safe(
         &self,
-        caller: &ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: TurnInput,
-        metadata: BTreeMap<String, String>,
+        input: crate::kernel::runtime_host::TurnInput,
+        metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
         manifest_payloads: Option<(serde_json::Value, serde_json::Value)>,
-    ) -> VerletResult<AgentProcessSpawnReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         let control = self.clone();
         let caller = caller.clone();
         tokio::spawn(async move {
@@ -445,21 +426,23 @@ impl RuntimeKernelControl {
         })
         .await
         .map_err(|err| {
-            VerletError::RuntimeExecution(format!("child spawn witness task failed: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                "child spawn witness task failed: {err}"
+            ))
         })?
     }
 
     async fn spawn_child_inner(
         &self,
-        caller: &ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: TurnInput,
-        mut metadata: BTreeMap<String, String>,
+        input: crate::kernel::runtime_host::TurnInput,
+        mut metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
         manifest_payloads: Option<(serde_json::Value, serde_json::Value)>,
-    ) -> VerletResult<AgentProcessSpawnReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
-        let coordinates = ThreadCoordinates::new(
+        let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
             caller.coordinates.tenant_id.clone(),
             caller.coordinates.user_id.clone(),
             caller.coordinates.session_id.clone(),
@@ -477,23 +460,32 @@ impl RuntimeKernelControl {
         let child = host
             .start_thread_with_topology_and_metadata(
                 coordinates,
-                ThreadTopology::spawned_from(caller.coordinates.thread_id),
+                verlet_runtime_contracts::ThreadTopology::spawned_from(
+                    caller.coordinates.thread_id,
+                ),
                 metadata,
             )
             .await?;
         let child_thread_id = child.context().coordinates.thread_id;
         let parent = host.get_thread(caller.coordinates.thread_id).await?;
-        let dispatch_id = DispatchId::new(
-            witness
-                .correlation_id
-                .clone()
-                .unwrap_or_else(|| format!("thread-spawn-{}", ThreadSignalId::new())),
+        let dispatch_id = verlet_runtime_contracts::DispatchId::new(
+            witness.correlation_id.clone().unwrap_or_else(|| {
+                format!(
+                    "thread-spawn-{}",
+                    verlet_runtime_contracts::ThreadSignalId::new()
+                )
+            }),
         );
         let turn_id = witness
             .submitted_turn_id
             .clone()
             .filter(|turn_id| !turn_id.trim().is_empty())
-            .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
+            .unwrap_or_else(|| {
+                format!(
+                    "agent-process-v1-{}",
+                    verlet_runtime_contracts::ThreadSignalId::new()
+                )
+            });
         if let Err(err) =
             append_thread_spawned_event(&parent, caller, child.context(), witness).await
         {
@@ -524,7 +516,7 @@ impl RuntimeKernelControl {
             status: child.status(),
             task_name,
             submitted_turn_id: turn_id,
-            handle: HandleId::thread(child_thread_id),
+            handle: verlet_runtime_contracts::HandleId::thread(child_thread_id),
             dispatch_id,
         })
     }
@@ -532,21 +524,21 @@ impl RuntimeKernelControl {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn spawn_remote_child_with_witness(
         &self,
-        caller: &ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         task_name: Option<String>,
-        input: TurnInput,
-        mut metadata: BTreeMap<String, String>,
+        input: crate::kernel::runtime_host::TurnInput,
+        mut metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
         compile_payload: Option<serde_json::Value>,
         bind_payload: Option<serde_json::Value>,
-    ) -> VerletResult<AgentProcessSpawnReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
         let executor = host.remote_thread_executor().await.ok_or_else(|| {
-            VerletError::RuntimeFactory(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "placement target remote requires a served remote thread executor".to_string(),
             )
         })?;
-        let coordinates = ThreadCoordinates::new(
+        let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
             caller.coordinates.tenant_id.clone(),
             caller.coordinates.user_id.clone(),
             caller.coordinates.session_id.clone(),
@@ -560,25 +552,32 @@ impl RuntimeKernelControl {
         if let Some(task_name) = &task_name {
             metadata.insert("task_name".to_string(), task_name.clone());
         }
-        let child = ThreadContext::with_topology_and_metadata(
+        let child = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
             coordinates,
-            ThreadTopology::spawned_from(caller.coordinates.thread_id),
+            verlet_runtime_contracts::ThreadTopology::spawned_from(caller.coordinates.thread_id),
             metadata,
         );
         let parent = host.get_thread(caller.coordinates.thread_id).await?;
-        let dispatch_id = DispatchId::new(
-            witness
-                .correlation_id
-                .clone()
-                .unwrap_or_else(|| format!("thread-spawn-{}", ThreadSignalId::new())),
+        let dispatch_id = verlet_runtime_contracts::DispatchId::new(
+            witness.correlation_id.clone().unwrap_or_else(|| {
+                format!(
+                    "thread-spawn-{}",
+                    verlet_runtime_contracts::ThreadSignalId::new()
+                )
+            }),
         );
         let turn_id = witness
             .submitted_turn_id
             .clone()
             .filter(|turn_id| !turn_id.trim().is_empty())
-            .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
+            .unwrap_or_else(|| {
+                format!(
+                    "agent-process-v1-{}",
+                    verlet_runtime_contracts::ThreadSignalId::new()
+                )
+            });
         let spawned = append_thread_spawned_event(&parent, caller, &child, witness).await?;
-        let request = RemoteThreadSpawnRequest {
+        let request = crate::daemon::remote_store::placement::RemoteThreadSpawnRequest {
             child: child.clone(),
             task_name: task_name.clone(),
             turn_id: turn_id.clone(),
@@ -589,7 +588,7 @@ impl RuntimeKernelControl {
             bind_payload,
         };
         if let Err(error) = executor.spawn(request).await {
-            let _ = append_thread_joined_first_wins(
+            let _ = crate::kernel::runtime_host::append_thread_joined_first_wins(
                 host.runtime_store().as_ref(),
                 caller.coordinates.clone(),
                 child.coordinates.clone(),
@@ -609,25 +608,25 @@ impl RuntimeKernelControl {
             caller_thread_id: caller.coordinates.thread_id,
             thread_id: child.coordinates.thread_id,
             parent_thread_id: caller.coordinates.thread_id,
-            status: ThreadStatus::Starting,
+            status: verlet_runtime_contracts::ThreadStatus::Starting,
             task_name,
             submitted_turn_id: turn_id,
-            handle: HandleId::thread(child.coordinates.thread_id),
+            handle: verlet_runtime_contracts::HandleId::thread(child.coordinates.thread_id),
             dispatch_id,
         })
     }
 
     pub async fn declare_thread(
         &self,
-        caller: &ThreadContext,
-        declaration: ThreadDeclaration,
-    ) -> VerletResult<ThreadHandle> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        declaration: crate::agent::contracts::ThreadDeclaration,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::agent::contracts::ThreadHandle> {
         declaration.validate()?;
         let contract = compile_declaration_contract(&declaration.contract)?;
         let contract_hash = contract.contract_hash()?;
         let compile_receipt = contract_hash.clone();
         let host = self.host()?;
-        let coordinates = ThreadCoordinates::new(
+        let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
             caller.coordinates.tenant_id.clone(),
             caller.coordinates.user_id.clone(),
             caller.coordinates.session_id.clone(),
@@ -640,9 +639,11 @@ impl RuntimeKernelControl {
         if parent_thread_id != caller.coordinates.thread_id {
             self.scoped_thread(caller, parent_thread_id).await?;
         }
-        let topology = ThreadTopology::spawned_from(parent_thread_id);
+        let topology = verlet_runtime_contracts::ThreadTopology::spawned_from(parent_thread_id);
         let propagator = declaration.propagator.clone().unwrap_or_else(|| {
-            ThreadPropagatorSelection::from_runtime_hint(contract.runtime.get("propagator"))
+            crate::agent::contracts::ThreadPropagatorSelection::from_runtime_hint(
+                contract.runtime.get("propagator"),
+            )
         });
         let mut metadata = declaration.metadata.clone();
         metadata.insert("thread_contract_v0".to_string(), "true".to_string());
@@ -675,7 +676,10 @@ impl RuntimeKernelControl {
             .start_thread_with_topology_and_metadata(coordinates, topology, metadata)
             .await?;
         let child_thread_id = child.context().coordinates.thread_id;
-        let turn_id = format!("thread-contract-v0-{}", ThreadSignalId::new());
+        let turn_id = format!(
+            "thread-contract-v0-{}",
+            verlet_runtime_contracts::ThreadSignalId::new()
+        );
         let input =
             declaration_turn_input(&contract, &declaration.initial_turn, &declaration.inputs)?;
         if let Err(err) = host
@@ -685,7 +689,7 @@ impl RuntimeKernelControl {
             let _ = host.shutdown_thread(child_thread_id).await;
             return Err(err);
         }
-        let spawn_receipt = sha256_hex(
+        let spawn_receipt = crate::agent::contracts::sha256_hex(
             serde_json::json!({
                 "kind": "cooldis.thread-spawn-receipt",
                 "version": 0,
@@ -700,15 +704,15 @@ impl RuntimeKernelControl {
             .as_bytes(),
         );
 
-        Ok(ThreadHandle {
-            kind: THREAD_HANDLE_KIND.to_string(),
+        Ok(crate::agent::contracts::ThreadHandle {
+            kind: crate::agent::contracts::THREAD_HANDLE_KIND.to_string(),
             version: 0,
             thread_id: child_thread_id,
             status: child.status(),
             propagator,
             contract_hash,
             submitted_turn_id: turn_id,
-            receipts: ThreadReceiptSet {
+            receipts: crate::agent::contracts::ThreadReceiptSet {
                 compile: compile_receipt,
                 spawn: spawn_receipt,
             },
@@ -717,28 +721,36 @@ impl RuntimeKernelControl {
 
     pub async fn declare_agent_thread(
         &self,
-        caller: &ThreadContext,
-        declaration: ThreadDeclaration,
-    ) -> VerletResult<ThreadHandle> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        declaration: crate::agent::contracts::ThreadDeclaration,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::agent::contracts::ThreadHandle> {
         self.declare_thread(caller, declaration).await
     }
 
     pub async fn submit_to_thread(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: Option<String>,
-        input: TurnInput,
-    ) -> VerletResult<AgentProcessSubmitReceipt> {
+        input: crate::kernel::runtime_host::TurnInput,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSubmitReceipt> {
         let turn_id = turn_id
             .filter(|turn_id| !turn_id.trim().is_empty())
-            .unwrap_or_else(|| format!("agent-process-v1-{}", ThreadSignalId::new()));
+            .unwrap_or_else(|| {
+                format!(
+                    "agent-process-v1-{}",
+                    verlet_runtime_contracts::ThreadSignalId::new()
+                )
+            });
         self.submit_to_thread_with_identities(
             caller,
             target_thread_id,
-            DispatchId::new(format!("thread-submit-{}", ThreadSignalId::new())),
+            verlet_runtime_contracts::DispatchId::new(format!(
+                "thread-submit-{}",
+                verlet_runtime_contracts::ThreadSignalId::new()
+            )),
             turn_id,
-            RuntimeEventId::new(),
+            verlet_runtime_contracts::RuntimeEventId::new(),
             input,
         )
         .await
@@ -749,11 +761,11 @@ impl RuntimeKernelControl {
     /// the fold key with an organic turn identity.
     pub async fn submit_to_thread_with_dispatch(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-        dispatch_id: DispatchId,
-        input: TurnInput,
-    ) -> VerletResult<AgentProcessSubmitReceipt> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        dispatch_id: verlet_runtime_contracts::DispatchId,
+        input: crate::kernel::runtime_host::TurnInput,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSubmitReceipt> {
         let turn_id = format!("thread-submit-{dispatch_id}");
         let interaction_id = submit_dispatch_interaction_id(target_thread_id, &dispatch_id);
         self.submit_to_thread_with_identities(
@@ -769,13 +781,13 @@ impl RuntimeKernelControl {
 
     async fn submit_to_thread_with_identities(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-        dispatch_id: DispatchId,
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        dispatch_id: verlet_runtime_contracts::DispatchId,
         turn_id: String,
-        interaction_id: RuntimeEventId,
-        input: TurnInput,
-    ) -> VerletResult<AgentProcessSubmitReceipt> {
+        interaction_id: verlet_runtime_contracts::RuntimeEventId,
+        input: crate::kernel::runtime_host::TurnInput,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSubmitReceipt> {
         let host = self.host()?;
         let caller_thread = self
             .scoped_thread(caller, caller.coordinates.thread_id)
@@ -785,27 +797,31 @@ impl RuntimeKernelControl {
             .await?
         {
             let status = executor
-                .submit(RemoteThreadSubmitRequest {
-                    target_thread_id,
-                    turn_id: turn_id.clone(),
-                    dispatch_id: dispatch_id.clone(),
-                    input,
-                })
+                .submit(
+                    crate::daemon::remote_store::placement::RemoteThreadSubmitRequest {
+                        target_thread_id,
+                        turn_id: turn_id.clone(),
+                        dispatch_id: dispatch_id.clone(),
+                        input,
+                    },
+                )
                 .await?;
-            let metadata = BTreeMap::from([
+            let metadata = std::collections::BTreeMap::from([
                 (
                     "operation".to_string(),
                     "cooldis.submit_to_thread".to_string(),
                 ),
                 (
                     "mode".to_string(),
-                    TurnSubmissionMode::Queue.as_str().to_string(),
+                    verlet_runtime_contracts::TurnSubmissionMode::Queue
+                        .as_str()
+                        .to_string(),
                 ),
             ]);
-            emit_thread_interaction(
+            crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
                 &caller_thread,
                 interaction_id,
-                ThreadInteractionKind::PromptSubmitted,
+                verlet_runtime_contracts::ThreadInteractionKind::PromptSubmitted,
                 caller.coordinates.thread_id,
                 target_thread_id,
                 None,
@@ -824,33 +840,37 @@ impl RuntimeKernelControl {
             });
         }
         let target = self.scoped_thread(caller, target_thread_id).await?;
-        let admission =
-            AdmissionGateContext::surface_default(KERNEL_THREAD_SUBMIT_SURFACE, Vec::new())?;
+        let admission = crate::kernel::admission::AdmissionGateContext::surface_default(
+            crate::kernel::admission::KERNEL_THREAD_SUBMIT_SURFACE,
+            Vec::new(),
+        )?;
         let reserved = crate::kernel::admission::reserve_turn(
             &host,
             target_thread_id,
             turn_id.clone(),
             input,
-            TurnSubmissionMode::Queue,
+            verlet_runtime_contracts::TurnSubmissionMode::Queue,
             Some(admission),
         )
         .await?;
         let submitted = crate::kernel::admission::submit_reserved(reserved).await;
-        let metadata = BTreeMap::from([
+        let metadata = std::collections::BTreeMap::from([
             (
                 "operation".to_string(),
                 "cooldis.submit_to_thread".to_string(),
             ),
             (
                 "mode".to_string(),
-                TurnSubmissionMode::Queue.as_str().to_string(),
+                verlet_runtime_contracts::TurnSubmissionMode::Queue
+                    .as_str()
+                    .to_string(),
             ),
         ]);
         if submitted {
-            emit_thread_interaction(
+            crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
                 &caller_thread,
                 interaction_id,
-                ThreadInteractionKind::PromptSubmitted,
+                verlet_runtime_contracts::ThreadInteractionKind::PromptSubmitted,
                 caller.coordinates.thread_id,
                 target_thread_id,
                 None,
@@ -858,10 +878,10 @@ impl RuntimeKernelControl {
                 None,
                 metadata.clone(),
             );
-            emit_thread_interaction(
+            crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
                 &target,
                 interaction_id,
-                ThreadInteractionKind::PromptReceived,
+                verlet_runtime_contracts::ThreadInteractionKind::PromptReceived,
                 caller.coordinates.thread_id,
                 target_thread_id,
                 None,
@@ -883,12 +903,12 @@ impl RuntimeKernelControl {
 
     pub async fn wait_thread(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
         timeout_ms: Option<u64>,
-    ) -> VerletResult<AgentProcessWaitReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessWaitReceipt> {
         if target_thread_id == caller.coordinates.thread_id {
-            return Err(VerletError::RuntimeExecution(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                 "Agent Process V1 cannot wait on the invoking thread".to_string(),
             ));
         }
@@ -906,17 +926,17 @@ impl RuntimeKernelControl {
                     .latest_output
                     .as_ref()
                     .map(|latest_output| {
-                        let interaction_id = RuntimeEventId::new();
-                        emit_thread_interaction(
+                        let interaction_id = verlet_runtime_contracts::RuntimeEventId::new();
+                        crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
                             &caller_thread,
                             interaction_id,
-                            ThreadInteractionKind::ResultAttached,
+                            verlet_runtime_contracts::ThreadInteractionKind::ResultAttached,
                             target_thread_id,
                             caller.coordinates.thread_id,
                             None,
                             None,
-                            Some(thread_interaction_preview(latest_output)),
-                            BTreeMap::from([(
+                            Some(crate::kernel::runtime_host::runtime_utils::thread_interaction_preview(latest_output)),
+                            std::collections::BTreeMap::from([(
                                 "operation".to_string(),
                                 "cooldis.wait_thread".to_string(),
                             )]),
@@ -939,34 +959,40 @@ impl RuntimeKernelControl {
         let target = self.scoped_thread(caller, target_thread_id).await?;
         let timed_out = match timeout_ms {
             Some(timeout_ms) => tokio::time::timeout(
-                Duration::from_millis(timeout_ms),
-                wait_until_thread_settled(&target),
+                std::time::Duration::from_millis(timeout_ms),
+                crate::kernel::runtime_host::runtime_utils::wait_until_thread_settled(&target),
             )
             .await
             .is_err(),
             None => {
-                wait_until_thread_settled(&target).await;
+                crate::kernel::runtime_host::runtime_utils::wait_until_thread_settled(&target)
+                    .await;
                 false
             }
         };
-        let latest_output = target
-            .session_context()
-            .await
-            .ok()
-            .and_then(|context| latest_message_text(&context.messages));
+        let latest_output = target.session_context().await.ok().and_then(|context| {
+            crate::kernel::runtime_host::runtime_utils::latest_message_text(&context.messages)
+        });
         let result_interaction_id = if !timed_out {
             latest_output.as_ref().map(|latest_output| {
-                let interaction_id = RuntimeEventId::new();
-                emit_thread_interaction(
+                let interaction_id = verlet_runtime_contracts::RuntimeEventId::new();
+                crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
                     &caller_thread,
                     interaction_id,
-                    ThreadInteractionKind::ResultAttached,
+                    verlet_runtime_contracts::ThreadInteractionKind::ResultAttached,
                     target_thread_id,
                     caller.coordinates.thread_id,
                     None,
                     None,
-                    Some(thread_interaction_preview(latest_output)),
-                    BTreeMap::from([("operation".to_string(), "cooldis.wait_thread".to_string())]),
+                    Some(
+                        crate::kernel::runtime_host::runtime_utils::thread_interaction_preview(
+                            latest_output,
+                        ),
+                    ),
+                    std::collections::BTreeMap::from([(
+                        "operation".to_string(),
+                        "cooldis.wait_thread".to_string(),
+                    )]),
                 );
                 interaction_id
             })
@@ -986,12 +1012,12 @@ impl RuntimeKernelControl {
 
     pub async fn cancel_thread(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
         reason: String,
-    ) -> VerletResult<AgentProcessLifecycleReceipt> {
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessLifecycleReceipt> {
         if target_thread_id == caller.coordinates.thread_id {
-            return Err(VerletError::RuntimeExecution(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                 "Agent Process V1 cannot cancel the invoking thread through its own control call"
                     .to_string(),
             ));
@@ -1001,15 +1027,15 @@ impl RuntimeKernelControl {
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
         let target = self.scoped_thread(caller, target_thread_id).await?;
-        let interaction_id = RuntimeEventId::new();
-        let metadata = BTreeMap::from([
+        let interaction_id = verlet_runtime_contracts::RuntimeEventId::new();
+        let metadata = std::collections::BTreeMap::from([
             ("operation".to_string(), "cooldis.cancel_thread".to_string()),
             ("reason".to_string(), reason.clone()),
         ]);
-        emit_thread_interaction(
+        crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
             &caller_thread,
             interaction_id,
-            ThreadInteractionKind::ControlRequested,
+            verlet_runtime_contracts::ThreadInteractionKind::ControlRequested,
             caller.coordinates.thread_id,
             target_thread_id,
             None,
@@ -1017,10 +1043,10 @@ impl RuntimeKernelControl {
             None,
             metadata.clone(),
         );
-        emit_thread_interaction(
+        crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
             &target,
             interaction_id,
-            ThreadInteractionKind::ControlRequested,
+            verlet_runtime_contracts::ThreadInteractionKind::ControlRequested,
             caller.coordinates.thread_id,
             target_thread_id,
             None,
@@ -1034,17 +1060,17 @@ impl RuntimeKernelControl {
             operation: "cooldis.cancel_thread".to_string(),
             caller_thread_id: caller.coordinates.thread_id,
             target_thread_id,
-            status: ThreadLifecycleStatus::from(target.status()),
+            status: verlet_runtime_contracts::ThreadLifecycleStatus::from(target.status()),
         })
     }
 
     pub async fn shutdown_thread(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-    ) -> VerletResult<AgentProcessLifecycleReceipt> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessLifecycleReceipt> {
         if target_thread_id == caller.coordinates.thread_id {
-            return Err(VerletError::RuntimeExecution(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                 "Agent Process V1 cannot shut down the invoking thread through its own control call"
                     .to_string(),
             ));
@@ -1054,15 +1080,15 @@ impl RuntimeKernelControl {
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
         let target = self.scoped_thread(caller, target_thread_id).await?;
-        let interaction_id = RuntimeEventId::new();
-        let metadata = BTreeMap::from([(
+        let interaction_id = verlet_runtime_contracts::RuntimeEventId::new();
+        let metadata = std::collections::BTreeMap::from([(
             "operation".to_string(),
             "cooldis.shutdown_thread".to_string(),
         )]);
-        emit_thread_interaction(
+        crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
             &caller_thread,
             interaction_id,
-            ThreadInteractionKind::ControlRequested,
+            verlet_runtime_contracts::ThreadInteractionKind::ControlRequested,
             caller.coordinates.thread_id,
             target_thread_id,
             None,
@@ -1070,10 +1096,10 @@ impl RuntimeKernelControl {
             None,
             metadata.clone(),
         );
-        emit_thread_interaction(
+        crate::kernel::runtime_host::runtime_utils::emit_thread_interaction(
             &target,
             interaction_id,
-            ThreadInteractionKind::ControlRequested,
+            verlet_runtime_contracts::ThreadInteractionKind::ControlRequested,
             caller.coordinates.thread_id,
             target_thread_id,
             None,
@@ -1086,18 +1112,18 @@ impl RuntimeKernelControl {
             operation: "cooldis.shutdown_thread".to_string(),
             caller_thread_id: caller.coordinates.thread_id,
             target_thread_id,
-            status: ThreadLifecycleStatus::Stopped,
+            status: verlet_runtime_contracts::ThreadLifecycleStatus::Stopped,
         })
     }
 
     pub async fn create_checkpoint(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-        parent_checkpoint_id: Option<ThreadCheckpointId>,
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        parent_checkpoint_id: Option<verlet_runtime_contracts::ThreadCheckpointId>,
         label: Option<String>,
-        metadata: BTreeMap<String, String>,
-    ) -> VerletResult<AgentProcessCheckpointReceipt> {
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessCheckpointReceipt> {
         let host = self.host()?;
         self.scoped_thread(caller, target_thread_id).await?;
         let checkpoint = host
@@ -1114,9 +1140,9 @@ impl RuntimeKernelControl {
 
     pub async fn thread_status(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-    ) -> VerletResult<AgentProcessStatusReceipt> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessStatusReceipt> {
         if let Some((executor, remote_context)) = self
             .scoped_remote_thread_executor(caller, target_thread_id)
             .await?
@@ -1142,9 +1168,9 @@ impl RuntimeKernelControl {
 
     pub async fn children_of(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-    ) -> VerletResult<AgentProcessChildrenReceipt> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessChildrenReceipt> {
         let host = self.host()?;
         self.scoped_thread(caller, target_thread_id).await?;
         let mut children = Vec::new();
@@ -1169,11 +1195,14 @@ impl RuntimeKernelControl {
 
     pub async fn record_manifest_receipts_for_thread(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
-    ) -> VerletResult<(EventRecord, EventRecord)> {
+    ) -> crate::kernel::runtime_host::VerletResult<(
+        crate::kernel::history::EventRecord,
+        crate::kernel::history::EventRecord,
+    )> {
         let target = self.scoped_thread(caller, target_thread_id).await?;
         target
             .record_manifest_receipts(compile_payload, bind_payload)
@@ -1182,10 +1211,12 @@ impl RuntimeKernelControl {
 
     pub async fn start_mandate(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-        mut request: MandateStartRequest,
-    ) -> VerletResult<MandateStartReceipt> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        mut request: crate::kernel::mandate_lifecycle::MandateStartRequest,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::mandate_lifecycle::MandateStartReceipt,
+    > {
         let host = self.host()?;
         let target = self.scoped_thread(caller, target_thread_id).await?;
         if request.snapshot_id.is_none() {
@@ -1195,7 +1226,7 @@ impl RuntimeKernelControl {
                 .get("cooldis.agent.manifest_hash")
                 .cloned();
         }
-        start_mandate(
+        crate::kernel::mandate_lifecycle::start_mandate(
             host.runtime_store().as_ref(),
             &target.context().coordinates,
             request,
@@ -1206,13 +1237,15 @@ impl RuntimeKernelControl {
 
     pub async fn revoke_mandate(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-        mandate_event_id: EventRecordId,
-    ) -> VerletResult<MandateRevokeReceipt> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+        mandate_event_id: crate::kernel::history::EventRecordId,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::mandate_lifecycle::MandateRevokeReceipt,
+    > {
         let host = self.host()?;
         let target = self.scoped_thread(caller, target_thread_id).await?;
-        revoke_mandate(
+        crate::kernel::mandate_lifecycle::revoke_mandate(
             host.runtime_store().as_ref(),
             &target.context().coordinates,
             mandate_event_id,
@@ -1222,18 +1255,24 @@ impl RuntimeKernelControl {
 
     pub async fn list_mandates(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-    ) -> VerletResult<Vec<ActiveMandate>> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Vec<crate::kernel::mandate_lifecycle::ActiveMandate>,
+    > {
         let host = self.host()?;
         let target = self.scoped_thread(caller, target_thread_id).await?;
-        list_active_mandates(host.runtime_store().as_ref(), &target.context().coordinates).await
+        crate::kernel::mandate_lifecycle::list_active_mandates(
+            host.runtime_store().as_ref(),
+            &target.context().coordinates,
+        )
+        .await
     }
 
     pub async fn caller_session_context(
         &self,
-        caller: &ThreadContext,
-    ) -> VerletResult<SessionContext> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionContext> {
         let target = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
@@ -1242,9 +1281,9 @@ impl RuntimeKernelControl {
 
     pub async fn caller_thread_events(
         &self,
-        caller: &ThreadContext,
-        from_sequence: Option<EventSequence>,
-    ) -> VerletResult<Vec<EventRecord>> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        from_sequence: Option<crate::kernel::history::EventSequence>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
         let target = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
@@ -1253,8 +1292,8 @@ impl RuntimeKernelControl {
 
     pub async fn caller_control_events(
         &self,
-        caller: &ThreadContext,
-    ) -> VerletResult<Vec<EventRecord>> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
         let target = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
@@ -1263,9 +1302,9 @@ impl RuntimeKernelControl {
 
     pub async fn append_caller_thread_event(
         &self,
-        caller: &ThreadContext,
-        record: NewEventRecord,
-    ) -> VerletResult<EventRecord> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        record: crate::kernel::history::NewEventRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
         let target = self
             .scoped_thread(caller, caller.coordinates.thread_id)
             .await?;
@@ -1274,9 +1313,10 @@ impl RuntimeKernelControl {
 
     async fn scoped_thread(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-    ) -> VerletResult<RuntimeThreadHandle> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         let host = self.host()?;
         let target = host.get_thread(target_thread_id).await?;
         ensure_thread_scope(caller, &target.context().coordinates)?;
@@ -1285,9 +1325,14 @@ impl RuntimeKernelControl {
 
     async fn scoped_remote_thread_executor(
         &self,
-        caller: &ThreadContext,
-        target_thread_id: ThreadId,
-    ) -> VerletResult<Option<(Arc<dyn RemoteThreadExecutor>, ThreadContext)>> {
+        caller: &verlet_runtime_contracts::ThreadContext,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Option<(
+            std::sync::Arc<dyn crate::daemon::remote_store::placement::RemoteThreadExecutor>,
+            verlet_runtime_contracts::ThreadContext,
+        )>,
+    > {
         let Some(executor) = self.host()?.remote_thread_executor().await else {
             return Ok(None);
         };
@@ -1299,15 +1344,20 @@ impl RuntimeKernelControl {
     }
 }
 
-fn ensure_thread_scope(caller: &ThreadContext, target: &ThreadCoordinates) -> VerletResult<()> {
+fn ensure_thread_scope(
+    caller: &verlet_runtime_contracts::ThreadContext,
+    target: &verlet_runtime_contracts::ThreadCoordinates,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let requested = caller.coordinates.scope();
     let actual = target.scope();
     if requested != actual {
-        return Err(VerletError::ThreadScopeMismatch {
-            thread_id: target.thread_id,
-            requested: Box::new(requested),
-            actual: Box::new(actual),
-        });
+        return Err(
+            crate::kernel::runtime_host::VerletError::ThreadScopeMismatch {
+                thread_id: target.thread_id,
+                requested: Box::new(requested),
+                actual: Box::new(actual),
+            },
+        );
     }
     Ok(())
 }
@@ -1316,33 +1366,39 @@ fn ensure_thread_scope(caller: &ThreadContext, target: &ThreadCoordinates) -> Ve
 /// Version 8 keeps deterministic dispatch interactions disjoint from organic
 /// runtime event ids, which are generated as UUIDv7.
 fn submit_dispatch_interaction_id(
-    target_thread_id: ThreadId,
-    dispatch_id: &DispatchId,
-) -> RuntimeEventId {
-    let digest = sha256_hex(format!("{target_thread_id}:{dispatch_id}").as_bytes());
+    target_thread_id: verlet_runtime_contracts::ThreadId,
+    dispatch_id: &verlet_runtime_contracts::DispatchId,
+) -> verlet_runtime_contracts::RuntimeEventId {
+    let digest =
+        crate::agent::contracts::sha256_hex(format!("{target_thread_id}:{dispatch_id}").as_bytes());
     let digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
     let mut value =
         u128::from_str_radix(&digest[..32], 16).expect("sha256 hex prefix is always a valid u128");
     value = (value & !(0xf_u128 << 76)) | (8_u128 << 76);
     value = (value & !(0b11_u128 << 62)) | (0b10_u128 << 62);
-    RuntimeEventId::from_uuid(uuid::Uuid::from_u128(value))
+    verlet_runtime_contracts::RuntimeEventId::from_uuid(uuid::Uuid::from_u128(value))
 }
 
 #[cfg(test)]
 mod remote_scope_tests {
-    use super::*;
 
     #[test]
     fn remote_execution_preserves_the_local_thread_scope_fence() {
-        let caller = ThreadContext::root(ThreadCoordinates::new("tenant", "user", "session-a"));
-        let target = ThreadContext::with_topology(
-            ThreadCoordinates::new("tenant", "user", "session-b"),
-            ThreadTopology::spawned_from(caller.coordinates.thread_id),
+        let caller = verlet_runtime_contracts::ThreadContext::root(
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session-a"),
         );
-        let error = ensure_thread_scope(&caller, &target.coordinates).unwrap_err();
+        let target = verlet_runtime_contracts::ThreadContext::with_topology(
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session-b"),
+            verlet_runtime_contracts::ThreadTopology::spawned_from(caller.coordinates.thread_id),
+        );
+        let error = crate::kernel::runtime_host::kernel_control::ensure_thread_scope(
+            &caller,
+            &target.coordinates,
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
-            VerletError::ThreadScopeMismatch { thread_id, .. }
+            crate::kernel::runtime_host::VerletError::ThreadScopeMismatch { thread_id, .. }
                 if thread_id == target.coordinates.thread_id
         ));
     }

@@ -1,11 +1,11 @@
 //! The `tool` subcommand family, package fixtures, and tool registries.
 
-use super::*;
-
+use crate::AgentKernelToolProvider as _;
+use std::io::Write as _;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn tool_manual(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_manual(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_tool_manual_args(args)?;
     if options.help {
         print_tool_manual_help();
@@ -13,14 +13,15 @@ pub(super) async fn tool_manual(args: Vec<OsString>) -> VerletResult<()> {
     }
     let tool_name = options
         .tool_name
-        .ok_or_else(|| usage_error("tool manual requires <published-tool>"))?;
+        .ok_or_else(|| crate::cli::usage_error("tool manual requires <published-tool>"))?;
     let registry_root = options.registry_root.unwrap_or_else(default_registry_root);
-    let registry = LocalOperationRegistry::new(registry_root);
+    let registry = crate::LocalOperationRegistry::new(registry_root);
     let record = registry.load_record(&tool_name)?;
     let manuals = manuals_for_record(&record, options.operation.as_deref())?;
     if options.json {
-        serde_json::to_writer_pretty(std::io::stdout(), &manuals)
-            .map_err(|err| usage_error(format!("failed to encode manual JSON: {err}")))?;
+        serde_json::to_writer_pretty(std::io::stdout(), &manuals).map_err(|err| {
+            crate::cli::usage_error(format!("failed to encode manual JSON: {err}"))
+        })?;
         println!();
         return Ok(());
     }
@@ -28,7 +29,7 @@ pub(super) async fn tool_manual(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn run_tool(mut args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_tool(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -49,7 +50,11 @@ pub(super) async fn run_tool(mut args: Vec<OsString>) -> VerletResult<()> {
             "run" => print_tool_run_help(),
             "manual" => print_tool_manual_help(),
             "source" => print_tool_source_help(),
-            other => return Err(usage_error(format!("unknown tool subcommand {other:?}"))),
+            other => {
+                return Err(crate::cli::usage_error(format!(
+                    "unknown tool subcommand {other:?}"
+                )));
+            }
         }
         return Ok(());
     }
@@ -60,13 +65,13 @@ pub(super) async fn run_tool(mut args: Vec<OsString>) -> VerletResult<()> {
         "run" => tool_run(args).await,
         "manual" => tool_manual(args).await,
         "source" => tool_source(args).await,
-        _ => Err(usage_error(format!(
+        _ => Err(crate::cli::usage_error(format!(
             "unknown tool subcommand {subcommand:?}"
         ))),
     }
 }
 
-pub(super) async fn tool_build(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_build(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_build_args(args)?;
     if let Some(package_path) = options.package_path.clone() {
         reject_package_build_overrides(&options)?;
@@ -79,7 +84,9 @@ pub(super) async fn tool_build(args: Vec<OsString>) -> VerletResult<()> {
     let module_path = options
         .module_path
         .or_else(|| config.module_path.clone())
-        .ok_or_else(|| usage_error("tool build requires --module-path or config module_path"))?;
+        .ok_or_else(|| {
+            crate::cli::usage_error("tool build requires --module-path or config module_path")
+        })?;
     let release = options.release.unwrap_or(config.release.unwrap_or(true));
     let conversion = options.conversion.or(config.conversion);
 
@@ -98,15 +105,20 @@ pub(super) async fn tool_build(args: Vec<OsString>) -> VerletResult<()> {
         for issue in &audit.issues {
             println!("reason {issue}");
         }
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletError::RuntimeFactory(
             "strict stateless conversion rejected".to_string(),
         ));
     }
     println!("policy accepted");
 
-    let build =
-        build_rust_wasm_module(RustWasmBuildOptions::new(module_path).with_release(release))?;
-    let manifest = validate_wasm_artifact(build.artifact_path.clone(), BTreeSet::new()).await?;
+    let build = crate::build_rust_wasm_module(
+        crate::RustWasmBuildOptions::new(module_path).with_release(release),
+    )?;
+    let manifest = validate_wasm_artifact(
+        build.artifact_path.clone(),
+        std::collections::BTreeSet::new(),
+    )
+    .await?;
     println!("artifact {}", build.artifact_path.display());
     for operation in manifest.operations {
         println!(
@@ -119,14 +131,15 @@ pub(super) async fn tool_build(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn tool_list(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_list(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_tool_registry_args(args, "tool list")?;
     if options.help {
         print_tool_list_help();
         return Ok(());
     }
-    let registry =
-        LocalOperationRegistry::new(options.registry_root.unwrap_or_else(default_registry_root));
+    let registry = crate::LocalOperationRegistry::new(
+        options.registry_root.unwrap_or_else(default_registry_root),
+    );
     let records = registry.list_records()?;
     println!(
         "{:<28} {:<16} {:<32} ACTIVE HASH",
@@ -153,22 +166,22 @@ pub(super) async fn tool_list(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn tool_publish(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_publish(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_publish_args(args)?;
     if let Some(package_path) = options.package_path.clone() {
         reject_package_publish_overrides(&options)?;
         let build = build_tool_package(&package_path).await?;
         print_tool_package_build(&build);
         let registry_root = options.registry_root.unwrap_or_else(default_registry_root);
-        let registry = LocalOperationRegistry::new(registry_root);
+        let registry = crate::LocalOperationRegistry::new(registry_root);
         let record = registry
-            .publish_artifact(PublishOperationRequest {
+            .publish_artifact(crate::PublishOperationRequest {
                 name: build.package.manifest.identity.name.clone(),
                 artifact_path: build.artifact_path.clone(),
                 source: build.source.clone(),
                 interface: Some(build.interface.clone()),
                 capability_grants: build.interface.capability_requests(),
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             })
             .await?;
 
@@ -180,15 +193,15 @@ pub(super) async fn tool_publish(args: Vec<OsString>) -> VerletResult<()> {
         }
         return Ok(());
     }
-    Err(usage_error(
+    Err(crate::cli::usage_error(
         "tool publish requires a package proof gate; author verlet.tool.toml and publish with `verlet tool publish --package <verlet.tool.toml>`",
     ))
 }
 
 pub(super) fn manuals_for_record(
-    record: &PublishedOperationRecord,
+    record: &crate::PublishedOperationRecord,
     operation: Option<&str>,
-) -> VerletResult<Vec<ToolOperationManual>> {
+) -> crate::VerletResult<Vec<crate::ToolOperationManual>> {
     let mut manuals = Vec::new();
     if let Some(interface) = &record.interface {
         for interface_operation in &interface.operations {
@@ -199,7 +212,7 @@ pub(super) fn manuals_for_record(
                 manuals.push(manual.clone());
                 continue;
             }
-            manuals.push(ToolOperationManual {
+            manuals.push(crate::ToolOperationManual {
                 schema_version: 0,
                 tool_name: interface.identity.name.clone(),
                 operation_name: interface_operation.name.clone(),
@@ -228,14 +241,16 @@ pub(super) fn manuals_for_record(
             if operation.is_some_and(|wanted| wanted != projection.operation_name) {
                 continue;
             }
-            manuals.push(ToolOperationManual {
+            manuals.push(crate::ToolOperationManual {
                 schema_version: 0,
                 tool_name: record.name.clone(),
                 operation_name: projection.operation_name.clone(),
                 summary: format!("Run {} from {}.", projection.operation_name, record.name),
                 usage: vec![projection.process.command.clone()],
-                input_schema: serde_json::to_value(&projection.input).unwrap_or(Value::Null),
-                output_schema: serde_json::to_value(&projection.output).unwrap_or(Value::Null),
+                input_schema: serde_json::to_value(&projection.input)
+                    .unwrap_or(serde_json::Value::Null),
+                output_schema: serde_json::to_value(&projection.output)
+                    .unwrap_or(serde_json::Value::Null),
                 required_capabilities: projection
                     .abi
                     .required_capabilities
@@ -256,7 +271,7 @@ pub(super) fn manuals_for_record(
         let target = operation
             .map(|value| format!(" operation {value:?}"))
             .unwrap_or_default();
-        return Err(usage_error(format!(
+        return Err(crate::cli::usage_error(format!(
             "published tool {:?} has no{target} manual",
             record.name
         )));
@@ -264,32 +279,32 @@ pub(super) fn manuals_for_record(
     Ok(manuals)
 }
 
-pub(super) fn cli_manual_exit_status() -> Vec<ToolManualExitStatus> {
+pub(super) fn cli_manual_exit_status() -> Vec<crate::ToolManualExitStatus> {
     vec![
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 0,
             meaning: "operation succeeded".to_string(),
         },
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 1,
             meaning: "operation failed at runtime".to_string(),
         },
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 2,
             meaning: "caller supplied invalid input or arguments".to_string(),
         },
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 126,
             meaning: "capability or policy denied execution".to_string(),
         },
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 127,
             meaning: "tool or operation was not found".to_string(),
         },
     ]
 }
 
-pub(super) fn print_manuals(manuals: &[ToolOperationManual]) {
+pub(super) fn print_manuals(manuals: &[crate::ToolOperationManual]) {
     for (index, manual) in manuals.iter().enumerate() {
         if index > 0 {
             println!();
@@ -338,37 +353,39 @@ pub(super) fn print_manuals(manuals: &[ToolOperationManual]) {
     }
 }
 
-pub(super) fn compact_json(value: &Value) -> String {
+pub(super) fn compact_json(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
 
 #[derive(Debug)]
 pub(super) struct BuiltToolPackage {
-    package: ToolPackageSource,
-    artifact_path: PathBuf,
-    source: PublishedOperationSource,
-    manifest: WasmOperationManifest,
-    interface: ToolInterfaceContract,
-    receipt: ToolBuildReceipt,
+    package: crate::ToolPackageSource,
+    artifact_path: std::path::PathBuf,
+    source: crate::PublishedOperationSource,
+    manifest: crate::WasmOperationManifest,
+    interface: crate::ToolInterfaceContract,
+    receipt: crate::ToolBuildReceipt,
 }
 
-pub(super) async fn build_tool_package(package_path: &Path) -> VerletResult<BuiltToolPackage> {
-    let package = ToolPackageSource::load(package_path)?;
+pub(super) async fn build_tool_package(
+    package_path: &std::path::Path,
+) -> crate::VerletResult<BuiltToolPackage> {
+    let package = crate::ToolPackageSource::load(package_path)?;
     reject_user_kernel_tool_package(&package)?;
     let (artifact_path, source) = build_tool_package_artifact(&package)?;
     let declared_capabilities = package_capability_requests(&package);
     let manifest =
         validate_wasm_artifact(artifact_path.clone(), declared_capabilities.clone()).await?;
-    let registered = RegisteredOperation {
+    let registered = crate::RegisteredOperation {
         name: package.manifest.identity.name.clone(),
         manifest: manifest.clone(),
         capability_grants: declared_capabilities,
-        metadata: BTreeMap::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
     let projections = registered.projections();
-    let interface = ToolInterfaceContract::from_package(&package, &manifest, &projections)?;
+    let interface = crate::ToolInterfaceContract::from_package(&package, &manifest, &projections)?;
     let fixtures = run_tool_package_fixtures(&package, &artifact_path, &interface).await?;
-    let receipt = ToolBuildReceipt::new(
+    let receipt = crate::ToolBuildReceipt::new(
         &package,
         &interface,
         &projections,
@@ -385,9 +402,11 @@ pub(super) async fn build_tool_package(package_path: &Path) -> VerletResult<Buil
     })
 }
 
-pub(super) fn reject_user_kernel_tool_package(package: &ToolPackageSource) -> VerletResult<()> {
+pub(super) fn reject_user_kernel_tool_package(
+    package: &crate::ToolPackageSource,
+) -> crate::VerletResult<()> {
     if package.manifest.runtime.kind == "kernel" {
-        return Err(usage_error(
+        return Err(crate::cli::usage_error(
             "tool packages with runtime.kind = \"kernel\" are kernel-native records synthesized by Verlet startup; verlet tool build/publish cannot author or publish them",
         ));
     }
@@ -395,20 +414,20 @@ pub(super) fn reject_user_kernel_tool_package(package: &ToolPackageSource) -> Ve
 }
 
 pub(super) fn build_tool_package_artifact(
-    package: &ToolPackageSource,
-) -> VerletResult<(PathBuf, PublishedOperationSource)> {
+    package: &crate::ToolPackageSource,
+) -> crate::VerletResult<(std::path::PathBuf, crate::PublishedOperationSource)> {
     match (
         package.manifest.runtime.module_path.clone(),
         package.manifest.runtime.bin_path.clone(),
     ) {
         (Some(module_path), None) => {
             let release = package.manifest.runtime.release.unwrap_or(true);
-            let build = build_rust_wasm_module(
-                RustWasmBuildOptions::new(module_path.clone()).with_release(release),
+            let build = crate::build_rust_wasm_module(
+                crate::RustWasmBuildOptions::new(module_path.clone()).with_release(release),
             )?;
             Ok((
                 build.artifact_path,
-                PublishedOperationSource::Rust {
+                crate::PublishedOperationSource::Rust {
                     module_path,
                     release,
                 },
@@ -416,18 +435,20 @@ pub(super) fn build_tool_package_artifact(
         }
         (None, Some(bin_path)) => Ok((
             bin_path.clone(),
-            PublishedOperationSource::Wasm { bin_path },
+            crate::PublishedOperationSource::Wasm { bin_path },
         )),
-        (Some(_), Some(_)) => Err(usage_error(
+        (Some(_), Some(_)) => Err(crate::cli::usage_error(
             "tool package runtime cannot declare both module_path and bin_path",
         )),
-        (None, None) => Err(usage_error(
+        (None, None) => Err(crate::cli::usage_error(
             "tool package runtime requires module_path or bin_path",
         )),
     }
 }
 
-pub(super) fn package_capability_requests(package: &ToolPackageSource) -> BTreeSet<String> {
+pub(super) fn package_capability_requests(
+    package: &crate::ToolPackageSource,
+) -> std::collections::BTreeSet<String> {
     package
         .manifest
         .operations
@@ -437,12 +458,14 @@ pub(super) fn package_capability_requests(package: &ToolPackageSource) -> BTreeS
 }
 
 pub(super) async fn run_tool_package_fixtures(
-    package: &ToolPackageSource,
-    artifact_path: &Path,
-    interface: &ToolInterfaceContract,
-) -> VerletResult<Vec<ToolFixtureRun>> {
-    let mut config = WasmRuntimeConfig::new(WasmRuntimeArtifact::path(artifact_path.to_path_buf()))
-        .with_capability_grants(interface.capability_requests());
+    package: &crate::ToolPackageSource,
+    artifact_path: &std::path::Path,
+    interface: &crate::ToolInterfaceContract,
+) -> crate::VerletResult<Vec<crate::ToolFixtureRun>> {
+    let mut config = crate::WasmRuntimeConfig::new(crate::WasmRuntimeArtifact::path(
+        artifact_path.to_path_buf(),
+    ))
+    .with_capability_grants(interface.capability_requests());
     config = config.with_vfs(package_fixture_vfs(package)?);
     if let Some(max_input_bytes) = package.manifest.runtime.max_input_bytes {
         config = config.with_max_input_bytes(size_limit("max_input_bytes", max_input_bytes)?);
@@ -450,17 +473,17 @@ pub(super) async fn run_tool_package_fixtures(
     if let Some(max_output_bytes) = package.manifest.runtime.max_output_bytes {
         config = config.with_max_output_bytes(size_limit("max_output_bytes", max_output_bytes)?);
     }
-    let factory = WasmRuntimeFactory::new(config)?;
+    let factory = crate::WasmRuntimeFactory::new(config)?;
     let mut runs = Vec::with_capacity(package.manifest.fixtures.len());
     for fixture in &package.manifest.fixtures {
-        let input = fs::read(&fixture.input).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let input = std::fs::read(&fixture.input).map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to read fixture input {}: {err}",
                 fixture.input.display()
             ))
         })?;
-        let expected = fs::read(&fixture.expect).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let expected = std::fs::read(&fixture.expect).map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to read fixture expectation {}: {err}",
                 fixture.expect.display()
             ))
@@ -470,7 +493,7 @@ pub(super) async fn run_tool_package_fixtures(
             .await?
             .output;
         if !fixture_output_matches(&expected, &output) {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletError::RuntimeExecution(format!(
                 "tool package fixture {:?} failed for operation {:?}: expected {}, got {}",
                 fixture.name,
                 fixture.operation,
@@ -478,7 +501,7 @@ pub(super) async fn run_tool_package_fixtures(
                 String::from_utf8_lossy(&output)
             )));
         }
-        runs.push(ToolFixtureRun {
+        runs.push(crate::ToolFixtureRun {
             name: fixture.name.clone(),
             operation: fixture.operation.clone(),
             status: "passed".to_string(),
@@ -488,37 +511,45 @@ pub(super) async fn run_tool_package_fixtures(
 }
 
 /// Builds the read-only VFS mount available while package fixtures run.
-pub(super) fn package_fixture_vfs(package: &ToolPackageSource) -> VerletResult<Arc<VerletVfs>> {
-    let vfs = Arc::new(VerletVfs::new(Arc::new(InMemoryFs::new())));
+pub(super) fn package_fixture_vfs(
+    package: &crate::ToolPackageSource,
+) -> crate::VerletResult<std::sync::Arc<crate::VerletVfs>> {
+    let vfs = std::sync::Arc::new(crate::VerletVfs::new(std::sync::Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
     let fixture_root = package.package_root.join("fixtures");
     if !fixture_root.is_dir() {
         return Ok(vfs);
     }
-    let fixture_fs =
-        HostFileSystem::new(&fixture_root, HostFileSystemMode::ReadOnly).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+    let fixture_fs = crate::HostFileSystem::new(&fixture_root, crate::HostFileSystemMode::ReadOnly)
+        .map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to prepare package fixture VFS for {}: {err}",
                 fixture_root.display()
             ))
         })?;
-    vfs.mount("/fixtures", Arc::new(fixture_fs))
-        .map_err(|err| VerletError::RuntimeFactory(format!("failed to mount fixtures: {err}")))?;
+    vfs.mount("/fixtures", std::sync::Arc::new(fixture_fs))
+        .map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!("failed to mount fixtures: {err}"))
+        })?;
     Ok(vfs)
 }
 
 pub(super) fn fixture_output_matches(expected: &[u8], actual: &[u8]) -> bool {
     match (
-        serde_json::from_slice::<Value>(expected),
-        serde_json::from_slice::<Value>(actual),
+        serde_json::from_slice::<serde_json::Value>(expected),
+        serde_json::from_slice::<serde_json::Value>(actual),
     ) {
         (Ok(expected), Ok(actual)) => expected == actual,
         _ => expected == actual,
     }
 }
 
-pub(super) fn size_limit(label: &str, value: u64) -> VerletResult<usize> {
+pub(super) fn size_limit(label: &str, value: u64) -> crate::VerletResult<usize> {
     usize::try_from(value).map_err(|_| {
-        VerletError::RuntimeFactory(format!("{label} {value} is too large for this platform"))
+        crate::VerletError::RuntimeFactory(format!(
+            "{label} {value} is too large for this platform"
+        ))
     })
 }
 
@@ -556,21 +587,21 @@ pub(super) fn print_tool_package_build(build: &BuiltToolPackage) {
     }
 }
 
-pub(super) fn reject_package_build_overrides(options: &BuildArgs) -> VerletResult<()> {
+pub(super) fn reject_package_build_overrides(options: &BuildArgs) -> crate::VerletResult<()> {
     if options.name.is_some()
         || options.module_path.is_some()
         || options.config_path.is_some()
         || options.release.is_some()
         || options.conversion.is_some()
     {
-        return Err(usage_error(
+        return Err(crate::cli::usage_error(
             "tool build --package reads package source, runtime, and policy from verlet.tool.toml",
         ));
     }
     Ok(())
 }
 
-pub(super) fn reject_package_publish_overrides(options: &PublishArgs) -> VerletResult<()> {
+pub(super) fn reject_package_publish_overrides(options: &PublishArgs) -> crate::VerletResult<()> {
     if options.name.is_some()
         || options.module_path.is_some()
         || options.bin_path.is_some()
@@ -581,14 +612,14 @@ pub(super) fn reject_package_publish_overrides(options: &PublishArgs) -> VerletR
         || options.strict_conversion
         || options.conversion.is_some()
     {
-        return Err(usage_error(
+        return Err(crate::cli::usage_error(
             "tool publish --package reads name, source, capabilities, and metadata from verlet.tool.toml",
         ));
     }
     Ok(())
 }
 
-pub(super) async fn tool_run(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_run(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_run_args(args)?;
     let config_file = load_tool_config(options.config_path.as_deref())?;
     let registered_name = options.registered_name;
@@ -609,38 +640,41 @@ pub(super) async fn tool_run(args: Vec<OsString>) -> VerletResult<()> {
         .unwrap_or_else(default_registry_root);
     let (mut config, manifest) = match (module_path, bin_path, registered_name) {
         (Some(module_path), None, None) => {
-            let build = build_rust_wasm_module(
-                RustWasmBuildOptions::new(module_path).with_release(release),
+            let build = crate::build_rust_wasm_module(
+                crate::RustWasmBuildOptions::new(module_path).with_release(release),
             )?;
-            let config = WasmRuntimeConfig::new(WasmRuntimeArtifact::path(build.artifact_path))
-                .with_max_output_bytes(options.max_output_bytes);
-            let manifest = WasmRuntimeFactory::new(config.clone())?
+            let config = crate::WasmRuntimeConfig::new(crate::WasmRuntimeArtifact::path(
+                build.artifact_path,
+            ))
+            .with_max_output_bytes(options.max_output_bytes);
+            let manifest = crate::WasmRuntimeFactory::new(config.clone())?
                 .validate_operation_artifact()
                 .await?;
             (config, manifest)
         }
         (None, Some(bin_path), None) => {
-            let config = WasmRuntimeConfig::new(WasmRuntimeArtifact::path(bin_path))
+            let config = crate::WasmRuntimeConfig::new(crate::WasmRuntimeArtifact::path(bin_path))
                 .with_max_output_bytes(options.max_output_bytes);
-            let manifest = WasmRuntimeFactory::new(config.clone())?
+            let manifest = crate::WasmRuntimeFactory::new(config.clone())?
                 .validate_operation_artifact()
                 .await?;
             (config, manifest)
         }
         (None, None, Some(registered_name)) => {
-            let registry = LocalOperationRegistry::new(registry_root);
+            let registry = crate::LocalOperationRegistry::new(registry_root);
             let record = registry.load_record(&registered_name)?;
-            let resolved_secrets = if !required_secret_names(&record.manifest)
-                .map_err(secret_cli_error)?
+            let resolved_secrets = if !crate::required_secret_names(&record.manifest)
+                .map_err(crate::cli::secret::secret_cli_error)?
                 .is_empty()
             {
-                let secret_store = open_secret_store(options.state_home.clone()).await?;
+                let secret_store =
+                    crate::cli::secret::open_secret_store(options.state_home.clone()).await?;
                 let resolution =
-                    resolve_manifest_secret_resolution(&secret_store, &record.manifest)
+                    crate::resolve_manifest_secret_resolution(&secret_store, &record.manifest)
                         .await
-                        .map_err(secret_cli_error)?;
+                        .map_err(crate::cli::secret::secret_cli_error)?;
                 if !resolution.is_ready() {
-                    return Err(usage_error(format!(
+                    return Err(crate::cli::usage_error(format!(
                         "missing required operation secrets: {}; import with `verlet secret import <name> --from-env <ENV>` or `verlet secret set <name> --value-stdin`",
                         resolution
                             .missing
@@ -652,7 +686,7 @@ pub(super) async fn tool_run(args: Vec<OsString>) -> VerletResult<()> {
                 }
                 resolution.values
             } else {
-                BTreeMap::new()
+                std::collections::BTreeMap::new()
             };
             let mut config = registry.load_runtime_config_for_record(&record).await?;
             if !resolved_secrets.is_empty() {
@@ -662,26 +696,26 @@ pub(super) async fn tool_run(args: Vec<OsString>) -> VerletResult<()> {
             (config, record.manifest)
         }
         (Some(_), Some(_), _) => {
-            return Err(usage_error(
+            return Err(crate::cli::usage_error(
                 "--module-path and --bin-path are mutually exclusive",
             ));
         }
         (Some(_), None, Some(_)) | (None, Some(_), Some(_)) => {
-            return Err(usage_error(
+            return Err(crate::cli::usage_error(
                 "tool run cannot combine a published tool name with --module-path or --bin-path",
             ));
         }
         (None, None, None) => {
-            return Err(usage_error(
+            return Err(crate::cli::usage_error(
                 "tool run requires --module-path, --bin-path, or <published-name> <operation>",
             ));
         }
     };
     let vfs = load_vfs(options.mounts).await?;
     config = config.with_vfs(vfs);
-    let factory = WasmRuntimeFactory::new(config)?;
+    let factory = crate::WasmRuntimeFactory::new(config)?;
     if manifest.operation(&options.operation).is_none() {
-        return Err(VerletError::RuntimeExecution(format!(
+        return Err(crate::VerletError::RuntimeExecution(format!(
             "operation {:?} is not in wasm manifest",
             options.operation
         )));
@@ -690,15 +724,15 @@ pub(super) async fn tool_run(args: Vec<OsString>) -> VerletResult<()> {
         .invoke_operation_bytes(&options.operation, options.input.into_bytes())
         .await?;
     std::io::stdout().write_all(&output.output).map_err(|err| {
-        VerletError::RuntimeExecution(format!("failed to write operation output: {err}"))
+        crate::VerletError::RuntimeExecution(format!("failed to write operation output: {err}"))
     })?;
     std::io::stdout().flush().map_err(|err| {
-        VerletError::RuntimeExecution(format!("failed to flush operation output: {err}"))
+        crate::VerletError::RuntimeExecution(format!("failed to flush operation output: {err}"))
     })?;
     Ok(())
 }
 
-pub(super) async fn tool_source(mut args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_source(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -719,7 +753,7 @@ pub(super) async fn tool_source(mut args: Vec<OsString>) -> VerletResult<()> {
             "show" => print_tool_source_show_help(),
             "remove" => print_tool_source_remove_help(),
             other => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown tool source subcommand {other:?}"
                 )));
             }
@@ -732,13 +766,13 @@ pub(super) async fn tool_source(mut args: Vec<OsString>) -> VerletResult<()> {
         "list" => tool_source_list(args).await,
         "show" => tool_source_show(args).await,
         "remove" => tool_source_remove(args).await,
-        _ => Err(usage_error(format!(
+        _ => Err(crate::cli::usage_error(format!(
             "unknown tool source subcommand {subcommand:?}"
         ))),
     }
 }
 
-pub(super) async fn tool_source_add(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_source_add(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_tool_source_add_args(args)?;
     if options.help {
         print_tool_source_add_help();
@@ -746,14 +780,14 @@ pub(super) async fn tool_source_add(args: Vec<OsString>) -> VerletResult<()> {
     }
     let name = options
         .name
-        .ok_or_else(|| usage_error("tool source add requires <name>"))?;
+        .ok_or_else(|| crate::cli::usage_error("tool source add requires <name>"))?;
     let transport = options
         .kind
-        .ok_or_else(|| usage_error("tool source add requires --kind"))?;
+        .ok_or_else(|| crate::cli::usage_error("tool source add requires --kind"))?;
     let url = options
         .url
-        .ok_or_else(|| usage_error("tool source add requires --url"))?;
-    let mut config = McpRemoteServerConfig::new(name, transport, url)?;
+        .ok_or_else(|| crate::cli::usage_error("tool source add requires --url"))?;
+    let mut config = crate::McpRemoteServerConfig::new(name, transport, url)?;
     if let Some(secret) = options.bearer_secret {
         config = config.with_bearer_secret(secret)?;
     }
@@ -780,7 +814,7 @@ pub(super) async fn tool_source_add(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn tool_source_discover(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_source_discover(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_tool_source_name_args(args, "tool source discover")?;
     if options.help {
         print_tool_source_discover_help();
@@ -788,15 +822,18 @@ pub(super) async fn tool_source_discover(args: Vec<OsString>) -> VerletResult<()
     }
     let name = options
         .name
-        .ok_or_else(|| usage_error("tool source discover requires <name>"))?;
+        .ok_or_else(|| crate::cli::usage_error("tool source discover requires <name>"))?;
     let registry = open_mcp_source_registry(options.state_home.clone()).await?;
     let record = registry
         .get_source_async(&name)
         .await?
-        .ok_or_else(|| usage_error(format!("tool source {name:?} was not found")))?;
-    let secret_store = open_secret_store(options.state_home).await?;
-    let provider =
-        McpRemoteToolProvider::connect(record.to_config(), Some(Arc::new(secret_store))).await?;
+        .ok_or_else(|| crate::cli::usage_error(format!("tool source {name:?} was not found")))?;
+    let secret_store = crate::cli::secret::open_secret_store(options.state_home).await?;
+    let provider = crate::McpRemoteToolProvider::connect(
+        record.to_config(),
+        Some(std::sync::Arc::new(secret_store)),
+    )
+    .await?;
     let tools = provider.tool_definitions().await;
     let updated = registry.update_discovered_tools_async(&name, tools).await?;
     println!("discovered tool source {}", updated.name);
@@ -806,7 +843,7 @@ pub(super) async fn tool_source_discover(args: Vec<OsString>) -> VerletResult<()
     Ok(())
 }
 
-pub(super) async fn tool_source_list(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_source_list(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_tool_source_list_args(args, "tool source list")?;
     if options.help {
         print_tool_source_list_help();
@@ -815,7 +852,7 @@ pub(super) async fn tool_source_list(args: Vec<OsString>) -> VerletResult<()> {
     let registry = open_mcp_source_registry(options.state_home).await?;
     let records = registry.list_sources_async().await?;
     if options.json {
-        let json = Value::Array(
+        let json = serde_json::Value::Array(
             records
                 .iter()
                 .map(|record| record.redacted_json())
@@ -824,7 +861,9 @@ pub(super) async fn tool_source_list(args: Vec<OsString>) -> VerletResult<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&json).map_err(|err| {
-                VerletError::RuntimeFactory(format!("failed to encode tool source list: {err}"))
+                crate::VerletError::RuntimeFactory(format!(
+                    "failed to encode tool source list: {err}"
+                ))
             })?
         );
         return Ok(());
@@ -844,7 +883,7 @@ pub(super) async fn tool_source_list(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn tool_source_show(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_source_show(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_tool_source_show_args(args)?;
     if options.help {
         print_tool_source_show_help();
@@ -852,17 +891,17 @@ pub(super) async fn tool_source_show(args: Vec<OsString>) -> VerletResult<()> {
     }
     let name = options
         .name
-        .ok_or_else(|| usage_error("tool source show requires <name>"))?;
+        .ok_or_else(|| crate::cli::usage_error("tool source show requires <name>"))?;
     let registry = open_mcp_source_registry(options.state_home).await?;
     let record = registry
         .get_source_async(&name)
         .await?
-        .ok_or_else(|| usage_error(format!("tool source {name:?} was not found")))?;
+        .ok_or_else(|| crate::cli::usage_error(format!("tool source {name:?} was not found")))?;
     if options.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&record.redacted_json()).map_err(|err| {
-                VerletError::RuntimeFactory(format!("failed to encode tool source: {err}"))
+                crate::VerletError::RuntimeFactory(format!("failed to encode tool source: {err}"))
             })?
         );
         return Ok(());
@@ -880,7 +919,7 @@ pub(super) async fn tool_source_show(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn tool_source_remove(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn tool_source_remove(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_tool_source_name_args(args, "tool source remove")?;
     if options.help {
         print_tool_source_remove_help();
@@ -888,7 +927,7 @@ pub(super) async fn tool_source_remove(args: Vec<OsString>) -> VerletResult<()> 
     }
     let name = options
         .name
-        .ok_or_else(|| usage_error("tool source remove requires <name>"))?;
+        .ok_or_else(|| crate::cli::usage_error("tool source remove requires <name>"))?;
     let registry = open_mcp_source_registry(options.state_home).await?;
     if registry.delete_source_async(&name).await? {
         println!("removed tool source {name}");
@@ -901,9 +940,9 @@ pub(super) async fn tool_source_remove(args: Vec<OsString>) -> VerletResult<()> 
 #[derive(Debug)]
 pub(super) struct BuildArgs {
     name: Option<String>,
-    module_path: Option<PathBuf>,
-    package_path: Option<PathBuf>,
-    config_path: Option<PathBuf>,
+    module_path: Option<std::path::PathBuf>,
+    package_path: Option<std::path::PathBuf>,
+    config_path: Option<std::path::PathBuf>,
     release: Option<bool>,
     conversion: Option<ToolConversionConfig>,
 }
@@ -911,32 +950,32 @@ pub(super) struct BuildArgs {
 #[derive(Debug)]
 pub(super) struct PublishArgs {
     name: Option<String>,
-    module_path: Option<PathBuf>,
-    bin_path: Option<PathBuf>,
-    package_path: Option<PathBuf>,
-    config_path: Option<PathBuf>,
-    registry_root: Option<PathBuf>,
+    module_path: Option<std::path::PathBuf>,
+    bin_path: Option<std::path::PathBuf>,
+    package_path: Option<std::path::PathBuf>,
+    config_path: Option<std::path::PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     release: Option<bool>,
-    capability_grants: BTreeSet<String>,
-    metadata: BTreeMap<String, Value>,
+    capability_grants: std::collections::BTreeSet<String>,
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
     strict_conversion: bool,
     conversion: Option<ToolConversionConfig>,
 }
 
 #[derive(Debug)]
 pub(super) struct ToolRegistryArgs {
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct RunArgs {
     registered_name: Option<String>,
-    module_path: Option<PathBuf>,
-    bin_path: Option<PathBuf>,
-    config_path: Option<PathBuf>,
-    state_home: Option<PathBuf>,
-    registry_root: Option<PathBuf>,
+    module_path: Option<std::path::PathBuf>,
+    bin_path: Option<std::path::PathBuf>,
+    config_path: Option<std::path::PathBuf>,
+    state_home: Option<std::path::PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     operation: String,
     input: String,
     mounts: Vec<MountArg>,
@@ -948,7 +987,7 @@ pub(super) struct RunArgs {
 pub(super) struct ToolManualArgs {
     tool_name: Option<String>,
     operation: Option<String>,
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     json: bool,
     help: bool,
 }
@@ -956,27 +995,27 @@ pub(super) struct ToolManualArgs {
 #[derive(Debug)]
 pub(super) struct ToolSourceAddArgs {
     name: Option<String>,
-    kind: Option<McpRemoteTransport>,
+    kind: Option<crate::McpRemoteTransport>,
     url: Option<String>,
     bearer_secret: Option<String>,
     headers: Vec<(String, String)>,
-    include_tools: BTreeSet<String>,
+    include_tools: std::collections::BTreeSet<String>,
     timeout_ms: Option<u64>,
     max_output_bytes: Option<u64>,
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct ToolSourceNameArgs {
     name: Option<String>,
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct ToolSourceListArgs {
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     json: bool,
     help: bool,
 }
@@ -984,36 +1023,36 @@ pub(super) struct ToolSourceListArgs {
 #[derive(Debug)]
 pub(super) struct ToolSourceShowArgs {
     name: Option<String>,
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     json: bool,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct MountArg {
-    guest_path: PathBuf,
-    host_path: PathBuf,
+    guest_path: std::path::PathBuf,
+    host_path: std::path::PathBuf,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 pub(super) struct ToolConfigFile {
     name: Option<String>,
-    module_path: Option<PathBuf>,
-    bin_path: Option<PathBuf>,
-    registry_root: Option<PathBuf>,
+    module_path: Option<std::path::PathBuf>,
+    bin_path: Option<std::path::PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     release: Option<bool>,
     #[serde(default)]
     conversion: Option<ToolConversionConfig>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 pub(super) struct ToolConversionConfig {
     upstream_url: Option<String>,
     upstream_rev: Option<String>,
     upstream_crate: Option<String>,
 }
 
-pub(super) fn parse_build_args(args: Vec<OsString>) -> VerletResult<BuildArgs> {
+pub(super) fn parse_build_args(args: Vec<std::ffi::OsString>) -> crate::VerletResult<BuildArgs> {
     let mut name = None;
     let mut module_path = None;
     let mut package_path = None;
@@ -1044,7 +1083,7 @@ pub(super) fn parse_build_args(args: Vec<OsString>) -> VerletResult<BuildArgs> {
             "--debug" => release = Some(false),
             "--release" => release = Some(true),
             other => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown tool build argument {other:?}"
                 )));
             }
@@ -1060,7 +1099,9 @@ pub(super) fn parse_build_args(args: Vec<OsString>) -> VerletResult<BuildArgs> {
     })
 }
 
-pub(super) fn parse_publish_args(args: Vec<OsString>) -> VerletResult<PublishArgs> {
+pub(super) fn parse_publish_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<PublishArgs> {
     let mut name = None;
     let mut module_path = None;
     let mut bin_path = None;
@@ -1068,8 +1109,8 @@ pub(super) fn parse_publish_args(args: Vec<OsString>) -> VerletResult<PublishArg
     let mut config_path = None;
     let mut registry_root = None;
     let mut release = None;
-    let mut capability_grants = BTreeSet::new();
-    let mut metadata = BTreeMap::new();
+    let mut capability_grants = std::collections::BTreeSet::new();
+    let mut metadata = std::collections::BTreeMap::new();
     let mut strict_conversion = false;
     let mut conversion = ToolConversionConfig::default();
     let mut has_conversion = false;
@@ -1112,7 +1153,7 @@ pub(super) fn parse_publish_args(args: Vec<OsString>) -> VerletResult<PublishArg
             "--debug" => release = Some(false),
             "--release" => release = Some(true),
             other => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown tool publish argument {other:?}"
                 )));
             }
@@ -1134,9 +1175,9 @@ pub(super) fn parse_publish_args(args: Vec<OsString>) -> VerletResult<PublishArg
 }
 
 pub(super) fn parse_tool_registry_args(
-    args: Vec<OsString>,
+    args: Vec<std::ffi::OsString>,
     command: &str,
-) -> VerletResult<ToolRegistryArgs> {
+) -> crate::VerletResult<ToolRegistryArgs> {
     let mut registry_root = None;
     let mut help = false;
     let mut iter = args.into_iter();
@@ -1147,7 +1188,9 @@ pub(super) fn parse_tool_registry_args(
                 registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
             }
             other => {
-                return Err(usage_error(format!("unknown {command} argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown {command} argument {other:?}"
+                )));
             }
         }
     }
@@ -1157,7 +1200,7 @@ pub(super) fn parse_tool_registry_args(
     })
 }
 
-pub(super) fn parse_run_args(args: Vec<OsString>) -> VerletResult<RunArgs> {
+pub(super) fn parse_run_args(args: Vec<std::ffi::OsString>) -> crate::VerletResult<RunArgs> {
     let mut module_path = None;
     let mut bin_path = None;
     let mut config_path = None;
@@ -1186,12 +1229,14 @@ pub(super) fn parse_run_args(args: Vec<OsString>) -> VerletResult<RunArgs> {
             "--release" => release = Some(true),
             "--max-output-bytes" => {
                 let value = required_string_value(&mut iter, "--max-output-bytes")?;
-                max_output_bytes = value
-                    .parse()
-                    .map_err(|_| usage_error("--max-output-bytes must be a positive integer"))?;
+                max_output_bytes = value.parse().map_err(|_| {
+                    crate::cli::usage_error("--max-output-bytes must be a positive integer")
+                })?;
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown tool run argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown tool run argument {other:?}"
+                )));
             }
             _ => {
                 positionals.push(arg.to_string_lossy().to_string());
@@ -1200,7 +1245,7 @@ pub(super) fn parse_run_args(args: Vec<OsString>) -> VerletResult<RunArgs> {
     }
     let (registered_name, operation) = if module_path.is_some() || bin_path.is_some() {
         if positionals.len() != 1 {
-            return Err(usage_error(
+            return Err(crate::cli::usage_error(
                 "tool run with --module-path or --bin-path accepts exactly one operation name",
             ));
         }
@@ -1210,7 +1255,7 @@ pub(super) fn parse_run_args(args: Vec<OsString>) -> VerletResult<RunArgs> {
             1 => (None, positionals.remove(0)),
             2 => (Some(positionals.remove(0)), positionals.remove(0)),
             _ => {
-                return Err(usage_error(
+                return Err(crate::cli::usage_error(
                     "tool run requires <operation> for source/bin or <published-name> <operation>",
                 ));
             }
@@ -1232,7 +1277,9 @@ pub(super) fn parse_run_args(args: Vec<OsString>) -> VerletResult<RunArgs> {
     })
 }
 
-pub(super) fn parse_tool_manual_args(args: Vec<OsString>) -> VerletResult<ToolManualArgs> {
+pub(super) fn parse_tool_manual_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<ToolManualArgs> {
     let mut registry_root = None;
     let mut json = false;
     let mut help = false;
@@ -1246,7 +1293,7 @@ pub(super) fn parse_tool_manual_args(args: Vec<OsString>) -> VerletResult<ToolMa
             "--json" => json = true,
             "--help" | "-h" => help = true,
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown tool manual argument {other:?}"
                 )));
             }
@@ -1254,7 +1301,7 @@ pub(super) fn parse_tool_manual_args(args: Vec<OsString>) -> VerletResult<ToolMa
         }
     }
     if positionals.len() > 2 {
-        return Err(usage_error(
+        return Err(crate::cli::usage_error(
             "tool manual accepts <published-tool> and optional <operation>",
         ));
     }
@@ -1267,13 +1314,15 @@ pub(super) fn parse_tool_manual_args(args: Vec<OsString>) -> VerletResult<ToolMa
     })
 }
 
-pub(super) fn parse_tool_source_add_args(args: Vec<OsString>) -> VerletResult<ToolSourceAddArgs> {
+pub(super) fn parse_tool_source_add_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<ToolSourceAddArgs> {
     let mut name = None;
     let mut kind = None;
     let mut url = None;
     let mut bearer_secret = None;
     let mut headers = Vec::new();
-    let mut include_tools = BTreeSet::new();
+    let mut include_tools = std::collections::BTreeSet::new();
     let mut timeout_ms = None;
     let mut max_output_bytes = None;
     let mut state_home = None;
@@ -1284,7 +1333,7 @@ pub(super) fn parse_tool_source_add_args(args: Vec<OsString>) -> VerletResult<To
             "--help" | "-h" => help = true,
             "--kind" => {
                 let value = required_string_value(&mut iter, "--kind")?;
-                kind = Some(McpRemoteTransport::from_str(&value)?);
+                kind = Some(crate::McpRemoteTransport::from_str(&value)?);
             }
             "--url" => url = Some(required_string_value(&mut iter, "--url")?),
             "--bearer-secret" => {
@@ -1312,13 +1361,15 @@ pub(super) fn parse_tool_source_add_args(args: Vec<OsString>) -> VerletResult<To
             }
             "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown tool source add argument {other:?}"
                 )));
             }
             _ => {
                 if name.is_some() {
-                    return Err(usage_error("tool source add accepts exactly one <name>"));
+                    return Err(crate::cli::usage_error(
+                        "tool source add accepts exactly one <name>",
+                    ));
                 }
                 name = Some(arg.to_string_lossy().to_string());
             }
@@ -1339,9 +1390,9 @@ pub(super) fn parse_tool_source_add_args(args: Vec<OsString>) -> VerletResult<To
 }
 
 pub(super) fn parse_tool_source_name_args(
-    args: Vec<OsString>,
+    args: Vec<std::ffi::OsString>,
     command: &str,
-) -> VerletResult<ToolSourceNameArgs> {
+) -> crate::VerletResult<ToolSourceNameArgs> {
     let mut name = None;
     let mut state_home = None;
     let mut help = false;
@@ -1351,11 +1402,15 @@ pub(super) fn parse_tool_source_name_args(
             "--help" | "-h" => help = true,
             "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown {command} argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown {command} argument {other:?}"
+                )));
             }
             _ => {
                 if name.is_some() {
-                    return Err(usage_error(format!("{command} accepts exactly one <name>")));
+                    return Err(crate::cli::usage_error(format!(
+                        "{command} accepts exactly one <name>"
+                    )));
                 }
                 name = Some(arg.to_string_lossy().to_string());
             }
@@ -1369,9 +1424,9 @@ pub(super) fn parse_tool_source_name_args(
 }
 
 pub(super) fn parse_tool_source_list_args(
-    args: Vec<OsString>,
+    args: Vec<std::ffi::OsString>,
     command: &str,
-) -> VerletResult<ToolSourceListArgs> {
+) -> crate::VerletResult<ToolSourceListArgs> {
     let mut state_home = None;
     let mut json = false;
     let mut help = false;
@@ -1381,7 +1436,11 @@ pub(super) fn parse_tool_source_list_args(
             "--help" | "-h" => help = true,
             "--json" => json = true,
             "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
-            other => return Err(usage_error(format!("unknown {command} argument {other:?}"))),
+            other => {
+                return Err(crate::cli::usage_error(format!(
+                    "unknown {command} argument {other:?}"
+                )));
+            }
         }
     }
     Ok(ToolSourceListArgs {
@@ -1391,7 +1450,9 @@ pub(super) fn parse_tool_source_list_args(
     })
 }
 
-pub(super) fn parse_tool_source_show_args(args: Vec<OsString>) -> VerletResult<ToolSourceShowArgs> {
+pub(super) fn parse_tool_source_show_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<ToolSourceShowArgs> {
     let mut name = None;
     let mut state_home = None;
     let mut json = false;
@@ -1403,13 +1464,15 @@ pub(super) fn parse_tool_source_show_args(args: Vec<OsString>) -> VerletResult<T
             "--json" => json = true,
             "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown tool source show argument {other:?}"
                 )));
             }
             _ => {
                 if name.is_some() {
-                    return Err(usage_error("tool source show accepts exactly one <name>"));
+                    return Err(crate::cli::usage_error(
+                        "tool source show accepts exactly one <name>",
+                    ));
                 }
                 name = Some(arg.to_string_lossy().to_string());
             }
@@ -1424,79 +1487,86 @@ pub(super) fn parse_tool_source_show_args(args: Vec<OsString>) -> VerletResult<T
 }
 
 pub(super) fn required_path_value(
-    iter: &mut impl Iterator<Item = OsString>,
+    iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
-) -> VerletResult<PathBuf> {
+) -> crate::VerletResult<std::path::PathBuf> {
     iter.next()
-        .map(PathBuf::from)
-        .ok_or_else(|| usage_error(format!("{flag} requires a value")))
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))
 }
 
 pub(super) fn required_string_value(
-    iter: &mut impl Iterator<Item = OsString>,
+    iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
-) -> VerletResult<String> {
+) -> crate::VerletResult<String> {
     iter.next()
         .map(|value| value.to_string_lossy().to_string())
-        .ok_or_else(|| usage_error(format!("{flag} requires a value")))
+        .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))
 }
 
-pub(super) fn parse_mount_arg(value: &str) -> VerletResult<MountArg> {
+pub(super) fn parse_mount_arg(value: &str) -> crate::VerletResult<MountArg> {
     let Some((guest_path, host_path)) = value.split_once('=') else {
-        return Err(usage_error("--mount must use /guest/path=/host/path"));
+        return Err(crate::cli::usage_error(
+            "--mount must use /guest/path=/host/path",
+        ));
     };
-    let guest_path = PathBuf::from(guest_path);
+    let guest_path = std::path::PathBuf::from(guest_path);
     if !guest_path.is_absolute() {
-        return Err(usage_error("--mount guest path must be absolute"));
+        return Err(crate::cli::usage_error(
+            "--mount guest path must be absolute",
+        ));
     }
     Ok(MountArg {
         guest_path,
-        host_path: PathBuf::from(host_path),
+        host_path: std::path::PathBuf::from(host_path),
     })
 }
 
-pub(super) fn parse_header_arg(value: &str) -> VerletResult<(String, String)> {
+pub(super) fn parse_header_arg(value: &str) -> crate::VerletResult<(String, String)> {
     let Some((name, header_value)) = value.split_once('=') else {
-        return Err(usage_error("--header must use name=value"));
+        return Err(crate::cli::usage_error("--header must use name=value"));
     };
     if name.trim().is_empty() {
-        return Err(usage_error("--header name cannot be empty"));
+        return Err(crate::cli::usage_error("--header name cannot be empty"));
     }
     Ok((name.trim().to_string(), header_value.to_string()))
 }
 
-pub(super) fn parse_u64_arg(flag: &str, value: &str) -> VerletResult<u64> {
+pub(super) fn parse_u64_arg(flag: &str, value: &str) -> crate::VerletResult<u64> {
     value
         .parse()
-        .map_err(|_| usage_error(format!("{flag} must be a positive integer")))
+        .map_err(|_| crate::cli::usage_error(format!("{flag} must be a positive integer")))
 }
 
-pub(super) fn parse_metadata_arg(value: &str) -> VerletResult<(String, Value)> {
+pub(super) fn parse_metadata_arg(value: &str) -> crate::VerletResult<(String, serde_json::Value)> {
     let Some((key, raw_value)) = value.split_once('=') else {
-        return Err(usage_error("--metadata must use key=value"));
+        return Err(crate::cli::usage_error("--metadata must use key=value"));
     };
     if key.trim().is_empty() {
-        return Err(usage_error("--metadata key cannot be empty"));
+        return Err(crate::cli::usage_error("--metadata key cannot be empty"));
     }
-    let value = serde_json::from_str(raw_value).unwrap_or_else(|_| Value::String(raw_value.into()));
+    let value = serde_json::from_str(raw_value)
+        .unwrap_or_else(|_| serde_json::Value::String(raw_value.into()));
     Ok((key.to_string(), value))
 }
 
-pub(super) fn default_registry_root() -> PathBuf {
-    default_operations_registry_root()
+pub(super) fn default_registry_root() -> std::path::PathBuf {
+    crate::default_operations_registry_root()
 }
 
 pub(super) async fn open_mcp_source_registry(
-    state_home: Option<PathBuf>,
-) -> VerletResult<SqliteMcpSourceRegistry> {
-    SqliteMcpSourceRegistry::open_async(metadata_store_path_for_state_home(
-        state_home,
-        default_project_state_home(),
-    ))
+    state_home: Option<std::path::PathBuf>,
+) -> crate::VerletResult<crate::SqliteMcpSourceRegistry> {
+    crate::SqliteMcpSourceRegistry::open_async(
+        crate::cli::secret::metadata_store_path_for_state_home(
+            state_home,
+            crate::cli::secret::default_project_state_home(),
+        ),
+    )
     .await
     .map_err(|err| {
-        if turso_cross_process_lock_error(&err.to_string()) {
-            cross_process_database_guidance(
+        if crate::cli::secret::turso_cross_process_lock_error(&err.to_string()) {
+            crate::cli::secret::cross_process_database_guidance(
                 "use the running daemon's mcpSource RPC or stop the daemon and retry",
             )
         } else {
@@ -1505,16 +1575,18 @@ pub(super) async fn open_mcp_source_registry(
     })
 }
 
-pub(super) fn load_tool_config(path: Option<&Path>) -> VerletResult<ToolConfigFile> {
+pub(super) fn load_tool_config(
+    path: Option<&std::path::Path>,
+) -> crate::VerletResult<ToolConfigFile> {
     let discovered;
     let path = if let Some(path) = path {
         path
     } else {
-        let canonical = PathBuf::from("verlet.json");
+        let canonical = std::path::PathBuf::from("verlet.json");
         if canonical.exists() {
             discovered = canonical;
         } else {
-            let legacy = PathBuf::from(concat!("cool", "dis.json"));
+            let legacy = std::path::PathBuf::from(concat!("cool", "dis.json"));
             if !legacy.exists() {
                 return Ok(ToolConfigFile::default());
             }
@@ -1526,26 +1598,26 @@ pub(super) fn load_tool_config(path: Option<&Path>) -> VerletResult<ToolConfigFi
         }
         discovered.as_path()
     };
-    let bytes = fs::read(path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    let bytes = std::fs::read(path).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
             "failed to read tool config {}: {err}",
             path.display()
         ))
     })?;
     let mut config: ToolConfigFile = serde_json::from_slice(&bytes).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to decode tool config {} as JSON: {err}",
             path.display()
         ))
     })?;
-    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let base = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     relativize_config_paths(&mut config, base);
     Ok(config)
 }
 
 #[derive(Debug)]
 pub(super) struct ToolConversionAudit {
-    manifest_path: PathBuf,
+    manifest_path: std::path::PathBuf,
     crate_name: String,
     issues: Vec<String>,
     conversion: Option<ToolConversionConfig>,
@@ -1578,19 +1650,21 @@ impl ToolConversionAudit {
 }
 
 pub(super) fn audit_strict_stateless_conversion(
-    module_path: &Path,
+    module_path: &std::path::Path,
     conversion: Option<&ToolConversionConfig>,
-) -> VerletResult<ToolConversionAudit> {
+) -> crate::VerletResult<ToolConversionAudit> {
     let manifest_path = resolve_cargo_manifest_path(module_path)?;
-    let crate_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let manifest_text = fs::read_to_string(&manifest_path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    let crate_root = manifest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
             "failed to read Cargo manifest {}: {err}",
             manifest_path.display()
         ))
     })?;
     let manifest: toml::Value = toml::from_str(&manifest_text).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to decode Cargo manifest {}: {err}",
             manifest_path.display()
         ))
@@ -1625,14 +1699,16 @@ pub(super) fn audit_strict_stateless_conversion(
     })
 }
 
-pub(super) fn resolve_cargo_manifest_path(module_path: &Path) -> VerletResult<PathBuf> {
-    let path = if module_path.file_name() == Some(OsStr::new("Cargo.toml")) {
+pub(super) fn resolve_cargo_manifest_path(
+    module_path: &std::path::Path,
+) -> crate::VerletResult<std::path::PathBuf> {
+    let path = if module_path.file_name() == Some(std::ffi::OsStr::new("Cargo.toml")) {
         module_path.to_path_buf()
     } else {
         module_path.join("Cargo.toml")
     };
     if !path.exists() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "Rust Wasm module manifest not found at {}",
             path.display()
         )));
@@ -1640,8 +1716,10 @@ pub(super) fn resolve_cargo_manifest_path(module_path: &Path) -> VerletResult<Pa
     Ok(path)
 }
 
-pub(super) fn collect_cargo_dependency_names(manifest: &toml::Value) -> BTreeSet<String> {
-    let mut dependencies = BTreeSet::new();
+pub(super) fn collect_cargo_dependency_names(
+    manifest: &toml::Value,
+) -> std::collections::BTreeSet<String> {
+    let mut dependencies = std::collections::BTreeSet::new();
     collect_dependency_table(manifest.get("dependencies"), &mut dependencies);
     collect_dependency_table(manifest.get("build-dependencies"), &mut dependencies);
     collect_dependency_table(manifest.get("dev-dependencies"), &mut dependencies);
@@ -1657,7 +1735,7 @@ pub(super) fn collect_cargo_dependency_names(manifest: &toml::Value) -> BTreeSet
 
 pub(super) fn collect_dependency_table(
     value: Option<&toml::Value>,
-    dependencies: &mut BTreeSet<String>,
+    dependencies: &mut std::collections::BTreeSet<String>,
 ) {
     let Some(table) = value.and_then(toml::Value::as_table) else {
         return;
@@ -1665,7 +1743,7 @@ pub(super) fn collect_dependency_table(
     dependencies.extend(table.keys().cloned());
 }
 
-pub(super) fn strict_conversion_denied_dependencies() -> BTreeSet<&'static str> {
+pub(super) fn strict_conversion_denied_dependencies() -> std::collections::BTreeSet<&'static str> {
     ["git2", "heed", "libc", "memmap2", "notify", "rayon"]
         .into_iter()
         .collect()
@@ -1678,7 +1756,7 @@ pub(super) fn json_label(value: &impl serde::Serialize) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-pub(super) fn relativize_config_paths(config: &mut ToolConfigFile, base: &Path) {
+pub(super) fn relativize_config_paths(config: &mut ToolConfigFile, base: &std::path::Path) {
     if let Some(path) = config.module_path.take() {
         config.module_path = Some(resolve_config_path(base, path));
     }
@@ -1690,7 +1768,10 @@ pub(super) fn relativize_config_paths(config: &mut ToolConfigFile, base: &Path) 
     }
 }
 
-pub(super) fn resolve_config_path(base: &Path, path: PathBuf) -> PathBuf {
+pub(super) fn resolve_config_path(
+    base: &std::path::Path,
+    path: std::path::PathBuf,
+) -> std::path::PathBuf {
     if path.is_absolute() {
         path
     } else {
@@ -1699,35 +1780,43 @@ pub(super) fn resolve_config_path(base: &Path, path: PathBuf) -> PathBuf {
 }
 
 pub(super) async fn validate_wasm_artifact(
-    artifact_path: PathBuf,
-    capability_grants: BTreeSet<String>,
-) -> VerletResult<crate::WasmOperationManifest> {
-    let factory = WasmRuntimeFactory::new(
-        WasmRuntimeConfig::new(WasmRuntimeArtifact::path(artifact_path))
+    artifact_path: std::path::PathBuf,
+    capability_grants: std::collections::BTreeSet<String>,
+) -> crate::VerletResult<crate::WasmOperationManifest> {
+    let factory = crate::WasmRuntimeFactory::new(
+        crate::WasmRuntimeConfig::new(crate::WasmRuntimeArtifact::path(artifact_path))
             .with_capability_grants(capability_grants),
     )?;
     factory.validate_operation_artifact().await
 }
 
-pub(super) async fn load_vfs(mounts: Vec<MountArg>) -> VerletResult<Arc<VerletVfs>> {
-    let vfs = Arc::new(VerletVfs::new(Arc::new(InMemoryFs::new())));
+pub(super) async fn load_vfs(
+    mounts: Vec<MountArg>,
+) -> crate::VerletResult<std::sync::Arc<crate::VerletVfs>> {
+    let vfs = std::sync::Arc::new(crate::VerletVfs::new(std::sync::Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
     for mount in mounts {
-        let fs = Arc::new(
-            HostFileSystem::new(&mount.host_path, HostFileSystemMode::ReadOnly).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
-                    "failed to open host mount {}: {err}",
-                    mount.host_path.display()
-                ))
-            })?,
+        let fs = std::sync::Arc::new(
+            crate::HostFileSystem::new(&mount.host_path, crate::HostFileSystemMode::ReadOnly)
+                .map_err(|err| {
+                    crate::VerletError::RuntimeFactory(format!(
+                        "failed to open host mount {}: {err}",
+                        mount.host_path.display()
+                    ))
+                })?,
         );
-        vfs.mount(&mount.guest_path, fs as Arc<dyn crate::VerletVfsBackend>)
-            .map_err(|err| {
-                VerletError::RuntimeFactory(format!(
-                    "failed to mount {} at {}: {err}",
-                    mount.host_path.display(),
-                    mount.guest_path.display()
-                ))
-            })?;
+        vfs.mount(
+            &mount.guest_path,
+            fs as std::sync::Arc<dyn crate::VerletVfsBackend>,
+        )
+        .map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
+                "failed to mount {} at {}: {err}",
+                mount.host_path.display(),
+                mount.guest_path.display()
+            ))
+        })?;
     }
     Ok(vfs)
 }

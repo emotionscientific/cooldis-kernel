@@ -1,23 +1,9 @@
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::net::TcpStream;
-use tokio::task::JoinHandle;
-use uuid::Uuid;
-use verlet::daemon::identity::{IdentityAuthority, PrincipalId, SqliteIdentityAuthority};
-use verlet::{
-    AppServerListenAddr, CapsuleBindingsConfig, CodexTuiConnectConfig, CodexTuiTestClient,
-    LocalAgentRegistry, LocalOperationRegistry, PublishedOperationBuild, PublishedOperationRecord,
-    PublishedOperationSource, RegisteredOperation, SqliteSessionStore, SystemDaemonClock,
-    VerletAppServer, VerletAppServerConfig, WasmOperationDefinition, WasmOperationEventKind,
-    WasmOperationManifest, WasmOperationMode, WasmOperationValueKind, wasm_sha256,
-};
+use verlet::daemon::identity::IdentityAuthority as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from("/tmp").join(format!("cdis-workbench-{}", Uuid::now_v7().simple()));
+    let root = std::path::PathBuf::from("/tmp")
+        .join(format!("cdis-workbench-{}", uuid::Uuid::now_v7().simple()));
     let result = run(&root).await;
     let cleanup = std::fs::remove_dir_all(&root);
     match (result, cleanup) {
@@ -32,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = root.join("workspace");
     let agent_registry_root = root.join("agents");
     let operation_registry_root = root.join("operations");
@@ -42,7 +28,7 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     publish_operation_record(&operation_registry_root)?;
 
     let addr = unused_loopback_addr()?;
-    let listen = AppServerListenAddr::WebSocket(addr);
+    let listen = verlet::AppServerListenAddr::WebSocket(addr);
     let (server_task, token) = start_server(
         root,
         &workspace,
@@ -63,7 +49,7 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let threads = client.thread_list().await?;
         assert_array(&threads, "thread/list data")?;
         let config = client
-            .request("config/read", json!({ "includeLayers": false }))
+            .request("config/read", serde_json::json!({ "includeLayers": false }))
             .await?;
         if config["config"]["model"].as_str().is_none() {
             return Err("config/read did not return config.model".into());
@@ -74,9 +60,11 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         {
             return Err("config/read did not return an absolute config.cwd".into());
         }
-        let agents = client.request("agent/list", json!({})).await?;
+        let agents = client.request("agent/list", serde_json::json!({})).await?;
         assert_nonempty_array(&agents, "agent/list data")?;
-        let operations = client.request("operation/list", json!({})).await?;
+        let operations = client
+            .request("operation/list", serde_json::json!({}))
+            .await?;
         let operation_values = assert_array(&operations, "operation/list data")?;
         if !operation_values
             .iter()
@@ -86,13 +74,13 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let thread = client
-            .thread_start(json!({ "agentRef": "agent://workbench-runner@latest" }))
+            .thread_start(serde_json::json!({ "agentRef": "agent://workbench-runner@latest" }))
             .await?;
         let turn = client
             .turn_start_text(&thread.id, "workbench smoke receipt")
             .await?;
         let completed = client
-            .wait_for_turn_completed(&thread.id, &turn.id, Duration::from_secs(5))
+            .wait_for_turn_completed(&thread.id, &turn.id, std::time::Duration::from_secs(5))
             .await?;
         if !completed
             .notifications
@@ -105,7 +93,7 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let events = client
             .request(
                 "thread/events/list",
-                json!({
+                serde_json::json!({
                     "threadId": thread.id,
                     "limit": 100,
                 }),
@@ -139,22 +127,29 @@ async fn run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn start_server(
-    root: &Path,
-    workspace: &Path,
-    agent_registry_root: &Path,
-    operation_registry_root: &Path,
-    listen: AppServerListenAddr,
-) -> Result<(JoinHandle<verlet::VerletResult<()>>, String), Box<dyn std::error::Error>> {
-    let mut config = VerletAppServerConfig::local(listen.clone(), workspace).with_capsule_bindings(
-        CapsuleBindingsConfig::default().with_registry_root(operation_registry_root),
-    );
+    root: &std::path::Path,
+    workspace: &std::path::Path,
+    agent_registry_root: &std::path::Path,
+    operation_registry_root: &std::path::Path,
+    listen: verlet::AppServerListenAddr,
+) -> Result<(tokio::task::JoinHandle<verlet::VerletResult<()>>, String), Box<dyn std::error::Error>>
+{
+    let mut config = verlet::VerletAppServerConfig::local(listen.clone(), workspace)
+        .with_capsule_bindings(
+            verlet::CapsuleBindingsConfig::default().with_registry_root(operation_registry_root),
+        );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.to_path_buf();
-    let server = VerletAppServer::new_local(config).await?;
-    let store = SqliteSessionStore::open(server.session_store_path()).await?;
-    let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None).await?;
-    let principal = PrincipalId::new(server.user_id());
+    let server = verlet::VerletAppServer::new_local(config).await?;
+    let store = verlet::SqliteSessionStore::open(server.session_store_path()).await?;
+    let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(
+        store,
+        std::sync::Arc::new(verlet::SystemDaemonClock),
+        None,
+    )
+    .await?;
+    let principal = verlet::daemon::identity::PrincipalId::new(server.user_id());
     let token = authority
         .mint_credential(&principal, &principal, None)
         .await?
@@ -168,15 +163,15 @@ async fn start_server(
 async fn connect_client(
     url: &str,
     token: &str,
-) -> Result<CodexTuiTestClient<TcpStream>, Box<dyn std::error::Error>> {
+) -> Result<verlet::CodexTuiTestClient<tokio::net::TcpStream>, Box<dyn std::error::Error>> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match CodexTuiTestClient::connect_websocket(
+        match verlet::CodexTuiTestClient::connect_websocket(
             url,
-            CodexTuiConnectConfig {
+            verlet::CodexTuiConnectConfig {
                 client_name: "verlet-workbench-smoke".to_string(),
                 bearer_token: Some(token.to_string()),
-                ..CodexTuiConnectConfig::default()
+                ..verlet::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -184,7 +179,7 @@ async fn connect_client(
             Ok(client) => return Ok(client),
             Err(err) => {
                 last_error = Some(err.to_string());
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
     }
@@ -196,8 +191,8 @@ async fn connect_client(
 }
 
 fn publish_agent_manifest(
-    root: &Path,
-    agent_registry_root: &Path,
+    root: &std::path::Path,
+    agent_registry_root: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manifest_path = root.join("workbench.verlet.agent.toml");
     std::fs::write(
@@ -221,51 +216,51 @@ default_cwd = "."
 streaming = false
 "#,
     )?;
-    LocalAgentRegistry::new(agent_registry_root).publish_manifest_path(&manifest_path)?;
+    verlet::LocalAgentRegistry::new(agent_registry_root).publish_manifest_path(&manifest_path)?;
     Ok(())
 }
 
 fn publish_operation_record(
-    operation_registry_root: &Path,
+    operation_registry_root: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let name = "workbench_lookup";
     let artifact_path = operation_registry_root.join(format!("{name}.wasm"));
-    let manifest = WasmOperationManifest {
+    let manifest = verlet::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
-        operations: vec![WasmOperationDefinition {
+        operations: vec![verlet::WasmOperationDefinition {
             id: 1,
             name: "lookup".to_string(),
-            input: WasmOperationValueKind::Text,
-            output: WasmOperationValueKind::Text,
-            events: WasmOperationEventKind::None,
-            mode: WasmOperationMode::Sync,
+            input: verlet::WasmOperationValueKind::Text,
+            output: verlet::WasmOperationValueKind::Text,
+            events: verlet::WasmOperationEventKind::None,
+            mode: verlet::WasmOperationMode::Sync,
             required_capabilities: Vec::new(),
         }],
     };
-    let registered = RegisteredOperation {
+    let registered = verlet::RegisteredOperation {
         name: name.to_string(),
         manifest: manifest.clone(),
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
-    let record = PublishedOperationRecord {
+    let record = verlet::PublishedOperationRecord {
         schema_version: 1,
         name: name.to_string(),
-        active_artifact_hash: wasm_sha256(b"workbench smoke operation placeholder"),
+        active_artifact_hash: verlet::wasm_sha256(b"workbench smoke operation placeholder"),
         manifest,
         projections: registered.projections(),
         interface: None,
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
-        source: PublishedOperationSource::Wasm {
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
+        source: verlet::PublishedOperationSource::Wasm {
             bin_path: artifact_path.clone(),
         },
-        build: PublishedOperationBuild {
+        build: verlet::PublishedOperationBuild {
             artifact_path,
             published_at_ms: unix_timestamp_ms(),
         },
     };
-    let registry = LocalOperationRegistry::new(operation_registry_root);
+    let registry = verlet::LocalOperationRegistry::new(operation_registry_root);
     let record_path = registry.record_path(name)?;
     if let Some(parent) = record_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -275,7 +270,10 @@ fn publish_operation_record(
     Ok(())
 }
 
-fn assert_nonempty_array(result: &Value, label: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_nonempty_array(
+    result: &serde_json::Value,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let values = assert_array(result, label)?;
     if values.is_empty() {
         return Err(format!("{label} was empty").into());
@@ -284,21 +282,24 @@ fn assert_nonempty_array(result: &Value, label: &str) -> Result<(), Box<dyn std:
 }
 
 fn assert_array<'a>(
-    result: &'a Value,
+    result: &'a serde_json::Value,
     label: &str,
-) -> Result<&'a Vec<Value>, Box<dyn std::error::Error>> {
+) -> Result<&'a Vec<serde_json::Value>, Box<dyn std::error::Error>> {
     result["data"]
         .as_array()
         .ok_or_else(|| format!("{label} was not an array").into())
 }
 
-fn assert_event_kind(events: &Value, kind: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_event_kind(
+    events: &serde_json::Value,
+    kind: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     find_event(events, kind)
         .map(|_| ())
         .ok_or_else(|| format!("thread/events/list did not expose {kind}").into())
 }
 
-fn find_event<'a>(events: &'a Value, kind: &str) -> Option<&'a Value> {
+fn find_event<'a>(events: &'a serde_json::Value, kind: &str) -> Option<&'a serde_json::Value> {
     events["data"]
         .as_array()?
         .iter()
@@ -311,8 +312,8 @@ fn unused_loopback_addr() -> Result<std::net::SocketAddr, Box<dyn std::error::Er
 }
 
 fn unix_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
 }

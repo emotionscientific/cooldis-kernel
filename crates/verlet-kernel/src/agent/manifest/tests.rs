@@ -1,8 +1,6 @@
-use super::*;
-
-fn temp_root(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("verlet-agent-{label}-{}", Uuid::now_v7()));
-    fs::create_dir_all(&path).unwrap();
+fn temp_root(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("verlet-agent-{label}-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&path).unwrap();
     path
 }
 
@@ -87,7 +85,7 @@ fn legacy_string_grants_keep_the_resolved_manifest_hash_and_wire_shape() {
         false,
     );
 
-    let plan = AgentPublishPlan::from_source(&source).unwrap();
+    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
 
     assert_eq!(
         plan.resolved_manifest["tools"][0]["grants"],
@@ -160,7 +158,7 @@ fn legacy_string_grants_pin_all_four_positions_in_one_manifest_hash() {
     let source =
         manifest_source_with_all_grant_positions("legacy-all-grants", "\"stream.read:thread\"");
 
-    let plan = AgentPublishPlan::from_source(&source).unwrap();
+    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
 
     let grants = plan.resolved_manifest["tools"]
         .as_array()
@@ -189,15 +187,15 @@ fn object_grant_manifest_hash_is_stable_across_toml_round_trip() {
         "object-all-grants",
         r#"{ capability = "stream.read:thread", expires_at = "2026-07-16T20:00:00Z" }"#,
     );
-    let first = AgentPublishPlan::from_source(&source).unwrap();
+    let first = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
     let value: toml::Value = toml::from_str(&source).unwrap();
-    AgentManifestSchema::from_toml_value(&value).unwrap();
+    crate::agent::manifest_schema::AgentManifestSchema::from_toml_value(&value).unwrap();
     let encoded = toml::to_string(&value).unwrap();
-    let second = AgentPublishPlan::from_source(&encoded).unwrap();
+    let second = crate::agent::manifest::AgentPublishPlan::from_source(&encoded).unwrap();
 
     let grant_wire = GrantEnvelope {
         grants: vec![crate::agent::manifest_schema::AgentManifestGrant::Expiring(
-            AgentManifestGrantExpiry {
+            crate::agent::manifest_schema::AgentManifestGrantExpiry {
                 capability: "stream.read:thread".to_string(),
                 expires_at: "2026-07-16T20:00:00Z".to_string(),
             },
@@ -241,7 +239,7 @@ model_ref = "model://example-chat-model"
 }
 
 fn seed_operation_record(
-    root: &Path,
+    root: &std::path::Path,
     name: &str,
     artifact_hash: &str,
     operations: &[(&str, &[&str])],
@@ -295,18 +293,18 @@ fn seed_operation_record(
             package: "test".to_string(),
         },
         build: crate::PublishedOperationBuild {
-            artifact_path: PathBuf::from("<test>"),
-            published_at_ms: now_ms(),
+            artifact_path: std::path::PathBuf::from("<test>"),
+            published_at_ms: crate::agent::manifest::now_ms(),
         },
     };
     record.validate().unwrap();
-    write_json_atomically(
+    crate::agent::manifest::write_json_atomically(
         &registry.record_path(name).unwrap(),
         format!("operation record {name:?}"),
         &record,
     )
     .unwrap();
-    write_json_atomically(
+    crate::agent::manifest::write_json_atomically(
         &registry.version_record_path(name, artifact_hash).unwrap(),
         format!("operation version record {name:?}@{artifact_hash}"),
         &record,
@@ -314,7 +312,7 @@ fn seed_operation_record(
     .unwrap();
 }
 
-fn seed_tailcat_operation_root(label: &str) -> PathBuf {
+fn seed_tailcat_operation_root(label: &str) -> std::path::PathBuf {
     let operation_root = temp_root(label);
     seed_operation_record(&operation_root, "tailcat", hash(), &[("cat", &[])]);
     operation_root
@@ -324,9 +322,9 @@ fn seed_tailcat_operation_root(label: &str) -> PathBuf {
 fn folder_first_prompt_lowers_into_explicit_context_pipeline() {
     let root = temp_root("folder-first-explicit-context");
     let project = root.join("agent");
-    fs::create_dir_all(project.join("prompts")).unwrap();
+    std::fs::create_dir_all(project.join("prompts")).unwrap();
     let prompt_text = "You are the folder-first explicit context agent.\n";
-    fs::write(project.join("prompts/system.md"), prompt_text).unwrap();
+    std::fs::write(project.join("prompts/system.md"), prompt_text).unwrap();
     let source = folder_first_manifest_source(
         "release-verifier",
         r#"
@@ -347,10 +345,14 @@ budget_share = 0.75
 "#,
     );
     let manifest_path = project.join("verlet.agent.toml");
-    fs::write(&manifest_path, source).unwrap();
+    std::fs::write(&manifest_path, source).unwrap();
     let blob_root = root.join("blobs");
 
-    let plan = AgentPublishPlan::from_path_with_blob_registry(&manifest_path, &blob_root).unwrap();
+    let plan = crate::agent::manifest::AgentPublishPlan::from_path_with_blob_registry(
+        &manifest_path,
+        &blob_root,
+    )
+    .unwrap();
 
     assert_eq!(plan.resource_count, 1);
     let resource = &plan.resolved_manifest["resources"][0];
@@ -369,19 +371,19 @@ budget_share = 0.75
             .iter()
             .any(|resolved| resolved.declared == prompt_ref)
     );
-    let (_record, published_prompt) = LocalBlobRegistry::new(blob_root)
+    let (_record, published_prompt) = crate::LocalBlobRegistry::new(blob_root)
         .load_text_ref(prompt_ref)
         .unwrap();
     assert_eq!(published_prompt, prompt_text);
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn folder_first_prompt_rejects_explicit_identity_input() {
     let root = temp_root("folder-first-identity-input");
     let project = root.join("agent");
-    fs::create_dir_all(project.join("prompts")).unwrap();
-    fs::write(
+    std::fs::create_dir_all(project.join("prompts")).unwrap();
+    std::fs::write(
         project.join("prompts/system.md"),
         "Prompt from folder-first file.\n",
     )
@@ -412,25 +414,28 @@ budget_share = "rest"
 "#,
     );
     let manifest_path = project.join("verlet.agent.toml");
-    fs::write(&manifest_path, source).unwrap();
+    std::fs::write(&manifest_path, source).unwrap();
 
-    let err = AgentPublishPlan::from_path_with_blob_registry(&manifest_path, root.join("blobs"))
-        .unwrap_err();
+    let err = crate::agent::manifest::AgentPublishPlan::from_path_with_blob_registry(
+        &manifest_path,
+        root.join("blobs"),
+    )
+    .unwrap_err();
 
     let text = err.to_string();
     assert!(text.contains("prompts/system.md"));
     assert!(text.contains("identity"));
     assert!(text.contains("drop the input"));
     assert!(text.contains("move the file out of prompts/system.md"));
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn folder_first_prompt_rejects_declared_identity_resource_with_legal_escape_hatch() {
     let root = temp_root("folder-first-identity-resource");
     let project = root.join("agent");
-    fs::create_dir_all(project.join("prompts")).unwrap();
-    fs::write(
+    std::fs::create_dir_all(project.join("prompts")).unwrap();
+    std::fs::write(
         project.join("prompts/system.md"),
         "Prompt from folder-first file.\n",
     )
@@ -460,26 +465,29 @@ budget_share = "rest"
 "#,
     );
     let manifest_path = project.join("verlet.agent.toml");
-    fs::write(&manifest_path, source).unwrap();
+    std::fs::write(&manifest_path, source).unwrap();
     let blob_root = root.join("blobs");
 
-    let err =
-        AgentPublishPlan::from_path_with_blob_registry(&manifest_path, &blob_root).unwrap_err();
+    let err = crate::agent::manifest::AgentPublishPlan::from_path_with_blob_registry(
+        &manifest_path,
+        &blob_root,
+    )
+    .unwrap_err();
 
     let text = err.to_string();
     assert!(text.contains("already declares resource \"identity\""));
     assert!(text.contains("remove or rename that resource"));
     assert!(text.contains("point the identity static source at a declared resource explicitly"));
     assert!(!blob_root.exists());
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn folder_first_prompt_validates_before_publishing_blob() {
     let root = temp_root("folder-first-invalid-context");
     let project = root.join("agent");
-    fs::create_dir_all(project.join("prompts")).unwrap();
-    fs::write(
+    std::fs::create_dir_all(project.join("prompts")).unwrap();
+    std::fs::write(
         project.join("prompts/system.md"),
         "Prompt from folder-first file.\n",
     )
@@ -504,18 +512,21 @@ budget_share = 1.25
 "#,
     );
     let manifest_path = project.join("verlet.agent.toml");
-    fs::write(&manifest_path, source).unwrap();
+    std::fs::write(&manifest_path, source).unwrap();
     let blob_root = root.join("blobs");
 
-    let err =
-        AgentPublishPlan::from_path_with_blob_registry(&manifest_path, &blob_root).unwrap_err();
+    let err = crate::agent::manifest::AgentPublishPlan::from_path_with_blob_registry(
+        &manifest_path,
+        &blob_root,
+    )
+    .unwrap_err();
 
     assert!(
         err.to_string()
             .contains("budget_share fraction must be in (0, 1]")
     );
     assert!(!blob_root.exists());
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -540,7 +551,7 @@ budget_share = "rest"
 "#,
     );
 
-    let err = AgentPublishPlan::from_source(&source).unwrap_err();
+    let err = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap_err();
 
     assert!(
         err.to_string()
@@ -550,13 +561,17 @@ budget_share = "rest"
 
 #[test]
 fn plan_records_resolved_and_unresolved_refs_and_publish_rejects_unresolved() {
-    let plan =
-        AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", true)).unwrap();
+    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+        "release-verifier",
+        "1.0.0",
+        true,
+    ))
+    .unwrap();
 
     assert_eq!(plan.resolved_refs.len(), 2);
     assert_eq!(
         plan.resolved_refs[0].status,
-        AgentManifestRefStatus::Resolved
+        crate::agent::manifest_schema::AgentManifestRefStatus::Resolved
     );
     let expected_hash = format!("sha256:{}", hash());
     assert_eq!(
@@ -565,10 +580,10 @@ fn plan_records_resolved_and_unresolved_refs_and_publish_rejects_unresolved() {
     );
     assert_eq!(
         plan.resolved_refs[1].status,
-        AgentManifestRefStatus::UnresolvedOffline
+        crate::agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
     );
 
-    let err = LocalAgentRegistry::new(temp_root("unresolved"))
+    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("unresolved"))
         .publish_plan(plan)
         .unwrap_err();
     assert!(err.to_string().contains("unresolved artifact ref"));
@@ -579,10 +594,14 @@ fn publish_verifies_operation_ref_exists_in_registry() {
     let agent_root = temp_root("verified-agent");
     let operation_root = temp_root("verified-operations");
     seed_operation_record(&operation_root, "tailcat", hash(), &[("cat", &[])]);
-    let record = LocalAgentRegistry::new(agent_root)
+    let record = crate::agent::manifest::LocalAgentRegistry::new(agent_root)
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.0.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap();
@@ -590,17 +609,21 @@ fn publish_verifies_operation_ref_exists_in_registry() {
     assert_eq!(record.name, "release-verifier");
     assert_eq!(
         record.resolved_refs[0].status,
-        AgentManifestRefStatus::Resolved
+        crate::agent::manifest_schema::AgentManifestRefStatus::Resolved
     );
 }
 
 #[test]
 fn publish_rejects_missing_operation_record() {
     let operation_root = temp_root("missing-operation-record");
-    let err = LocalAgentRegistry::new(temp_root("missing-operation-agent"))
+    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("missing-operation-agent"))
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.0.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap_err();
@@ -621,10 +644,14 @@ fn publish_rejects_operation_ref_hash_that_is_not_a_published_version() {
         &[("cat", &[])],
     );
 
-    let err = LocalAgentRegistry::new(temp_root("wrong-operation-agent"))
+    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("wrong-operation-agent"))
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.0.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap_err();
@@ -647,9 +674,9 @@ fn publish_rejects_two_segment_ref_for_undeclared_operation() {
         false,
     );
 
-    let err = LocalAgentRegistry::new(temp_root("unknown-operation-agent"))
+    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("unknown-operation-agent"))
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&source).unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap(),
             &operation_root,
         )
         .unwrap_err();
@@ -679,9 +706,9 @@ fn publish_rejects_single_segment_ref_when_any_operation_grant_is_missing() {
         false,
     );
 
-    let err = LocalAgentRegistry::new(temp_root("single-grant-agent"))
+    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("single-grant-agent"))
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&source).unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap(),
             &operation_root,
         )
         .unwrap_err();
@@ -709,9 +736,9 @@ fn publish_rejects_two_segment_ref_when_selected_operation_grant_is_missing() {
         false,
     );
 
-    let err = LocalAgentRegistry::new(temp_root("selected-grant-agent"))
+    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("selected-grant-agent"))
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&source).unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap(),
             &operation_root,
         )
         .unwrap_err();
@@ -725,15 +752,15 @@ fn content_addressed_refs_must_end_after_sha256_digest() {
         &format!("operation_ref = \"op://tailcat@sha256:{}\"", hash()),
         &format!("operation_ref = \"op://tailcat@sha256:{}extra\"", hash()),
     );
-    let plan = AgentPublishPlan::from_source(&source).unwrap();
+    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
 
     assert_eq!(
         plan.resolved_refs[0].status,
-        AgentManifestRefStatus::UnresolvedOffline
+        crate::agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
     );
     assert!(plan.resolved_refs[0].content_hash.is_none());
 
-    let err = LocalAgentRegistry::new(temp_root("trailing-junk"))
+    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("trailing-junk"))
         .publish_plan(plan)
         .unwrap_err();
     assert!(err.to_string().contains("unresolved artifact ref"));
@@ -741,10 +768,13 @@ fn content_addressed_refs_must_end_after_sha256_digest() {
 
 #[test]
 fn resolved_ref_validation_checks_recorded_content_hash() {
-    let mut record =
-        AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-            .unwrap()
-            .into_record(now_ms());
+    let mut record = crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+        "release-verifier",
+        "1.0.0",
+        false,
+    ))
+    .unwrap()
+    .into_record(crate::agent::manifest::now_ms());
     record.resolved_refs[0].content_hash =
         Some("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string());
 
@@ -754,12 +784,16 @@ fn resolved_ref_validation_checks_recorded_content_hash() {
 
 #[test]
 fn publish_maintains_latest_alias_and_load_ref_resolves_alias() {
-    let registry = LocalAgentRegistry::new(temp_root("latest"));
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(temp_root("latest"));
     let operation_root = seed_tailcat_operation_root("latest-operations");
     let first = registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.0.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap();
@@ -788,8 +822,12 @@ fn publish_maintains_latest_alias_and_load_ref_resolves_alias() {
 
     registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.1.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.1.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap();
@@ -804,22 +842,27 @@ fn publish_maintains_latest_alias_and_load_ref_resolves_alias() {
 
 #[test]
 fn resolve_alias_fails_closed_on_hash_mismatch() {
-    let registry = LocalAgentRegistry::new(temp_root("alias-mismatch"));
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(temp_root("alias-mismatch"));
     let operation_root = seed_tailcat_operation_root("alias-mismatch-operations");
     registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.0.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap();
     let path = registry
         .alias_record_path("release-verifier", "latest")
         .unwrap();
-    let mut alias: AgentAliasRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut alias: crate::agent::manifest::AgentAliasRecord =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     alias.manifest_hash =
         "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string();
-    fs::write(&path, serde_json::to_vec_pretty(&alias).unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&alias).unwrap()).unwrap();
 
     let err = registry
         .resolve_alias("release-verifier", "latest")
@@ -829,54 +872,64 @@ fn resolve_alias_fails_closed_on_hash_mismatch() {
 
 #[test]
 fn alias_and_version_collisions_are_refused() {
-    let registry = LocalAgentRegistry::new(temp_root("alias-collision"));
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(temp_root("alias-collision"));
     let operation_root = seed_tailcat_operation_root("alias-collision-operations");
     registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.0.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap();
 
-    let latest_plan =
-        AgentPublishPlan::from_source(&manifest_source("release-verifier", "latest", false))
-            .unwrap();
+    let latest_plan = crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+        "release-verifier",
+        "latest",
+        false,
+    ))
+    .unwrap();
     let err = registry
         .publish_plan_with_operation_registry(latest_plan, &operation_root)
         .unwrap_err();
     assert!(err.to_string().contains("reserved alias"));
 
     registry
-        .write_alias_record_atomically(&AgentAliasRecord {
-            schema_version: AGENT_RECORD_SCHEMA_VERSION,
+        .write_alias_record_atomically(&crate::agent::manifest::AgentAliasRecord {
+            schema_version: crate::agent::manifest::AGENT_RECORD_SCHEMA_VERSION,
             name: "release-verifier".to_string(),
             alias: "stable".to_string(),
             version: "1.0.0".to_string(),
             manifest_hash:
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                     .to_string(),
-            updated_at_ms: now_ms(),
+            updated_at_ms: crate::agent::manifest::now_ms(),
         })
         .unwrap();
-    let stable_plan =
-        AgentPublishPlan::from_source(&manifest_source("release-verifier", "stable", false))
-            .unwrap();
+    let stable_plan = crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+        "release-verifier",
+        "stable",
+        false,
+    ))
+    .unwrap();
     let err = registry
         .publish_plan_with_operation_registry(stable_plan, &operation_root)
         .unwrap_err();
     assert!(err.to_string().contains("collides with an existing alias"));
 
     let err = registry
-        .write_alias_record_atomically(&AgentAliasRecord {
-            schema_version: AGENT_RECORD_SCHEMA_VERSION,
+        .write_alias_record_atomically(&crate::agent::manifest::AgentAliasRecord {
+            schema_version: crate::agent::manifest::AGENT_RECORD_SCHEMA_VERSION,
             name: "release-verifier".to_string(),
             alias: "1.0.0".to_string(),
             version: "1.0.0".to_string(),
             manifest_hash:
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                     .to_string(),
-            updated_at_ms: now_ms(),
+            updated_at_ms: crate::agent::manifest::now_ms(),
         })
         .unwrap_err();
     assert!(
@@ -887,22 +940,29 @@ fn alias_and_version_collisions_are_refused() {
 
 #[test]
 fn publish_preflights_latest_alias_collision_before_writing_records() {
-    let registry = LocalAgentRegistry::new(temp_root("legacy-latest-version"));
+    let registry =
+        crate::agent::manifest::LocalAgentRegistry::new(temp_root("legacy-latest-version"));
     let operation_root = seed_tailcat_operation_root("legacy-latest-operations");
-    let mut legacy_latest =
-        AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-            .unwrap()
-            .into_record(now_ms());
+    let mut legacy_latest = crate::agent::manifest::AgentPublishPlan::from_source(
+        &manifest_source("release-verifier", "1.0.0", false),
+    )
+    .unwrap()
+    .into_record(crate::agent::manifest::now_ms());
     legacy_latest.version = "latest".to_string();
-    legacy_latest.ref_uri = agent_ref_uri(None, &legacy_latest.name, &legacy_latest.version);
+    legacy_latest.ref_uri =
+        crate::agent::manifest::agent_ref_uri(None, &legacy_latest.name, &legacy_latest.version);
     registry
         .write_version_record_atomically(&legacy_latest)
         .unwrap();
 
     let err = registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.0.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap_err();
@@ -916,19 +976,23 @@ fn publish_preflights_latest_alias_collision_before_writing_records() {
 
 #[test]
 fn legacy_records_without_resolved_refs_still_load() {
-    let registry = LocalAgentRegistry::new(temp_root("legacy-record"));
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(temp_root("legacy-record"));
     let operation_root = seed_tailcat_operation_root("legacy-record-operations");
     let record = registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", "1.0.0", false))
-                .unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+                "release-verifier",
+                "1.0.0",
+                false,
+            ))
+            .unwrap(),
             &operation_root,
         )
         .unwrap();
     let path = registry.record_path("release-verifier").unwrap();
     let mut json = serde_json::to_value(&record).unwrap();
     json.as_object_mut().unwrap().remove("resolved_refs");
-    fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
 
     let loaded = registry.load_record("release-verifier").unwrap();
     assert!(loaded.resolved_refs.is_empty());
@@ -936,12 +1000,12 @@ fn legacy_records_without_resolved_refs_still_load() {
 
 #[test]
 fn published_records_round_trip_authored_source_and_legacy_absence() {
-    let registry = LocalAgentRegistry::new(temp_root("authored-source"));
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(temp_root("authored-source"));
     let operation_root = seed_tailcat_operation_root("authored-source-operations");
     let source = manifest_source("release-verifier", "1.0.0", false);
     let record = registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&source).unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap(),
             &operation_root,
         )
         .unwrap();
@@ -970,9 +1034,10 @@ fn published_records_round_trip_authored_source_and_legacy_absence() {
             .version_record_path("release-verifier", "1.0.0")
             .unwrap(),
     ] {
-        let mut json: JsonValue = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         json.as_object_mut().unwrap().remove("authored_source");
-        fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
     }
 
     let legacy_head = registry.load_record("release-verifier").unwrap();
@@ -997,12 +1062,13 @@ fn published_records_round_trip_authored_source_and_legacy_absence() {
 
 #[test]
 fn immutable_version_record_keeps_first_authored_snapshot() {
-    let registry = LocalAgentRegistry::new(temp_root("authored-source-immutable"));
+    let registry =
+        crate::agent::manifest::LocalAgentRegistry::new(temp_root("authored-source-immutable"));
     let operation_root = seed_tailcat_operation_root("authored-source-immutable-operations");
     let original = manifest_source("release-verifier", "1.0.0", false);
     registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&original).unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&original).unwrap(),
             &operation_root,
         )
         .unwrap();
@@ -1010,7 +1076,7 @@ fn immutable_version_record_keeps_first_authored_snapshot() {
     let reformatted = format!("# republished with a comment\n{original}");
     registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&reformatted).unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&reformatted).unwrap(),
             &operation_root,
         )
         .unwrap();
@@ -1023,7 +1089,7 @@ fn immutable_version_record_keeps_first_authored_snapshot() {
     let changed = original.replace("Checks a release branch.", "Checks every release branch.");
     let error = registry
         .publish_plan_with_operation_registry(
-            AgentPublishPlan::from_source(&changed).unwrap(),
+            crate::agent::manifest::AgentPublishPlan::from_source(&changed).unwrap(),
             &operation_root,
         )
         .unwrap_err();
@@ -1040,12 +1106,15 @@ fn immutable_version_record_keeps_first_authored_snapshot() {
 
 #[test]
 fn version_records_are_listed_by_publication_time_not_declared_version() {
-    let registry = LocalAgentRegistry::new(temp_root("version-history"));
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(temp_root("version-history"));
     for (version, published_at_ms) in [("9.0.0", 300), ("1.0.0", 100), ("2.0.0", 200)] {
-        let record =
-            AgentPublishPlan::from_source(&manifest_source("release-verifier", version, false))
-                .unwrap()
-                .into_record(published_at_ms);
+        let record = crate::agent::manifest::AgentPublishPlan::from_source(&manifest_source(
+            "release-verifier",
+            version,
+            false,
+        ))
+        .unwrap()
+        .into_record(published_at_ms);
         registry.write_version_record_atomically(&record).unwrap();
     }
 
@@ -1085,7 +1154,7 @@ fn canonical_json_diff_is_structural_path_ordered_and_escapes_json_pointers() {
         "a/b": {"~pin": "new"},
     });
 
-    let changes = diff_canonical_json(&before, &after);
+    let changes = crate::agent::manifest::diff_canonical_json(&before, &after);
 
     assert_eq!(
         changes
@@ -1093,13 +1162,34 @@ fn canonical_json_diff_is_structural_path_ordered_and_escapes_json_pointers() {
             .map(|change| (change.path.as_str(), change.kind))
             .collect::<Vec<_>>(),
         vec![
-            ("/array/0/pin", AgentManifestDiffKind::Changed),
-            ("/array/1", AgentManifestDiffKind::Removed),
-            ("/a~1b/~0pin", AgentManifestDiffKind::Changed),
-            ("/nested/added", AgentManifestDiffKind::Added),
-            ("/nested/changed", AgentManifestDiffKind::Changed),
-            ("/nested/removed", AgentManifestDiffKind::Removed),
-            ("/ref", AgentManifestDiffKind::Changed),
+            (
+                "/array/0/pin",
+                crate::agent::manifest::AgentManifestDiffKind::Changed
+            ),
+            (
+                "/array/1",
+                crate::agent::manifest::AgentManifestDiffKind::Removed
+            ),
+            (
+                "/a~1b/~0pin",
+                crate::agent::manifest::AgentManifestDiffKind::Changed
+            ),
+            (
+                "/nested/added",
+                crate::agent::manifest::AgentManifestDiffKind::Added
+            ),
+            (
+                "/nested/changed",
+                crate::agent::manifest::AgentManifestDiffKind::Changed
+            ),
+            (
+                "/nested/removed",
+                crate::agent::manifest::AgentManifestDiffKind::Removed
+            ),
+            (
+                "/ref",
+                crate::agent::manifest::AgentManifestDiffKind::Changed
+            ),
         ]
     );
     assert_eq!(
@@ -1113,11 +1203,14 @@ fn canonical_json_diff_is_structural_path_ordered_and_escapes_json_pointers() {
     assert_eq!(changes[1].before, Some(serde_json::json!("removed")));
     assert_eq!(changes[1].after, None);
     assert_eq!(changes[3].before, None);
-    assert_eq!(changes[3].after, Some(JsonValue::Null));
+    assert_eq!(changes[3].after, Some(serde_json::Value::Null));
     assert!(changes.iter().all(|change| match change.kind {
-        AgentManifestDiffKind::Added => change.before.is_none() && change.after.is_some(),
-        AgentManifestDiffKind::Removed => change.before.is_some() && change.after.is_none(),
-        AgentManifestDiffKind::Changed => change.before.is_some() && change.after.is_some(),
+        crate::agent::manifest::AgentManifestDiffKind::Added =>
+            change.before.is_none() && change.after.is_some(),
+        crate::agent::manifest::AgentManifestDiffKind::Removed =>
+            change.before.is_some() && change.after.is_none(),
+        crate::agent::manifest::AgentManifestDiffKind::Changed =>
+            change.before.is_some() && change.after.is_some(),
     }));
     let encoded = serde_json::to_value(&changes).unwrap();
     assert!(encoded[0].get("before").is_some());
@@ -1125,7 +1218,11 @@ fn canonical_json_diff_is_structural_path_ordered_and_escapes_json_pointers() {
     assert!(encoded[1].get("before").is_some());
     assert!(encoded[1].get("after").is_none());
     assert!(encoded[3].get("before").is_none());
-    assert!(encoded[3].get("after").is_some_and(JsonValue::is_null));
+    assert!(
+        encoded[3]
+            .get("after")
+            .is_some_and(serde_json::Value::is_null)
+    );
 }
 
 #[test]
@@ -1133,7 +1230,7 @@ fn canonical_json_diff_sorts_array_index_paths_lexicographically() {
     let before = serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     let after = serde_json::json!([0, 1, 20, 3, 4, 5, 6, 7, 8, 9, 100]);
 
-    let changes = diff_canonical_json(&before, &after);
+    let changes = crate::agent::manifest::diff_canonical_json(&before, &after);
 
     assert_eq!(
         changes

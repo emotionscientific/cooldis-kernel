@@ -1,29 +1,29 @@
-use bashkit::{FileSystem, InMemoryFs};
-use std::path::Path;
-use std::sync::Arc;
-use verlet::{
-    RustWasmBuildOptions, VerletVfs, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
-    build_rust_wasm_module,
-};
+use bashkit::FileSystem as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("wasm-vfs-tools");
-    let build = build_rust_wasm_module(RustWasmBuildOptions::new(fixture_dir))?;
+    let build = verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(fixture_dir))?;
 
-    let workspace = Arc::new(InMemoryFs::new());
+    let workspace = std::sync::Arc::new(bashkit::InMemoryFs::new());
     workspace
-        .write_file(Path::new("/input.txt"), b"hello from compiled Rust wasm\n")
+        .write_file(
+            std::path::Path::new("/input.txt"),
+            b"hello from compiled Rust wasm\n",
+        )
         .await?;
 
-    let vfs = Arc::new(VerletVfs::new(Arc::new(InMemoryFs::new())));
+    let vfs = std::sync::Arc::new(verlet::VerletVfs::new(std::sync::Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
     vfs.mount("/workspace", workspace)?;
 
-    let factory = WasmRuntimeFactory::new(
-        WasmRuntimeConfig::new(WasmRuntimeArtifact::path(build.artifact_path)).with_vfs(vfs),
+    let factory = verlet::WasmRuntimeFactory::new(
+        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::path(build.artifact_path))
+            .with_vfs(vfs),
     )?;
     let output = factory
         .invoke_operation_bytes("cat", b"/workspace/input.txt".to_vec())

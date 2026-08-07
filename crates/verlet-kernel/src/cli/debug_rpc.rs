@@ -1,11 +1,10 @@
 //! The `debug rpc` subcommand family.
 
-use super::*;
-
+use std::io::Write as _;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn run_debug(mut args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_debug(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -16,9 +15,9 @@ pub(super) async fn run_debug(mut args: Vec<OsString>) -> VerletResult<()> {
     }
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
-        "bind" => run_debug_bind(args).await,
+        "bind" => crate::cli::debug_bind::run_debug_bind(args).await,
         "rpc" => run_debug_rpc(args).await,
-        other => Err(usage_error(format!(
+        other => Err(crate::cli::usage_error(format!(
             "unknown debug subcommand {other:?}; use `verlet debug --help`"
         ))),
     }
@@ -27,7 +26,7 @@ pub(super) async fn run_debug(mut args: Vec<OsString>) -> VerletResult<()> {
 /// `verlet debug rpc` — protocol-level debug client for a RUNNING daemon's
 /// app-server websocket. Connects with `CodexTuiTestClient::connect_websocket`,
 /// performs the initialize handshake, then dispatches a subcommand.
-pub(super) async fn run_debug_rpc(mut args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_debug_rpc(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -41,7 +40,7 @@ pub(super) async fn run_debug_rpc(mut args: Vec<OsString>) -> VerletResult<()> {
         "call" => run_debug_rpc_call(args).await,
         "turn" => run_debug_rpc_turn(args).await,
         "tail" => run_debug_rpc_tail(args).await,
-        other => Err(usage_error(format!(
+        other => Err(crate::cli::usage_error(format!(
             "unknown debug rpc subcommand {other:?}; use `verlet debug rpc --help`"
         ))),
     }
@@ -54,13 +53,13 @@ pub(super) async fn run_debug_rpc(mut args: Vec<OsString>) -> VerletResult<()> {
 #[derive(Debug)]
 pub(super) struct DebugRpcEndpointArgs {
     pub(super) url: Option<String>,
-    pub(super) config: Option<PathBuf>,
+    pub(super) config: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
 pub(super) struct DebugRpcCallArgs {
     method: String,
-    params: Value,
+    params: serde_json::Value,
     endpoint: DebugRpcEndpointArgs,
 }
 
@@ -90,19 +89,20 @@ pub(super) enum DebugRpcTurnStreamResult {
 }
 
 pub(super) const DEBUG_RPC_DEFAULT_URL: &str = "ws://127.0.0.1:49200/rpc";
-pub(super) const DEBUG_RPC_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const DEBUG_RPC_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// One-shot JSON-RPC request: `verlet debug rpc call <method> [PARAMS_JSON]`.
 /// PARAMS_JSON is an inline JSON object (omitted = no params). Prints the
 /// result pretty-printed to stdout. A JSON-RPC error response prints the error
 /// to stderr and exits 1 (transport failures likewise).
-pub(super) async fn run_debug_rpc_call(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_debug_rpc_call(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_debug_rpc_call_args(args)?;
     let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
     let mut client = connect_debug_rpc_client(&url).await?;
     let result = client.request(&options.method, options.params).await?;
-    serde_json::to_writer_pretty(std::io::stdout(), &result)
-        .map_err(|err| usage_error(format!("failed to encode JSON-RPC result: {err}")))?;
+    serde_json::to_writer_pretty(std::io::stdout(), &result).map_err(|err| {
+        crate::cli::usage_error(format!("failed to encode JSON-RPC result: {err}"))
+    })?;
     println!();
     client.close().await?;
     Ok(())
@@ -115,13 +115,13 @@ pub(super) async fn run_debug_rpc_call(args: Vec<OsString>) -> VerletResult<()> 
 /// delta), terminated by a newline at turn completion. `--json` instead emits
 /// every notification scoped to the thread as one JSON object per line.
 /// Exit codes: 0 turn completed, 2 turn error, 1 transport/protocol failure.
-pub(super) async fn run_debug_rpc_turn(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_debug_rpc_turn(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_debug_rpc_turn_args(args)?;
     let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
     let mut client = connect_debug_rpc_client(&url).await?;
     let thread_id = match &options.target {
         DebugRpcThreadTarget::New => {
-            let thread = client.thread_start(json!({})).await?;
+            let thread = client.thread_start(serde_json::json!({})).await?;
             eprintln!("{}", thread.id);
             thread.id
         }
@@ -129,7 +129,7 @@ pub(super) async fn run_debug_rpc_turn(args: Vec<OsString>) -> VerletResult<()> 
             client
                 .request(
                     "thread/resume",
-                    json!({
+                    serde_json::json!({
                         "threadId": thread_id,
                         "excludeTurns": true,
                     }),
@@ -154,14 +154,14 @@ pub(super) async fn run_debug_rpc_turn(args: Vec<OsString>) -> VerletResult<()> 
 /// Subscribe and watch: `verlet debug rpc tail --thread <id>`.
 /// Resumes the thread for the subscription, then prints every received
 /// notification as one JSON object per line until Ctrl-C/EOF.
-pub(super) async fn run_debug_rpc_tail(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_debug_rpc_tail(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_debug_rpc_tail_args(args)?;
     let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
     let mut client = connect_debug_rpc_client(&url).await?;
     client
         .request(
             "thread/resume",
-            json!({
+            serde_json::json!({
                 "threadId": options.thread_id,
                 "excludeTurns": true,
             }),
@@ -169,26 +169,26 @@ pub(super) async fn run_debug_rpc_tail(args: Vec<OsString>) -> VerletResult<()> 
         .await?;
     loop {
         match client.next_event().await {
-            Ok(CodexTuiEvent::Notification(notification)) => {
+            Ok(crate::CodexTuiEvent::Notification(notification)) => {
                 print_jsonl_notification(&notification)?;
             }
-            Ok(CodexTuiEvent::Error(error)) => {
-                return Err(usage_error(format!(
+            Ok(crate::CodexTuiEvent::Error(error)) => {
+                return Err(crate::cli::usage_error(format!(
                     "JSON-RPC error {}: {}",
                     error.error.code, error.error.message
                 )));
             }
-            Ok(CodexTuiEvent::Request(_) | CodexTuiEvent::Response(_)) => {}
+            Ok(crate::CodexTuiEvent::Request(_) | crate::CodexTuiEvent::Response(_)) => {}
             Err(err) if rpc_connection_was_closed(&err) => return Ok(()),
             Err(err) => return Err(err),
         }
     }
 }
 
-fn rpc_connection_was_closed(err: &VerletError) -> bool {
+fn rpc_connection_was_closed(err: &crate::VerletError) -> bool {
     matches!(
         err,
-        VerletError::RpcClient(message)
+        crate::VerletError::RpcClient(message)
             if message == "Verlet RPC connection closed"
                 || message.starts_with("Verlet RPC connection was closed by the endpoint:")
     )
@@ -210,7 +210,9 @@ notifications as JSONL with --json); tail prints notifications until Ctrl-C.\n"
     );
 }
 
-pub(super) fn parse_debug_rpc_call_args(args: Vec<OsString>) -> VerletResult<DebugRpcCallArgs> {
+pub(super) fn parse_debug_rpc_call_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<DebugRpcCallArgs> {
     let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
@@ -219,8 +221,14 @@ pub(super) fn parse_debug_rpc_call_args(args: Vec<OsString>) -> VerletResult<Deb
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
-            "--url" => endpoint.url = Some(required_string_value(&mut iter, "--url")?),
-            "--config" => endpoint.config = Some(required_path_value(&mut iter, "--config")?),
+            "--url" => {
+                endpoint.url = Some(crate::cli::tool::required_string_value(&mut iter, "--url")?)
+            }
+            "--config" => {
+                endpoint.config = Some(crate::cli::tool::required_path_value(
+                    &mut iter, "--config",
+                )?)
+            }
             other if other.starts_with('-') => {
                 return Err(debug_rpc_usage_error(format!(
                     "unknown debug rpc call argument {other:?}"
@@ -243,7 +251,7 @@ pub(super) fn parse_debug_rpc_call_args(args: Vec<OsString>) -> VerletResult<Deb
         Some(raw) => serde_json::from_str(raw).map_err(|err| {
             debug_rpc_usage_error(format!("invalid PARAMS_JSON for debug rpc call: {err}"))
         })?,
-        None => json!({}),
+        None => serde_json::json!({}),
     };
     if !params.is_object() {
         return Err(debug_rpc_usage_error(
@@ -257,7 +265,9 @@ pub(super) fn parse_debug_rpc_call_args(args: Vec<OsString>) -> VerletResult<Deb
     })
 }
 
-pub(super) fn parse_debug_rpc_turn_args(args: Vec<OsString>) -> VerletResult<DebugRpcTurnArgs> {
+pub(super) fn parse_debug_rpc_turn_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<DebugRpcTurnArgs> {
     let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
@@ -269,9 +279,19 @@ pub(super) fn parse_debug_rpc_turn_args(args: Vec<OsString>) -> VerletResult<Deb
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
-            "--url" => endpoint.url = Some(required_string_value(&mut iter, "--url")?),
-            "--config" => endpoint.config = Some(required_path_value(&mut iter, "--config")?),
-            "--thread" => thread_id = Some(required_string_value(&mut iter, "--thread")?),
+            "--url" => {
+                endpoint.url = Some(crate::cli::tool::required_string_value(&mut iter, "--url")?)
+            }
+            "--config" => {
+                endpoint.config = Some(crate::cli::tool::required_path_value(
+                    &mut iter, "--config",
+                )?)
+            }
+            "--thread" => {
+                thread_id = Some(crate::cli::tool::required_string_value(
+                    &mut iter, "--thread",
+                )?)
+            }
             "--new" => new_thread = true,
             "--json" => json = true,
             other if other.starts_with('-') => {
@@ -310,7 +330,9 @@ pub(super) fn parse_debug_rpc_turn_args(args: Vec<OsString>) -> VerletResult<Deb
     })
 }
 
-pub(super) fn parse_debug_rpc_tail_args(args: Vec<OsString>) -> VerletResult<DebugRpcTailArgs> {
+pub(super) fn parse_debug_rpc_tail_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<DebugRpcTailArgs> {
     let mut endpoint = DebugRpcEndpointArgs {
         url: None,
         config: None,
@@ -319,9 +341,19 @@ pub(super) fn parse_debug_rpc_tail_args(args: Vec<OsString>) -> VerletResult<Deb
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
-            "--url" => endpoint.url = Some(required_string_value(&mut iter, "--url")?),
-            "--config" => endpoint.config = Some(required_path_value(&mut iter, "--config")?),
-            "--thread" => thread_id = Some(required_string_value(&mut iter, "--thread")?),
+            "--url" => {
+                endpoint.url = Some(crate::cli::tool::required_string_value(&mut iter, "--url")?)
+            }
+            "--config" => {
+                endpoint.config = Some(crate::cli::tool::required_path_value(
+                    &mut iter, "--config",
+                )?)
+            }
+            "--thread" => {
+                thread_id = Some(crate::cli::tool::required_string_value(
+                    &mut iter, "--thread",
+                )?)
+            }
             other => {
                 return Err(debug_rpc_usage_error(format!(
                     "unknown debug rpc tail argument {other:?}"
@@ -339,7 +371,7 @@ pub(super) fn parse_debug_rpc_tail_args(args: Vec<OsString>) -> VerletResult<Deb
 
 pub(super) fn validate_debug_rpc_endpoint_args(
     endpoint: &DebugRpcEndpointArgs,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     if endpoint.url.is_some() && endpoint.config.is_some() {
         return Err(debug_rpc_usage_error(
             "verlet debug rpc accepts --url or --config, not both",
@@ -348,17 +380,21 @@ pub(super) fn validate_debug_rpc_endpoint_args(
     Ok(())
 }
 
-pub(super) fn resolve_debug_rpc_endpoint(endpoint: &DebugRpcEndpointArgs) -> VerletResult<String> {
+pub(super) fn resolve_debug_rpc_endpoint(
+    endpoint: &DebugRpcEndpointArgs,
+) -> crate::VerletResult<String> {
     validate_debug_rpc_endpoint_args(endpoint)?;
     if let Some(url) = &endpoint.url {
         return Ok(url.clone());
     }
     if let Some(config_path) = &endpoint.config {
-        let loaded = load_verlet_daemon_config(Some(config_path))?;
+        let loaded = crate::load_verlet_daemon_config(Some(config_path))?;
         match loaded.config.app_server.listen_addr()? {
-            AppServerListenAddr::WebSocket(_) => return Ok(loaded.config.app_server.listen),
-            AppServerListenAddr::Unix(_) => {
-                return Err(usage_error("daemon listens on a unix socket; pass --url"));
+            crate::AppServerListenAddr::WebSocket(_) => return Ok(loaded.config.app_server.listen),
+            crate::AppServerListenAddr::Unix(_) => {
+                return Err(crate::cli::usage_error(
+                    "daemon listens on a unix socket; pass --url",
+                ));
             }
         }
     }
@@ -367,23 +403,23 @@ pub(super) fn resolve_debug_rpc_endpoint(endpoint: &DebugRpcEndpointArgs) -> Ver
 
 pub(super) async fn connect_debug_rpc_client(
     url: &str,
-) -> VerletResult<CodexTuiTestClient<TcpStream>> {
-    CodexTuiTestClient::connect_websocket(
+) -> crate::VerletResult<crate::CodexTuiTestClient<tokio::net::TcpStream>> {
+    crate::CodexTuiTestClient::connect_websocket(
         url,
-        CodexTuiConnectConfig {
+        crate::CodexTuiConnectConfig {
             client_name: "verlet-debug-rpc".to_string(),
-            ..CodexTuiConnectConfig::default()
+            ..crate::CodexTuiConnectConfig::default()
         },
     )
     .await
 }
 
 pub(super) async fn stream_debug_rpc_turn(
-    client: &mut CodexTuiTestClient<TcpStream>,
+    client: &mut crate::CodexTuiTestClient<tokio::net::TcpStream>,
     thread_id: &str,
     turn_id: &str,
     json_output: bool,
-) -> VerletResult<DebugRpcTurnStreamResult> {
+) -> crate::VerletResult<DebugRpcTurnStreamResult> {
     let deadline = tokio::time::sleep(DEBUG_RPC_TURN_TIMEOUT);
     tokio::pin!(deadline);
     loop {
@@ -392,19 +428,19 @@ pub(super) async fn stream_debug_rpc_turn(
                 if !json_output {
                     println!();
                 }
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "timed out after {}s waiting for turn {turn_id}",
                     DEBUG_RPC_TURN_TIMEOUT.as_secs()
                 )));
             }
             event = client.next_event() => {
                 match event? {
-                    CodexTuiEvent::Notification(notification) => {
+                    crate::CodexTuiEvent::Notification(notification) => {
                         if json_output && notification_thread_id(&notification) == Some(thread_id) {
                             print_jsonl_notification(&notification)?;
                         }
                         if notification.method == "item/agentMessage/delta"
-                            && notification_matches_thread_turn(&notification, thread_id, turn_id)
+                            && crate::cli::console::notification_matches_thread_turn(&notification, thread_id, turn_id)
                             && !json_output
                             && let Some(delta) = notification_delta(&notification)
                         {
@@ -420,7 +456,7 @@ pub(super) async fn stream_debug_rpc_turn(
                             ));
                         }
                         if notification.method == "turn/completed"
-                            && notification_turn_id(&notification) == Some(turn_id)
+                            && crate::cli::console::notification_turn_id(&notification) == Some(turn_id)
                         {
                             if !json_output {
                                 println!();
@@ -428,91 +464,94 @@ pub(super) async fn stream_debug_rpc_turn(
                             return Ok(DebugRpcTurnStreamResult::Completed);
                         }
                     }
-                    CodexTuiEvent::Error(error) => {
+                    crate::CodexTuiEvent::Error(error) => {
                         if !json_output {
                             println!();
                         }
-                        return Err(usage_error(format!(
+                        return Err(crate::cli::usage_error(format!(
                             "JSON-RPC error {}: {}",
                             error.error.code, error.error.message
                         )));
                     }
-                    CodexTuiEvent::Request(_) | CodexTuiEvent::Response(_) => {}
+                    crate::CodexTuiEvent::Request(_) | crate::CodexTuiEvent::Response(_) => {}
                 }
             }
         }
     }
 }
 
-pub(super) fn print_jsonl_notification(notification: &JsonRpcNotification) -> VerletResult<()> {
-    serde_json::to_writer(std::io::stdout(), notification)
-        .map_err(|err| usage_error(format!("failed to encode notification JSON: {err}")))?;
+pub(super) fn print_jsonl_notification(
+    notification: &crate::JsonRpcNotification,
+) -> crate::VerletResult<()> {
+    serde_json::to_writer(std::io::stdout(), notification).map_err(|err| {
+        crate::cli::usage_error(format!("failed to encode notification JSON: {err}"))
+    })?;
     println!();
     flush_stdout()
 }
 
-pub(super) fn notification_thread_id(notification: &JsonRpcNotification) -> Option<&str> {
+pub(super) fn notification_thread_id(notification: &crate::JsonRpcNotification) -> Option<&str> {
     notification
         .params
         .as_ref()
         .and_then(|params| params.get("threadId"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
 }
 
-pub(super) fn notification_delta(notification: &JsonRpcNotification) -> Option<&str> {
+pub(super) fn notification_delta(notification: &crate::JsonRpcNotification) -> Option<&str> {
     notification
         .params
         .as_ref()
         .and_then(|params| params.get("delta"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
 }
 
 pub(super) fn notification_is_turn_error(
-    notification: &JsonRpcNotification,
+    notification: &crate::JsonRpcNotification,
     thread_id: &str,
     turn_id: &str,
 ) -> bool {
     if notification.method == "error"
-        && (notification_matches_thread_turn(notification, thread_id, turn_id)
-            || notification_turn_id(notification) == Some(turn_id))
+        && (crate::cli::console::notification_matches_thread_turn(notification, thread_id, turn_id)
+            || crate::cli::console::notification_turn_id(notification) == Some(turn_id))
     {
         return true;
     }
     notification.method == "turn/completed"
         && notification_thread_id(notification) == Some(thread_id)
-        && notification_turn_id(notification) == Some(turn_id)
+        && crate::cli::console::notification_turn_id(notification) == Some(turn_id)
         && notification
             .params
             .as_ref()
             .and_then(|params| params.get("turn"))
             .and_then(|turn| turn.get("status"))
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .is_some_and(|status| status == "failed" || status == "interrupted")
 }
 
-pub(super) fn notification_turn_error_message(notification: &JsonRpcNotification) -> String {
+pub(super) fn notification_turn_error_message(notification: &crate::JsonRpcNotification) -> String {
     notification
         .params
         .as_ref()
         .and_then(|params| params.get("turn"))
         .and_then(|turn| turn.get("error"))
         .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .map(ToString::to_string)
-        .unwrap_or_else(|| notification_error_message(notification))
+        .unwrap_or_else(|| crate::cli::console::notification_error_message(notification))
 }
 
-pub(super) fn debug_rpc_usage_error(message: impl Into<String>) -> VerletError {
-    usage_error(format!(
+pub(super) fn debug_rpc_usage_error(message: impl Into<String>) -> crate::VerletError {
+    crate::cli::usage_error(format!(
         "{}\nUsage: verlet debug rpc --help",
         message.into()
     ))
 }
 
-pub(super) fn flush_stdout() -> VerletResult<()> {
+pub(super) fn flush_stdout() -> crate::VerletResult<()> {
     std::io::stdout()
         .flush()
-        .map_err(|err| usage_error(format!("failed to flush stdout: {err}")))
+        .map_err(|err| crate::cli::usage_error(format!("failed to flush stdout: {err}")))
 }
 
 pub(super) fn print_debug_help() {

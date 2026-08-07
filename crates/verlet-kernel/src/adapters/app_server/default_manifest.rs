@@ -6,26 +6,6 @@
 //! Nothing about it is special at bind time: it flows through the normal
 //! plan → publish → bind pipeline with full receipts.
 
-use super::VerletAppServerConfig;
-use crate::agent::manifest::{AgentPublishPlan, LocalAgentRegistry, PublishedAgentRecord};
-use crate::agent::manifest_schema::{
-    AgentManifestBashTool, AgentManifestDirectTool, AgentManifestIdentity,
-    AgentManifestModelParams, AgentManifestModelProfile, AgentManifestPolicies,
-    AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey,
-    AgentManifestRuntimeOverridePolicy, AgentManifestSchema, AgentManifestTool,
-};
-use crate::{
-    LocalOperationRegistry, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION,
-    THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION,
-    VERLET_PROCESS_PACKAGE, VERLET_THREADS_PACKAGE, VerletError, VerletResult,
-};
-use serde::Serialize;
-use std::collections::BTreeMap;
-use std::fs;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
 /// Name of the synthesized default agent record (D1).
 pub(super) const DEFAULT_AGENT_NAME: &str = "default";
 /// Namespace marking kernel-synthesized records (D1).
@@ -35,7 +15,7 @@ pub(super) const LEGACY_DEFAULT_AGENT_NAMESPACE: &str = concat!("cool", "dis");
 /// The ref a ref-less `thread/start` binds (alias resolution via `@latest`).
 pub(crate) const DEFAULT_AGENT_REF: &str = "agent://verlet/default@latest";
 const DEFAULT_MANIFEST_LOCK_ATTEMPTS: usize = 250;
-const DEFAULT_MANIFEST_LOCK_SLEEP: Duration = Duration::from_millis(20);
+const DEFAULT_MANIFEST_LOCK_SLEEP: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Publishes the synthesized default manifest into the agent registry,
 /// idempotently by content (D3): if `verlet/default@latest` exists and its
@@ -44,10 +24,11 @@ const DEFAULT_MANIFEST_LOCK_SLEEP: Duration = Duration::from_millis(20);
 /// Errors fail daemon startup (fail-closed): an envelope that cannot be
 /// declared does not run.
 pub(super) fn ensure_default_manifest_published(
-    config: &VerletAppServerConfig,
+    config: &crate::adapters::app_server::VerletAppServerConfig,
     supports_streaming: bool,
-) -> VerletResult<PublishedAgentRecord> {
-    let registry = LocalAgentRegistry::new(config.agent_registry_root.clone());
+) -> crate::VerletResult<crate::agent::manifest::PublishedAgentRecord> {
+    let registry =
+        crate::agent::manifest::LocalAgentRegistry::new(config.agent_registry_root.clone());
     let _lock = DefaultManifestPublishLock::acquire(&registry)?;
     let existing = load_existing_default_manifest(&registry)?;
     if let Some(record) = existing.record() {
@@ -86,10 +67,10 @@ pub(super) fn ensure_default_manifest_published(
 }
 
 fn publish_default_manifest_plan(
-    registry: &LocalAgentRegistry,
-    plan: AgentPublishPlan,
-    config: &VerletAppServerConfig,
-) -> VerletResult<PublishedAgentRecord> {
+    registry: &crate::agent::manifest::LocalAgentRegistry,
+    plan: crate::agent::manifest::AgentPublishPlan,
+    config: &crate::adapters::app_server::VerletAppServerConfig,
+) -> crate::VerletResult<crate::agent::manifest::PublishedAgentRecord> {
     if !plan.has_operation_refs() {
         return registry.publish_plan(plan);
     }
@@ -99,7 +80,7 @@ fn publish_default_manifest_plan(
         .registry_root
         .as_ref()
         .ok_or_else(|| {
-            VerletError::RuntimeFactory(
+            crate::VerletError::RuntimeFactory(
                 "default manifest op:// declarations require operation binding registry_root"
                     .to_string(),
             )
@@ -108,13 +89,13 @@ fn publish_default_manifest_plan(
 }
 
 enum ExistingDefaultManifest {
-    Latest(PublishedAgentRecord),
-    VersionOnly(PublishedAgentRecord),
+    Latest(crate::agent::manifest::PublishedAgentRecord),
+    VersionOnly(crate::agent::manifest::PublishedAgentRecord),
     None,
 }
 
 impl ExistingDefaultManifest {
-    fn record(&self) -> Option<&PublishedAgentRecord> {
+    fn record(&self) -> Option<&crate::agent::manifest::PublishedAgentRecord> {
         match self {
             Self::Latest(record) | Self::VersionOnly(record) => Some(record),
             Self::None => None,
@@ -123,8 +104,8 @@ impl ExistingDefaultManifest {
 }
 
 fn load_existing_default_manifest(
-    registry: &LocalAgentRegistry,
-) -> VerletResult<ExistingDefaultManifest> {
+    registry: &crate::agent::manifest::LocalAgentRegistry,
+) -> crate::VerletResult<ExistingDefaultManifest> {
     if registry
         .alias_record_path(DEFAULT_AGENT_NAME, "latest")?
         .exists()
@@ -145,39 +126,39 @@ fn load_existing_default_manifest(
 }
 
 struct DefaultManifestPublishLock {
-    path: PathBuf,
+    path: std::path::PathBuf,
 }
 
 impl DefaultManifestPublishLock {
-    fn acquire(registry: &LocalAgentRegistry) -> VerletResult<Self> {
+    fn acquire(registry: &crate::agent::manifest::LocalAgentRegistry) -> crate::VerletResult<Self> {
         let path = registry.root().join("locks").join("default-manifest");
         let parent = path.parent().ok_or_else(|| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "default manifest publish lock path {} has no parent",
                 path.display()
             ))
         })?;
-        fs::create_dir_all(parent).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        std::fs::create_dir_all(parent).map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to create default manifest publish lock directory {}: {err}",
                 parent.display()
             ))
         })?;
         for _ in 0..DEFAULT_MANIFEST_LOCK_ATTEMPTS {
-            match fs::create_dir(&path) {
+            match std::fs::create_dir(&path) {
                 Ok(()) => return Ok(Self { path }),
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                     std::thread::sleep(DEFAULT_MANIFEST_LOCK_SLEEP);
                 }
                 Err(err) => {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletError::RuntimeFactory(format!(
                         "failed to acquire default manifest publish lock {}: {err}",
                         path.display()
                     )));
                 }
             }
         }
-        Err(VerletError::RuntimeFactory(format!(
+        Err(crate::VerletError::RuntimeFactory(format!(
             "timed out acquiring default manifest publish lock {}",
             path.display()
         )))
@@ -186,7 +167,7 @@ impl DefaultManifestPublishLock {
 
 impl Drop for DefaultManifestPublishLock {
     fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.path);
+        let _ = std::fs::remove_dir(&self.path);
     }
 }
 
@@ -197,13 +178,13 @@ impl Drop for DefaultManifestPublishLock {
 /// `default_cwd` from the daemon cwd (absolute) and `streaming` from the
 /// provider surface, with override allowlist `[default_cwd]`.
 fn synthesize_default_manifest_with_version(
-    config: &VerletAppServerConfig,
+    config: &crate::adapters::app_server::VerletAppServerConfig,
     supports_streaming: bool,
     version: &str,
-) -> VerletResult<AgentManifestSchema> {
+) -> crate::VerletResult<crate::agent::manifest_schema::AgentManifestSchema> {
     let tools = default_manifest_tools(config)?;
-    let manifest = AgentManifestSchema {
-        identity: AgentManifestIdentity {
+    let manifest = crate::agent::manifest_schema::AgentManifestSchema {
+        identity: crate::agent::manifest_schema::AgentManifestIdentity {
             name: DEFAULT_AGENT_NAME.to_string(),
             namespace: Some(DEFAULT_AGENT_NAMESPACE.to_string()),
             version: Some(version.to_string()),
@@ -214,11 +195,11 @@ fn synthesize_default_manifest_with_version(
             labels: Default::default(),
             publisher: None,
         },
-        model_profiles: vec![AgentManifestModelProfile {
+        model_profiles: vec![crate::agent::manifest_schema::AgentManifestModelProfile {
             id: "default".to_string(),
             provider_ref: format!("provider://{}", config.model_provider),
             model_ref: format!("model://{}/{}", config.model_provider, config.model),
-            params: AgentManifestModelParams::default(),
+            params: crate::agent::manifest_schema::AgentManifestModelParams::default(),
             credentials: None,
             retry: None,
             fallbacks: Vec::new(),
@@ -229,17 +210,19 @@ fn synthesize_default_manifest_with_version(
         skills: Default::default(),
         context: None,
         couplings: Vec::new(),
-        policies: AgentManifestPolicies {
+        policies: crate::agent::manifest_schema::AgentManifestPolicies {
             allow_child_agents: true,
-            ..AgentManifestPolicies::default()
+            ..crate::agent::manifest_schema::AgentManifestPolicies::default()
         },
-        runtime: AgentManifestRuntimeDefaults {
+        runtime: crate::agent::manifest_schema::AgentManifestRuntimeDefaults {
             default_cwd: absolute_path_string(&config.cwd)?,
             streaming: supports_streaming,
-            overrides: AgentManifestRuntimeOverridePolicy {
-                allow: vec![AgentManifestRuntimeOverrideKey::DefaultCwd],
+            overrides: crate::agent::manifest_schema::AgentManifestRuntimeOverridePolicy {
+                allow: vec![
+                    crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd,
+                ],
             },
-            ..AgentManifestRuntimeDefaults::default()
+            ..crate::agent::manifest_schema::AgentManifestRuntimeDefaults::default()
         },
     };
     manifest.validate()?;
@@ -249,19 +232,21 @@ fn synthesize_default_manifest_with_version(
 /// Lowers daemon-configured operation bindings into declared default-manifest
 /// tools. The active registry records are resolved at synthesis time, so the
 /// bind receipt shows pinned `op://...@sha256` rows instead of ambient loading.
-fn default_manifest_tools(config: &VerletAppServerConfig) -> VerletResult<Vec<AgentManifestTool>> {
+fn default_manifest_tools(
+    config: &crate::adapters::app_server::VerletAppServerConfig,
+) -> crate::VerletResult<Vec<crate::agent::manifest_schema::AgentManifestTool>> {
     // lexicon-allow: capsule - legacy config field name
     let bindings = &config.capsule_bindings;
     let mut tools = Vec::new();
     if let Some(registry_root) = bindings.registry_root.as_ref() {
-        let registry = LocalOperationRegistry::new(registry_root);
-        if let Ok(record) = registry.load_record(VERLET_THREADS_PACKAGE) {
+        let registry = crate::LocalOperationRegistry::new(registry_root);
+        if let Ok(record) = registry.load_record(crate::VERLET_THREADS_PACKAGE) {
             for operation_name in [
-                THREAD_SPAWN_OPERATION,
-                THREAD_SUBMIT_OPERATION,
-                THREAD_WAIT_OPERATION,
-                THREAD_STATUS_OPERATION,
-                THREAD_CANCEL_OPERATION,
+                crate::THREAD_SPAWN_OPERATION,
+                crate::THREAD_SUBMIT_OPERATION,
+                crate::THREAD_WAIT_OPERATION,
+                crate::THREAD_STATUS_OPERATION,
+                crate::THREAD_CANCEL_OPERATION,
             ] {
                 let grants = record
                     .manifest
@@ -275,16 +260,19 @@ fn default_manifest_tools(config: &VerletAppServerConfig) -> VerletResult<Vec<Ag
                             .collect()
                     })
                     .unwrap_or_default();
-                tools.push(AgentManifestTool::Direct(AgentManifestDirectTool {
-                    id: format!("{VERLET_THREADS_PACKAGE}.{operation_name}"),
-                    tool_name: operation_name.to_string(),
-                    operation_ref: format!(
-                        "op://{VERLET_THREADS_PACKAGE}/{operation_name}@sha256:{}",
-                        record.active_artifact_hash
-                    ),
-                    effect_class: Default::default(),
-                    grants,
-                }));
+                tools.push(crate::agent::manifest_schema::AgentManifestTool::Direct(
+                    crate::agent::manifest_schema::AgentManifestDirectTool {
+                        id: format!("{}.{operation_name}", crate::VERLET_THREADS_PACKAGE),
+                        tool_name: operation_name.to_string(),
+                        operation_ref: format!(
+                            "op://{}/{operation_name}@sha256:{}",
+                            crate::VERLET_THREADS_PACKAGE,
+                            record.active_artifact_hash
+                        ),
+                        effect_class: Default::default(),
+                        grants,
+                    },
+                ));
             }
         }
     }
@@ -292,16 +280,16 @@ fn default_manifest_tools(config: &VerletAppServerConfig) -> VerletResult<Vec<Ag
         return Ok(tools);
     }
     let registry_root = bindings.registry_root.as_ref().ok_or_else(|| {
-        VerletError::RuntimeFactory(
+        crate::VerletError::RuntimeFactory(
             "default manifest operation declarations require operation binding registry_root"
                 .to_string(),
         )
     })?;
-    let registry = LocalOperationRegistry::new(registry_root);
-    let mut records = BTreeMap::new();
+    let registry = crate::LocalOperationRegistry::new(registry_root);
+    let mut records = std::collections::BTreeMap::new();
     for operation_name in &bindings.global_operation_names {
         let record = registry.load_record(operation_name).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "default manifest global operation {operation_name:?} was not found: {err}"
             ))
         })?;
@@ -309,7 +297,7 @@ fn default_manifest_tools(config: &VerletAppServerConfig) -> VerletResult<Vec<Ag
     }
     if bindings.load_all_active_when_unbound {
         for record in registry.list_records()? {
-            if record.name == VERLET_PROCESS_PACKAGE {
+            if record.name == crate::VERLET_PROCESS_PACKAGE {
                 continue;
             }
             records.insert(record.name.clone(), record);
@@ -317,7 +305,7 @@ fn default_manifest_tools(config: &VerletAppServerConfig) -> VerletResult<Vec<Ag
     }
 
     for record in records.into_values() {
-        if record.name == VERLET_THREADS_PACKAGE {
+        if record.name == crate::VERLET_THREADS_PACKAGE {
             continue;
         }
         let grants = record
@@ -327,39 +315,43 @@ fn default_manifest_tools(config: &VerletAppServerConfig) -> VerletResult<Vec<Ag
             .map(Into::into)
             .collect::<Vec<_>>();
         for operation in &record.projections.operations {
-            tools.push(AgentManifestTool::Bash(AgentManifestBashTool {
-                id: format!("{}.{}", record.name, operation.operation_name),
-                command: operation.operation_name.clone(),
-                operation_ref: format!(
-                    "op://{}/{}@sha256:{}",
-                    record.name, operation.operation_name, record.active_artifact_hash
-                ),
-                effect_class: Default::default(),
-                grants: grants.clone(),
-            }));
+            tools.push(crate::agent::manifest_schema::AgentManifestTool::Bash(
+                crate::agent::manifest_schema::AgentManifestBashTool {
+                    id: format!("{}.{}", record.name, operation.operation_name),
+                    command: operation.operation_name.clone(),
+                    operation_ref: format!(
+                        "op://{}/{}@sha256:{}",
+                        record.name, operation.operation_name, record.active_artifact_hash
+                    ),
+                    effect_class: Default::default(),
+                    grants: grants.clone(),
+                },
+            ));
         }
     }
     Ok(tools)
 }
 
 fn default_manifest_publish_plan(
-    config: &VerletAppServerConfig,
+    config: &crate::adapters::app_server::VerletAppServerConfig,
     supports_streaming: bool,
     version: &str,
-) -> VerletResult<AgentPublishPlan> {
+) -> crate::VerletResult<crate::agent::manifest::AgentPublishPlan> {
     let manifest = synthesize_default_manifest_with_version(config, supports_streaming, version)?;
     let source = default_manifest_source(&manifest)?;
-    AgentPublishPlan::from_source(&source)
+    crate::agent::manifest::AgentPublishPlan::from_source(&source)
 }
 
-fn default_manifest_source(manifest: &AgentManifestSchema) -> VerletResult<String> {
+fn default_manifest_source(
+    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
+) -> crate::VerletResult<String> {
     let profile = manifest.model_profiles.first().ok_or_else(|| {
-        VerletError::RuntimeFactory(
+        crate::VerletError::RuntimeFactory(
             "default manifest requires one model profile before publish".to_string(),
         )
     })?;
     let version = manifest.identity.version.as_deref().ok_or_else(|| {
-        VerletError::RuntimeFactory(
+        crate::VerletError::RuntimeFactory(
             "default manifest requires a version before publish".to_string(),
         )
     })?;
@@ -380,23 +372,27 @@ fn default_manifest_source(manifest: &AgentManifestSchema) -> VerletResult<Strin
             .tools
             .iter()
             .map(|tool| match tool {
-                AgentManifestTool::Bash(tool) => DefaultManifestToolToml {
-                    tool_type: "bash_tool",
-                    id: &tool.id,
-                    command: Some(&tool.command),
-                    tool_name: None,
-                    operation_ref: &tool.operation_ref,
-                    grants: &tool.grants,
-                },
-                AgentManifestTool::Direct(tool) => DefaultManifestToolToml {
-                    tool_type: "direct_tool",
-                    id: &tool.id,
-                    command: None,
-                    tool_name: Some(&tool.tool_name),
-                    operation_ref: &tool.operation_ref,
-                    grants: &tool.grants,
-                },
-                AgentManifestTool::ProtocolImport(_) => {
+                crate::agent::manifest_schema::AgentManifestTool::Bash(tool) => {
+                    DefaultManifestToolToml {
+                        tool_type: "bash_tool",
+                        id: &tool.id,
+                        command: Some(&tool.command),
+                        tool_name: None,
+                        operation_ref: &tool.operation_ref,
+                        grants: &tool.grants,
+                    }
+                }
+                crate::agent::manifest_schema::AgentManifestTool::Direct(tool) => {
+                    DefaultManifestToolToml {
+                        tool_type: "direct_tool",
+                        id: &tool.id,
+                        command: None,
+                        tool_name: Some(&tool.tool_name),
+                        operation_ref: &tool.operation_ref,
+                        grants: &tool.grants,
+                    }
+                }
+                crate::agent::manifest_schema::AgentManifestTool::ProtocolImport(_) => {
                     unreachable!("default manifest synthesis does not emit protocol imports")
                 }
             })
@@ -413,18 +409,22 @@ fn default_manifest_source(manifest: &AgentManifestSchema) -> VerletResult<Strin
         },
     };
     toml::to_string(&source).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to encode default agent manifest: {err}"))
+        crate::VerletError::RuntimeFactory(format!(
+            "failed to encode default agent manifest: {err}"
+        ))
     })
 }
 
-fn ensure_default_record_identity(record: &PublishedAgentRecord) -> VerletResult<()> {
+fn ensure_default_record_identity(
+    record: &crate::agent::manifest::PublishedAgentRecord,
+) -> crate::VerletResult<()> {
     if record.name != DEFAULT_AGENT_NAME
         || !matches!(
             record.namespace.as_deref(),
             Some(DEFAULT_AGENT_NAMESPACE | LEGACY_DEFAULT_AGENT_NAMESPACE)
         )
     {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "agent registry latest default record is {} in namespace {:?}, expected {}/{}",
             record.name, record.namespace, DEFAULT_AGENT_NAMESPACE, DEFAULT_AGENT_NAME
         )));
@@ -432,7 +432,7 @@ fn ensure_default_record_identity(record: &PublishedAgentRecord) -> VerletResult
     Ok(())
 }
 
-fn patch_bump_version(version: &str) -> VerletResult<String> {
+fn patch_bump_version(version: &str) -> crate::VerletResult<String> {
     let mut parts = version.split('.');
     let major = parts
         .next()
@@ -458,19 +458,19 @@ fn patch_bump_version(version: &str) -> VerletResult<String> {
     Ok(format!("{major}.{minor}.{next_patch}"))
 }
 
-fn invalid_default_version(version: &str) -> VerletError {
-    VerletError::RuntimeFactory(format!(
+fn invalid_default_version(version: &str) -> crate::VerletError {
+    crate::VerletError::RuntimeFactory(format!(
         "default manifest latest version {version:?} is not a patch-bumpable semver"
     ))
 }
 
-fn absolute_path_string(path: &Path) -> VerletResult<String> {
+fn absolute_path_string(path: &std::path::Path) -> crate::VerletResult<String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
             .map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "failed to resolve current directory for default manifest cwd: {err}"
                 ))
             })?
@@ -479,11 +479,11 @@ fn absolute_path_string(path: &Path) -> VerletResult<String> {
     Ok(path_string(&absolute))
 }
 
-fn path_string(path: &Path) -> String {
+fn path_string(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct DefaultManifestToml<'a> {
     agent: DefaultManifestAgentToml<'a>,
     model_profiles: Vec<DefaultManifestModelProfileToml<'a>>,
@@ -493,7 +493,7 @@ struct DefaultManifestToml<'a> {
     runtime: DefaultManifestRuntimeToml<'a>,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct DefaultManifestAgentToml<'a> {
     name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -505,14 +505,14 @@ struct DefaultManifestAgentToml<'a> {
     schema_version: Option<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct DefaultManifestModelProfileToml<'a> {
     id: &'a str,
     provider_ref: &'a str,
     model_ref: &'a str,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct DefaultManifestToolToml<'a> {
     #[serde(rename = "type")]
     tool_type: &'a str,
@@ -526,21 +526,21 @@ struct DefaultManifestToolToml<'a> {
     grants: &'a Vec<crate::AgentManifestGrant>,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct DefaultManifestPoliciesToml {
     allow_child_agents: bool,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct DefaultManifestRuntimeToml<'a> {
     default_cwd: &'a str,
     streaming: bool,
     overrides: DefaultManifestRuntimeOverridesToml,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct DefaultManifestRuntimeOverridesToml {
-    allow: Vec<AgentManifestRuntimeOverrideKey>,
+    allow: Vec<crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey>,
 }
 
 #[cfg(test)]

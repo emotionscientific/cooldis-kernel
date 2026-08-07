@@ -1,113 +1,322 @@
-use super::connection::*;
-use super::subscriptions::*;
-use super::threads::{
-    AppServerTurnState, app_server_turns_from_session_entries, append_bound_agent_metadata,
-    apply_manifest_operation_grants, apply_manifest_runtime_metadata, finalize_turn_payload,
-    record_bound_agent_receipts, thread_manifest_operation_bindings,
-    thread_manifest_skill_discovery, thread_manifest_skill_packages, thread_metadata_thinking,
-    turn_input_from_values, user_input_preview,
-};
-use super::*;
-use crate::daemon::identity::{AuthorityClass, authority_class_for_method};
-use crate::{
-    CHANNEL_EMIT_OPERATION, EffectClass, EventKind, EventOrigin, KERNEL_RUNTIME_KIND,
-    LocalOperationRegistry, LocalSkillRegistry, MANDATE_LIST_OPERATION, MANDATE_REVOKE_OPERATION,
-    MANDATE_START_OPERATION, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
-    PROCESS_EXEC_OPERATION, PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION,
-    PROCESS_WRITE_OPERATION, ProviderError, PublishSkillPackageRequest, PublishedOperationSource,
-    SCHEDULE_MANAGE_CAPABILITY, SCHEDULE_READ_CAPABILITY, THREAD_CANCEL_OPERATION,
-    THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION,
-    THREAD_WAIT_OPERATION, THREADS_CONTROL_CAPABILITY, THREADS_READ_CAPABILITY,
-    THREADS_SPAWN_CAPABILITY, TOOL_CALL_TOOL, TOOL_DESCRIBE_TOOL, TOOL_SEARCH_TOOL, ThinkingConfig,
-    ThinkingEffort, VERLET_NOTIFY_PACKAGE, VERLET_PROCESS_PACKAGE, VERLET_SCHEDULE_PACKAGE,
-    VERLET_THREADS_PACKAGE,
-};
+use crate::EventStore as _;
+use crate::LlmProviderAuthStore as _;
+use crate::LlmProviderCatalogStore as _;
+use crate::SecretResolver as _;
+use crate::SessionStore as _;
+use crate::ThreadMetadataStore as _;
+use crate::daemon::identity::IdentityAuthority as _;
+use base64::Engine as _;
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 #[test]
 fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
-    use AuthorityClass::{Host, Ingress, Interactive};
-
-    const EXPECTED: &[(&str, AuthorityClass)] = &[
-        ("account/read", Interactive),
-        ("account/rateLimits/read", Interactive),
-        ("app/list", Interactive),
-        ("capsule/binding/set", Host), // lexicon-allow: capsule - existing RPC method.
-        ("capsule/binding/delete", Host), // lexicon-allow: capsule - existing RPC method.
-        ("capsule/binding/list", Host), // lexicon-allow: capsule - existing RPC method.
-        ("capsule/binding/resolve", Host), // lexicon-allow: capsule - existing RPC method.
-        ("agent/list", Interactive),
-        ("agent/read", Interactive),
-        ("agent/plan", Interactive),
-        ("agent/publish", Host),
-        ("operation/list", Interactive),
-        ("command/exec", Host),
-        ("command/exec/write", Host),
-        ("command/exec/terminate", Host),
-        ("command/exec/resize", Host),
-        ("model/list", Interactive),
-        ("modelProvider/capabilities/read", Interactive),
-        ("modelProvider/list", Host),
-        ("modelProvider/read", Host),
-        ("modelProvider/upsert", Host),
-        ("modelProvider/delete", Host),
-        ("modelProvider/auth/status", Host),
-        ("modelProvider/auth/set", Host),
-        ("modelProvider/auth/delete", Host),
-        ("experimentalFeature/list", Interactive),
-        ("experimentalFeature/enablement/set", Interactive),
-        ("getAuthStatus", Interactive),
-        ("getConversationSummary", Host),
-        ("ingress/submit", Ingress),
-        ("stream/append", Host),
-        ("stream/read", Interactive),
-        ("thread/start", Host),
-        ("thread/spawn", Host),
-        ("thread/submit", Interactive),
-        ("thread/fork", Interactive),
-        ("thread/rebindFork", Host),
-        ("thread/resume", Host),
-        ("thread/read", Interactive),
-        ("thread/events/list", Interactive),
-        ("thread/couplings/list", Interactive),
-        ("thread/approvals/list", Interactive),
-        ("thread/waiting/list", Interactive),
-        ("approval/resolve", Host),
-        ("mandate/start", Interactive),
-        ("mandate/revoke", Interactive),
-        ("mandate/list", Interactive),
-        ("thread/debug/export", Host),
-        ("thread/list", Interactive),
-        ("thread/loaded/list", Interactive),
-        ("thread/unsubscribe", Interactive),
-        ("thread/name/set", Interactive),
-        ("thread/metadata/update", Interactive),
-        ("thread/compact/start", Interactive),
-        ("thread/shellCommand", Host),
-        ("turn/start", Ingress),
-        ("turn/steer", Interactive),
-        ("turn/interrupt", Interactive),
-        ("skills/list", Interactive),
-        ("plugin/list", Interactive),
-        ("hooks/list", Interactive),
-        ("mcpServerStatus/list", Host),
-        ("mcpSource/list", Host),
-        ("mcpSource/read", Host),
-        ("mcpSource/upsert", Host),
-        ("mcpSource/discover", Host),
-        ("mcpSource/delete", Host),
-        ("mcpSource/testTool", Host),
-        ("mcpSource/manifestPatch", Host),
-        ("fs/readFile", Host),
-        ("fs/writeFile", Host),
-        ("fs/createDirectory", Host),
-        ("fs/getMetadata", Host),
-        ("fs/readDirectory", Host),
-        ("fs/remove", Host),
-        ("fs/copy", Host),
-        ("fs/watch", Host),
-        ("fs/unwatch", Host),
-        ("config/read", Interactive),
-        ("configRequirements/read", Interactive),
+    const EXPECTED: &[(&str, crate::daemon::identity::AuthorityClass)] = &[
+        (
+            "account/read",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "account/rateLimits/read",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "app/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "capsule/binding/set",
+            crate::daemon::identity::AuthorityClass::Host,
+        ), // lexicon-allow: capsule - existing RPC method.
+        (
+            "capsule/binding/delete",
+            crate::daemon::identity::AuthorityClass::Host,
+        ), // lexicon-allow: capsule - existing RPC method.
+        (
+            "capsule/binding/list",
+            crate::daemon::identity::AuthorityClass::Host,
+        ), // lexicon-allow: capsule - existing RPC method.
+        (
+            "capsule/binding/resolve",
+            crate::daemon::identity::AuthorityClass::Host,
+        ), // lexicon-allow: capsule - existing RPC method.
+        (
+            "agent/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "agent/read",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "agent/plan",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "agent/publish",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "operation/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "command/exec",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "command/exec/write",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "command/exec/terminate",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "command/exec/resize",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "model/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "modelProvider/capabilities/read",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "modelProvider/list",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "modelProvider/read",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "modelProvider/upsert",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "modelProvider/delete",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "modelProvider/auth/status",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "modelProvider/auth/set",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "modelProvider/auth/delete",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "experimentalFeature/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "experimentalFeature/enablement/set",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "getAuthStatus",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "getConversationSummary",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "ingress/submit",
+            crate::daemon::identity::AuthorityClass::Ingress,
+        ),
+        (
+            "stream/append",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "stream/read",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/start",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "thread/spawn",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "thread/submit",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/fork",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/rebindFork",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "thread/resume",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "thread/read",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/events/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/couplings/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/approvals/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/waiting/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "approval/resolve",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "mandate/start",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "mandate/revoke",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "mandate/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/debug/export",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "thread/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/loaded/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/unsubscribe",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/name/set",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/metadata/update",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/compact/start",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "thread/shellCommand",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "turn/start",
+            crate::daemon::identity::AuthorityClass::Ingress,
+        ),
+        (
+            "turn/steer",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "turn/interrupt",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "skills/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "plugin/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "hooks/list",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "mcpServerStatus/list",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "mcpSource/list",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "mcpSource/read",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "mcpSource/upsert",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "mcpSource/discover",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "mcpSource/delete",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "mcpSource/testTool",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "mcpSource/manifestPatch",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        ("fs/readFile", crate::daemon::identity::AuthorityClass::Host),
+        (
+            "fs/writeFile",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "fs/createDirectory",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "fs/getMetadata",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "fs/readDirectory",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        ("fs/remove", crate::daemon::identity::AuthorityClass::Host),
+        ("fs/copy", crate::daemon::identity::AuthorityClass::Host),
+        ("fs/watch", crate::daemon::identity::AuthorityClass::Host),
+        ("fs/unwatch", crate::daemon::identity::AuthorityClass::Host),
+        (
+            "config/read",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
+            "configRequirements/read",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
     ];
 
     let dispatch_source = include_str!("connection.rs")
@@ -131,17 +340,20 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
         .collect::<Vec<_>>();
 
     assert_eq!(dispatch_methods, expected_methods);
-    assert_eq!(DISPATCH_METHOD_AUTHORITY_CLASSES, EXPECTED);
+    assert_eq!(
+        crate::adapters::app_server::connection::DISPATCH_METHOD_AUTHORITY_CLASSES,
+        EXPECTED
+    );
     for (method, expected_class) in EXPECTED {
         assert_eq!(
-            authority_class_for_method(method),
+            crate::daemon::identity::authority_class_for_method(method),
             *expected_class,
             "authority class drifted for {method}"
         );
     }
-    for method in HOST_EFFECT_METHODS {
+    for method in crate::adapters::app_server::connection::HOST_EFFECT_METHODS {
         assert!(
-            EXPECTED.contains(&(*method, Host)),
+            EXPECTED.contains(&(*method, crate::daemon::identity::AuthorityClass::Host)),
             "host-effect witness method must have Host authority: {method}"
         );
     }
@@ -150,12 +362,19 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
 #[test]
 fn jsonrpc_decodes_initialize_without_jsonrpc_field() {
     let raw = r#"{"id":"initialize","method":"initialize","params":{"clientInfo":{"name":"codex","title":null,"version":"test"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}"#;
-    let message: JsonRpcMessage = serde_json::from_str(raw).unwrap();
+    let message: crate::adapters::app_server::connection::JsonRpcMessage =
+        serde_json::from_str(raw).unwrap();
     match message {
-        JsonRpcMessage::Request(request) => {
-            assert_eq!(request.id, RequestId::String("initialize".to_string()));
+        crate::adapters::app_server::connection::JsonRpcMessage::Request(request) => {
+            assert_eq!(
+                request.id,
+                crate::adapters::app_server::connection::RequestId::String(
+                    "initialize".to_string()
+                )
+            );
             assert_eq!(request.method, "initialize");
-            let params: InitializeParams = parse_params(request.params).unwrap();
+            let params: crate::adapters::app_server::connection::InitializeParams =
+                crate::adapters::app_server::connection::parse_params(request.params).unwrap();
             assert_eq!(params.client_info.name, "codex");
             assert!(params.capabilities.unwrap().experimental_api);
         }
@@ -165,19 +384,21 @@ fn jsonrpc_decodes_initialize_without_jsonrpc_field() {
 
 #[test]
 fn jsonrpc_encodes_notification_shape() {
-    let notification = JsonRpcMessage::Notification(JsonRpcNotification {
-        method: "item/agentMessage/delta".to_string(),
-        params: Some(json!({
-            "threadId": "thread",
-            "turnId": "turn",
-            "itemId": "item",
-            "delta": "hello",
-        })),
-    });
+    let notification = crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+        crate::adapters::app_server::connection::JsonRpcNotification {
+            method: "item/agentMessage/delta".to_string(),
+            params: Some(serde_json::json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "itemId": "item",
+                "delta": "hello",
+            })),
+        },
+    );
     let encoded = serde_json::to_value(notification).unwrap();
     assert_eq!(
         encoded,
-        json!({
+        serde_json::json!({
             "method": "item/agentMessage/delta",
             "params": {
                 "threadId": "thread",
@@ -189,14 +410,20 @@ fn jsonrpc_encodes_notification_shape() {
     );
 }
 
-fn operation_record_by_name<'a>(records: &'a [Value], name: &str) -> &'a Value {
+fn operation_record_by_name<'a>(
+    records: &'a [serde_json::Value],
+    name: &str,
+) -> &'a serde_json::Value {
     records
         .iter()
         .find(|record| record["name"].as_str() == Some(name))
         .unwrap_or_else(|| panic!("expected operation record {name}"))
 }
 
-fn manifest_operation_binding_by_name<'a>(payload: &'a Value, name: &str) -> &'a Value {
+fn manifest_operation_binding_by_name<'a>(
+    payload: &'a serde_json::Value,
+    name: &str,
+) -> &'a serde_json::Value {
     payload["operation_bindings"]
         .as_array()
         .unwrap()
@@ -214,74 +441,78 @@ fn event_by_kind(events: &[crate::EventRecord], kind: crate::EventKind) -> &crat
 
 #[test]
 fn thinking_params_parse_supported_shapes() {
-    let effort: ThreadStartParams = parse_params(Some(json!({
-        "thinking": { "type": "effort", "effort": "xhigh" },
-    })))
-    .unwrap();
+    let effort: crate::adapters::app_server::connection::ThreadStartParams =
+        crate::adapters::app_server::connection::parse_params(Some(serde_json::json!({
+            "thinking": { "type": "effort", "effort": "xhigh" },
+        })))
+        .unwrap();
     assert_eq!(
         effort.thinking,
-        Some(ThinkingConfig::Effort {
-            effort: ThinkingEffort::XHigh
+        Some(crate::ThinkingConfig::Effort {
+            effort: crate::ThinkingEffort::XHigh
         })
     );
 
-    let budget: ThreadStartParams = parse_params(Some(json!({
-        "thinking": { "type": "budget", "budgetTokens": 2048 },
-    })))
-    .unwrap();
+    let budget: crate::adapters::app_server::connection::ThreadStartParams =
+        crate::adapters::app_server::connection::parse_params(Some(serde_json::json!({
+            "thinking": { "type": "budget", "budgetTokens": 2048 },
+        })))
+        .unwrap();
     assert_eq!(
         budget.thinking,
-        Some(ThinkingConfig::Budget {
+        Some(crate::ThinkingConfig::Budget {
             budget_tokens: 2048
         })
     );
-    let zero_budget: ThreadStartParams = parse_params(Some(json!({
-        "thinking": { "type": "budget", "budgetTokens": 0 },
-    })))
-    .unwrap();
+    let zero_budget: crate::adapters::app_server::connection::ThreadStartParams =
+        crate::adapters::app_server::connection::parse_params(Some(serde_json::json!({
+            "thinking": { "type": "budget", "budgetTokens": 0 },
+        })))
+        .unwrap();
     assert_eq!(
         zero_budget.thinking,
-        Some(ThinkingConfig::Budget { budget_tokens: 0 })
+        Some(crate::ThinkingConfig::Budget { budget_tokens: 0 })
     );
 
-    let disabled: TurnStartParams = parse_params(Some(json!({
-        "threadId": "thread-1",
-        "input": [],
-        "thinking": { "type": "disabled" },
-    })))
-    .unwrap();
-    assert_eq!(disabled.thinking, Some(ThinkingConfig::Disabled));
+    let disabled: crate::adapters::app_server::connection::TurnStartParams =
+        crate::adapters::app_server::connection::parse_params(Some(serde_json::json!({
+            "threadId": "thread-1",
+            "input": [],
+            "thinking": { "type": "disabled" },
+        })))
+        .unwrap();
+    assert_eq!(disabled.thinking, Some(crate::ThinkingConfig::Disabled));
 }
 
 #[test]
 fn thinking_params_reject_malformed_shapes() {
     let malformed = [
-        json!({ "type": "effort", "effort": "x_high" }),
-        json!({ "type": "budget" }),
-        json!({ "type": "budget", "budgetTokens": -1 }),
-        json!({ "type": "budget", "budgetTokens": (u64::from(u32::MAX) + 1) }),
-        json!({ "type": "budget", "budgetTokens": 1.5 }),
-        json!({ "type": "mystery" }),
-        json!("low"),
+        serde_json::json!({ "type": "effort", "effort": "x_high" }),
+        serde_json::json!({ "type": "budget" }),
+        serde_json::json!({ "type": "budget", "budgetTokens": -1 }),
+        serde_json::json!({ "type": "budget", "budgetTokens": (u64::from(u32::MAX) + 1) }),
+        serde_json::json!({ "type": "budget", "budgetTokens": 1.5 }),
+        serde_json::json!({ "type": "mystery" }),
+        serde_json::json!("low"),
     ];
 
     for thinking in malformed {
-        let err = parse_params::<ThreadStartParams>(Some(json!({ "thinking": thinking })))
-            .expect_err("thread/start should reject malformed thinking");
+        let err = crate::adapters::app_server::connection::parse_params::<
+            crate::adapters::app_server::connection::ThreadStartParams,
+        >(Some(serde_json::json!({ "thinking": thinking })))
+        .expect_err("thread/start should reject malformed thinking");
         assert_eq!(err.code, -32602);
     }
 }
 
 #[tokio::test]
 async fn app_server_turn_start_records_surface_admission_before_execution() {
-    use crate::EventStore;
-
     let app = test_app().await;
     let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -289,7 +520,7 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id.clone(),
                 "input": [{ "type": "text", "text": "admission rpc", "text_elements": [] }],
             })),
@@ -302,7 +533,7 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .unwrap();
@@ -330,7 +561,10 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
     );
     assert_eq!(admission.payload["route_id"], "surface:app-server-rpc");
     assert_eq!(admission.payload["decision"], "queue");
-    assert_eq!(admission.payload["admissible"], json!(["queue"]));
+    assert_eq!(
+        admission.payload["admissible"],
+        serde_json::json!(["queue"])
+    );
     let source_ids = admission.payload["source_ingress_event_ids"]
         .as_array()
         .unwrap();
@@ -339,7 +573,7 @@ async fn app_server_turn_start_records_surface_admission_before_execution() {
     assert!(control_events.iter().any(|event| {
         event.kind == crate::EventKind::IoIngressReceived && event.id.to_string() == source_id
     }));
-    assert_eq!(admission.origin, EventOrigin::Discharged);
+    assert_eq!(admission.origin, crate::EventOrigin::Discharged);
     assert_eq!(
         admission.provenance.discharged_by.as_deref(),
         Some("policy:admission_surface:app-server-rpc")
@@ -359,18 +593,18 @@ async fn concurrent_new_thread_turn_burst_surfaces_no_history_lock_errors() {
     const THREAD_STARTS: usize = 200;
     let root = unique_test_root("app-server-history-contention");
     let app = test_app_at_root(&root).await;
-    let barrier = Arc::new(tokio::sync::Barrier::new(THREAD_STARTS));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(THREAD_STARTS));
 
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..THREAD_STARTS {
         let app = app.clone();
-        let barrier = Arc::clone(&barrier);
+        let barrier = std::sync::Arc::clone(&barrier);
         tasks.spawn(async move {
             let (connection, _outbound_rx) = test_connection(app.clone()).await;
             initialize_for_test(&connection).await;
             barrier.wait().await;
             let thread = app
-                .dispatch_request(&connection, "thread/start", Some(json!({})))
+                .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
                 .await
                 .map_err(|error| format!("thread/start: {}", error.message))?;
             let thread_id = thread["thread"]["id"]
@@ -380,7 +614,7 @@ async fn concurrent_new_thread_turn_burst_surfaces_no_history_lock_errors() {
             app.dispatch_request(
                 &connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id.clone(),
                     "input": [{
                         "type": "text",
@@ -438,29 +672,32 @@ async fn concurrent_new_thread_turn_burst_surfaces_no_history_lock_errors() {
 #[test]
 fn assistant_content_projection_concatenates_thinking_chunks_like_streaming() {
     let messages = vec![
-        CanonicalMessage::user_text("question"),
-        CanonicalMessage::assistant(
+        crate::CanonicalMessage::user_text("question"),
+        crate::CanonicalMessage::assistant(
             "openai",
-            ProviderApi::OpenAIResponses,
+            crate::ProviderApi::OpenAIResponses,
             "gpt-test",
             vec![
-                CanonicalContent::Thinking {
+                crate::CanonicalContent::Thinking {
                     text: "plan ".to_string(),
                     provider: crate::ThinkingProvider::Other("unit".to_string()),
                     metadata: crate::ThinkingMetadata::None,
                 },
-                CanonicalContent::Thinking {
+                crate::CanonicalContent::Thinking {
                     text: "check".to_string(),
                     provider: crate::ThinkingProvider::Other("unit".to_string()),
                     metadata: crate::ThinkingMetadata::None,
                 },
-                CanonicalContent::text("answer"),
+                crate::CanonicalContent::text("answer"),
             ],
-            CanonicalStopReason::EndTurn,
+            crate::CanonicalStopReason::EndTurn,
         ),
     ];
 
-    let content = assistant_content_after_latest_user(&messages, "question").unwrap();
+    let content = crate::adapters::app_server::subscriptions::assistant_content_after_latest_user(
+        &messages, "question",
+    )
+    .unwrap();
     assert_eq!(content.text, "answer");
     assert_eq!(content.thinking, "plan check");
 }
@@ -468,40 +705,44 @@ fn assistant_content_projection_concatenates_thinking_chunks_like_streaming() {
 #[test]
 fn restored_turn_projection_preserves_thinking_before_text_order() {
     let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-    let user_entry = SessionEntry::new(
+    let user_entry = crate::SessionEntry::new(
         coordinates.clone(),
         None,
-        SessionEntryKind::Message {
-            message: CanonicalMessage::user_text("question"),
+        crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::user_text("question"),
         },
     );
-    let assistant_entry = SessionEntry::new(
+    let assistant_entry = crate::SessionEntry::new(
         coordinates,
         Some(user_entry.entry_id),
-        SessionEntryKind::Message {
-            message: CanonicalMessage::assistant(
+        crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::assistant(
                 "anthropic_bedrock",
-                ProviderApi::AnthropicMessages,
+                crate::ProviderApi::AnthropicMessages,
                 "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
                 vec![
-                    CanonicalContent::Thinking {
+                    crate::CanonicalContent::Thinking {
                         text: "plan".to_string(),
                         provider: crate::ThinkingProvider::Anthropic,
                         metadata: crate::ThinkingMetadata::None,
                     },
-                    CanonicalContent::text("answer"),
+                    crate::CanonicalContent::text("answer"),
                 ],
-                CanonicalStopReason::EndTurn,
+                crate::CanonicalStopReason::EndTurn,
             ),
         },
     );
 
-    let (_preview, turns) = app_server_turns_from_session_entries(&[user_entry, assistant_entry]);
+    let (_preview, turns) =
+        crate::adapters::app_server::threads::app_server_turns_from_session_entries(&[
+            user_entry,
+            assistant_entry,
+        ]);
     let turn = turns.values().next().unwrap();
     let item_types = turn
         .items
         .iter()
-        .filter_map(|item| item.get("type").and_then(Value::as_str))
+        .filter_map(|item| item.get("type").and_then(serde_json::Value::as_str))
         .collect::<Vec<_>>();
     assert_eq!(
         item_types,
@@ -511,14 +752,18 @@ fn restored_turn_projection_preserves_thinking_before_text_order() {
 
 #[test]
 fn reconcile_turn_assistant_text_starts_empty_item_then_delta() {
-    let mut turn = AppServerTurnState::new(
+    let mut turn = crate::adapters::app_server::threads::AppServerTurnState::new(
         "turn-reconcile-start".to_string(),
-        vec![json!({ "type": "text", "text": "hello", "text_elements": [] })],
+        vec![serde_json::json!({ "type": "text", "text": "hello", "text_elements": [] })],
     );
     let item_id = turn.assistant_item_id.clone();
 
     let (started_item, delta, delta_item_id) =
-        reconcile_turn_assistant_text(&mut turn, "saved final text").unwrap();
+        crate::adapters::app_server::subscriptions::reconcile_turn_assistant_text(
+            &mut turn,
+            "saved final text",
+        )
+        .unwrap();
 
     let started_item = started_item.unwrap();
     assert_eq!(delta_item_id, item_id);
@@ -526,70 +771,100 @@ fn reconcile_turn_assistant_text_starts_empty_item_then_delta() {
     assert_eq!(started_item["id"].as_str(), Some(item_id.as_str()));
     assert_eq!(item_text(&started_item).as_deref(), Some(""));
 
-    let (turn_json, completed_items) = finalize_turn_payload(&mut turn);
+    let (turn_json, completed_items) =
+        crate::adapters::app_server::threads::finalize_turn_payload(&mut turn);
     assert_eq!(
         completed_items.first().and_then(item_text).as_deref(),
         Some("saved final text")
     );
     assert_eq!(
-        completed_turn_agent_text(&json!({ "turn": turn_json })).as_deref(),
+        completed_turn_agent_text(&serde_json::json!({ "turn": turn_json })).as_deref(),
         Some("saved final text")
     );
 }
 
 #[test]
 fn reconcile_turn_assistant_text_appends_only_missing_suffix() {
-    let mut turn = AppServerTurnState::new(
+    let mut turn = crate::adapters::app_server::threads::AppServerTurnState::new(
         "turn-reconcile-suffix".to_string(),
-        vec![json!({ "type": "text", "text": "hello", "text_elements": [] })],
+        vec![serde_json::json!({ "type": "text", "text": "hello", "text_elements": [] })],
     );
 
-    let _ = reconcile_turn_assistant_text(&mut turn, "saved").unwrap();
+    let _ = crate::adapters::app_server::subscriptions::reconcile_turn_assistant_text(
+        &mut turn, "saved",
+    )
+    .unwrap();
     let (started_item, delta, _) =
-        reconcile_turn_assistant_text(&mut turn, "saved final text").unwrap();
+        crate::adapters::app_server::subscriptions::reconcile_turn_assistant_text(
+            &mut turn,
+            "saved final text",
+        )
+        .unwrap();
 
     assert!(started_item.is_none());
     assert_eq!(delta, " final text");
-    let (turn_json, completed_items) = finalize_turn_payload(&mut turn);
+    let (turn_json, completed_items) =
+        crate::adapters::app_server::threads::finalize_turn_payload(&mut turn);
     assert_eq!(
         completed_items.first().and_then(item_text).as_deref(),
         Some("saved final text")
     );
     assert_eq!(
-        completed_turn_agent_text(&json!({ "turn": turn_json })).as_deref(),
+        completed_turn_agent_text(&serde_json::json!({ "turn": turn_json })).as_deref(),
         Some("saved final text")
     );
 }
 
 #[test]
 fn reconcile_turn_assistant_text_does_not_replay_existing_delta() {
-    let mut turn = AppServerTurnState::new(
+    let mut turn = crate::adapters::app_server::threads::AppServerTurnState::new(
         "turn-reconcile-existing".to_string(),
-        vec![json!({ "type": "text", "text": "hello", "text_elements": [] })],
+        vec![serde_json::json!({ "type": "text", "text": "hello", "text_elements": [] })],
     );
 
-    let _ = reconcile_turn_assistant_text(&mut turn, "saved final text").unwrap();
+    let _ = crate::adapters::app_server::subscriptions::reconcile_turn_assistant_text(
+        &mut turn,
+        "saved final text",
+    )
+    .unwrap();
 
-    assert!(reconcile_turn_assistant_text(&mut turn, "saved final text").is_none());
+    assert!(
+        crate::adapters::app_server::subscriptions::reconcile_turn_assistant_text(
+            &mut turn,
+            "saved final text"
+        )
+        .is_none()
+    );
 }
 
 #[test]
 fn reconcile_turn_assistant_text_keeps_prior_stream_when_saved_text_diverges() {
-    let mut turn = AppServerTurnState::new(
+    let mut turn = crate::adapters::app_server::threads::AppServerTurnState::new(
         "turn-reconcile-diverged".to_string(),
-        vec![json!({ "type": "text", "text": "hello", "text_elements": [] })],
+        vec![serde_json::json!({ "type": "text", "text": "hello", "text_elements": [] })],
     );
 
-    let _ = reconcile_turn_assistant_text(&mut turn, "streamed text").unwrap();
+    let _ = crate::adapters::app_server::subscriptions::reconcile_turn_assistant_text(
+        &mut turn,
+        "streamed text",
+    )
+    .unwrap();
 
-    assert!(reconcile_turn_assistant_text(&mut turn, "saved final text").is_none());
-    let (turn_json, completed_items) = finalize_turn_payload(&mut turn);
+    assert!(
+        crate::adapters::app_server::subscriptions::reconcile_turn_assistant_text(
+            &mut turn,
+            "saved final text"
+        )
+        .is_none()
+    );
+    let (turn_json, completed_items) =
+        crate::adapters::app_server::threads::finalize_turn_payload(&mut turn);
     assert_eq!(
         completed_items.first().and_then(item_text).as_deref(),
         Some("streamed text")
     );
     assert_eq!(
-        completed_turn_agent_text(&json!({ "turn": turn_json })).as_deref(),
+        completed_turn_agent_text(&serde_json::json!({ "turn": turn_json })).as_deref(),
         Some("streamed text")
     );
 }
@@ -601,7 +876,7 @@ async fn thread_compact_start_dispatches_to_runtime() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
@@ -610,54 +885,71 @@ async fn thread_compact_start_dispatches_to_runtime() {
         .dispatch_request(
             &connection,
             "thread/compact/start",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
-    assert_eq!(compact_start, json!({}));
+    assert_eq!(compact_start, serde_json::json!({}));
 }
 
 #[tokio::test]
 async fn app_server_retains_identity_boundary_config() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-identity-config-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-identity-config-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-identity-config");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    config.apply_daemon_identity_config(&VerletDaemonIdentityConfig {
-        mode: IdentityMode::Managed,
+    config.apply_daemon_identity_config(&crate::daemon::identity::VerletDaemonIdentityConfig {
+        mode: crate::daemon::identity::IdentityMode::Managed,
         tenant_id: Some("tenant-managed".to_string()),
-        console_principal: Some(PrincipalId::new("operator-managed")),
+        console_principal: Some(crate::daemon::identity::PrincipalId::new(
+            "operator-managed",
+        )),
     });
 
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
 
     assert_eq!(
         app.identity_boundary_config(),
         (
-            IdentityMode::Managed,
-            Some(&PrincipalId::new("operator-managed"))
+            crate::daemon::identity::IdentityMode::Managed,
+            Some(&crate::daemon::identity::PrincipalId::new(
+                "operator-managed"
+            ))
         )
     );
 }
 
 #[tokio::test]
 async fn app_server_new_local_seeds_default_provider_store() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-provider-store-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-provider-store-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let root = std::env::temp_dir().join(format!("verlet-provider-store-{}", uuid::Uuid::now_v7()));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
     );
-    let root = std::env::temp_dir().join(format!("verlet-provider-store-{}", Uuid::now_v7()));
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
 
-    let app = VerletAppServer::new_local(config).await.unwrap();
-    assert_eq!(app.model_provider(), APP_SERVER_LOCAL_PROVIDER);
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.model_provider(),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+    );
 
     let store = crate::SqliteMetadataStore::open(&metadata_path)
         .await
@@ -680,11 +972,14 @@ async fn app_server_new_local_seeds_default_provider_store() {
 
 #[tokio::test]
 async fn model_provider_auth_methods_store_redacted_credentials() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-provider-auth-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-provider-auth-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-provider-auth");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
@@ -697,9 +992,9 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .unwrap();
     metadata_store
         .upsert_provider(
-            LlmProviderRecord::new(
+            crate::LlmProviderRecord::new(
                 provider_id,
-                ProviderApi::OpenAIChatCompletions,
+                crate::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_display_name("Fixture Auth")
@@ -709,7 +1004,9 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .unwrap();
     drop(metadata_store);
 
-    let app = VerletAppServer::new_local(config.clone()).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config.clone())
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -717,7 +1014,7 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .dispatch_request(
             &connection,
             "modelProvider/auth/status",
-            Some(json!({ "providerId": provider_id })),
+            Some(serde_json::json!({ "providerId": provider_id })),
         )
         .await
         .unwrap();
@@ -728,7 +1025,7 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .dispatch_request(
             &connection,
             "modelProvider/auth/set",
-            Some(json!({
+            Some(serde_json::json!({
                 "providerId": provider_id,
                 "apiKey": "stored-openai_compatible-key",
             })),
@@ -780,7 +1077,7 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .dispatch_request(
             &connection,
             "modelProvider/auth/delete",
-            Some(json!({ "providerId": provider_id })),
+            Some(serde_json::json!({ "providerId": provider_id })),
         )
         .await
         .unwrap();
@@ -803,11 +1100,14 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
 
 #[tokio::test]
 async fn model_provider_list_and_read_return_redacted_endpoint_records() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-provider-list-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-provider-list-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-provider-list");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
@@ -820,9 +1120,9 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
         .unwrap();
     metadata_store
         .upsert_provider(
-            LlmProviderRecord::new(
+            crate::LlmProviderRecord::new(
                 provider_id,
-                ProviderApi::OpenAIChatCompletions,
+                crate::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_display_name("Fixture List")
@@ -854,7 +1154,9 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
         )
         .await
         .unwrap();
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -894,7 +1196,7 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
         .dispatch_request(
             &connection,
             "modelProvider/read",
-            Some(json!({ "providerId": provider_id })),
+            Some(serde_json::json!({ "providerId": provider_id })),
         )
         .await
         .unwrap();
@@ -904,7 +1206,7 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
         .dispatch_request(
             &connection,
             "modelProvider/read",
-            Some(json!({ "providerId": "missing-provider" })),
+            Some(serde_json::json!({ "providerId": "missing-provider" })),
         )
         .await
         .unwrap_err();
@@ -914,16 +1216,21 @@ async fn model_provider_list_and_read_return_redacted_endpoint_records() {
 
 #[tokio::test]
 async fn model_provider_upsert_creates_and_updates_endpoint_records() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-provider-upsert-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-provider-upsert-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-provider-upsert");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
-    let app = VerletAppServer::new_local(config.clone()).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config.clone())
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -931,7 +1238,7 @@ async fn model_provider_upsert_creates_and_updates_endpoint_records() {
         .dispatch_request(
             &connection,
             "modelProvider/upsert",
-            Some(json!({
+            Some(serde_json::json!({
                 "provider": {
                     "providerId": "fixture-upsert",
                     "api": "open_ai_chat_completions",
@@ -969,7 +1276,7 @@ async fn model_provider_upsert_creates_and_updates_endpoint_records() {
     );
     assert_eq!(
         created["provider"]["models"][0]["inputModalities"],
-        json!(["text", "image"])
+        serde_json::json!(["text", "image"])
     );
     assert_eq!(created["provider"]["metadata"]["owner"], "tests");
     assert!(!created.to_string().contains("secret-mode"));
@@ -990,7 +1297,7 @@ async fn model_provider_upsert_creates_and_updates_endpoint_records() {
         .dispatch_request(
             &connection,
             "modelProvider/upsert",
-            Some(json!({
+            Some(serde_json::json!({
                 "provider": {
                     "providerId": "fixture-upsert",
                     "api": "open_ai_chat_completions",
@@ -1011,15 +1318,20 @@ async fn model_provider_upsert_creates_and_updates_endpoint_records() {
 
 #[tokio::test]
 async fn model_provider_upsert_rejects_inline_api_keys_and_command_values() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-provider-reject-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-provider-reject-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-provider-reject");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -1027,7 +1339,7 @@ async fn model_provider_upsert_rejects_inline_api_keys_and_command_values() {
         .dispatch_request(
             &connection,
             "modelProvider/upsert",
-            Some(json!({
+            Some(serde_json::json!({
                 "provider": {
                     "providerId": "fixture-inline",
                     "api": "open_ai_chat_completions",
@@ -1045,7 +1357,7 @@ async fn model_provider_upsert_rejects_inline_api_keys_and_command_values() {
         .dispatch_request(
             &connection,
             "modelProvider/upsert",
-            Some(json!({
+            Some(serde_json::json!({
                 "provider": {
                     "providerId": "fixture-command-auth",
                     "api": "open_ai_chat_completions",
@@ -1063,7 +1375,7 @@ async fn model_provider_upsert_rejects_inline_api_keys_and_command_values() {
         .dispatch_request(
             &connection,
             "modelProvider/upsert",
-            Some(json!({
+            Some(serde_json::json!({
                 "provider": {
                     "providerId": "fixture-command-header",
                     "api": "open_ai_chat_completions",
@@ -1083,11 +1395,14 @@ async fn model_provider_upsert_rejects_inline_api_keys_and_command_values() {
 
 #[tokio::test]
 async fn model_provider_delete_removes_record_and_stored_credential() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-provider-delete-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-provider-delete-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-provider-delete");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
@@ -1098,9 +1413,9 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
         .await
         .unwrap();
     metadata_store
-        .upsert_provider(LlmProviderRecord::new(
+        .upsert_provider(crate::LlmProviderRecord::new(
             "fixture-delete",
-            ProviderApi::OpenAIChatCompletions,
+            crate::ProviderApi::OpenAIChatCompletions,
             "https://example.invalid/v1",
         ))
         .await
@@ -1126,7 +1441,9 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
         )
         .await
         .unwrap();
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -1134,7 +1451,7 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
         .dispatch_request(
             &connection,
             "modelProvider/delete",
-            Some(json!({ "providerId": "fixture-delete" })),
+            Some(serde_json::json!({ "providerId": "fixture-delete" })),
         )
         .await
         .unwrap();
@@ -1173,12 +1490,16 @@ async fn model_provider_delete_removes_record_and_stored_credential() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-provider-cancel-delete-{}.sock",
-        Uuid::now_v7()
-    )));
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-provider-cancel-delete-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
     let root = unique_test_root("app-server-provider-cancel-delete");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
@@ -1189,9 +1510,9 @@ async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
         .await
         .unwrap();
     metadata_store
-        .upsert_provider(LlmProviderRecord::new(
+        .upsert_provider(crate::LlmProviderRecord::new(
             "fixture-cancel-delete",
-            ProviderApi::OpenAIChatCompletions,
+            crate::ProviderApi::OpenAIChatCompletions,
             "https://example.invalid/v1",
         ))
         .await
@@ -1218,7 +1539,9 @@ async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
         .await
         .unwrap();
 
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -1237,7 +1560,7 @@ async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
             .dispatch_request(
                 &connection,
                 "modelProvider/delete",
-                Some(json!({ "providerId": "fixture-cancel-delete" })),
+                Some(serde_json::json!({ "providerId": "fixture-cancel-delete" })),
             )
             .await
     });
@@ -1295,17 +1618,22 @@ async fn cancelling_model_provider_delete_finishes_all_credential_cleanup() {
 
 #[tokio::test]
 async fn app_server_mcp_status_lists_redacted_remote_sources() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-mcp-source-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("verlet-mcp-source-{}.sock", uuid::Uuid::now_v7())),
     );
     let root = unique_test_root("app-server-mcp-source");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
-    let app = VerletAppServer::new_local(config).await.unwrap();
-    let registry = SqliteMcpSourceRegistry::open_async(&metadata_path)
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let registry = crate::SqliteMcpSourceRegistry::open_async(&metadata_path)
         .await
         .unwrap();
     registry
@@ -1334,18 +1662,23 @@ async fn app_server_mcp_status_lists_redacted_remote_sources() {
 
 #[tokio::test]
 async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_source() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-mcp-rpc-source-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-mcp-rpc-source-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-mcp-rpc-source");
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
     let user_metadata_path = config.user_metadata_store_path();
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let (mcp_url, mcp_task) = spawn_app_mcp_http_fixture("string").await;
@@ -1354,7 +1687,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
         .dispatch_request(
             &connection,
             "mcpSource/upsert",
-            Some(json!({
+            Some(serde_json::json!({
                 "name": "arcade",
                 "transport": "mcp-http",
                 "url": mcp_url,
@@ -1377,7 +1710,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
     assert!(!upsert.to_string().contains("fixture-secret-like-value"));
 
     assert!(
-        SqliteSecretStore::open(&metadata_path)
+        crate::SqliteSecretStore::open(&metadata_path)
             .await
             .unwrap()
             .resolve_secret("mcp.arcade.bearer")
@@ -1385,7 +1718,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
             .unwrap()
             .is_none()
     );
-    let secret = SqliteSecretStore::open(&user_metadata_path)
+    let secret = crate::SqliteSecretStore::open(&user_metadata_path)
         .await
         .unwrap()
         .resolve_secret("mcp.arcade.bearer")
@@ -1393,16 +1726,20 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
         .unwrap()
         .expect("upsert should persist pasted bearer token");
     assert_eq!(secret.value, "fixture-token");
-    assert_eq!(secret.source_kind, SecretSourceKind::Local);
+    assert_eq!(secret.source_kind, crate::SecretSourceKind::Local);
 
     let list = app
-        .dispatch_request(&connection, "mcpSource/list", Some(json!({})))
+        .dispatch_request(&connection, "mcpSource/list", Some(serde_json::json!({})))
         .await
         .unwrap();
     assert_eq!(list["data"][0]["name"], "arcade");
 
     let legacy_status = app
-        .dispatch_request(&connection, "mcpServerStatus/list", Some(json!({})))
+        .dispatch_request(
+            &connection,
+            "mcpServerStatus/list",
+            Some(serde_json::json!({})),
+        )
         .await
         .unwrap();
     assert_eq!(legacy_status["data"][0]["name"], "arcade");
@@ -1411,7 +1748,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
         .dispatch_request(
             &connection,
             "mcpSource/discover",
-            Some(json!({ "name": "arcade" })),
+            Some(serde_json::json!({ "name": "arcade" })),
         )
         .await
         .unwrap();
@@ -1424,7 +1761,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
         .dispatch_request(
             &connection,
             "mcpSource/read",
-            Some(json!({ "name": "arcade" })),
+            Some(serde_json::json!({ "name": "arcade" })),
         )
         .await
         .unwrap();
@@ -1437,7 +1774,7 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
         .dispatch_request(
             &connection,
             "mcpSource/testTool",
-            Some(json!({
+            Some(serde_json::json!({
                 "name": "arcade",
                 "tool": "verlet_mcp_echo",
                 "arguments": { "message": "hello" },
@@ -1458,13 +1795,13 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
         .dispatch_request(
             &connection,
             "mcpSource/delete",
-            Some(json!({ "name": "arcade" })),
+            Some(serde_json::json!({ "name": "arcade" })),
         )
         .await
         .unwrap();
     assert_eq!(delete["deleted"], true);
     let empty = app
-        .dispatch_request(&connection, "mcpSource/list", Some(json!({})))
+        .dispatch_request(&connection, "mcpSource/list", Some(serde_json::json!({})))
         .await
         .unwrap();
     assert!(empty["data"].as_array().unwrap().is_empty());
@@ -1475,9 +1812,9 @@ async fn app_server_mcp_source_methods_register_discover_test_and_delete_remote_
 
 #[tokio::test]
 async fn app_server_mcp_source_manifest_patch_previews_bare_protocol_import() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-mcp-manifest-patch-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-mcp-manifest-patch-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-mcp-manifest-patch");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -1497,13 +1834,15 @@ server_ref = "mcp://arcade"
 "#
         .to_string()],
     );
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
     let metadata_path = config.metadata_store_path();
-    let app = VerletAppServer::new_local(config).await.unwrap();
-    SqliteMcpSourceRegistry::open_async(&metadata_path)
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    crate::SqliteMcpSourceRegistry::open_async(&metadata_path)
         .await
         .unwrap()
         .upsert_source_async(
@@ -1523,7 +1862,7 @@ server_ref = "mcp://arcade"
         .dispatch_request(
             &connection,
             "mcpSource/manifestPatch",
-            Some(json!({
+            Some(serde_json::json!({
                 "name": "arcade",
                 "agentRef": "agent://mcp-existing@latest",
             })),
@@ -1547,10 +1886,10 @@ server_ref = "mcp://arcade"
         .unwrap()
         .iter()
         .filter_map(|diagnostic| diagnostic["code"].as_str())
-        .collect::<BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>();
     assert!(diagnostic_codes.contains("duplicate_tool_id"));
     assert!(diagnostic_codes.contains("source_already_imported"));
-    let current_record = LocalAgentRegistry::new(&agent_registry_root)
+    let current_record = crate::LocalAgentRegistry::new(&agent_registry_root)
         .load_ref("agent://mcp-existing@latest")
         .unwrap();
     assert_eq!(current_record.manifest_hash, existing_record.manifest_hash);
@@ -1566,7 +1905,7 @@ server_ref = "mcp://arcade"
         .dispatch_request(
             &connection,
             "mcpSource/manifestPatch",
-            Some(json!({ "name": "missing" })),
+            Some(serde_json::json!({ "name": "missing" })),
         )
         .await
         .unwrap_err();
@@ -1577,7 +1916,7 @@ server_ref = "mcp://arcade"
         .dispatch_request(
             &connection,
             "mcpSource/manifestPatch",
-            Some(json!({ "name": "arcade", "importId": "bad id" })),
+            Some(serde_json::json!({ "name": "arcade", "importId": "bad id" })),
         )
         .await
         .unwrap_err();
@@ -1601,14 +1940,16 @@ async fn agent_query_methods_project_local_registry_records() {
         "Runs local prompts",
         &[],
     );
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-agent-query-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("verlet-agent-query-{}.sock", uuid::Uuid::now_v7())),
     );
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -1616,7 +1957,7 @@ async fn agent_query_methods_project_local_registry_records() {
         .dispatch_request(&connection, "agent/list", None)
         .await
         .unwrap();
-    assert_eq!(list["cursor"], Value::Null);
+    assert_eq!(list["cursor"], serde_json::Value::Null);
     let agents = list["data"].as_array().unwrap();
     assert_eq!(agents.len(), 2);
     assert!(
@@ -1661,7 +2002,7 @@ async fn agent_query_methods_project_local_registry_records() {
         .dispatch_request(
             &connection,
             "agent/read",
-            Some(json!({ "ref": "agent://local-runner@latest" })),
+            Some(serde_json::json!({ "ref": "agent://local-runner@latest" })),
         )
         .await
         .unwrap();
@@ -1679,7 +2020,7 @@ async fn agent_query_methods_project_local_registry_records() {
         .dispatch_request(
             &connection,
             "agent/read",
-            Some(json!({ "ref": "agent://missing@latest" })),
+            Some(serde_json::json!({ "ref": "agent://missing@latest" })),
         )
         .await
         .unwrap_err();
@@ -1690,7 +2031,7 @@ async fn agent_query_methods_project_local_registry_records() {
         .dispatch_request(
             &connection,
             "agent/read",
-            Some(json!({ "ref": "agent://bad name@latest" })),
+            Some(serde_json::json!({ "ref": "agent://bad name@latest" })),
         )
         .await
         .unwrap_err();
@@ -1698,7 +2039,7 @@ async fn agent_query_methods_project_local_registry_records() {
     assert!(malformed.message.contains("malformed agent ref"));
 
     std::fs::remove_file(
-        LocalAgentRegistry::new(&agent_registry_root)
+        crate::LocalAgentRegistry::new(&agent_registry_root)
             .version_record_path("local-runner", "0.1.0")
             .unwrap(),
     )
@@ -1730,14 +2071,16 @@ async fn agent_plan_validates_source_and_manifest_without_writes() {
         "Plans without writes",
         &[],
     );
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-agent-plan-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("verlet-agent-plan-{}.sock", uuid::Uuid::now_v7())),
     );
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -1763,7 +2106,7 @@ streaming = true
         .dispatch_request(
             &connection,
             "agent/plan",
-            Some(json!({
+            Some(serde_json::json!({
                 "source": source,
                 "baseRef": base.ref_uri,
                 "baseManifestHash": base.manifest_hash,
@@ -1784,19 +2127,19 @@ streaming = true
     assert_eq!(from_source["suggestedNextVersion"].as_str(), Some("0.1.1"));
     assert_eq!(from_source["base"]["latestVersion"].as_str(), Some("0.1.0"));
     assert!(
-        !LocalAgentRegistry::new(&agent_registry_root)
+        !crate::LocalAgentRegistry::new(&agent_registry_root)
             .version_record_path("planner", "0.1.1")
             .unwrap()
             .exists()
     );
 
     let mut manifest = from_source["manifest"].clone();
-    manifest["identity"]["version"] = json!("0.1.2");
+    manifest["identity"]["version"] = serde_json::json!("0.1.2");
     let from_manifest = app
         .dispatch_request(
             &connection,
             "agent/plan",
-            Some(json!({ "manifest": manifest })),
+            Some(serde_json::json!({ "manifest": manifest })),
         )
         .await
         .unwrap();
@@ -1826,14 +2169,16 @@ async fn agent_publish_writes_new_version_and_rejects_stale_base() {
         "Publishes immutable versions",
         &[],
     );
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-agent-publish-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-agent-publish-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -1841,19 +2186,19 @@ async fn agent_publish_writes_new_version_and_rejects_stale_base() {
         .dispatch_request(
             &connection,
             "agent/read",
-            Some(json!({ "ref": "agent://publisher@latest" })),
+            Some(serde_json::json!({ "ref": "agent://publisher@latest" })),
         )
         .await
         .unwrap();
     let mut manifest = read["resolved_manifest"].clone();
-    manifest["identity"]["version"] = json!("0.1.1");
-    manifest["identity"]["display_name"] = json!("Publisher v2");
+    manifest["identity"]["version"] = serde_json::json!("0.1.1");
+    manifest["identity"]["display_name"] = serde_json::json!("Publisher v2");
 
     let publish = app
         .dispatch_request(
             &connection,
             "agent/publish",
-            Some(json!({
+            Some(serde_json::json!({
                 "manifest": manifest,
                 "baseRef": "agent://publisher@latest",
                 "baseManifestHash": base.manifest_hash,
@@ -1868,7 +2213,7 @@ async fn agent_publish_writes_new_version_and_rejects_stale_base() {
         Some("Publisher v2")
     );
     assert_eq!(publish["latestAlias"]["version"].as_str(), Some("0.1.1"));
-    let published_record = LocalAgentRegistry::new(&agent_registry_root)
+    let published_record = crate::LocalAgentRegistry::new(&agent_registry_root)
         .load_version_record("publisher", "0.1.1")
         .unwrap();
     assert_eq!(
@@ -1880,7 +2225,7 @@ async fn agent_publish_writes_new_version_and_rejects_stale_base() {
         .dispatch_request(
             &connection,
             "agent/publish",
-            Some(json!({
+            Some(serde_json::json!({
                 "source": r#"
 [agent]
 name = "publisher"
@@ -1916,8 +2261,9 @@ async fn operation_list_projects_published_registry_records() {
     let registry_root = root.join("operations");
     let record = publish_echo_operation(&registry_root, "search", "search_web", "result").await;
     let app = test_app_with_provider_and_capsule_bindings(
-        Arc::new(InspectingCapsuleClient::default()),
-        CapsuleBindingsConfig::default().with_registry_root(&registry_root),
+        std::sync::Arc::new(InspectingCapsuleClient::default()),
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&registry_root),
     )
     .await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -1927,13 +2273,13 @@ async fn operation_list_projects_published_registry_records() {
         .dispatch_request(&connection, "operation/list", None)
         .await
         .unwrap();
-    assert_eq!(list["cursor"], Value::Null);
+    assert_eq!(list["cursor"], serde_json::Value::Null);
     let operations = list["data"].as_array().unwrap();
     assert!(operations.len() >= 2);
     assert!(
         operations
             .iter()
-            .any(|operation| operation["name"].as_str() == Some(VERLET_THREADS_PACKAGE))
+            .any(|operation| operation["name"].as_str() == Some(crate::VERLET_THREADS_PACKAGE))
     );
     let search = operation_record_by_name(operations, "search");
     assert_eq!(
@@ -1968,15 +2314,19 @@ async fn registry_roots_resolve_against_configured_cwd() {
     let operation_registry_root = workspace.join(".verlet/operations");
     publish_echo_operation(&operation_registry_root, "cwdop", "lookup", "cwd").await;
 
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-registry-cwd-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("verlet-registry-cwd-{}.sock", uuid::Uuid::now_v7())),
     );
-    let mut config = VerletAppServerConfig::local(listen, &workspace).with_capsule_bindings(
-        CapsuleBindingsConfig::default().with_registry_root(".verlet/operations"),
-    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+        .with_capsule_bindings(
+            crate::adapters::app_server::CapsuleBindingsConfig::default()
+                .with_registry_root(".verlet/operations"),
+        );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -2001,21 +2351,22 @@ async fn registry_roots_resolve_against_configured_cwd() {
 #[tokio::test]
 async fn model_list_projects_catalog_provider_models() {
     let root = unique_test_root("app-server-model-query");
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-model-query-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("verlet-model-query-{}.sock", uuid::Uuid::now_v7())),
     );
-    let mut config = VerletAppServerConfig::local(listen, root.clone())
-        .with_catalog_openai_chat_completions("fixture", Some("fixture-large".to_string()));
+    let mut config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen, root.clone())
+            .with_catalog_openai_chat_completions("fixture", Some("fixture-large".to_string()));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
     metadata_store
         .upsert_provider(
-            LlmProviderRecord::new(
+            crate::LlmProviderRecord::new(
                 "fixture",
-                ProviderApi::OpenAIChatCompletions,
+                crate::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_display_name("Fixture Models")
@@ -2032,23 +2383,27 @@ async fn model_list_projects_catalog_provider_models() {
         )
         .await
         .unwrap();
-    sync_catalog_provider_identity(&mut config, &metadata_store)
+    crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "fixture", "fixture-large");
-    let runtime_factory = runtime_factory_from_provider_parts(
-        runtime_config,
-        Arc::new(InspectingCapsuleClient::default()),
-        CapsuleBindingsConfig::default(),
+    let runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "fixture",
+        "fixture-large",
     );
-    let app = VerletAppServer::with_runtime_factory_and_metadata_store(
-        config,
-        runtime_factory,
-        metadata_store,
-    )
-    .await
-    .unwrap();
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        std::sync::Arc::new(InspectingCapsuleClient::default()),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -2056,7 +2411,7 @@ async fn model_list_projects_catalog_provider_models() {
         .dispatch_request(&connection, "model/list", None)
         .await
         .unwrap();
-    assert_eq!(models["nextCursor"], Value::Null);
+    assert_eq!(models["nextCursor"], serde_json::Value::Null);
     let data = models["data"].as_array().unwrap();
     assert_eq!(data.len(), 2);
     assert_eq!(data[0]["providerId"].as_str(), Some("fixture"));
@@ -2072,22 +2427,22 @@ async fn model_list_projects_catalog_provider_models() {
 #[tokio::test]
 async fn model_list_appends_configured_default_when_catalog_omits_it() {
     let root = unique_test_root("app-server-model-missing-default");
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-model-missing-default-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config = VerletAppServerConfig::local(listen, root.clone())
-        .with_catalog_openai_chat_completions("fixture", Some("fixture-default".to_string()));
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-model-missing-default-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen, root.clone())
+            .with_catalog_openai_chat_completions("fixture", Some("fixture-default".to_string()));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
     metadata_store
         .upsert_provider(
-            LlmProviderRecord::new(
+            crate::LlmProviderRecord::new(
                 "fixture",
-                ProviderApi::OpenAIChatCompletions,
+                crate::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_display_name("Fixture Models")
@@ -2096,23 +2451,27 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
         )
         .await
         .unwrap();
-    sync_catalog_provider_identity(&mut config, &metadata_store)
+    crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "fixture", "fixture-default");
-    let runtime_factory = runtime_factory_from_provider_parts(
-        runtime_config,
-        Arc::new(InspectingCapsuleClient::default()),
-        CapsuleBindingsConfig::default(),
+    let runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "fixture",
+        "fixture-default",
     );
-    let app = VerletAppServer::with_runtime_factory_and_metadata_store(
-        config,
-        runtime_factory,
-        metadata_store,
-    )
-    .await
-    .unwrap();
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        std::sync::Arc::new(InspectingCapsuleClient::default()),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -2139,33 +2498,40 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
 
 #[tokio::test]
 async fn app_server_persists_thread_lifecycle_to_metadata_store() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-thread-store-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("verlet-thread-store-{}.sock", uuid::Uuid::now_v7())),
     );
-    let root = std::env::temp_dir().join(format!("verlet-thread-store-{}", Uuid::now_v7()));
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let root = std::env::temp_dir().join(format!("verlet-thread-store-{}", uuid::Uuid::now_v7()));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    config.apply_daemon_identity_config(&VerletDaemonIdentityConfig {
-        mode: IdentityMode::Local,
+    config.apply_daemon_identity_config(&crate::daemon::identity::VerletDaemonIdentityConfig {
+        mode: crate::daemon::identity::IdentityMode::Local,
         tenant_id: Some("tenant-configured".to_string()),
-        console_principal: Some(PrincipalId::new("principal-configured")),
+        console_principal: Some(crate::daemon::identity::PrincipalId::new(
+            "principal-configured",
+        )),
     });
     let expected_tenant_id = config.tenant_id.clone();
     let expected_user_id = config.user_id.clone();
     let metadata_path = config.metadata_store_path();
 
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app).await;
     initialize_for_test(&connection).await;
 
     let thread_start = connection
         .app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
-    let thread_id = ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap())
+    let thread_id = crate::ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap())
         .expect("thread/start should return a thread id");
 
     let store = crate::SqliteMetadataStore::open(&metadata_path)
@@ -2179,7 +2545,7 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
     assert_eq!(record.coordinates.tenant_id, expected_tenant_id);
     assert_eq!(record.coordinates.user_id, expected_user_id);
     assert_eq!(record.status, crate::ThreadLifecycleStatus::Idle);
-    assert_eq!(record.topology, ThreadTopology::root());
+    assert_eq!(record.topology, crate::ThreadTopology::root());
     assert_eq!(
         store
             .list_thread_lifecycle(&record.coordinates.scope())
@@ -2193,24 +2559,29 @@ async fn app_server_persists_thread_lifecycle_to_metadata_store() {
 
 #[tokio::test]
 async fn thread_handle_dispatch_retries_fold_through_rpc() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-thread-spawn-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("verlet-thread-spawn-{}.sock", uuid::Uuid::now_v7())),
     );
-    let root = std::env::temp_dir().join(format!("verlet-thread-spawn-{}", Uuid::now_v7()));
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    let root = std::env::temp_dir().join(format!("verlet-thread-spawn-{}", uuid::Uuid::now_v7()));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
 
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let started = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let parent_thread_id = started["thread"]["id"].as_str().unwrap();
-    let params = json!({
+    let params = serde_json::json!({
         "threadId": parent_thread_id,
         "taskName": "worker",
         "message": "echo dispatched child",
@@ -2229,7 +2600,7 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
         .dispatch_request(
             &connection,
             "thread/spawn",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": parent_thread_id,
                 "taskName": "retry-alias-must-not-win",
                 "message": "echo retry message must not run",
@@ -2242,7 +2613,7 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
         .dispatch_request(
             &connection,
             "thread/spawn",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": parent_thread_id,
                 "taskName": "worker-2",
                 "message": "echo second child",
@@ -2258,7 +2629,7 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
     assert_eq!(conflicting_retry["handle"], first["handle"]);
     assert_eq!(conflicting_retry["taskName"], "worker");
     assert_ne!(first["handle"], distinct["handle"]);
-    let submit_params = json!({
+    let submit_params = serde_json::json!({
         "threadId": parent_thread_id,
         "message": "echo submitted once",
         "dispatchId": "rpc-submit-dispatch-1",
@@ -2283,7 +2654,7 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
         .unwrap();
     let control_events = store
         .read_events(
-            &EventStreamId::new(format!(
+            &crate::EventStreamId::new(format!(
                 "control:{}",
                 parent.context().coordinates.thread_id
             )),
@@ -2295,7 +2666,7 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
         control_events
             .iter()
             .filter(|event| {
-                event.kind == EventKind::ThreadSpawnRequested
+                event.kind == crate::EventKind::ThreadSpawnRequested
                     && event.payload["correlation_id"] == "rpc-dispatch-1"
                     && event.provenance.discharged_by.as_deref() == Some("dispatcher:thread-spawn")
             })
@@ -2309,112 +2680,122 @@ async fn thread_handle_dispatch_retries_fold_through_rpc() {
 
 #[test]
 fn ref_less_thread_start_default_manifest_gate_allows_lowered_params() {
-    let params = ThreadStartParams::default();
+    let params = crate::adapters::app_server::connection::ThreadStartParams::default();
     assert_eq!(
-        thread_start_default_agent_ref(&params),
-        Some(default_manifest::DEFAULT_AGENT_REF)
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     );
 
-    let mut params = ThreadStartParams {
-        capsule_bindings: Some(ThreadCapsuleBindingsParams::default()),
-        ..ThreadStartParams::default()
+    let mut params = crate::adapters::app_server::connection::ThreadStartParams {
+        capsule_bindings: Some(
+            crate::adapters::app_server::connection::ThreadCapsuleBindingsParams::default(),
+        ),
+        ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
     assert_eq!(
-        thread_start_default_agent_ref(&params),
-        Some(default_manifest::DEFAULT_AGENT_REF)
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     );
 
-    params.model = Some(APP_SERVER_LOCAL_MODEL.to_string());
+    params.model = Some(crate::adapters::app_server::APP_SERVER_LOCAL_MODEL.to_string());
     assert_eq!(
-        thread_start_default_agent_ref(&params),
-        Some(default_manifest::DEFAULT_AGENT_REF)
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     );
 
-    let params = ThreadStartParams {
-        model_provider: Some(APP_SERVER_LOCAL_PROVIDER.to_string()),
-        ..ThreadStartParams::default()
+    let params = crate::adapters::app_server::connection::ThreadStartParams {
+        model_provider: Some(crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string()),
+        ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
     assert_eq!(
-        thread_start_default_agent_ref(&params),
-        Some(default_manifest::DEFAULT_AGENT_REF)
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     );
 
-    let params = ThreadStartParams {
+    let params = crate::adapters::app_server::connection::ThreadStartParams {
         cwd: Some("workspace".to_string()),
-        ..ThreadStartParams::default()
+        ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
     assert_eq!(
-        thread_start_default_agent_ref(&params),
-        Some(default_manifest::DEFAULT_AGENT_REF)
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     );
 
-    let params = ThreadStartParams {
-        capsule_bindings: Some(ThreadCapsuleBindingsParams {
-            operation_names: vec!["global".to_string()],
-        }),
-        ..ThreadStartParams::default()
+    let params = crate::adapters::app_server::connection::ThreadStartParams {
+        capsule_bindings: Some(
+            crate::adapters::app_server::connection::ThreadCapsuleBindingsParams {
+                operation_names: vec!["global".to_string()],
+            },
+        ),
+        ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
     assert_eq!(
-        thread_start_default_agent_ref(&params),
-        Some(default_manifest::DEFAULT_AGENT_REF)
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     );
 
-    let params = ThreadStartParams {
-        agent_ref: Some(default_manifest::DEFAULT_AGENT_REF.to_string()),
-        ..ThreadStartParams::default()
+    let params = crate::adapters::app_server::connection::ThreadStartParams {
+        agent_ref: Some(
+            crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF.to_string(),
+        ),
+        ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
-    assert_eq!(thread_start_default_agent_ref(&params), None);
+    assert_eq!(
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        None
+    );
 
-    let params = ThreadStartParams {
-        runtime_overrides: Some(AgentManifestBindOverrides {
+    let params = crate::adapters::app_server::connection::ThreadStartParams {
+        runtime_overrides: Some(crate::AgentManifestBindOverrides {
             default_cwd: Some("workspace".to_string()),
-            ..AgentManifestBindOverrides::default()
+            ..crate::AgentManifestBindOverrides::default()
         }),
-        ..ThreadStartParams::default()
+        ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
     assert_eq!(
-        thread_start_default_agent_ref(&params),
-        Some(default_manifest::DEFAULT_AGENT_REF)
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     );
 
-    let params = ThreadStartParams {
-        model: Some(APP_SERVER_LOCAL_MODEL.to_string()),
-        runtime_overrides: Some(AgentManifestBindOverrides {
+    let params = crate::adapters::app_server::connection::ThreadStartParams {
+        model: Some(crate::adapters::app_server::APP_SERVER_LOCAL_MODEL.to_string()),
+        runtime_overrides: Some(crate::AgentManifestBindOverrides {
             default_cwd: Some("workspace".to_string()),
-            ..AgentManifestBindOverrides::default()
+            ..crate::AgentManifestBindOverrides::default()
         }),
-        ..ThreadStartParams::default()
+        ..crate::adapters::app_server::connection::ThreadStartParams::default()
     };
     assert_eq!(
-        thread_start_default_agent_ref(&params),
-        Some(default_manifest::DEFAULT_AGENT_REF)
+        crate::adapters::app_server::connection::thread_start_default_agent_ref(&params),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     );
 }
 
 #[tokio::test]
 async fn ref_less_thread_start_binds_default_manifest() {
-    use crate::EventStore;
-
     let root = unique_test_root("app-server-default-manifest-start");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let agent_registry_root = root.join("agents");
-    let registry = LocalAgentRegistry::new(&agent_registry_root);
+    let registry = crate::LocalAgentRegistry::new(&agent_registry_root);
     assert!(registry.list_records().unwrap().is_empty());
 
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-default-manifest-start-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-default-manifest-start-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
     let metadata_path = config.metadata_store_path();
     let session_path = config.state_home.join("session_history.sqlite3");
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let default_record = registry
-        .load_ref(default_manifest::DEFAULT_AGENT_REF)
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
     assert_eq!(default_record.name, "default");
     assert_eq!(default_record.namespace.as_deref(), Some("verlet"));
@@ -2428,50 +2809,64 @@ async fn ref_less_thread_start_binds_default_manifest() {
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "cwd": "override-workspace"
             })),
         )
         .await
         .unwrap();
-    let thread_id = ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap()).unwrap();
+    let thread_id =
+        crate::ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap()).unwrap();
     assert_eq!(
         thread_start["cwd"].as_str(),
-        Some(cwd_string(&workspace.join("override-workspace")).as_str())
+        Some(
+            crate::adapters::app_server::connection::cwd_string(
+                &workspace.join("override-workspace")
+            )
+            .as_str()
+        )
     );
 
-    let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
+    let metadata_store = crate::SqliteMetadataStore::open(metadata_path)
+        .await
+        .unwrap();
     let lifecycle = metadata_store
         .get_thread_lifecycle(thread_id)
         .await
         .unwrap()
         .expect("default manifest start should persist lifecycle metadata");
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_REF_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_REF_METADATA],
         default_record.ref_uri
     );
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_MANIFEST_HASH_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA],
         default_record.manifest_hash
     );
     assert_eq!(
-        serde_json::from_str::<AgentManifestBindOverrides>(
-            &lifecycle.metadata[THREAD_AGENT_RUNTIME_OVERRIDES_METADATA]
+        serde_json::from_str::<crate::AgentManifestBindOverrides>(
+            &lifecycle.metadata
+                [crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA]
         )
         .unwrap()
         .default_cwd
         .as_deref(),
-        Some(cwd_string(&workspace.join("override-workspace")).as_str())
+        Some(
+            crate::adapters::app_server::connection::cwd_string(
+                &workspace.join("override-workspace")
+            )
+            .as_str()
+        )
     );
 
-    let session_store = SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
+    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 4);
     let compile = event_by_kind(&events, crate::EventKind::ManifestCompileCompleted);
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
-    assert_eq!(compile.origin, EventOrigin::Discharged);
-    assert_eq!(bind.origin, EventOrigin::Discharged);
+    assert_eq!(compile.origin, crate::EventOrigin::Discharged);
+    assert_eq!(bind.origin, crate::EventOrigin::Discharged);
     assert_eq!(compile.payload["alias"]["alias"].as_str(), Some("latest"));
     assert_eq!(
         compile.payload["alias"]["manifest_hash"].as_str(),
@@ -2483,14 +2878,14 @@ async fn ref_less_thread_start_binds_default_manifest() {
     );
     assert_eq!(
         bind.payload["overridden_keys"].as_array().unwrap(),
-        &vec![json!("default_cwd")]
+        &vec![serde_json::json!("default_cwd")]
     );
 
     let rejected = app
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "runtimeOverrides": {
                     "streaming": false
                 }
@@ -2508,29 +2903,29 @@ async fn ref_less_thread_start_binds_default_manifest() {
 
 #[tokio::test]
 async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_once() {
-    use crate::EventStore;
-
     let root = unique_test_root("app-server-placement-override");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-placement-override-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-placement-override-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    config.default_placement = AgentManifestPlacementBinding {
+    config.default_placement = crate::AgentManifestPlacementBinding {
         target: crate::PlacementTarget::Sandbox,
         executor_ref: Some("executor://sandbox/default".to_string()),
-        config: BTreeMap::new(),
+        config: std::collections::BTreeMap::new(),
     };
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let rejected = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap_err();
     assert!(rejected.message.contains("remote EventStore backend"));
@@ -2539,11 +2934,11 @@ async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_on
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({"placement": {"target": "local"}})),
+            Some(serde_json::json!({"placement": {"target": "local"}})),
         )
         .await
         .unwrap();
-    let thread_id = ThreadId::parse_str(started["thread"]["id"].as_str().unwrap()).unwrap();
+    let thread_id = crate::ThreadId::parse_str(started["thread"]["id"].as_str().unwrap()).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -2551,21 +2946,24 @@ async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_on
         .await
         .unwrap()
         .unwrap();
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
     let events = session_store
-        .read_events(&EventStreamId::for_thread(&lifecycle.coordinates), None)
+        .read_events(
+            &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+            None,
+        )
         .await
         .unwrap();
-    let bind = event_by_kind(&events, EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(bind.payload["placement"]["target"], "local");
     let placement_events = events
         .iter()
-        .filter(|event| event.kind == EventKind::PlacementDecision)
+        .filter(|event| event.kind == crate::EventKind::PlacementDecision)
         .collect::<Vec<_>>();
     assert_eq!(placement_events.len(), 1);
-    assert_eq!(placement_events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(placement_events[0].origin, crate::EventOrigin::Witnessed);
     assert_eq!(placement_events[0].payload["placement"], "local");
     assert_eq!(
         placement_events[0].payload["snapshot_id"],
@@ -2577,32 +2975,33 @@ async fn thread_start_placement_override_wins_daemon_default_and_is_witnessed_on
 
 #[tokio::test]
 async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_once() {
-    use crate::EventStore;
-
     let root = unique_test_root("app-server-spawn-placement-override");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-spawn-placement-override-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-spawn-placement-override-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    config.default_placement = AgentManifestPlacementBinding {
+    config.default_placement = crate::AgentManifestPlacementBinding {
         target: crate::PlacementTarget::Sandbox,
         executor_ref: Some("executor://sandbox/default".to_string()),
-        config: BTreeMap::new(),
+        config: std::collections::BTreeMap::new(),
     };
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let started = app
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({"placement": {"target": "local"}})),
+            Some(serde_json::json!({"placement": {"target": "local"}})),
         )
         .await
         .unwrap();
@@ -2612,7 +3011,7 @@ async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_onc
         .dispatch_request(
             &connection,
             "thread/spawn",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": parent_thread_id,
                 "taskName": "worker",
                 "message": "placement without a manifest bind",
@@ -2631,17 +3030,17 @@ async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_onc
         .dispatch_request(
             &connection,
             "thread/spawn",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": parent_thread_id,
                 "taskName": "worker",
                 "message": "placement with a manifest bind",
-                "agentRef": default_manifest::DEFAULT_AGENT_REF,
+                "agentRef": crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
                 "placement": {"target": "local"}
             })),
         )
         .await
         .unwrap();
-    let child_id = ThreadId::parse_str(spawned["thread"]["id"].as_str().unwrap()).unwrap();
+    let child_id = crate::ThreadId::parse_str(spawned["thread"]["id"].as_str().unwrap()).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -2649,21 +3048,24 @@ async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_onc
         .await
         .unwrap()
         .unwrap();
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
     let events = session_store
-        .read_events(&EventStreamId::for_thread(&lifecycle.coordinates), None)
+        .read_events(
+            &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+            None,
+        )
         .await
         .unwrap();
-    let bind = event_by_kind(&events, EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(bind.payload["placement"]["target"], "local");
     let placement_events = events
         .iter()
-        .filter(|event| event.kind == EventKind::PlacementDecision)
+        .filter(|event| event.kind == crate::EventKind::PlacementDecision)
         .collect::<Vec<_>>();
     assert_eq!(placement_events.len(), 1);
-    assert_eq!(placement_events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(placement_events[0].origin, crate::EventOrigin::Witnessed);
     assert_eq!(placement_events[0].payload["placement"], "local");
     assert_eq!(
         placement_events[0].payload["snapshot_id"],
@@ -2675,8 +3077,6 @@ async fn thread_spawn_placement_requires_agent_ref_and_override_is_witnessed_onc
 
 #[tokio::test]
 async fn thread_start_model_param_selects_declared_manifest_profile() {
-    use crate::EventStore;
-
     let root = unique_test_root("app-server-manifest-profile-select");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -2710,25 +3110,25 @@ allow = ["default_cwd"]
 "#,
     )
     .unwrap();
-    let record = LocalAgentRegistry::new(&agent_registry_root)
+    let record = crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-profile-select-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace)
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-profile-select-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
         .with_catalog_openai_chat_completions("fixture", Some("fixture-large".to_string()));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
     metadata_store
         .upsert_provider(
-            LlmProviderRecord::new(
+            crate::LlmProviderRecord::new(
                 "fixture",
-                ProviderApi::OpenAIChatCompletions,
+                crate::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_model(crate::LlmProviderModelRecord::new("fixture-small"))
@@ -2736,27 +3136,28 @@ allow = ["default_cwd"]
         )
         .await
         .unwrap();
-    sync_catalog_provider_identity(&mut config, &metadata_store)
+    crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
     let session_path = config.state_home.join("session_history.sqlite3");
-    let runtime_config = AgentLoopConfig::new(
-        ProviderApi::OpenAIChatCompletions,
+    let runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIChatCompletions,
         "fixture",
         "fixture-large",
     );
-    let runtime_factory = runtime_factory_from_provider_parts(
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
-        Arc::new(InspectingCapsuleClient::default()),
-        CapsuleBindingsConfig::default(),
+        std::sync::Arc::new(InspectingCapsuleClient::default()),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     );
-    let app = VerletAppServer::with_runtime_factory_and_metadata_store(
-        config,
-        runtime_factory,
-        metadata_store,
-    )
-    .await
-    .unwrap();
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -2764,14 +3165,15 @@ allow = ["default_cwd"]
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://profiles@latest",
                 "model": "fixture-small"
             })),
         )
         .await
         .unwrap();
-    let thread_id = ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap()).unwrap();
+    let thread_id =
+        crate::ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap()).unwrap();
     assert_eq!(thread_start["model"].as_str(), Some("fixture-small"));
     assert_eq!(thread_start["modelProvider"].as_str(), Some("fixture"));
 
@@ -2783,20 +3185,20 @@ allow = ["default_cwd"]
         .unwrap()
         .expect("profile-selected start should persist lifecycle metadata");
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_MODEL_PROFILE_ID_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_MODEL_PROFILE_ID_METADATA],
         "small"
     );
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_MODEL_ID_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_MODEL_ID_METADATA],
         "fixture-small"
     );
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_PROVIDER_ID_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_PROVIDER_ID_METADATA],
         "fixture"
     );
 
-    let session_store = SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
+    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(
@@ -2814,7 +3216,7 @@ allow = ["default_cwd"]
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://profiles@latest",
                 "modelProvider": "fixture",
                 "model": "fixture-large"
@@ -2823,7 +3225,7 @@ allow = ["default_cwd"]
         .await
         .unwrap();
     let large_thread_id =
-        ThreadId::parse_str(large_start["thread"]["id"].as_str().unwrap()).unwrap();
+        crate::ThreadId::parse_str(large_start["thread"]["id"].as_str().unwrap()).unwrap();
     assert_eq!(large_start["model"].as_str(), Some("fixture-large"));
     let large_lifecycle = app
         .inner
@@ -2833,7 +3235,8 @@ allow = ["default_cwd"]
         .unwrap()
         .expect("provider/model selected start should persist lifecycle metadata");
     assert_eq!(
-        large_lifecycle.metadata[THREAD_AGENT_MODEL_PROFILE_ID_METADATA],
+        large_lifecycle.metadata
+            [crate::adapters::app_server::THREAD_AGENT_MODEL_PROFILE_ID_METADATA],
         "large"
     );
     let _ = std::fs::remove_dir_all(root);
@@ -2874,25 +3277,25 @@ allow = ["default_cwd"]
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-profile-reject-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace)
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-profile-reject-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
         .with_catalog_openai_chat_completions("fixture", Some("fixture-large".to_string()));
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
     metadata_store
         .upsert_provider(
-            LlmProviderRecord::new(
+            crate::LlmProviderRecord::new(
                 "fixture",
-                ProviderApi::OpenAIChatCompletions,
+                crate::ProviderApi::OpenAIChatCompletions,
                 "https://example.invalid/v1",
             )
             .with_model(crate::LlmProviderModelRecord::new("fixture-small"))
@@ -2900,26 +3303,27 @@ allow = ["default_cwd"]
         )
         .await
         .unwrap();
-    sync_catalog_provider_identity(&mut config, &metadata_store)
+    crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let runtime_config = AgentLoopConfig::new(
-        ProviderApi::OpenAIChatCompletions,
+    let runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIChatCompletions,
         "fixture",
         "fixture-large",
     );
-    let runtime_factory = runtime_factory_from_provider_parts(
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
-        Arc::new(InspectingCapsuleClient::default()),
-        CapsuleBindingsConfig::default(),
+        std::sync::Arc::new(InspectingCapsuleClient::default()),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     );
-    let app = VerletAppServer::with_runtime_factory_and_metadata_store(
-        config,
-        runtime_factory,
-        metadata_store,
-    )
-    .await
-    .unwrap();
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -2927,7 +3331,7 @@ allow = ["default_cwd"]
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://profiles@latest",
                 "model": "fixture-tiny"
             })),
@@ -2945,7 +3349,7 @@ allow = ["default_cwd"]
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://profiles@latest",
                 "model": "Fixture-Small"
             })),
@@ -2960,7 +3364,7 @@ allow = ["default_cwd"]
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://profiles@latest",
                 "modelProvider": "other"
             })),
@@ -2975,7 +3379,7 @@ allow = ["default_cwd"]
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://profiles@latest",
                 "modelProvider": "fixture"
             })),
@@ -3003,19 +3407,20 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
     std::fs::create_dir_all(&workspace).unwrap();
     let agent_registry_root = root.join("agents");
 
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-default-manifest-idem-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-default-manifest-idem-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
-    let _ = VerletAppServer::new_local(config.clone()).await.unwrap();
+    let _ = crate::adapters::app_server::VerletAppServer::new_local(config.clone())
+        .await
+        .unwrap();
 
-    let registry = LocalAgentRegistry::new(&agent_registry_root);
+    let registry = crate::LocalAgentRegistry::new(&agent_registry_root);
     let first = registry
-        .load_ref(default_manifest::DEFAULT_AGENT_REF)
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
     assert_eq!(first.version, "1.0.0");
     assert!(
@@ -3026,18 +3431,22 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
     );
     assert_eq!(default_agent_version_count(&agent_registry_root), 1);
 
-    let _ = VerletAppServer::new_local(config.clone()).await.unwrap();
+    let _ = crate::adapters::app_server::VerletAppServer::new_local(config.clone())
+        .await
+        .unwrap();
     let second = registry
-        .load_ref(default_manifest::DEFAULT_AGENT_REF)
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
     assert_eq!(second.version, "1.0.0");
     assert_eq!(second.manifest_hash, first.manifest_hash);
     assert_eq!(default_agent_version_count(&agent_registry_root), 1);
 
     config.model = "echo-v2".to_string();
-    let _ = VerletAppServer::new_local(config).await.unwrap();
+    let _ = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let third = registry
-        .load_ref(default_manifest::DEFAULT_AGENT_REF)
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
     assert_eq!(third.version, "1.0.1");
     assert_ne!(third.manifest_hash, first.manifest_hash);
@@ -3051,35 +3460,34 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
 
 #[tokio::test]
 async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
-    use crate::EventStore;
-
     let root = unique_test_root("app-server-default-thread-ops");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let operation_registry_root = root.join("operations");
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&operation_registry_root),
     )
     .await;
 
-    let operation_record = LocalOperationRegistry::new(&operation_registry_root)
-        .load_record(VERLET_THREADS_PACKAGE)
+    let operation_record = crate::LocalOperationRegistry::new(&operation_registry_root)
+        .load_record(crate::VERLET_THREADS_PACKAGE)
         .expect("startup should publish cooldis-threads");
     assert!(matches!(
         &operation_record.source,
-        PublishedOperationSource::Kernel { package } if package == VERLET_THREADS_PACKAGE
+        crate::PublishedOperationSource::Kernel { package } if package == crate::VERLET_THREADS_PACKAGE
     ));
     assert_eq!(
         operation_record
             .metadata
-            .get(OPERATION_METADATA_RUNTIME_KIND)
-            .and_then(Value::as_str),
-        Some(KERNEL_RUNTIME_KIND)
+            .get(crate::OPERATION_METADATA_RUNTIME_KIND)
+            .and_then(serde_json::Value::as_str),
+        Some(crate::KERNEL_RUNTIME_KIND)
     );
     let expected_operations = thread_operation_names();
     assert_eq!(
@@ -3091,19 +3499,19 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .collect::<Vec<_>>(),
         expected_operations
     );
-    let schedule_record = LocalOperationRegistry::new(&operation_registry_root)
-        .load_record(VERLET_SCHEDULE_PACKAGE)
+    let schedule_record = crate::LocalOperationRegistry::new(&operation_registry_root)
+        .load_record(crate::VERLET_SCHEDULE_PACKAGE)
         .expect("startup should publish cooldis-schedule");
     assert!(matches!(
         &schedule_record.source,
-        PublishedOperationSource::Kernel { package } if package == VERLET_SCHEDULE_PACKAGE
+        crate::PublishedOperationSource::Kernel { package } if package == crate::VERLET_SCHEDULE_PACKAGE
     ));
     assert_eq!(
         schedule_record
             .metadata
-            .get(OPERATION_METADATA_RUNTIME_KIND)
-            .and_then(Value::as_str),
-        Some(KERNEL_RUNTIME_KIND)
+            .get(crate::OPERATION_METADATA_RUNTIME_KIND)
+            .and_then(serde_json::Value::as_str),
+        Some(crate::KERNEL_RUNTIME_KIND)
     );
     assert_eq!(
         schedule_record
@@ -3113,31 +3521,31 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .map(|operation| operation.name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            MANDATE_START_OPERATION,
-            MANDATE_REVOKE_OPERATION,
-            MANDATE_LIST_OPERATION,
+            crate::MANDATE_START_OPERATION,
+            crate::MANDATE_REVOKE_OPERATION,
+            crate::MANDATE_LIST_OPERATION,
         ]
     );
     assert_eq!(
         schedule_record.capability_grants,
-        BTreeSet::from([
-            SCHEDULE_MANAGE_CAPABILITY.to_string(),
-            SCHEDULE_READ_CAPABILITY.to_string()
+        std::collections::BTreeSet::from([
+            crate::SCHEDULE_MANAGE_CAPABILITY.to_string(),
+            crate::SCHEDULE_READ_CAPABILITY.to_string()
         ])
     );
-    let process_record = LocalOperationRegistry::new(&operation_registry_root)
-        .load_record(VERLET_PROCESS_PACKAGE)
+    let process_record = crate::LocalOperationRegistry::new(&operation_registry_root)
+        .load_record(crate::VERLET_PROCESS_PACKAGE)
         .expect("startup should publish cooldis-process");
     assert!(matches!(
         &process_record.source,
-        PublishedOperationSource::Kernel { package } if package == VERLET_PROCESS_PACKAGE
+        crate::PublishedOperationSource::Kernel { package } if package == crate::VERLET_PROCESS_PACKAGE
     ));
     assert_eq!(
         process_record
             .metadata
-            .get(OPERATION_METADATA_RUNTIME_KIND)
-            .and_then(Value::as_str),
-        Some(KERNEL_RUNTIME_KIND)
+            .get(crate::OPERATION_METADATA_RUNTIME_KIND)
+            .and_then(serde_json::Value::as_str),
+        Some(crate::KERNEL_RUNTIME_KIND)
     );
     assert_eq!(
         process_record
@@ -3147,25 +3555,25 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .map(|operation| operation.name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            PROCESS_EXEC_OPERATION,
-            PROCESS_POLL_OPERATION,
-            PROCESS_WRITE_OPERATION,
-            PROCESS_TERMINATE_OPERATION,
+            crate::PROCESS_EXEC_OPERATION,
+            crate::PROCESS_POLL_OPERATION,
+            crate::PROCESS_WRITE_OPERATION,
+            crate::PROCESS_TERMINATE_OPERATION,
         ]
     );
-    let notify_record = LocalOperationRegistry::new(&operation_registry_root)
-        .load_record(VERLET_NOTIFY_PACKAGE)
+    let notify_record = crate::LocalOperationRegistry::new(&operation_registry_root)
+        .load_record(crate::VERLET_NOTIFY_PACKAGE)
         .expect("startup should publish cooldis-notify");
     assert!(matches!(
         &notify_record.source,
-        PublishedOperationSource::Kernel { package } if package == VERLET_NOTIFY_PACKAGE
+        crate::PublishedOperationSource::Kernel { package } if package == crate::VERLET_NOTIFY_PACKAGE
     ));
     assert_eq!(
         notify_record
             .metadata
-            .get(OPERATION_METADATA_RUNTIME_KIND)
-            .and_then(Value::as_str),
-        Some(KERNEL_RUNTIME_KIND)
+            .get(crate::OPERATION_METADATA_RUNTIME_KIND)
+            .and_then(serde_json::Value::as_str),
+        Some(crate::KERNEL_RUNTIME_KIND)
     );
     assert_eq!(
         notify_record
@@ -3174,19 +3582,22 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .iter()
             .map(|operation| operation.name.as_str())
             .collect::<Vec<_>>(),
-        vec![NOTIFY_PREVIEW_OPERATION, CHANNEL_EMIT_OPERATION]
+        vec![
+            crate::NOTIFY_PREVIEW_OPERATION,
+            crate::CHANNEL_EMIT_OPERATION
+        ]
     );
 
-    let agent = LocalAgentRegistry::new(root.join("agents"))
-        .load_ref(default_manifest::DEFAULT_AGENT_REF)
+    let agent = crate::LocalAgentRegistry::new(root.join("agents"))
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .expect("default manifest should publish");
     let tools = agent.resolved_manifest["tools"].as_array().unwrap();
     assert_eq!(tools.len(), expected_operations.len());
     assert!(tools.iter().all(|tool| {
         !tool["operation_ref"].as_str().is_some_and(|operation_ref| {
-            operation_ref.contains(VERLET_PROCESS_PACKAGE)
-                || operation_ref.contains(VERLET_NOTIFY_PACKAGE)
-                || operation_ref.contains(VERLET_SCHEDULE_PACKAGE)
+            operation_ref.contains(crate::VERLET_PROCESS_PACKAGE)
+                || operation_ref.contains(crate::VERLET_NOTIFY_PACKAGE)
+                || operation_ref.contains(crate::VERLET_SCHEDULE_PACKAGE)
         })
     }));
     for operation in expected_operations {
@@ -3199,7 +3610,8 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             row["operation_ref"].as_str(),
             Some(
                 format!(
-                    "op://{VERLET_THREADS_PACKAGE}/{operation}@sha256:{}",
+                    "op://{}/{operation}@sha256:{}",
+                    crate::VERLET_THREADS_PACKAGE,
                     operation_record.active_artifact_hash
                 )
                 .as_str()
@@ -3207,42 +3619,49 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
         );
         assert_eq!(
             json_array_string_set(&row["grants"]),
-            BTreeSet::from([thread_operation_capability(operation).to_string()])
+            std::collections::BTreeSet::from([thread_operation_capability(operation).to_string()])
         );
     }
 
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
+    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     let binding = &bind.payload["operation_bindings"][0];
-    assert_eq!(binding["name"].as_str(), Some(VERLET_THREADS_PACKAGE));
+    assert_eq!(
+        binding["name"].as_str(),
+        Some(crate::VERLET_THREADS_PACKAGE)
+    );
     assert!(
         bind.payload
             .get("operation_bindings")
-            .and_then(Value::as_array)
+            .and_then(serde_json::Value::as_array)
             .unwrap()
             .iter()
             .all(|binding| {
                 !matches!(
                     binding["name"].as_str(),
-                    Some(VERLET_PROCESS_PACKAGE | VERLET_NOTIFY_PACKAGE | VERLET_SCHEDULE_PACKAGE)
+                    Some(
+                        crate::VERLET_PROCESS_PACKAGE
+                            | crate::VERLET_NOTIFY_PACKAGE
+                            | crate::VERLET_SCHEDULE_PACKAGE
+                    )
                 )
             })
     );
@@ -3255,14 +3674,14 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
         thread_operation_names()
             .iter()
             .map(|operation| (*operation).to_string())
-            .collect::<BTreeSet<_>>()
+            .collect::<std::collections::BTreeSet<_>>()
     );
     assert_eq!(
         json_array_string_set(&binding["grants"]),
-        BTreeSet::from([
-            THREADS_CONTROL_CAPABILITY.to_string(),
-            THREADS_READ_CAPABILITY.to_string(),
-            THREADS_SPAWN_CAPABILITY.to_string()
+        std::collections::BTreeSet::from([
+            crate::THREADS_CONTROL_CAPABILITY.to_string(),
+            crate::THREADS_READ_CAPABILITY.to_string(),
+            crate::THREADS_SPAWN_CAPABILITY.to_string()
         ])
     );
     let direct_tools = binding["direct_tools"].as_array().unwrap();
@@ -3277,7 +3696,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "inspect thread tools", "text_elements": [] }],
         })),
@@ -3292,11 +3711,11 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .iter()
             .filter(|name| name.starts_with("thread_"))
             .cloned()
-            .collect::<BTreeSet<_>>(),
+            .collect::<std::collections::BTreeSet<_>>(),
         thread_operation_names()
             .iter()
             .map(|operation| (*operation).to_string())
-            .collect::<BTreeSet<_>>()
+            .collect::<std::collections::BTreeSet<_>>()
     );
     assert!(!names.iter().any(|name| name.starts_with("verlet_")));
     let _ = std::fs::remove_dir_all(root);
@@ -3333,17 +3752,18 @@ streaming = false
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&operation_registry_root),
     )
     .await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -3352,7 +3772,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://researcher@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://researcher@latest" })),
         )
         .await
         .unwrap();
@@ -3360,7 +3780,7 @@ streaming = false
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "inspect researcher tools", "text_elements": [] }],
         })),
@@ -3396,8 +3816,8 @@ description: Alpha description.
 Alpha body marker.
 "#,
     );
-    let skill_record = LocalSkillRegistry::new(&skill_registry_root)
-        .publish_directory(PublishSkillPackageRequest {
+    let skill_record = crate::LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(crate::PublishSkillPackageRequest {
             package_dir: package_dir.clone(),
             name: None,
         })
@@ -3428,43 +3848,47 @@ streaming = false
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
-    let client = Arc::new(SkillResourceClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-skill-resource-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let client = std::sync::Arc::new(SkillResourceClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-skill-resource-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     config.skill_registry_root = skill_registry_root.clone();
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
-        APP_SERVER_LOCAL_PROVIDER,
-        APP_SERVER_LOCAL_MODEL,
+    let mut runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
     runtime_config.max_tokens = 128;
-    let runtime_factory = runtime_factory_from_provider_parts_with_app_paths(
-        runtime_config,
-        provider_client,
-        config.capsule_bindings.clone(),
-        None,
-        &config,
-    );
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            config.capsule_bindings.clone(),
+            None,
+            &config,
+        );
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
-    let app = VerletAppServer::with_runtime_factory_and_metadata_store(
-        config,
-        runtime_factory,
-        metadata_store,
-    )
-    .await
-    .unwrap();
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
     let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -3472,7 +3896,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://skill-runner@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://skill-runner@latest" })),
         )
         .await
         .unwrap();
@@ -3482,8 +3906,8 @@ streaming = false
         "# Alpha\n\nChanged description.\n\nChanged body marker.\n",
     )
     .unwrap();
-    let changed_skill_record = LocalSkillRegistry::new(&skill_registry_root)
-        .publish_directory(PublishSkillPackageRequest {
+    let changed_skill_record = crate::LocalSkillRegistry::new(&skill_registry_root)
+        .publish_directory(crate::PublishSkillPackageRequest {
             package_dir,
             name: None,
         })
@@ -3492,7 +3916,7 @@ streaming = false
         changed_skill_record.active_artifact_hash,
         skill_record.active_artifact_hash
     );
-    let parsed_thread_id = ThreadId::parse_str(&thread_id).unwrap();
+    let parsed_thread_id = crate::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -3509,7 +3933,7 @@ streaming = false
     app.dispatch_request(
         &connection,
         "thread/resume",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "excludeTurns": true,
         })),
@@ -3517,10 +3941,11 @@ streaming = false
     .await
     .unwrap();
     let resumed_handle = app.handle_for_thread(&thread_id).await.unwrap();
-    let (_, resumed_bind_receipt) = active_manifest_receipt_payloads(&resumed_handle)
-        .await
-        .unwrap()
-        .expect("the resumed thread must retain a manifest bind witness");
+    let (_, resumed_bind_receipt) =
+        crate::adapters::app_server::threads::active_manifest_receipt_payloads(&resumed_handle)
+            .await
+            .unwrap()
+            .expect("the resumed thread must retain a manifest bind witness");
     assert_eq!(
         resumed_bind_receipt["skill_packages"][0]["artifact_hash"].as_str(),
         Some(skill_record.active_artifact_hash.as_str()),
@@ -3530,13 +3955,15 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/fork",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
     let fork_id = fork["thread"]["id"].as_str().unwrap();
     let fork_handle = app.handle_for_thread(fork_id).await.unwrap();
-    let fork_bindings = thread_manifest_skill_packages(fork_handle.context()).unwrap();
+    let fork_bindings =
+        crate::adapters::app_server::threads::thread_manifest_skill_packages(fork_handle.context())
+            .unwrap();
     assert_eq!(fork_bindings.len(), 1);
     assert_eq!(
         fork_bindings[0].artifact_hash, skill_record.active_artifact_hash,
@@ -3546,12 +3973,13 @@ streaming = false
         fork_handle
             .context()
             .metadata
-            .contains_key(THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+            .contains_key(crate::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
     );
-    let (_, fork_bind_receipt) = active_manifest_receipt_payloads(&fork_handle)
-        .await
-        .unwrap()
-        .expect("an ordinary fork must inherit the source manifest receipts");
+    let (_, fork_bind_receipt) =
+        crate::adapters::app_server::threads::active_manifest_receipt_payloads(&fork_handle)
+            .await
+            .unwrap()
+            .expect("an ordinary fork must inherit the source manifest receipts");
     assert_eq!(
         fork_bind_receipt["skill_packages"][0]["artifact_hash"].as_str(),
         Some(skill_record.active_artifact_hash.as_str())
@@ -3560,7 +3988,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "read skill body", "text_elements": [] }],
             })),
@@ -3585,7 +4013,7 @@ streaming = false
     );
     assert_eq!(segment["input"].as_str(), Some("karl_skills"));
     assert_eq!(segment["pinned"].as_bool(), Some(true));
-    assert_eq!(segment["budget_share"], Value::Null);
+    assert_eq!(segment["budget_share"], serde_json::Value::Null);
     assert_eq!(
         segment["ref_uri"].as_str(),
         Some(skill_record.ref_uri().as_str())
@@ -3600,7 +4028,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "kinds": ["manifest.bind.completed"],
             })),
@@ -3668,48 +4096,53 @@ streaming = false
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
-    let client = Arc::new(WorkspaceSkillDiscoveryClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-workspace-skill-discovery-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config = VerletAppServerConfig::local(listen, &app_cwd);
+    let client = std::sync::Arc::new(WorkspaceSkillDiscoveryClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-workspace-skill-discovery-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &app_cwd);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    config.default_workspace = Some(AgentManifestWorkspaceBinding {
+    config.default_workspace = Some(crate::AgentManifestWorkspaceBinding {
         host_path: host_workspace.clone(),
         mode: crate::AgentManifestWorkspaceMode::ReadWrite,
     });
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
-        APP_SERVER_LOCAL_PROVIDER,
-        APP_SERVER_LOCAL_MODEL,
+    let mut runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
     runtime_config.max_tokens = 128;
-    let runtime_factory = runtime_factory_from_provider_parts_with_app_paths(
-        runtime_config,
-        provider_client,
-        // lexicon-allow: capsule - existing app-server compatibility config field
-        config.capsule_bindings.clone(),
-        None,
-        &config,
-    );
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            // lexicon-allow: capsule - existing app-server compatibility config field
+            config.capsule_bindings.clone(),
+            None,
+            &config,
+        );
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
-    let app = VerletAppServer::with_runtime_factory_and_metadata_store(
-        config,
-        runtime_factory,
-        metadata_store,
-    )
-    .await
-    .unwrap();
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
     let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -3717,16 +4150,17 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://workspace-skill-runner@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://workspace-skill-runner@latest" })),
         )
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
     let initial_handle = app.handle_for_thread(&thread_id).await.unwrap();
-    let (_, initial_bind_receipt) = active_manifest_receipt_payloads(&initial_handle)
-        .await
-        .unwrap()
-        .expect("initial bind receipt");
+    let (_, initial_bind_receipt) =
+        crate::adapters::app_server::threads::active_manifest_receipt_payloads(&initial_handle)
+            .await
+            .unwrap()
+            .expect("initial bind receipt");
     let original_hash = initial_bind_receipt["skill_discovery"]["skills"][0]["content_sha256"]
         .as_str()
         .unwrap()
@@ -3745,7 +4179,7 @@ Changed discovery body marker.
 "#,
     )
     .unwrap();
-    let parsed_thread_id = ThreadId::parse_str(&thread_id).unwrap();
+    let parsed_thread_id = crate::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -3762,7 +4196,7 @@ Changed discovery body marker.
     app.dispatch_request(
         &connection,
         "thread/resume",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "excludeTurns": true,
         })),
@@ -3771,18 +4205,21 @@ Changed discovery body marker.
     .unwrap();
 
     let resumed_handle = app.handle_for_thread(&thread_id).await.unwrap();
-    let resumed_discovery = thread_manifest_skill_discovery(resumed_handle.context())
-        .unwrap()
-        .expect("resumed discovery metadata");
+    let resumed_discovery = crate::adapters::app_server::threads::thread_manifest_skill_discovery(
+        resumed_handle.context(),
+    )
+    .unwrap()
+    .expect("resumed discovery metadata");
     assert_eq!(resumed_discovery.skills[0].content_sha256, original_hash);
     assert_eq!(
         resumed_discovery.skills[0].description,
         "Original discovery description."
     );
-    let (_, resumed_bind_receipt) = active_manifest_receipt_payloads(&resumed_handle)
-        .await
-        .unwrap()
-        .expect("resumed bind receipt");
+    let (_, resumed_bind_receipt) =
+        crate::adapters::app_server::threads::active_manifest_receipt_payloads(&resumed_handle)
+            .await
+            .unwrap()
+            .expect("resumed bind receipt");
     assert_eq!(
         resumed_bind_receipt["skill_discovery"]["skills"][0]["content_sha256"].as_str(),
         Some(original_hash.as_str())
@@ -3795,7 +4232,7 @@ Changed discovery body marker.
             &resumed_handle.context().coordinates,
             None,
             Some("workspace-skill-explicit-fork".to_string()),
-            BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -3803,7 +4240,7 @@ Changed discovery body marker.
         .dispatch_request(
             &connection,
             "thread/fork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "checkpointId": checkpoint.id.to_string(),
             })),
@@ -3812,14 +4249,17 @@ Changed discovery body marker.
         .unwrap();
     let fork_id = fork["thread"]["id"].as_str().unwrap();
     let fork_handle = app.handle_for_thread(fork_id).await.unwrap();
-    let fork_discovery = thread_manifest_skill_discovery(fork_handle.context())
-        .unwrap()
-        .expect("fork discovery metadata");
+    let fork_discovery = crate::adapters::app_server::threads::thread_manifest_skill_discovery(
+        fork_handle.context(),
+    )
+    .unwrap()
+    .expect("fork discovery metadata");
     assert_eq!(fork_discovery.skills[0].content_sha256, original_hash);
-    let (_, fork_bind_receipt) = active_manifest_receipt_payloads(&fork_handle)
-        .await
-        .unwrap()
-        .expect("fork bind receipt");
+    let (_, fork_bind_receipt) =
+        crate::adapters::app_server::threads::active_manifest_receipt_payloads(&fork_handle)
+            .await
+            .unwrap()
+            .expect("fork bind receipt");
     assert_eq!(
         fork_bind_receipt["skill_discovery"]["skills"][0]["content_sha256"].as_str(),
         Some(original_hash.as_str())
@@ -3829,7 +4269,7 @@ Changed discovery body marker.
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "read the discovered skill", "text_elements": [] }],
             })),
@@ -3916,7 +4356,7 @@ budget_share = 0.75
         ),
     )
     .unwrap();
-    let record = LocalAgentRegistry::new(&agent_registry_root)
+    let record = crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
     let prompt_ref = record.resolved_manifest["resources"][0]["ref"]
@@ -3927,40 +4367,46 @@ budget_share = 0.75
         .unwrap();
     let expected_prompt_digest = format!("sha256:{prompt_hash}");
 
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-prompt-resource-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace).with_capsule_bindings(
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
-    );
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-prompt-resource-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+        .with_capsule_bindings(
+            crate::adapters::app_server::CapsuleBindingsConfig::default()
+                .with_registry_root(&operation_registry_root),
+        );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     config.blob_registry_root = blob_registry_root;
-    let runtime_config = AgentLoopConfig::new(
-        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
-        APP_SERVER_LOCAL_PROVIDER,
-        APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
-    let runtime_factory = runtime_factory_from_provider_parts_with_app_paths(
-        runtime_config,
-        provider_client,
-        config.capsule_bindings.clone(),
-        None,
-        &config,
-    );
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            config.capsule_bindings.clone(),
+            None,
+            &config,
+        );
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
-    let app = VerletAppServer::with_runtime_factory_and_metadata_store(
-        config,
-        runtime_factory,
-        metadata_store,
-    )
-    .await
-    .unwrap();
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
     let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -3968,7 +4414,7 @@ budget_share = 0.75
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://prompt-runner@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://prompt-runner@latest" })),
         )
         .await
         .unwrap();
@@ -3977,7 +4423,7 @@ budget_share = 0.75
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "hello", "text_elements": [] }],
             })),
@@ -4016,7 +4462,7 @@ budget_share = 0.75
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "kinds": ["manifest.bind.completed"],
             })),
@@ -4080,17 +4526,18 @@ streaming = false
         ),
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client;
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
     let app = test_app_with_provider_root(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&operation_registry_root),
     )
     .await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -4099,7 +4546,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://blocked-spawn@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://blocked-spawn@latest" })),
         )
         .await
         .unwrap_err();
@@ -4147,11 +4594,12 @@ grants = ["{}"]
 default_cwd = "."
 streaming = false
 "#,
-            operation_record.active_artifact_hash, SCHEDULE_MANAGE_CAPABILITY
+            operation_record.active_artifact_hash,
+            crate::SCHEDULE_MANAGE_CAPABILITY
         ),
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
@@ -4186,7 +4634,7 @@ streaming = false
         ),
     )
     .unwrap();
-    let err = LocalAgentRegistry::new(&agent_registry_root)
+    let err = crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(
             &no_grant_manifest_path,
             &operation_registry_root,
@@ -4195,13 +4643,14 @@ streaming = false
     assert!(err.to_string().contains("requires grants"));
     assert!(err.to_string().contains("mandate_start:schedule.manage"));
 
-    let client = Arc::new(ScheduleMandateStartClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(ScheduleMandateStartClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&operation_registry_root),
     )
     .await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -4211,7 +4660,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://scheduler@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://scheduler@latest" })),
         )
         .await
         .unwrap();
@@ -4219,7 +4668,7 @@ streaming = false
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "remind me in a minute", "text_elements": [] }],
         })),
@@ -4232,7 +4681,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "mandate/list",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
@@ -4240,7 +4689,7 @@ streaming = false
     assert_eq!(mandates.len(), 1);
     assert_eq!(
         mandates[0]["schedule"],
-        json!({ "interval": { "every_ms": 60_000 } })
+        serde_json::json!({ "interval": { "every_ms": 60_000 } })
     );
     assert_eq!(
         mandates[0]["inputTemplate"].as_str(),
@@ -4278,57 +4727,62 @@ max_tool_rounds = 64
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&worker_manifest_path)
         .unwrap();
 
-    let client = Arc::new(ThreadSpawnAgentRefClient::new("agent://worker@latest"));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-thread-spawn-agent-ref-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config = VerletAppServerConfig::local(listen, &workspace).with_capsule_bindings(
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
-    );
+    let client = std::sync::Arc::new(ThreadSpawnAgentRefClient::new("agent://worker@latest"));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-thread-spawn-agent-ref-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+        .with_capsule_bindings(
+            crate::adapters::app_server::CapsuleBindingsConfig::default()
+                .with_registry_root(&operation_registry_root),
+        );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::Other("local_offline".to_string()),
+    let mut runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::Other("local_offline".to_string()),
         "local_offline",
         "echo",
     );
     runtime_config.max_tokens = 128;
     let metadata_path = config.metadata_store_path();
-    let runtime_factory = runtime_factory_from_provider_parts_with_app_paths(
-        runtime_config,
-        provider_client,
-        config.capsule_bindings.clone(),
-        None,
-        &config,
-    );
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            config.capsule_bindings.clone(),
+            None,
+            &config,
+        );
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
-    let app = VerletAppServer::with_runtime_factory_and_metadata_store(
-        config,
-        runtime_factory,
-        metadata_store,
-    )
-    .await
-    .unwrap();
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let root_thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": root_thread_id,
             "input": [{ "type": "text", "text": "spawn worker with manifest", "text_elements": [] }],
         })),
@@ -4337,7 +4791,7 @@ max_tool_rounds = 64
     .unwrap();
 
     wait_for_provider_requests(&client, 3).await;
-    let root_id = ThreadId::parse_str(&root_thread_id).unwrap();
+    let root_id = crate::ThreadId::parse_str(&root_thread_id).unwrap();
     let list = app
         .dispatch_request(&connection, "thread/list", None)
         .await
@@ -4350,9 +4804,11 @@ max_tool_rounds = 64
         .expect("thread/list should expose the spawned child thread");
     let child_thread_id = child_thread["id"].as_str().unwrap().to_string();
 
-    let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
+    let metadata_store = crate::SqliteMetadataStore::open(metadata_path)
+        .await
+        .unwrap();
     let child_record = metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(&child_thread_id).unwrap())
+        .get_thread_lifecycle(crate::ThreadId::parse_str(&child_thread_id).unwrap())
         .await
         .unwrap()
         .expect("thread_spawn should persist child thread lifecycle metadata");
@@ -4360,21 +4816,21 @@ max_tool_rounds = 64
     assert_eq!(
         child_record
             .metadata
-            .get(THREAD_AGENT_REF_METADATA)
+            .get(crate::adapters::app_server::THREAD_AGENT_REF_METADATA)
             .map(String::as_str),
         Some("agent://worker@0.1.0")
     );
     assert_eq!(
         child_record
             .metadata
-            .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .get(crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA)
             .map(|hash| hash.starts_with("sha256:")),
         Some(true)
     );
     assert_eq!(
         child_record
             .metadata
-            .get(THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA)
+            .get(crate::adapters::app_server::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA)
             .map(String::as_str),
         Some("64")
     );
@@ -4383,7 +4839,7 @@ max_tool_rounds = 64
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({ "threadId": child_thread_id })),
+            Some(serde_json::json!({ "threadId": child_thread_id })),
         )
         .await
         .unwrap();
@@ -4399,7 +4855,7 @@ max_tool_rounds = 64
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": root_thread_id,
             "input": [{ "type": "text", "text": "cancel worker", "text_elements": [] }],
         })),
@@ -4407,7 +4863,7 @@ max_tool_rounds = 64
     .await
     .unwrap();
     wait_for_provider_requests(&client, 5).await;
-    let child_id = ThreadId::parse_str(&child_thread_id).unwrap();
+    let child_id = crate::ThreadId::parse_str(&child_thread_id).unwrap();
     let stopped_child_record = wait_for_lifecycle_status(
         &metadata_store,
         child_id,
@@ -4425,37 +4881,48 @@ async fn default_manifest_publish_recovers_partial_version_without_latest() {
     std::fs::create_dir_all(&workspace).unwrap();
     let agent_registry_root = root.join("agents");
 
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-default-manifest-partial-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-default-manifest-partial-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
-    default_manifest::ensure_default_manifest_published(&config, false).unwrap();
+    crate::adapters::app_server::default_manifest::ensure_default_manifest_published(
+        &config, false,
+    )
+    .unwrap();
 
-    let registry = LocalAgentRegistry::new(&agent_registry_root);
+    let registry = crate::LocalAgentRegistry::new(&agent_registry_root);
     std::fs::remove_file(
         registry
-            .alias_record_path(default_manifest::DEFAULT_AGENT_NAME, "latest")
+            .alias_record_path(
+                crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAME,
+                "latest",
+            )
             .unwrap(),
     )
     .unwrap();
     std::fs::remove_file(
         registry
-            .record_path(default_manifest::DEFAULT_AGENT_NAME)
+            .record_path(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAME)
             .unwrap(),
     )
     .unwrap();
 
     config.model = "echo-v2".to_string();
-    let recovered = default_manifest::ensure_default_manifest_published(&config, false).unwrap();
+    let recovered =
+        crate::adapters::app_server::default_manifest::ensure_default_manifest_published(
+            &config, false,
+        )
+        .unwrap();
 
     assert_eq!(recovered.version, "1.0.1");
     assert_eq!(default_agent_version_count(&agent_registry_root), 2);
     let latest = registry
-        .load_ref(default_manifest::DEFAULT_AGENT_REF)
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
     assert_eq!(latest.version, "1.0.1");
     assert_eq!(
@@ -4475,11 +4942,14 @@ fn default_manifest_publish_serializes_concurrent_startup() {
     let mut handles = Vec::new();
 
     for model in ["echo-a", "echo-b"] {
-        let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-            "verlet-default-manifest-concurrent-{}.sock",
-            Uuid::now_v7()
-        )));
-        let mut config = VerletAppServerConfig::local(listen, &workspace);
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+            std::env::temp_dir().join(format!(
+                "verlet-default-manifest-concurrent-{}.sock",
+                uuid::Uuid::now_v7()
+            )),
+        );
+        let mut config =
+            crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.agent_registry_root = agent_registry_root.clone();
@@ -4487,7 +4957,9 @@ fn default_manifest_publish_serializes_concurrent_startup() {
         let barrier = std::sync::Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            default_manifest::ensure_default_manifest_published(&config, false)
+            crate::adapters::app_server::default_manifest::ensure_default_manifest_published(
+                &config, false,
+            )
         }));
     }
 
@@ -4498,12 +4970,15 @@ fn default_manifest_publish_serializes_concurrent_startup() {
     let versions = records
         .iter()
         .map(|record| record.version.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(versions, BTreeSet::from(["1.0.0", "1.0.1"]));
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        versions,
+        std::collections::BTreeSet::from(["1.0.0", "1.0.1"])
+    );
 
-    let registry = LocalAgentRegistry::new(&agent_registry_root);
+    let registry = crate::LocalAgentRegistry::new(&agent_registry_root);
     let latest = registry
-        .load_ref(default_manifest::DEFAULT_AGENT_REF)
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
     assert_eq!(latest.version, "1.0.1");
     assert_eq!(default_agent_version_count(&agent_registry_root), 2);
@@ -4521,27 +4996,32 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
     let first_record;
 
     {
-        let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-            "verlet-default-manifest-restore-a-{}.sock",
-            Uuid::now_v7()
-        )));
-        let mut config = VerletAppServerConfig::local(listen, &workspace);
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+            std::env::temp_dir().join(format!(
+                "verlet-default-manifest-restore-a-{}.sock",
+                uuid::Uuid::now_v7()
+            )),
+        );
+        let mut config =
+            crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.agent_registry_root = agent_registry_root.clone();
         config.model = "echo-v1".to_string();
         metadata_path = config.metadata_store_path();
-        let app = VerletAppServer::new_local(config).await.unwrap();
+        let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+            .await
+            .unwrap();
         let (connection, _outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread_start = app
-            .dispatch_request(&connection, "thread/start", Some(json!({})))
+            .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
             .await
             .unwrap();
         thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-        first_record = LocalAgentRegistry::new(&agent_registry_root)
-            .load_ref(default_manifest::DEFAULT_AGENT_REF)
+        first_record = crate::LocalAgentRegistry::new(&agent_registry_root)
+            .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
             .unwrap();
         assert_eq!(first_record.version, "1.0.0");
         assert_eq!(
@@ -4550,21 +5030,25 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
         );
     }
 
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-default-manifest-restore-b-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut restarted_config = VerletAppServerConfig::local(listen, &workspace);
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-default-manifest-restore-b-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut restarted_config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     restarted_config.runtime_home = root.join("runtime");
     restarted_config.state_home = root.join("state");
     restarted_config.agent_registry_root = agent_registry_root.clone();
     restarted_config.model = "echo-v2".to_string();
-    let restarted = VerletAppServer::new_local(restarted_config).await.unwrap();
+    let restarted = crate::adapters::app_server::VerletAppServer::new_local(restarted_config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&connection).await;
 
-    let latest = LocalAgentRegistry::new(&agent_registry_root)
-        .load_ref(default_manifest::DEFAULT_AGENT_REF)
+    let latest = crate::LocalAgentRegistry::new(&agent_registry_root)
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
     assert_eq!(latest.version, "1.0.1");
     assert_eq!(
@@ -4576,7 +5060,7 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
         .dispatch_request(
             &connection,
             "thread/resume",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "excludeTurns": true,
             })),
@@ -4585,8 +5069,8 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
         .unwrap();
     assert_eq!(resume["thread"]["id"].as_str(), Some(thread_id.as_str()));
 
-    let parsed = ThreadId::parse_str(&thread_id).unwrap();
-    let lifecycle = SqliteMetadataStore::open(metadata_path)
+    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let lifecycle = crate::SqliteMetadataStore::open(metadata_path)
         .await
         .unwrap()
         .get_thread_lifecycle(parsed)
@@ -4594,15 +5078,15 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_REF_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_REF_METADATA],
         first_record.ref_uri
     );
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_MANIFEST_HASH_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA],
         first_record.manifest_hash
     );
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_MODEL_ID_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_MODEL_ID_METADATA],
         "echo-v1"
     );
     let _ = std::fs::remove_dir_all(root);
@@ -4618,47 +5102,56 @@ async fn app_server_startup_skips_stale_manifest_threads() {
     let thread_id;
 
     {
-        let listen = AppServerListenAddr::Unix(
-            std::env::temp_dir().join(format!("verlet-stale-manifest-a-{}.sock", Uuid::now_v7())),
-        );
-        let mut config = VerletAppServerConfig::local(listen, &workspace);
+        let listen =
+            crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+                format!("verlet-stale-manifest-a-{}.sock", uuid::Uuid::now_v7()),
+            ));
+        let mut config =
+            crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.agent_registry_root = agent_registry_root.clone();
         metadata_path = config.metadata_store_path();
-        let app = VerletAppServer::new_local(config).await.unwrap();
+        let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+            .await
+            .unwrap();
         let (connection, _outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread_start = app
-            .dispatch_request(&connection, "thread/start", Some(json!({})))
+            .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
             .await
             .unwrap();
         thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
     }
 
-    let parsed = ThreadId::parse_str(&thread_id).unwrap();
-    let store = SqliteMetadataStore::open(&metadata_path).await.unwrap();
+    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
+    let store = crate::SqliteMetadataStore::open(&metadata_path)
+        .await
+        .unwrap();
     let mut lifecycle = store
         .get_thread_lifecycle(parsed)
         .await
         .unwrap()
         .expect("thread/start should persist lifecycle metadata");
     lifecycle.metadata.insert(
-        THREAD_AGENT_MANIFEST_HASH_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA.to_string(),
         "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
     );
     store.upsert_thread_lifecycle(lifecycle).await.unwrap();
     drop(store);
 
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-stale-manifest-b-{}.sock", Uuid::now_v7())),
-    );
-    let mut restarted_config = VerletAppServerConfig::local(listen, &workspace);
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-stale-manifest-b-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut restarted_config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     restarted_config.runtime_home = root.join("runtime");
     restarted_config.state_home = root.join("state");
     restarted_config.agent_registry_root = agent_registry_root.clone();
-    let restarted = VerletAppServer::new_local(restarted_config).await.unwrap();
+    let restarted = crate::adapters::app_server::VerletAppServer::new_local(restarted_config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -4666,7 +5159,7 @@ async fn app_server_startup_skips_stale_manifest_threads() {
         .dispatch_request(
             &connection,
             "thread/resume",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "excludeTurns": true,
             })),
@@ -4683,11 +5176,9 @@ async fn app_server_startup_skips_stale_manifest_threads() {
 
 #[tokio::test]
 async fn thread_start_with_agent_ref_records_manifest_receipts_before_turns() {
-    use crate::EventStore;
-
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-manifest-start-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-manifest-start-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-manifest-start");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -4716,17 +5207,19 @@ allow = ["streaming"]
 "#,
     )
     .unwrap();
-    let record = LocalAgentRegistry::new(&agent_registry_root)
+    let record = crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let metadata_path = config.metadata_store_path();
     let session_path = config.state_home.join("session_history.sqlite3");
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -4734,7 +5227,7 @@ allow = ["streaming"]
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://local-runner@latest",
                 "runtimeOverrides": {
                     "streaming": false
@@ -4743,30 +5236,38 @@ allow = ["streaming"]
         )
         .await
         .unwrap();
-    let thread_id = ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap())
+    let thread_id = crate::ThreadId::parse_str(thread_start["thread"]["id"].as_str().unwrap())
         .expect("thread/start should return a thread id");
-    assert_eq!(thread_start["model"].as_str(), Some(APP_SERVER_LOCAL_MODEL));
+    assert_eq!(
+        thread_start["model"].as_str(),
+        Some(crate::adapters::app_server::APP_SERVER_LOCAL_MODEL)
+    );
     assert_eq!(
         thread_start["modelProvider"].as_str(),
-        Some(APP_SERVER_LOCAL_PROVIDER)
+        Some(crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER)
     );
     assert_eq!(
         thread_start["cwd"].as_str(),
-        Some(cwd_string(&workspace.join("agent-workspace")).as_str())
+        Some(
+            crate::adapters::app_server::connection::cwd_string(&workspace.join("agent-workspace"))
+                .as_str()
+        )
     );
 
-    let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
+    let metadata_store = crate::SqliteMetadataStore::open(metadata_path)
+        .await
+        .unwrap();
     let lifecycle = metadata_store
         .get_thread_lifecycle(thread_id)
         .await
         .unwrap()
         .expect("manifest start should persist lifecycle metadata");
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_REF_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_REF_METADATA],
         record.ref_uri
     );
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_MANIFEST_HASH_METADATA],
+        lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA],
         record.manifest_hash
     );
 
@@ -4798,7 +5299,7 @@ allow = ["streaming"]
     );
     assert_eq!(
         bind.payload["overridden_keys"].as_array().unwrap(),
-        &vec![json!("streaming")]
+        &vec![serde_json::json!("streaming")]
     );
     assert_eq!(bind.payload["placement"]["target"], "local");
     let placement_events = events
@@ -4820,33 +5321,39 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
     let app = test_app().await;
     let bound = app
         .bind_app_server_agent_ref(
-            default_manifest::DEFAULT_AGENT_REF,
-            &AgentManifestModelProfileSelection::default(),
-            &AgentManifestBindOverrides::default(),
+            crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
+            &crate::AgentManifestModelProfileSelection::default(),
+            &crate::AgentManifestBindOverrides::default(),
             None,
             None,
         )
         .await
         .unwrap();
-    let mut metadata = BTreeMap::new();
-    append_bound_agent_metadata(&mut metadata, &bound, None, None).unwrap();
+    let mut metadata = std::collections::BTreeMap::new();
+    crate::adapters::app_server::threads::append_bound_agent_metadata(
+        &mut metadata,
+        &bound,
+        None,
+        None,
+    )
+    .unwrap();
     let handle = app
         .inner
         .supervisor
-        .start_thread(ThreadStartRequest {
+        .start_thread(crate::ThreadStartRequest {
             tenant_id: app.inner.tenant_id.clone(),
             user_id: app.inner.user_id.clone(),
             session_id: "manifest-lifecycle-cancel".to_string(),
-            topology: ThreadTopology::root(),
+            topology: crate::ThreadTopology::root(),
             metadata,
         })
         .await
         .unwrap();
-    wait_for_initial_thread_status(&handle).await;
+    crate::adapters::app_server::subscriptions::wait_for_initial_thread_status(&handle).await;
     let thread_id = handle.context().coordinates.thread_id;
     let observer = handle.clone();
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let caller_app = app.clone();
     let operation_app = app.clone();
     let operation_entered = entered.clone();
@@ -4856,9 +5363,13 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
             .witness_and_persist_lifecycle(handle, move |handle| async move {
                 operation_entered.notify_one();
                 operation_release.notified().await;
-                record_bound_agent_receipts(&handle, &bound).await?;
+                crate::adapters::app_server::threads::record_bound_agent_receipts(&handle, &bound)
+                    .await?;
                 operation_app
-                    .persist_thread_lifecycle_record_with_metadata(&handle, BTreeMap::new())
+                    .persist_thread_lifecycle_record_with_metadata(
+                        &handle,
+                        std::collections::BTreeMap::new(),
+                    )
                     .await?;
                 Ok(())
             })
@@ -4877,7 +5388,7 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
                 .await
                 .unwrap()
                 .iter()
-                .any(|event| event.kind == EventKind::ManifestBindCompleted);
+                .any(|event| event.kind == crate::EventKind::ManifestBindCompleted);
             let has_lifecycle = app
                 .inner
                 .metadata_store
@@ -4896,7 +5407,7 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
 }
 
 struct StartingOnlyRuntimeFactory {
-    started: Arc<tokio::sync::Notify>,
+    started: std::sync::Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait]
@@ -4912,7 +5423,7 @@ impl crate::AgentRuntimeFactory for StartingOnlyRuntimeFactory {
 }
 
 struct StartingOnlyRuntime {
-    started: Arc<tokio::sync::Notify>,
+    started: std::sync::Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait]
@@ -4921,7 +5432,7 @@ impl crate::AgentRuntime for StartingOnlyRuntime {
         self: Box<Self>,
         context: crate::ThreadContext,
         _services: crate::RuntimeServices,
-        mut commands: mpsc::Receiver<crate::ThreadCommand>,
+        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
         events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
         _status: tokio::sync::watch::Sender<crate::ThreadStatus>,
         cancellation: tokio_util::sync::CancellationToken,
@@ -4968,23 +5479,23 @@ streaming = false
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
-    let listen = AppServerListenAddr::Unix(root.join("app.sock"));
-    let mut config = VerletAppServerConfig::local(listen, &app_cwd);
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(root.join("app.sock"));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &app_cwd);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    config.default_workspace = Some(AgentManifestWorkspaceBinding {
+    config.default_workspace = Some(crate::AgentManifestWorkspaceBinding {
         host_path: host_workspace,
         mode: crate::AgentManifestWorkspaceMode::ReadWrite,
     });
-    let started = Arc::new(tokio::sync::Notify::new());
-    let app = VerletAppServer::with_runtime_factory(
+    let started = std::sync::Arc::new(tokio::sync::Notify::new());
+    let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
         config,
-        Arc::new(StartingOnlyRuntimeFactory {
+        std::sync::Arc::new(StartingOnlyRuntimeFactory {
             started: started.clone(),
         }),
     )
@@ -5000,7 +5511,7 @@ streaming = false
             .dispatch_request(
                 &caller_connection,
                 "thread/start",
-                Some(json!({"agentRef": "agent://starting-workspace@latest"})),
+                Some(serde_json::json!({"agentRef": "agent://starting-workspace@latest"})),
             )
             .await
     });
@@ -5018,7 +5529,7 @@ streaming = false
                 .find(|record| {
                     record
                         .metadata
-                        .contains_key(THREAD_AGENT_WORKSPACE_METADATA)
+                        .contains_key(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
                 })
             {
                 break record.coordinates.clone();
@@ -5042,7 +5553,7 @@ streaming = false
                 .unwrap()
                 .iter()
                 .any(|event| {
-                    event.kind == EventKind::ManifestBindCompleted
+                    event.kind == crate::EventKind::ManifestBindCompleted
                         && event.payload["workspace"].is_object()
                 })
             {
@@ -5071,7 +5582,7 @@ streaming = false
                 .is_some_and(|record| {
                     record
                         .metadata
-                        .contains_key(THREAD_AGENT_WORKSPACE_METADATA)
+                        .contains_key(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
                 })
             {
                 break;
@@ -5108,10 +5619,10 @@ server_ref = "mcp://arcade"
     );
     let (mcp_url, mcp_task) = spawn_app_mcp_http_fixture("string").await;
     let app = app_server_with_tool_client(&root, &workspace, &agent_registry_root, {
-        Arc::new(UniverseCallingClient::default())
+        std::sync::Arc::new(UniverseCallingClient::default())
     })
     .await;
-    SqliteMcpSourceRegistry::open_async(&app.inner.metadata_store_path)
+    crate::SqliteMcpSourceRegistry::open_async(&app.inner.metadata_store_path)
         .await
         .unwrap()
         .upsert_source_async(
@@ -5131,12 +5642,12 @@ server_ref = "mcp://arcade"
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://mcp-runner@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://mcp-runner@latest" })),
         )
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let parsed = ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -5147,13 +5658,13 @@ server_ref = "mcp://arcade"
     assert!(
         lifecycle
             .metadata
-            .contains_key(THREAD_AGENT_TOOL_UNIVERSES_METADATA)
+            .contains_key(crate::adapters::app_server::THREAD_AGENT_TOOL_UNIVERSES_METADATA)
     );
 
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "use the universe", "text_elements": [] }],
         })),
@@ -5229,10 +5740,10 @@ pin = "mcptool://arcade/verlet_mcp_echo@{schema_hash}"
     );
     let (mcp_url, mcp_task) = spawn_app_mcp_http_fixture("string").await;
     let app = app_server_with_tool_client(&root, &workspace, &agent_registry_root, {
-        Arc::new(PinnedDirectCallingClient::default())
+        std::sync::Arc::new(PinnedDirectCallingClient::default())
     })
     .await;
-    SqliteMcpSourceRegistry::open_async(&app.inner.metadata_store_path)
+    crate::SqliteMcpSourceRegistry::open_async(&app.inner.metadata_store_path)
         .await
         .unwrap()
         .upsert_source_async(
@@ -5252,7 +5763,7 @@ pin = "mcptool://arcade/verlet_mcp_echo@{schema_hash}"
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://mcp-pinned@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://mcp-pinned@latest" })),
         )
         .await
         .unwrap();
@@ -5260,7 +5771,7 @@ pin = "mcptool://arcade/verlet_mcp_echo@{schema_hash}"
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "use the pinned row", "text_elements": [] }],
         })),
@@ -5290,8 +5801,6 @@ pin = "mcptool://arcade/verlet_mcp_echo@{schema_hash}"
 
 #[tokio::test]
 async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped() {
-    use crate::EventStore;
-
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
@@ -5301,7 +5810,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         .dispatch_request(
             &connection,
             "stream/append",
-            Some(json!({
+            Some(serde_json::json!({
                 "stream": atomic_stream,
                 "records": [
                     {
@@ -5324,7 +5833,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         .dispatch_request(
             &connection,
             "stream/read",
-            Some(json!({"stream": atomic_stream})),
+            Some(serde_json::json!({"stream": atomic_stream})),
         )
         .await
         .unwrap();
@@ -5335,7 +5844,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         .dispatch_request(
             &connection,
             "stream/append",
-            Some(json!({
+            Some(serde_json::json!({
                 "stream": stream,
                 "expectedSequence": 1,
                 "records": [
@@ -5362,7 +5871,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         .dispatch_request(
             &connection,
             "stream/read",
-            Some(json!({"stream": stream, "limit": 1})),
+            Some(serde_json::json!({"stream": stream, "limit": 1})),
         )
         .await
         .unwrap();
@@ -5375,7 +5884,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
     );
     assert_eq!(
         first_page["data"][0]["payload"],
-        json!({"agent": "agent://worker@1.0.0"})
+        serde_json::json!({"agent": "agent://worker@1.0.0"})
     );
     assert_eq!(
         first_page["data"][0]["principal_id"],
@@ -5388,7 +5897,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         .dispatch_request(
             &connection,
             "stream/read",
-            Some(json!({"stream": stream, "streamCursor": cursor, "limit": 1})),
+            Some(serde_json::json!({"stream": stream, "streamCursor": cursor, "limit": 1})),
         )
         .await
         .unwrap();
@@ -5398,7 +5907,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         .dispatch_request(
             &connection,
             "stream/read",
-            Some(json!({"stream": stream, "kinds": ["run.outcome_recorded"]})),
+            Some(serde_json::json!({"stream": stream, "kinds": ["run.outcome_recorded"]})),
         )
         .await
         .unwrap();
@@ -5409,7 +5918,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         .dispatch_request(
             &connection,
             "stream/append",
-            Some(json!({
+            Some(serde_json::json!({
                 "stream": stream,
                 "expectedSequence": 1,
                 "records": [{
@@ -5422,13 +5931,16 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         .await
         .unwrap_err();
     assert_eq!(conflict.code, -32004);
-    assert_eq!(conflict.data, Some(json!({"expected": 1, "actual": 3})));
+    assert_eq!(
+        conflict.data,
+        Some(serde_json::json!({"expected": 1, "actual": 3}))
+    );
 
     let wrong_stream = app
         .dispatch_request(
             &connection,
             "stream/read",
-            Some(json!({
+            Some(serde_json::json!({
                 "stream": "client:orch:other",
                 "streamCursor": first_page["streamCursor"].clone(),
             })),
@@ -5443,7 +5955,7 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
             .dispatch_request(
                 &connection,
                 "stream/read",
-                Some(json!({"stream": forbidden})),
+                Some(serde_json::json!({"stream": forbidden})),
             )
             .await
             .unwrap_err();
@@ -5472,8 +5984,8 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
         carriers[0].payload["principal_id"],
         connection.resolved_principal.principal_id.as_str()
     );
-    let namespace = Uuid::parse_str("530827e2-57cf-405e-9ca7-bb08b18c1ab0").unwrap();
-    let expected_thread_id = Uuid::new_v5(&namespace, stream.as_bytes()).to_string();
+    let namespace = uuid::Uuid::parse_str("530827e2-57cf-405e-9ca7-bb08b18c1ab0").unwrap();
+    let expected_thread_id = uuid::Uuid::new_v5(&namespace, stream.as_bytes()).to_string();
     assert!(
         carriers
             .iter()
@@ -5483,29 +5995,27 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn app_server_envelope_ingress_records_surface_admission_before_execution() {
-    use crate::EventStore;
-
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
-    let params = json!({
+    let params = serde_json::json!({
         "threadId": thread_id,
         "input": [{"type": "text", "text": "envelope once", "text_elements": []}],
         "delivery": {"deliveryId": "delivery-1", "attempt": 1, "metadata": {"source": "test"}},
         "correlationId": "run-1",
     });
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..2 {
         let app = app.clone();
         let connection = connection.clone();
         let params = params.clone();
-        let barrier = Arc::clone(&barrier);
+        let barrier = std::sync::Arc::clone(&barrier);
         tasks.spawn(async move {
             barrier.wait().await;
             app.dispatch_request(&connection, "ingress/submit", Some(params))
@@ -5522,7 +6032,7 @@ async fn app_server_envelope_ingress_records_surface_admission_before_execution(
     assert_eq!(results[0]["ingressEventId"], results[1]["ingressEventId"]);
     assert_eq!(
         results[0]["admission"],
-        json!({"decision": "queue", "admissible": true})
+        serde_json::json!({"decision": "queue", "admissible": true})
     );
 
     wait_for_session_text(&app, &thread_id, "envelope once").await;
@@ -5530,7 +6040,7 @@ async fn app_server_envelope_ingress_records_surface_admission_before_execution(
         .dispatch_request(
             &connection,
             "thread/read",
-            Some(json!({"threadId": thread_id})),
+            Some(serde_json::json!({"threadId": thread_id})),
         )
         .await
         .unwrap();
@@ -5577,8 +6087,6 @@ async fn app_server_envelope_ingress_records_surface_admission_before_execution(
 
 #[tokio::test]
 async fn thread_events_list_pages_filters_and_reports_clear_errors() {
-    use crate::EventStore;
-
     let root = unique_test_root("app-server-thread-events-query");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -5591,14 +6099,16 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         "Produces event receipts",
         &[],
     );
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-event-query-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        std::env::temp_dir().join(format!("verlet-event-query-{}.sock", uuid::Uuid::now_v7())),
     );
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -5606,7 +6116,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://event-runner@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://event-runner@latest" })),
         )
         .await
         .unwrap();
@@ -5616,7 +6126,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({ "threadId": thread_id, "limit": 1 })),
+            Some(serde_json::json!({ "threadId": thread_id, "limit": 1 })),
         )
         .await
         .unwrap();
@@ -5669,7 +6179,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({ "threadId": thread_id, "streamCursor": stream_cursor, "limit": 1 })),
+            Some(serde_json::json!({ "threadId": thread_id, "streamCursor": stream_cursor, "limit": 1 })),
         )
         .await
         .unwrap();
@@ -5688,7 +6198,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({ "threadId": thread_id, "cursor": cursor, "limit": 1 })),
+            Some(serde_json::json!({ "threadId": thread_id, "cursor": cursor, "limit": 1 })),
         )
         .await
         .unwrap();
@@ -5698,12 +6208,13 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     );
 
     let mut wrong_event_cursor = first_page["streamCursor"].clone();
-    wrong_event_cursor["event_id"] = json!(second_page["data"][0]["event_id"].as_str().unwrap());
+    wrong_event_cursor["event_id"] =
+        serde_json::json!(second_page["data"][0]["event_id"].as_str().unwrap());
     let bad_stream_cursor = app
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "streamCursor": wrong_event_cursor,
                 "limit": 1,
@@ -5717,7 +6228,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "compile context", "text_elements": [] }],
         })),
@@ -5748,7 +6259,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     );
     assert!(context_event["payload"].is_object());
 
-    let listed_thread_id = ThreadId::parse_str(&thread_id).unwrap();
+    let listed_thread_id = crate::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -5765,7 +6276,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             vec![crate::NewEventRecord::witnessed(
                 lifecycle.coordinates.clone(),
                 crate::EventKind::MandateStarted,
-                json!({
+                serde_json::json!({
                     "subject": { "loop_id": "loop-1" },
                     "mandate_id": "mandate-1",
                     "snapshot_id": "snapshot-1",
@@ -5779,7 +6290,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "stream": "control",
                 "kinds": ["mandate.started"],
@@ -5802,7 +6313,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     let request_event = crate::NewEventRecord::witnessed(
         lifecycle.coordinates.clone(),
         crate::EventKind::ToolCallRequested,
-        json!({
+        serde_json::json!({
             "subject": { "turn_id": "turn-pending", "call_id": "call-approval" },
             "snapshot_id": "snapshot-approval",
             "tool_name": "bash",
@@ -5817,7 +6328,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     let suspended_event = crate::NewEventRecord::discharged(
         lifecycle.coordinates.clone(),
         crate::EventKind::ToolCallSuspended,
-        json!({
+        serde_json::json!({
             "schema": crate::EventKind::ToolCallSuspended.payload_schema_id(),
             "subject": { "turn_id": "turn-pending", "call_id": "call-approval" },
             "snapshot_id": "snapshot-approval",
@@ -5836,7 +6347,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     let waiting_event = crate::NewEventRecord::discharged(
         lifecycle.coordinates.clone(),
         crate::EventKind::TurnWaiting,
-        json!({
+        serde_json::json!({
             "schema": crate::EventKind::TurnWaiting.payload_schema_id(),
             "turn_id": "turn-pending",
             "subject": { "turn_id": "turn-pending", "call_id": "call-approval" },
@@ -5863,7 +6374,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/approvals/list",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
@@ -5884,7 +6395,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/waiting/list",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
@@ -5903,7 +6414,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "approval/resolve",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "approvalId": "approval-1",
                 "decision": "approved",
@@ -5923,7 +6434,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "stream": "control",
                 "kinds": ["approval.resolved"],
@@ -5969,7 +6480,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "approval/resolve",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "approvalId": "approval-1",
                 "decision": "approved",
@@ -5990,7 +6501,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "approval/resolve",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "approvalId": "approval-1",
                 "decision": "denied",
@@ -6009,7 +6520,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     let decision_event = crate::NewEventRecord::discharged(
         lifecycle.coordinates.clone(),
         crate::EventKind::ToolCallDecision,
-        json!({
+        serde_json::json!({
             "subject": { "turn_id": "turn-pending", "call_id": "call-approval" },
             "snapshot_id": "snapshot-approval",
             "outcome": { "decision": "allow" },
@@ -6026,7 +6537,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     let resumed_event = crate::NewEventRecord::discharged(
         lifecycle.coordinates.clone(),
         crate::EventKind::TurnResumed,
-        json!({
+        serde_json::json!({
             "turn_id": "turn-pending",
             "consumed_fact_id": decision_event_id.to_string(),
         }),
@@ -6046,7 +6557,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/approvals/list",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
@@ -6060,7 +6571,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/waiting/list",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
@@ -6075,7 +6586,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             vec![crate::NewEventRecord::discharged(
                 lifecycle.coordinates.clone(),
                 crate::EventKind::SessionEntryAppended,
-                json!({ "fact": "likes receipts" }),
+                serde_json::json!({ "fact": "likes receipts" }),
                 crate::EventProvenance {
                     source_streams: vec![crate::EventStreamId::for_thread(&lifecycle.coordinates)],
                     discharged_by: Some("coupling:test-memory".to_string()),
@@ -6090,7 +6601,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "stream": "derived:memory",
                 "kinds": ["session.entry.appended"],
@@ -6107,7 +6618,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/debug/export",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "streams": ["thread", "control", "derived:memory"],
                 "includeThread": false,
@@ -6120,7 +6631,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         export["schema"].as_str(),
         Some("cooldis.debug.thread_export/1")
     );
-    assert_eq!(export["thread"], Value::Null);
+    assert_eq!(export["thread"], serde_json::Value::Null);
     assert_eq!(
         export["redaction"]["mode"].as_str(),
         Some("secret-shaped-json-keys")
@@ -6133,7 +6644,10 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     );
     assert_eq!(
         export["ackClasses"].as_array().unwrap(),
-        &vec![json!("local_committed"), json!("query_projected")]
+        &vec![
+            serde_json::json!("local_committed"),
+            serde_json::json!("query_projected")
+        ]
     );
     let export_streams = export["streams"].as_array().unwrap();
     let thread_stream = export_streams
@@ -6142,7 +6656,10 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .unwrap();
     assert_eq!(
         thread_stream["ackClasses"].as_array().unwrap(),
-        &vec![json!("local_committed"), json!("query_projected")]
+        &vec![
+            serde_json::json!("local_committed"),
+            serde_json::json!("query_projected")
+        ]
     );
     assert_eq!(thread_stream["eventCount"].as_u64(), Some(1));
     assert_eq!(thread_stream["truncated"].as_bool(), Some(true));
@@ -6197,7 +6714,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/debug/export",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "streams": ["control"],
                 "includeThread": false,
@@ -6226,7 +6743,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         redaction_export["redaction"]["redactedKeys"]
             .as_array()
             .unwrap()
-            .contains(&json!("api_key"))
+            .contains(&serde_json::json!("api_key"))
     );
     let derived_stream = export_streams
         .iter()
@@ -6244,11 +6761,11 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             && receipt["payloadSchema"].as_str() == Some("cooldis.event.session.entry.appended/1")
     }));
 
-    let child_thread_id = ThreadId::new();
+    let child_thread_id = crate::ThreadId::new();
     let thread_spawned = crate::NewEventRecord::witnessed(
         lifecycle.coordinates.clone(),
         crate::EventKind::ThreadSpawned,
-        json!({
+        serde_json::json!({
             "schema": crate::EventKind::ThreadSpawned.payload_schema_id(),
             "parent_thread_id": lifecycle.coordinates.thread_id.to_string(),
             "child_thread_id": child_thread_id.to_string(),
@@ -6261,7 +6778,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     let io_ingress = crate::NewEventRecord::witnessed(
         lifecycle.coordinates.clone(),
         crate::EventKind::IoIngressReceived,
-        json!({
+        serde_json::json!({
             "schema": crate::EventKind::IoIngressReceived.payload_schema_id(),
             "route_id": "debug-route",
             "envelope_digest": "sha256:debug-envelope",
@@ -6276,7 +6793,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
                 crate::NewEventRecord::witnessed(
                     lifecycle.coordinates.clone(),
                     crate::EventKind::ThreadJoined,
-                    json!({
+                    serde_json::json!({
                         "schema": crate::EventKind::ThreadJoined.payload_schema_id(),
                         "child_thread_id": child_thread_id.to_string(),
                         "spawned_event_id": spawned_event_id.to_string(),
@@ -6286,7 +6803,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
                 crate::NewEventRecord::witnessed(
                     lifecycle.coordinates.clone(),
                     crate::EventKind::PolicyBound,
-                    json!({
+                    serde_json::json!({
                         "schema": crate::EventKind::PolicyBound.payload_schema_id(),
                         "policy_kind": "coupling_set",
                         "policy_id": "debug-policy",
@@ -6298,7 +6815,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
                 crate::NewEventRecord::witnessed(
                     lifecycle.coordinates.clone(),
                     crate::EventKind::AdmissionDecided,
-                    json!({
+                    serde_json::json!({
                         "schema": crate::EventKind::AdmissionDecided.payload_schema_id(),
                         "route_id": "debug-route",
                         "policy_hash": "sha256:debug-policy",
@@ -6315,7 +6832,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/debug/export",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "streams": ["control"],
                 "includeThread": false,
@@ -6348,7 +6865,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({ "threadId": thread_id, "stream": "derived:" })),
+            Some(serde_json::json!({ "threadId": thread_id, "stream": "derived:" })),
         )
         .await
         .unwrap_err();
@@ -6359,7 +6876,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "limit": 1,
                 "kinds": ["manifest.bind.completed", "context.compile.completed"],
@@ -6376,7 +6893,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "cursor": filtered_cursor,
                 "limit": 1,
@@ -6395,7 +6912,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     );
 
     let empty_thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let empty_thread_id = empty_thread["thread"]["id"].as_str().unwrap().to_string();
@@ -6403,7 +6920,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({ "threadId": empty_thread_id, "limit": 100 })),
+            Some(serde_json::json!({ "threadId": empty_thread_id, "limit": 100 })),
         )
         .await
         .unwrap();
@@ -6422,9 +6939,9 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         Some("manifest.bind.completed")
     );
     assert_eq!(empty_events[3]["kind"].as_str(), Some("placement.decision"));
-    assert_eq!(empty_page["cursor"], Value::Null);
+    assert_eq!(empty_page["cursor"], serde_json::Value::Null);
 
-    let bulk_thread_id = ThreadId::parse_str(&empty_thread_id).unwrap();
+    let bulk_thread_id = crate::ThreadId::parse_str(&empty_thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -6441,7 +6958,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             crate::NewEventRecord::witnessed(
                 lifecycle.coordinates.clone(),
                 crate::EventKind::SessionEntryAppended,
-                json!({ "idx": idx }),
+                serde_json::json!({ "idx": idx }),
             )
         })
         .collect::<Vec<_>>();
@@ -6454,7 +6971,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": empty_thread_id,
                 "limit": 0,
                 "kinds": ["session.entry.appended"],
@@ -6469,7 +6986,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": empty_thread_id,
                 "limit": 999,
                 "kinds": ["session.entry.appended"],
@@ -6483,7 +7000,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": empty_thread_id,
                 "cursor": clamped_cursor,
                 "limit": 999,
@@ -6493,14 +7010,15 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .await
         .unwrap();
     assert!(!clamped_tail["data"].as_array().unwrap().is_empty());
-    assert_eq!(clamped_tail["cursor"], Value::Null);
+    assert_eq!(clamped_tail["cursor"], serde_json::Value::Null);
 
-    let past_end_cursor = encode_thread_events_cursor(10_000).unwrap();
+    let past_end_cursor =
+        crate::adapters::app_server::connection::encode_thread_events_cursor(10_000).unwrap();
     let past_end = app
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": empty_thread_id,
                 "cursor": past_end_cursor,
                 "limit": 100,
@@ -6509,13 +7027,13 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .await
         .unwrap();
     assert_eq!(past_end["data"].as_array().unwrap().len(), 0);
-    assert_eq!(past_end["cursor"], Value::Null);
+    assert_eq!(past_end["cursor"], serde_json::Value::Null);
 
     let bad_cursor = app
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({ "threadId": thread_id, "cursor": "not-a-cursor" })),
+            Some(serde_json::json!({ "threadId": thread_id, "cursor": "not-a-cursor" })),
         )
         .await
         .unwrap_err();
@@ -6526,8 +7044,8 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
-                "threadId": Uuid::now_v7().to_string(),
+            Some(serde_json::json!({
+                "threadId": uuid::Uuid::now_v7().to_string(),
                 "limit": 1,
             })),
         )
@@ -6544,7 +7062,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -6553,7 +7071,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "schedule": { "cron": { "expr": "not cron", "tz": "UTC" } },
             })),
@@ -6566,7 +7084,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "schedule": { "cron": { "expr": "0 * * * * *", "tz": "Mars/Olympus" } },
             })),
@@ -6579,7 +7097,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "schedule": { "interval": { "every_ms": 59_999 } },
             })),
@@ -6592,7 +7110,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "schedule": { "at": { "when": "2000-01-01T00:00:00Z" } },
             })),
@@ -6605,7 +7123,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "schedule": { "at": { "when": "2000-01-01T00:00:00Z" } },
                 "catchUp": "coalesce_missed",
@@ -6617,7 +7135,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
     app.dispatch_request(
         &connection,
         "mandate/revoke",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "mandateEventId": coalesced_id,
         })),
@@ -6629,7 +7147,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "schedule": { "interval": { "every_ms": 60_000 } },
                 "maxOccurrences": 3,
@@ -6645,7 +7163,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/list",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
@@ -6667,7 +7185,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "thread/events/list",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "stream": "control",
                 "kinds": ["mandate.started"],
@@ -6685,7 +7203,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/revoke",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "mandateEventId": mandate_event_id,
             })),
@@ -6697,7 +7215,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/revoke",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "mandateEventId": mandate_event_id,
             })),
@@ -6710,7 +7228,7 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
         .dispatch_request(
             &connection,
             "mandate/list",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
@@ -6719,11 +7237,9 @@ async fn mandate_rpc_validates_and_folds_control_stream_events() {
 
 #[tokio::test]
 async fn thread_start_with_agent_ref_lowers_cwd_and_rejects_operation_injection() {
-    use crate::EventStore;
-
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-manifest-closed-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-manifest-closed-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("app-server-manifest-closed");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -6753,7 +7269,7 @@ allow = ["default_cwd", "max_tool_rounds"]
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
     let no_cwd_manifest_path = root.join("closed-no-cwd.verlet.agent.toml");
@@ -6777,24 +7293,28 @@ streaming = false
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&no_cwd_manifest_path)
         .unwrap();
 
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    config.apply_daemon_identity_config(&VerletDaemonIdentityConfig {
-        mode: IdentityMode::Local,
+    config.apply_daemon_identity_config(&crate::daemon::identity::VerletDaemonIdentityConfig {
+        mode: crate::daemon::identity::IdentityMode::Local,
         tenant_id: Some("tenant-manifest".to_string()),
-        console_principal: Some(PrincipalId::new("principal-manifest")),
+        console_principal: Some(crate::daemon::identity::PrincipalId::new(
+            "principal-manifest",
+        )),
     });
     let tenant_id = config.tenant_id.clone();
     let user_id = config.user_id.clone();
     let metadata_path = config.metadata_store_path();
     let session_path = config.state_home.join("session_history.sqlite3");
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -6802,17 +7322,23 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://closed-runner@latest",
                 "cwd": "outside-manifest",
             })),
         )
         .await
         .unwrap();
-    let thread_id = ThreadId::parse_str(cwd_start["thread"]["id"].as_str().unwrap()).unwrap();
+    let thread_id =
+        crate::ThreadId::parse_str(cwd_start["thread"]["id"].as_str().unwrap()).unwrap();
     assert_eq!(
         cwd_start["cwd"].as_str(),
-        Some(cwd_string(&workspace.join("outside-manifest")).as_str())
+        Some(
+            crate::adapters::app_server::connection::cwd_string(
+                &workspace.join("outside-manifest")
+            )
+            .as_str()
+        )
     );
     let lifecycle = app
         .inner
@@ -6822,40 +7348,52 @@ streaming = false
         .unwrap()
         .expect("cwd-lowered manifest start should persist lifecycle metadata");
     assert_eq!(
-        serde_json::from_str::<AgentManifestBindOverrides>(
-            &lifecycle.metadata[THREAD_AGENT_RUNTIME_OVERRIDES_METADATA]
+        serde_json::from_str::<crate::AgentManifestBindOverrides>(
+            &lifecycle.metadata
+                [crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA]
         )
         .unwrap()
         .default_cwd
         .as_deref(),
-        Some(cwd_string(&workspace.join("outside-manifest")).as_str())
+        Some(
+            crate::adapters::app_server::connection::cwd_string(
+                &workspace.join("outside-manifest")
+            )
+            .as_str()
+        )
     );
     assert_eq!(
-        lifecycle.metadata[THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA],
+        lifecycle.metadata
+            [crate::adapters::app_server::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA],
         "64"
     );
-    let session_store = SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
+    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(
         bind.payload["overridden_keys"].as_array().unwrap(),
-        &vec![json!("default_cwd")]
+        &vec![serde_json::json!("default_cwd")]
     );
     assert_eq!(
         bind.payload["effective_runtime"]["default_cwd"].as_str(),
-        Some(cwd_string(&workspace.join("outside-manifest")).as_str())
+        Some(
+            crate::adapters::app_server::connection::cwd_string(
+                &workspace.join("outside-manifest")
+            )
+            .as_str()
+        )
     );
     assert_eq!(
         bind.payload["effective_runtime"]["max_tool_rounds"],
-        json!(64)
+        serde_json::json!(64)
     );
 
     let no_cwd_err = app
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://closed-no-cwd@latest",
                 "cwd": "outside-manifest",
             })),
@@ -6875,7 +7413,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/rebindFork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id.to_string(),
                 "agentRef": "agent://closed-runner@latest",
                 "runtimeOverrides": {"maxToolRounds": "unlimited"},
@@ -6883,7 +7421,7 @@ streaming = false
         )
         .await
         .unwrap();
-    let rebound_id = ThreadId::parse_str(rebind["thread"]["id"].as_str().unwrap()).unwrap();
+    let rebound_id = crate::ThreadId::parse_str(rebind["thread"]["id"].as_str().unwrap()).unwrap();
     let rebound = app
         .inner
         .metadata_store
@@ -6892,7 +7430,8 @@ streaming = false
         .unwrap()
         .unwrap();
     assert_eq!(
-        rebound.metadata[THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA],
+        rebound.metadata
+            [crate::adapters::app_server::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA],
         "unlimited"
     );
 
@@ -6900,7 +7439,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/rebindFork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id.to_string(),
                 "agentRef": "agent://closed-no-cwd@latest",
                 "runtimeOverrides": {"maxToolRounds": "unlimited"},
@@ -6921,7 +7460,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://closed-runner@latest",
                 "capsuleBindings": {
                     "operationNames": ["ambient"]
@@ -6940,7 +7479,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "capsuleBindings": {
                     "operationNames": ["ambient"]
                 }
@@ -6955,7 +7494,9 @@ streaming = false
             .contains("operations are declared in an agent manifest")
     );
 
-    let metadata_store = SqliteMetadataStore::open(metadata_path).await.unwrap();
+    let metadata_store = crate::SqliteMetadataStore::open(metadata_path)
+        .await
+        .unwrap();
     assert_eq!(
         metadata_store
             .list_thread_lifecycle_for_user(&tenant_id, &user_id)
@@ -7002,34 +7543,35 @@ streaming = false
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let capsule_bindings = CapsuleBindingsConfig::default()
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
         .with_registry_root(&operation_registry_root)
         .with_global_operation_name("global");
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-manifest-ambient-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace)
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-manifest-ambient-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
         .with_capsule_bindings(capsule_bindings.clone()); // lexicon-allow: capsule - existing app-server config method and parameter
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let mut runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
-    let runtime_factory = runtime_factory_from_provider_parts(
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
         provider_client,
         capsule_bindings, // lexicon-allow: capsule - existing app-server config parameter
     );
-    let app = VerletAppServer::with_runtime_factory(config, runtime_factory)
-        .await
-        .unwrap();
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
+            .await
+            .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -7037,7 +7579,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://no-tools@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://no-tools@latest" })),
         )
         .await
         .unwrap();
@@ -7045,7 +7587,7 @@ streaming = false
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "no ambient tools", "text_elements": [] }],
         })),
@@ -7056,7 +7598,7 @@ streaming = false
     wait_for_provider_requests(&client, 1).await;
     let requests = client.requests();
     assert!(!tool_names(&requests[0]).contains(&"global_global_search".to_string()));
-    assert!(!tool_names(&requests[0]).contains(&TOOL_SEARCH_TOOL.to_string()));
+    assert!(!tool_names(&requests[0]).contains(&crate::TOOL_SEARCH_TOOL.to_string()));
     assert!(
         !requests[0]
             .tools
@@ -7104,36 +7646,40 @@ streaming = false
         ),
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
     publish_echo_operation(&operation_registry_root, "search", "search", "new").await;
 
-    let client = Arc::new(BashCallingCapsuleClient::new(
+    let client = std::sync::Arc::new(BashCallingCapsuleClient::new(
         "search",
         "search",
         "printf verlet | search",
         "old:verlet",
     ));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let capsule_bindings =
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root);
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-manifest-pinned-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace)
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&operation_registry_root);
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-manifest-pinned-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
         .with_capsule_bindings(capsule_bindings.clone());
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let mut runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
-    let runtime_factory =
-        runtime_factory_from_provider_parts(runtime_config, provider_client, capsule_bindings);
-    let app = VerletAppServer::with_runtime_factory(config, runtime_factory)
-        .await
-        .unwrap();
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        provider_client,
+        capsule_bindings,
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
+            .await
+            .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -7141,7 +7687,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://pinned@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://pinned@latest" })),
         )
         .await
         .unwrap();
@@ -7149,7 +7695,7 @@ streaming = false
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "use pinned search", "text_elements": [] }],
         })),
@@ -7164,9 +7710,6 @@ streaming = false
 #[cfg(unix)]
 #[tokio::test]
 async fn manifest_rw_workspace_binding_round_trips_real_files_and_blocks_host_escape() {
-    use crate::EventStore;
-    use std::os::unix::fs::symlink;
-
     let root = unique_test_root("app-server-manifest-workspace");
     let app_cwd = root.join("app-cwd");
     let host_workspace = root.join("host-workspace");
@@ -7176,7 +7719,7 @@ async fn manifest_rw_workspace_binding_round_trips_real_files_and_blocks_host_es
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(host_workspace.join("note.txt"), "seed\n").unwrap();
     std::fs::write(outside.join("secret.txt"), "outside-safe\n").unwrap();
-    symlink(
+    std::os::unix::fs::symlink(
         outside.join("secret.txt"),
         host_workspace.join("outside-link"),
     )
@@ -7208,17 +7751,17 @@ streaming = false
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
 
-    let client = Arc::new(WorkspaceBindingClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(WorkspaceBindingClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &app_cwd,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -7228,7 +7771,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "workspace": {"hostPath": host_workspace, "mode": "rw"}
             })),
         )
@@ -7240,7 +7783,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({"agentRef": "agent://workspace-agent@latest"})),
+            Some(serde_json::json!({"agentRef": "agent://workspace-agent@latest"})),
         )
         .await
         .unwrap_err();
@@ -7250,7 +7793,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "agentRef": "agent://workspace-agent@latest",
                 "workspace": {"hostPath": host_workspace, "mode": "rw"}
             })),
@@ -7261,18 +7804,21 @@ streaming = false
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .unwrap();
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
     let events = session_store
-        .read_events(&EventStreamId::for_thread(&lifecycle.coordinates), None)
+        .read_events(
+            &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+            None,
+        )
         .await
         .unwrap();
-    let bind = event_by_kind(&events, EventKind::ManifestBindCompleted);
+    let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(bind.payload["workspace"]["guest_path"], "/work");
     assert_eq!(bind.payload["workspace"]["mode"], "rw");
     assert_eq!(
@@ -7287,11 +7833,11 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/fork",
-            Some(json!({"threadId": thread_id})),
+            Some(serde_json::json!({"threadId": thread_id})),
         )
         .await
         .unwrap();
-    let fork_id = ThreadId::parse_str(fork["thread"]["id"].as_str().unwrap()).unwrap();
+    let fork_id = crate::ThreadId::parse_str(fork["thread"]["id"].as_str().unwrap()).unwrap();
     let fork_lifecycle = app
         .inner
         .metadata_store
@@ -7300,15 +7846,19 @@ streaming = false
         .unwrap()
         .unwrap();
     assert_eq!(
-        fork_lifecycle.metadata.get(THREAD_AGENT_WORKSPACE_METADATA),
-        lifecycle.metadata.get(THREAD_AGENT_WORKSPACE_METADATA),
+        fork_lifecycle
+            .metadata
+            .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA),
+        lifecycle
+            .metadata
+            .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA),
         "clone forks must inherit the exact resolved bind-time workspace"
     );
 
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{"type": "text", "text": "edit the workspace", "text_elements": []}]
         })),
@@ -7387,22 +7937,25 @@ streaming = false
         ),
     )
     .unwrap();
-    let agent = LocalAgentRegistry::new(&agent_registry_root)
+    let agent = crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
-    let capsule_bindings =
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root);
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-manifest-bound-coupling-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config =
-        VerletAppServerConfig::local(listen, &workspace).with_capsule_bindings(capsule_bindings);
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&operation_registry_root);
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-manifest-bound-coupling-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+        .with_capsule_bindings(capsule_bindings);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -7410,12 +7963,12 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://coupled@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://coupled@latest" })),
         )
         .await
         .unwrap();
     let thread_id_string = thread["thread"]["id"].as_str().unwrap().to_string();
-    let thread_id = ThreadId::parse_str(&thread_id_string).unwrap();
+    let thread_id = crate::ThreadId::parse_str(&thread_id_string).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -7426,7 +7979,7 @@ streaming = false
     let coupling_set: crate::BoundCouplingSet = serde_json::from_str(
         lifecycle
             .metadata
-            .get(THREAD_BOUND_COUPLING_SET_METADATA)
+            .get(crate::THREAD_BOUND_COUPLING_SET_METADATA)
             .expect("bound coupling set metadata should be persisted"),
     )
     .unwrap();
@@ -7450,7 +8003,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/couplings/list",
-            Some(json!({ "threadId": thread_id_string })),
+            Some(serde_json::json!({ "threadId": thread_id_string })),
         )
         .await
         .unwrap();
@@ -7475,11 +8028,11 @@ streaming = false
         coupling_list["data"][0]["sourceStreams"]
             .as_array()
             .unwrap(),
-        &vec![json!("thread")]
+        &vec![serde_json::json!("thread")]
     );
     assert_eq!(
         coupling_list["data"][0]["sourceKinds"].as_array().unwrap(),
-        &vec![json!("context.compile.completed")]
+        &vec![serde_json::json!("context.compile.completed")]
     );
     assert_eq!(
         coupling_list["data"][0]["sinkStream"].as_str(),
@@ -7488,8 +8041,8 @@ streaming = false
     assert_eq!(
         coupling_list["data"][0]["sinkKinds"].as_array().unwrap(),
         &vec![
-            json!("context.summary.completed"),
-            json!("context.read_plan.set")
+            serde_json::json!("context.summary.completed"),
+            serde_json::json!("context.read_plan.set")
         ]
     );
     assert_eq!(
@@ -7520,8 +8073,6 @@ streaming = false
 
 #[tokio::test]
 async fn manifest_operation_binding_filters_two_segment_ref_from_thread_catalog() {
-    use crate::EventStore;
-
     let root = unique_test_root("app-server-manifest-operation-segment");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -7564,32 +8115,37 @@ streaming = false
         ),
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let capsule_bindings =
-        CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root);
-    let listen = AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
-        "verlet-manifest-operation-segment-{}.sock",
-        Uuid::now_v7()
-    )));
-    let mut config = VerletAppServerConfig::local(listen, &workspace)
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&operation_registry_root);
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-manifest-operation-segment-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
         .with_capsule_bindings(capsule_bindings.clone());
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let session_path = config.state_home.join("session_history.sqlite3");
     let mut runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
-    let runtime_factory =
-        runtime_factory_from_provider_parts(runtime_config, provider_client, capsule_bindings);
-    let app = VerletAppServer::with_runtime_factory(config, runtime_factory)
-        .await
-        .unwrap();
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        provider_client,
+        capsule_bindings,
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
+            .await
+            .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -7597,7 +8153,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "agentRef": "agent://operation-segment@latest" })),
+            Some(serde_json::json!({ "agentRef": "agent://operation-segment@latest" })),
         )
         .await
         .unwrap();
@@ -7606,17 +8162,17 @@ streaming = false
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("manifest start should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(session_path).await.unwrap();
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = crate::SqliteSessionStore::open(session_path).await.unwrap();
+    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     assert_eq!(
         bind.payload["operation_bindings"][0]["operations"],
-        json!(["profile"])
+        serde_json::json!(["profile"])
     );
     let request = crate::ToolCallRequestedPayload {
         subject: crate::ToolCallSubject {
@@ -7625,20 +8181,20 @@ streaming = false
         },
         snapshot_id: bind.payload["manifest_hash"].as_str().unwrap().to_string(),
         tool_name: crate::BASH_TOOL.to_string(),
-        arguments: json!({"command":"profile customer-1"}),
+        arguments: serde_json::json!({"command":"profile customer-1"}),
         args_fingerprint: None,
         holds: Vec::new(),
     };
     assert_eq!(
         crate::adapters::agent_loop::effect_class_for_request(&events, &request).unwrap(),
-        EffectClass::Idempotent,
+        crate::EffectClass::Idempotent,
         "the runtime lookup must read the class from the real top-level bind receipt shape"
     );
 
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "inspect scoped catalog", "text_elements": [] }],
         })),
@@ -7658,26 +8214,27 @@ streaming = false
 
 #[test]
 fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations() {
-    let mut metadata = BTreeMap::new();
+    let mut metadata = std::collections::BTreeMap::new();
     metadata.insert(
-        THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
         r#"[{"name":"analytics","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net:https://example.com"]}]"#
             .to_string(),
     );
-    let context = ThreadContext::with_topology_and_metadata(
+    let context = crate::ThreadContext::with_topology_and_metadata(
         crate::ThreadCoordinates::new("tenant", "user", "session"),
-        ThreadTopology::root(),
+        crate::ThreadTopology::root(),
         metadata,
     );
 
-    let bindings = thread_manifest_operation_bindings(&context).unwrap();
+    let bindings =
+        crate::adapters::app_server::threads::thread_manifest_operation_bindings(&context).unwrap();
     assert_eq!(
         bindings,
-        vec![AgentManifestOperationBinding {
+        vec![crate::AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
-            effect_class: EffectClass::AtMostOnce,
+            effect_class: crate::EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
             grant_expiries: Vec::new(),
             operations: Vec::new(),
@@ -7689,21 +8246,26 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
 #[test]
 fn apply_manifest_runtime_metadata_injects_tool_use_instruction_once() {
     let instruction = "Use the Verlet tools when they fit the request.";
-    let mut metadata = BTreeMap::new();
+    let mut metadata = std::collections::BTreeMap::new();
     metadata.insert(
-        THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
         instruction.to_string(),
     );
-    let context = ThreadContext::with_topology_and_metadata(
+    let context = crate::ThreadContext::with_topology_and_metadata(
         crate::ThreadCoordinates::new("tenant", "user", "session"),
-        ThreadTopology::root(),
+        crate::ThreadTopology::root(),
         metadata,
     );
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    config.system.push(SystemBlock::text("Base instruction."));
+    let mut config =
+        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    config
+        .system
+        .push(crate::SystemBlock::text("Base instruction."));
 
-    apply_manifest_runtime_metadata(&context, &mut config).unwrap();
-    apply_manifest_runtime_metadata(&context, &mut config).unwrap();
+    crate::adapters::app_server::threads::apply_manifest_runtime_metadata(&context, &mut config)
+        .unwrap();
+    crate::adapters::app_server::threads::apply_manifest_runtime_metadata(&context, &mut config)
+        .unwrap();
 
     assert_eq!(config.system[0].text, "Base instruction.");
     assert_eq!(
@@ -7718,24 +8280,26 @@ fn apply_manifest_runtime_metadata_injects_tool_use_instruction_once() {
 
 #[test]
 fn apply_manifest_runtime_metadata_injects_legacy_tool_use_instruction() {
-    let mut metadata = BTreeMap::new();
+    let mut metadata = std::collections::BTreeMap::new();
     metadata.insert(
-        THREAD_AGENT_REF_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_REF_METADATA.to_string(),
         "agent://legacy@0.1.0".to_string(),
     );
     metadata.insert(
-        THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
         r#"[{"name":"file-read","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":[]}]"#
             .to_string(),
     );
-    let context = ThreadContext::with_topology_and_metadata(
+    let context = crate::ThreadContext::with_topology_and_metadata(
         crate::ThreadCoordinates::new("tenant", "user", "session"),
-        ThreadTopology::root(),
+        crate::ThreadTopology::root(),
         metadata,
     );
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config =
+        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
 
-    apply_manifest_runtime_metadata(&context, &mut config).unwrap();
+    crate::adapters::app_server::threads::apply_manifest_runtime_metadata(&context, &mut config)
+        .unwrap();
 
     assert_eq!(config.system.len(), 1);
     assert!(config.system[0].text.contains("agent://legacy@0.1.0"));
@@ -7752,7 +8316,7 @@ async fn manifest_operation_grants_extend_loaded_record_without_duplicates() {
         .capability_grants
         .insert("package:required".to_string());
 
-    apply_manifest_operation_grants(
+    crate::adapters::app_server::threads::apply_manifest_operation_grants(
         &mut record,
         [
             "net.http:GET:https://example.com".to_string(),
@@ -7763,7 +8327,7 @@ async fn manifest_operation_grants_extend_loaded_record_without_duplicates() {
 
     assert_eq!(
         record.capability_grants,
-        BTreeSet::from([
+        std::collections::BTreeSet::from([
             "net.http:GET:https://example.com".to_string(),
             "package:required".to_string(),
         ])
@@ -7773,7 +8337,8 @@ async fn manifest_operation_grants_extend_loaded_record_without_duplicates() {
 
 #[tokio::test]
 async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_stored_auth() {
-    let root = std::env::temp_dir().join(format!("verlet-provider-resolve-{}", Uuid::now_v7()));
+    let root =
+        std::env::temp_dir().join(format!("verlet-provider-resolve-{}", uuid::Uuid::now_v7()));
     let store_path = root.join("metadata.sqlite3");
     let store = crate::SqliteMetadataStore::open(&store_path).await.unwrap();
     crate::seed_default_llm_providers(&store).await.unwrap();
@@ -7787,7 +8352,7 @@ async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_sto
         .await
         .unwrap();
 
-    let resolved = resolve_catalog_openai_chat_completions_provider(
+    let resolved = crate::adapters::app_server::resolve_catalog_openai_chat_completions_provider(
         &store,
         &store,
         &crate::LlmProviderAuthContext::new(),
@@ -7833,7 +8398,7 @@ async fn thread_fork_creates_child_app_server_thread() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
@@ -7842,7 +8407,7 @@ async fn thread_fork_creates_child_app_server_thread() {
         .dispatch_request(
             &connection,
             "thread/fork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": source_thread_id,
                 "ephemeral": true,
             })),
@@ -7882,14 +8447,15 @@ async fn thread_fork_creates_child_app_server_thread() {
 
     let mut saw_fork_started = false;
     while let Ok(message) = outbound_rx.try_recv() {
-        if let JsonRpcMessage::Notification(notification) = message
+        if let crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification) =
+            message
             && notification.method == "thread/started"
             && notification
                 .params
                 .as_ref()
                 .and_then(|params| params.get("thread"))
                 .and_then(|thread| thread.get("id"))
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 == Some(fork_thread_id)
         {
             saw_fork_started = true;
@@ -7905,11 +8471,11 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let source_id = ThreadId::parse_str(&source_thread_id).unwrap();
+    let source_id = crate::ThreadId::parse_str(&source_thread_id).unwrap();
     let source_lifecycle = app
         .inner
         .metadata_store
@@ -7917,15 +8483,15 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
         .await
         .unwrap()
         .unwrap();
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
     let _source_entry = session_store
         .append(
             &source_lifecycle.coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("explicit fork checkpoint"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("explicit fork checkpoint"),
             },
         )
         .await
@@ -7937,7 +8503,7 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
             &source_lifecycle.coordinates,
             None,
             Some("explicit-fork".to_string()),
-            BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -7949,7 +8515,7 @@ async fn thread_fork_can_use_explicit_checkpoint_id() {
         .dispatch_request(
             &connection,
             "thread/fork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": source_thread_id,
                 "checkpointId": checkpoint.id.to_string(),
             })),
@@ -7983,7 +8549,7 @@ async fn thread_fork_rejects_invalid_checkpoint_id() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
@@ -7992,7 +8558,7 @@ async fn thread_fork_rejects_invalid_checkpoint_id() {
         .dispatch_request(
             &connection,
             "thread/fork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": source_thread_id,
                 "checkpointId": "not-a-checkpoint-id",
             })),
@@ -8011,17 +8577,17 @@ async fn thread_fork_rejects_unavailable_checkpoint_id() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let checkpoint_id = ThreadCheckpointId::new();
+    let checkpoint_id = crate::ThreadCheckpointId::new();
 
     let err = app
         .dispatch_request(
             &connection,
             "thread/fork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": source_thread_id,
                 "checkpointId": checkpoint_id.to_string(),
             })),
@@ -8041,11 +8607,11 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let source_id = ThreadId::parse_str(&source_thread_id).unwrap();
+    let source_id = crate::ThreadId::parse_str(&source_thread_id).unwrap();
     let source_lifecycle = app
         .inner
         .metadata_store
@@ -8053,15 +8619,15 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         .await
         .unwrap()
         .unwrap();
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
     let source_entry = session_store
         .append(
             &source_lifecycle.coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("borrowed source message"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("borrowed source message"),
             },
         )
         .await
@@ -8071,9 +8637,9 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         .dispatch_request(
             &connection,
             "thread/rebindFork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": source_thread_id,
-                "agentRef": default_manifest::DEFAULT_AGENT_REF,
+                "agentRef": crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
                 "placement": {"target": "local"},
                 "reason": "manifest_update",
             })),
@@ -8103,7 +8669,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
             .is_some()
     );
 
-    let child_id = ThreadId::parse_str(child_thread_id).unwrap();
+    let child_id = crate::ThreadId::parse_str(child_thread_id).unwrap();
     let child_lifecycle = app
         .inner
         .metadata_store
@@ -8116,11 +8682,12 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
         Some(source_lifecycle.coordinates.thread_id)
     );
     assert_eq!(
-        child_lifecycle.metadata[THREAD_REBIND_FORK_REASON_METADATA],
+        child_lifecycle.metadata[crate::adapters::app_server::THREAD_REBIND_FORK_REASON_METADATA],
         "manifest_update"
     );
     assert!(
-        child_lifecycle.metadata[THREAD_AGENT_REF_METADATA].starts_with("agent://verlet/default@")
+        child_lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_REF_METADATA]
+            .starts_with("agent://verlet/default@")
     );
 
     let child_context = session_store
@@ -8138,7 +8705,7 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
     );
     assert!(matches!(
         child_context.entries.last().unwrap().kind,
-        SessionEntryKind::Runtime { ref kind, .. } if kind == "thread_rebind_fork"
+        crate::SessionEntryKind::Runtime { ref kind, .. } if kind == "thread_rebind_fork"
     ));
     assert_eq!(child_context.source_cuts.len(), 2);
     assert!(child_context.source_cuts[0].inherited);
@@ -8146,43 +8713,50 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
 
     let child_events = session_store
         .read_events(
-            &EventStreamId::for_thread(&child_lifecycle.coordinates),
+            &crate::EventStreamId::for_thread(&child_lifecycle.coordinates),
             None,
         )
         .await
         .unwrap();
     let child_bind_events = child_events
         .iter()
-        .filter(|event| event.kind == EventKind::ManifestBindCompleted)
+        .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted)
         .collect::<Vec<_>>();
     assert_eq!(child_bind_events.len(), 1);
     assert_eq!(child_bind_events[0].payload["placement"]["target"], "local");
     let child_placement_events = child_events
         .iter()
-        .filter(|event| event.kind == EventKind::PlacementDecision)
+        .filter(|event| event.kind == crate::EventKind::PlacementDecision)
         .collect::<Vec<_>>();
     assert_eq!(child_placement_events.len(), 1);
-    assert_eq!(child_placement_events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(
+        child_placement_events[0].origin,
+        crate::EventOrigin::Witnessed
+    );
     assert_eq!(child_placement_events[0].payload["placement"], "local");
     assert_eq!(
         child_placement_events[0].payload["snapshot_id"],
         child_bind_events[0].payload["manifest_hash"]
     );
     assert!(!child_events.iter().any(|event| {
-        event.payload.get("entry_id").and_then(Value::as_str)
+        event
+            .payload
+            .get("entry_id")
+            .and_then(serde_json::Value::as_str)
             == Some(source_entry.entry_id.to_string().as_str())
     }));
 
     let mut saw_rebind_started = false;
     while let Ok(message) = outbound_rx.try_recv() {
-        if let JsonRpcMessage::Notification(notification) = message
+        if let crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification) =
+            message
             && notification.method == "thread/started"
             && notification
                 .params
                 .as_ref()
                 .and_then(|params| params.get("thread"))
                 .and_then(|thread| thread.get("id"))
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 == Some(child_thread_id)
         {
             saw_rebind_started = true;
@@ -8198,7 +8772,7 @@ async fn thread_rebind_fork_rejects_active_source_thread() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
@@ -8212,9 +8786,9 @@ async fn thread_rebind_fork_rejects_active_source_thread() {
         .dispatch_request(
             &connection,
             "thread/rebindFork",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": source_thread_id,
-                "agentRef": default_manifest::DEFAULT_AGENT_REF,
+                "agentRef": crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
             })),
         )
         .await
@@ -8233,7 +8807,7 @@ async fn thread_start_accepts_parent_thread_shorthand() {
     initialize_for_test(&connection).await;
 
     let root = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let root_thread = &root["thread"];
@@ -8244,7 +8818,7 @@ async fn thread_start_accepts_parent_thread_shorthand() {
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({ "parentThreadId": root_thread_id })),
+            Some(serde_json::json!({ "parentThreadId": root_thread_id })),
         )
         .await
         .unwrap();
@@ -8274,7 +8848,7 @@ async fn thread_resume_returns_loaded_thread() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
@@ -8283,7 +8857,7 @@ async fn thread_resume_returns_loaded_thread() {
         .dispatch_request(
             &connection,
             "thread/resume",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "modelProvider": "resume-provider",
                 "excludeTurns": true,
@@ -8307,11 +8881,11 @@ async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let parsed = ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
     let record = app
         .inner
         .metadata_store
@@ -8328,7 +8902,11 @@ async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
     app.inner.state.write().await.threads.remove(&thread_id);
 
     let loaded_before_resume = app
-        .dispatch_request(&connection, "thread/loaded/list", Some(json!({})))
+        .dispatch_request(
+            &connection,
+            "thread/loaded/list",
+            Some(serde_json::json!({})),
+        )
         .await
         .unwrap();
     assert_eq!(loaded_before_resume["data"].as_array().unwrap().len(), 0);
@@ -8337,7 +8915,7 @@ async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
         .dispatch_request(
             &connection,
             "thread/resume",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "excludeTurns": true,
             })),
@@ -8347,7 +8925,11 @@ async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
     assert_eq!(resume["thread"]["id"].as_str(), Some(thread_id.as_str()));
 
     let loaded_after_resume = app
-        .dispatch_request(&connection, "thread/loaded/list", Some(json!({})))
+        .dispatch_request(
+            &connection,
+            "thread/loaded/list",
+            Some(serde_json::json!({})),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -8358,38 +8940,40 @@ async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
 
 #[tokio::test]
 async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
-    use crate::EventStore;
-
     let root = unique_test_root("app-server-placement-reload");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let config_for = |default_placement| {
-        let listen = AppServerListenAddr::Unix(
-            std::env::temp_dir().join(format!("verlet-placement-reload-{}.sock", Uuid::now_v7())),
-        );
-        let mut config = VerletAppServerConfig::local(listen, &workspace);
+        let listen =
+            crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+                format!("verlet-placement-reload-{}.sock", uuid::Uuid::now_v7()),
+            ));
+        let mut config =
+            crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.agent_registry_root = root.join("agents");
         config.default_placement = default_placement;
         config
     };
-    let first = VerletAppServer::new_local(config_for(AgentManifestPlacementBinding::default()))
-        .await
-        .unwrap();
+    let first = crate::adapters::app_server::VerletAppServer::new_local(config_for(
+        crate::AgentManifestPlacementBinding::default(),
+    ))
+    .await
+    .unwrap();
     let (connection, _outbound_rx) = test_connection(first.clone()).await;
     initialize_for_test(&connection).await;
 
     let absent = first
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let corrupt = first
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
-    let absent_id = ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap()).unwrap();
-    let corrupt_id = ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap()).unwrap();
+    let absent_id = crate::ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap()).unwrap();
+    let corrupt_id = crate::ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap()).unwrap();
     let mut absent_lifecycle = first
         .inner
         .metadata_store
@@ -8406,9 +8990,9 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
         .unwrap();
     absent_lifecycle
         .metadata
-        .remove(THREAD_AGENT_PLACEMENT_METADATA);
+        .remove(crate::adapters::app_server::THREAD_AGENT_PLACEMENT_METADATA);
     corrupt_lifecycle.metadata.insert(
-        THREAD_AGENT_PLACEMENT_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_PLACEMENT_METADATA.to_string(),
         "not-json".to_string(),
     );
     first
@@ -8438,44 +9022,53 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
     drop(connection);
     drop(first);
 
-    let restarted = VerletAppServer::new_local(config_for(AgentManifestPlacementBinding {
-        target: crate::PlacementTarget::Sandbox,
-        executor_ref: Some("executor://new-daemon-default".to_string()),
-        config: BTreeMap::new(),
-    }))
+    let restarted = crate::adapters::app_server::VerletAppServer::new_local(config_for(
+        crate::AgentManifestPlacementBinding {
+            target: crate::PlacementTarget::Sandbox,
+            executor_ref: Some("executor://new-daemon-default".to_string()),
+            config: std::collections::BTreeMap::new(),
+        },
+    ))
     .await
     .unwrap();
     let (restarted_connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
     let loaded = restarted
-        .dispatch_request(&restarted_connection, "thread/loaded/list", Some(json!({})))
+        .dispatch_request(
+            &restarted_connection,
+            "thread/loaded/list",
+            Some(serde_json::json!({})),
+        )
         .await
         .unwrap();
     let loaded_ids = loaded["data"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(Value::as_str)
-        .collect::<BTreeSet<_>>();
+        .filter_map(serde_json::Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         loaded_ids,
-        BTreeSet::from([
+        std::collections::BTreeSet::from([
             absent["thread"]["id"].as_str().unwrap(),
             corrupt["thread"]["id"].as_str().unwrap()
         ])
     );
 
-    let session_store = SqliteSessionStore::open(&restarted.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&restarted.inner.session_store_path)
         .await
         .unwrap();
     for lifecycle in [&absent_lifecycle, &corrupt_lifecycle] {
         let events = session_store
-            .read_events(&EventStreamId::for_thread(&lifecycle.coordinates), None)
+            .read_events(
+                &crate::EventStreamId::for_thread(&lifecycle.coordinates),
+                None,
+            )
             .await
             .unwrap();
         let bind_events = events
             .iter()
-            .filter(|event| event.kind == EventKind::ManifestBindCompleted)
+            .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted)
             .collect::<Vec<_>>();
         assert_eq!(bind_events.len(), 2);
         assert!(
@@ -8485,7 +9078,7 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
         );
         let placement_events = events
             .iter()
-            .filter(|event| event.kind == EventKind::PlacementDecision)
+            .filter(|event| event.kind == crate::EventKind::PlacementDecision)
             .collect::<Vec<_>>();
         assert_eq!(placement_events.len(), 2);
         assert!(
@@ -8533,34 +9126,37 @@ streaming = false
 "#,
     )
     .unwrap();
-    LocalAgentRegistry::new(&agent_registry_root)
+    crate::LocalAgentRegistry::new(&agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap();
-    let config_for = |host_path: &Path| {
-        let listen = AppServerListenAddr::Unix(
-            std::env::temp_dir().join(format!("verlet-workspace-reload-{}.sock", Uuid::now_v7())),
-        );
-        let mut config = VerletAppServerConfig::local(listen, &app_cwd);
+    let config_for = |host_path: &std::path::Path| {
+        let listen =
+            crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+                format!("verlet-workspace-reload-{}.sock", uuid::Uuid::now_v7()),
+            ));
+        let mut config =
+            crate::adapters::app_server::VerletAppServerConfig::local(listen, &app_cwd);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.agent_registry_root = agent_registry_root.clone();
-        config.default_workspace = Some(AgentManifestWorkspaceBinding {
+        config.default_workspace = Some(crate::AgentManifestWorkspaceBinding {
             host_path: host_path.to_path_buf(),
             mode: crate::AgentManifestWorkspaceMode::ReadWrite,
         });
         config
     };
 
-    let first = VerletAppServer::new_local(config_for(&first_workspace))
-        .await
-        .unwrap();
+    let first =
+        crate::adapters::app_server::VerletAppServer::new_local(config_for(&first_workspace))
+            .await
+            .unwrap();
     let (connection, _outbound_rx) = test_connection(first.clone()).await;
     initialize_for_test(&connection).await;
     let absent = first
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({"agentRef": "agent://workspace-reload@latest"})),
+            Some(serde_json::json!({"agentRef": "agent://workspace-reload@latest"})),
         )
         .await
         .unwrap();
@@ -8568,7 +9164,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({"agentRef": "agent://workspace-reload@latest"})),
+            Some(serde_json::json!({"agentRef": "agent://workspace-reload@latest"})),
         )
         .await
         .unwrap();
@@ -8576,7 +9172,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({"agentRef": "agent://workspace-reload@latest"})),
+            Some(serde_json::json!({"agentRef": "agent://workspace-reload@latest"})),
         )
         .await
         .unwrap();
@@ -8584,7 +9180,7 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({"agentRef": "agent://workspace-reload@latest"})),
+            Some(serde_json::json!({"agentRef": "agent://workspace-reload@latest"})),
         )
         .await
         .unwrap();
@@ -8592,13 +9188,13 @@ streaming = false
         .dispatch_request(
             &connection,
             "thread/fork",
-            Some(json!({"threadId": valid["thread"]["id"]})),
+            Some(serde_json::json!({"threadId": valid["thread"]["id"]})),
         )
         .await
         .unwrap();
-    let absent_id = ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap()).unwrap();
-    let corrupt_id = ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap()).unwrap();
-    let drifted_id = ThreadId::parse_str(drifted["thread"]["id"].as_str().unwrap()).unwrap();
+    let absent_id = crate::ThreadId::parse_str(absent["thread"]["id"].as_str().unwrap()).unwrap();
+    let corrupt_id = crate::ThreadId::parse_str(corrupt["thread"]["id"].as_str().unwrap()).unwrap();
+    let drifted_id = crate::ThreadId::parse_str(drifted["thread"]["id"].as_str().unwrap()).unwrap();
     let mut absent_lifecycle = first
         .inner
         .metadata_store
@@ -8623,7 +9219,9 @@ streaming = false
     let valid_lifecycle = first
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap()).unwrap())
+        .get_thread_lifecycle(
+            crate::ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap()).unwrap(),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -8631,36 +9229,36 @@ streaming = false
         .inner
         .metadata_store
         .get_thread_lifecycle(
-            ThreadId::parse_str(valid_fork["thread"]["id"].as_str().unwrap()).unwrap(),
+            crate::ThreadId::parse_str(valid_fork["thread"]["id"].as_str().unwrap()).unwrap(),
         )
         .await
         .unwrap()
         .unwrap();
     assert!(
-        SqliteSessionStore::open(&first.inner.session_store_path)
+        crate::SqliteSessionStore::open(&first.inner.session_store_path)
             .await
             .unwrap()
             .read_events(
-                &EventStreamId::for_thread(&valid_fork_lifecycle.coordinates),
+                &crate::EventStreamId::for_thread(&valid_fork_lifecycle.coordinates),
                 None,
             )
             .await
             .unwrap()
             .iter()
-            .any(|event| event.kind == EventKind::ManifestBindCompleted),
+            .any(|event| event.kind == crate::EventKind::ManifestBindCompleted),
         "a plain fork must receive its own durable workspace bind witness"
     );
     absent_lifecycle
         .metadata
-        .remove(THREAD_AGENT_WORKSPACE_METADATA);
+        .remove(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA);
     corrupt_lifecycle.metadata.insert(
-        THREAD_AGENT_WORKSPACE_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA.to_string(),
         "not-json".to_string(),
     );
     drifted_lifecycle.metadata.insert(
-        THREAD_AGENT_WORKSPACE_METADATA.to_string(),
-        serde_json::to_string(&AgentManifestResolvedWorkspaceMount {
-            guest_path: PathBuf::from("/work"),
+        crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA.to_string(),
+        serde_json::to_string(&crate::AgentManifestResolvedWorkspaceMount {
+            guest_path: std::path::PathBuf::from("/work"),
             host_path: std::fs::canonicalize(&replacement_workspace).unwrap(),
             mode: crate::AgentManifestWorkspaceMode::ReadWrite,
         })
@@ -8700,21 +9298,26 @@ streaming = false
     drop(connection);
     drop(first);
 
-    let restarted = VerletAppServer::new_local(config_for(&replacement_workspace))
-        .await
-        .unwrap();
+    let restarted =
+        crate::adapters::app_server::VerletAppServer::new_local(config_for(&replacement_workspace))
+            .await
+            .unwrap();
     let (restarted_connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
     let loaded = restarted
-        .dispatch_request(&restarted_connection, "thread/loaded/list", Some(json!({})))
+        .dispatch_request(
+            &restarted_connection,
+            "thread/loaded/list",
+            Some(serde_json::json!({})),
+        )
         .await
         .unwrap();
     let loaded_ids = loaded["data"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(Value::as_str)
-        .collect::<BTreeSet<_>>();
+        .filter_map(serde_json::Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
     assert!(!loaded_ids.contains(absent["thread"]["id"].as_str().unwrap()));
     assert!(!loaded_ids.contains(corrupt["thread"]["id"].as_str().unwrap()));
     assert!(
@@ -8735,7 +9338,7 @@ streaming = false
             .dispatch_request(
                 &restarted_connection,
                 "thread/resume",
-                Some(json!({"threadId": thread_id})),
+                Some(serde_json::json!({"threadId": thread_id})),
             )
             .await
             .unwrap_err();
@@ -8748,14 +9351,16 @@ streaming = false
     let valid_reloaded = restarted
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap()).unwrap())
+        .get_thread_lifecycle(
+            crate::ThreadId::parse_str(valid["thread"]["id"].as_str().unwrap()).unwrap(),
+        )
         .await
         .unwrap()
         .unwrap();
-    let inherited: AgentManifestResolvedWorkspaceMount = serde_json::from_str(
+    let inherited: crate::AgentManifestResolvedWorkspaceMount = serde_json::from_str(
         valid_reloaded
             .metadata
-            .get(THREAD_AGENT_WORKSPACE_METADATA)
+            .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
             .unwrap(),
     )
     .unwrap();
@@ -8779,25 +9384,25 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     // lexicon-allow: capsule - existing test provider helper type
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root(
         &root,
         &workspace,
         provider_client,
         // lexicon-allow: capsule - existing operation binding config type
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let parsed = ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
     let mut record = app
         .inner
         .metadata_store
@@ -8830,7 +9435,7 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
         .dispatch_request(
             &connection,
             "thread/resume",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "excludeTurns": true,
             })),
@@ -8842,7 +9447,7 @@ async fn thread_resume_ignores_pre_manifest_operation_name_metadata() {
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "turn after legacy metadata", "text_elements": [] }],
         })),
@@ -8867,7 +9472,7 @@ async fn model_provider_capabilities_read_returns_local_capabilities() {
         .unwrap();
     assert_eq!(
         capabilities,
-        json!({
+        serde_json::json!({
             "namespaceTools": true,
             "imageGeneration": false,
             "webSearch": false,
@@ -8878,22 +9483,28 @@ async fn model_provider_capabilities_read_returns_local_capabilities() {
 
 #[tokio::test]
 async fn model_provider_capabilities_read_reports_bedrock_streaming() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-bedrock-cap-test-{}.sock", Uuid::now_v7())),
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-bedrock-cap-test-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let root =
+        std::env::temp_dir().join(format!("verlet-bedrock-cap-test-{}", uuid::Uuid::now_v7()));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    )
+    .with_anthropic_bedrock(
+        "us-east-1",
+        "AKIA_TEST",
+        "secret",
+        None,
+        "anthropic.claude-test-v1:0",
     );
-    let root = std::env::temp_dir().join(format!("verlet-bedrock-cap-test-{}", Uuid::now_v7()));
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap())
-        .with_anthropic_bedrock(
-            "us-east-1",
-            "AKIA_TEST",
-            "secret",
-            None,
-            "anthropic.claude-test-v1:0",
-        );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
@@ -8901,25 +9512,23 @@ async fn model_provider_capabilities_read_reports_bedrock_streaming() {
         .dispatch_request(&connection, "modelProvider/capabilities/read", None)
         .await
         .unwrap();
-    assert_eq!(capabilities["supportsStreaming"], json!(true));
+    assert_eq!(capabilities["supportsStreaming"], serde_json::json!(true));
 }
 
 #[tokio::test]
 async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bash() {
-    use crate::EventStore;
-
     let registry_root = unique_test_root("capsule-global-registry");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
-    let client = Arc::new(BashCallingCapsuleClient::new(
+    let client = std::sync::Arc::new(BashCallingCapsuleClient::new(
         "search",
         "search",
         "command -v search && printf verlet | search",
         "search:verlet",
     ));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
-        CapsuleBindingsConfig::default()
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
             .with_registry_root(&registry_root)
             .with_global_operation_name("search"),
     )
@@ -8928,21 +9537,21 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
+    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     let exa_binding = manifest_operation_binding_by_name(&bind.payload, "search");
@@ -8951,11 +9560,11 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
         exa_binding["artifact_hash"].as_str(),
         Some(record.active_artifact_hash.as_str())
     );
-    assert_eq!(exa_binding["operations"], json!(["search"]));
+    assert_eq!(exa_binding["operations"], serde_json::json!(["search"]));
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "use search", "text_elements": [] }],
         })),
@@ -8972,16 +9581,14 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
 
 #[tokio::test]
 async fn default_manifest_synthesizes_load_all_active_operation_rows() {
-    use crate::EventStore;
-
     let registry_root = unique_test_root("capsule-load-all-registry");
     let alpha = publish_echo_operation(&registry_root, "alpha", "alpha_search", "alpha").await;
     let beta = publish_echo_operation(&registry_root, "beta", "beta_search", "beta").await;
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client;
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
-        CapsuleBindingsConfig::default()
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
             .with_registry_root(&registry_root)
             .with_load_all_active_when_unbound(true),
     )
@@ -8990,37 +9597,38 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("load-all default manifest thread should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
+    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     let alpha_binding = manifest_operation_binding_by_name(&bind.payload, "alpha");
     let beta_binding = manifest_operation_binding_by_name(&bind.payload, "beta");
-    let thread_binding = manifest_operation_binding_by_name(&bind.payload, VERLET_THREADS_PACKAGE);
+    let thread_binding =
+        manifest_operation_binding_by_name(&bind.payload, crate::VERLET_THREADS_PACKAGE);
     assert!(
         bind.payload
             .get("operation_bindings")
-            .and_then(Value::as_array)
+            .and_then(serde_json::Value::as_array)
             .unwrap()
             .iter()
-            .all(|binding| binding["name"].as_str() != Some(VERLET_PROCESS_PACKAGE))
+            .all(|binding| binding["name"].as_str() != Some(crate::VERLET_PROCESS_PACKAGE))
     );
     assert_eq!(
         alpha_binding,
-        &json!({
+        &serde_json::json!({
             "name": "alpha",
             "artifact_hash": alpha.active_artifact_hash,
             "operations": ["alpha_search"]
@@ -9028,7 +9636,7 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
     );
     assert_eq!(
         beta_binding,
-        &json!({
+        &serde_json::json!({
             "name": "beta",
             "artifact_hash": beta.active_artifact_hash,
             "operations": ["beta_search"]
@@ -9036,12 +9644,12 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
     );
     assert_eq!(
         thread_binding["direct_tools"],
-        json!([
-            { "operation": THREAD_CANCEL_OPERATION, "tool_name": THREAD_CANCEL_OPERATION },
-            { "operation": THREAD_SPAWN_OPERATION, "tool_name": THREAD_SPAWN_OPERATION },
-            { "operation": THREAD_STATUS_OPERATION, "tool_name": THREAD_STATUS_OPERATION },
-            { "operation": THREAD_SUBMIT_OPERATION, "tool_name": THREAD_SUBMIT_OPERATION },
-            { "operation": THREAD_WAIT_OPERATION, "tool_name": THREAD_WAIT_OPERATION }
+        serde_json::json!([
+            { "operation": crate::THREAD_CANCEL_OPERATION, "tool_name": crate::THREAD_CANCEL_OPERATION },
+            { "operation": crate::THREAD_SPAWN_OPERATION, "tool_name": crate::THREAD_SPAWN_OPERATION },
+            { "operation": crate::THREAD_STATUS_OPERATION, "tool_name": crate::THREAD_STATUS_OPERATION },
+            { "operation": crate::THREAD_SUBMIT_OPERATION, "tool_name": crate::THREAD_SUBMIT_OPERATION },
+            { "operation": crate::THREAD_WAIT_OPERATION, "tool_name": crate::THREAD_WAIT_OPERATION }
         ])
     );
     let _ = std::fs::remove_dir_all(registry_root);
@@ -9049,22 +9657,24 @@ async fn default_manifest_synthesizes_load_all_active_operation_rows() {
 
 #[tokio::test]
 async fn default_manifest_load_all_requires_registry_root() {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-load-all-root-{}.sock", Uuid::now_v7())),
-    );
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-load-all-root-{}.sock", uuid::Uuid::now_v7()),
+    ));
     let root = unique_test_root("default-manifest-load-all-no-root");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     // lexicon-allow: capsule - existing operation binding config API
-    let mut config = VerletAppServerConfig::local(listen, &workspace).with_capsule_bindings(
-        // lexicon-allow: capsule - existing operation binding config type
-        CapsuleBindingsConfig::default().with_load_all_active_when_unbound(true),
-    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+        .with_capsule_bindings(
+            // lexicon-allow: capsule - existing operation binding config type
+            crate::adapters::app_server::CapsuleBindingsConfig::default()
+                .with_load_all_active_when_unbound(true),
+        );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
 
-    let err = match VerletAppServer::new_local(config).await {
+    let err = match crate::adapters::app_server::VerletAppServer::new_local(config).await {
         Ok(_) => panic!("load-all operation bindings without registry root should fail startup"),
         Err(err) => err,
     };
@@ -9077,18 +9687,16 @@ async fn default_manifest_load_all_requires_registry_root() {
 
 #[tokio::test]
 async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_records() {
-    use crate::EventStore;
-
     let registry_root = unique_test_root("operation-empty-registry");
     std::fs::create_dir_all(&registry_root).unwrap();
     // lexicon-allow: capsule - existing test provider helper type
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client;
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
     // lexicon-allow: capsule - existing operation binding test helper
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
         // lexicon-allow: capsule - existing operation binding config type
-        CapsuleBindingsConfig::default()
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
             .with_registry_root(&registry_root)
             .with_load_all_active_when_unbound(true),
     )
@@ -9097,21 +9705,21 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
     let lifecycle = app
         .inner
         .metadata_store
-        .get_thread_lifecycle(ThreadId::parse_str(&thread_id).unwrap())
+        .get_thread_lifecycle(crate::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("empty registry default manifest thread should persist lifecycle metadata");
-    let session_store = SqliteSessionStore::open(&app.inner.session_store_path)
+    let session_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
         .await
         .unwrap();
-    let stream_id = EventStreamId::for_thread(&lifecycle.coordinates);
+    let stream_id = crate::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, crate::EventKind::ManifestBindCompleted);
     let bindings = bind.payload["operation_bindings"].as_array().unwrap();
@@ -9119,35 +9727,37 @@ async fn default_manifest_load_all_accepts_registry_with_only_kernel_native_reco
     assert!(
         bindings
             .iter()
-            .all(|binding| binding["name"].as_str() != Some(VERLET_PROCESS_PACKAGE))
+            .all(|binding| binding["name"].as_str() != Some(crate::VERLET_PROCESS_PACKAGE))
     );
-    let thread_binding = manifest_operation_binding_by_name(&bind.payload, VERLET_THREADS_PACKAGE);
+    let thread_binding =
+        manifest_operation_binding_by_name(&bind.payload, crate::VERLET_THREADS_PACKAGE);
     assert_eq!(
         thread_binding["direct_tools"],
-        json!([
-            { "operation": THREAD_CANCEL_OPERATION, "tool_name": THREAD_CANCEL_OPERATION },
-            { "operation": THREAD_SPAWN_OPERATION, "tool_name": THREAD_SPAWN_OPERATION },
-            { "operation": THREAD_STATUS_OPERATION, "tool_name": THREAD_STATUS_OPERATION },
-            { "operation": THREAD_SUBMIT_OPERATION, "tool_name": THREAD_SUBMIT_OPERATION },
-            { "operation": THREAD_WAIT_OPERATION, "tool_name": THREAD_WAIT_OPERATION }
+        serde_json::json!([
+            { "operation": crate::THREAD_CANCEL_OPERATION, "tool_name": crate::THREAD_CANCEL_OPERATION },
+            { "operation": crate::THREAD_SPAWN_OPERATION, "tool_name": crate::THREAD_SPAWN_OPERATION },
+            { "operation": crate::THREAD_STATUS_OPERATION, "tool_name": crate::THREAD_STATUS_OPERATION },
+            { "operation": crate::THREAD_SUBMIT_OPERATION, "tool_name": crate::THREAD_SUBMIT_OPERATION },
+            { "operation": crate::THREAD_WAIT_OPERATION, "tool_name": crate::THREAD_WAIT_OPERATION }
         ])
     );
-    let notify_binding = manifest_operation_binding_by_name(&bind.payload, VERLET_NOTIFY_PACKAGE);
+    let notify_binding =
+        manifest_operation_binding_by_name(&bind.payload, crate::VERLET_NOTIFY_PACKAGE);
     assert_eq!(
         json_array_string_set(&notify_binding["operations"]),
-        BTreeSet::from([
-            NOTIFY_PREVIEW_OPERATION.to_string(),
-            CHANNEL_EMIT_OPERATION.to_string()
+        std::collections::BTreeSet::from([
+            crate::NOTIFY_PREVIEW_OPERATION.to_string(),
+            crate::CHANNEL_EMIT_OPERATION.to_string()
         ])
     );
     let schedule_binding =
-        manifest_operation_binding_by_name(&bind.payload, VERLET_SCHEDULE_PACKAGE);
+        manifest_operation_binding_by_name(&bind.payload, crate::VERLET_SCHEDULE_PACKAGE);
     assert_eq!(
         json_array_string_set(&schedule_binding["operations"]),
-        BTreeSet::from([
-            MANDATE_START_OPERATION.to_string(),
-            MANDATE_REVOKE_OPERATION.to_string(),
-            MANDATE_LIST_OPERATION.to_string()
+        std::collections::BTreeSet::from([
+            crate::MANDATE_START_OPERATION.to_string(),
+            crate::MANDATE_REVOKE_OPERATION.to_string(),
+            crate::MANDATE_LIST_OPERATION.to_string()
         ])
     );
     let _ = std::fs::remove_dir_all(registry_root);
@@ -9158,11 +9768,11 @@ async fn app_server_capsule_bindings_reject_thread_operation_scope_injection() {
     let registry_root = unique_test_root("capsule-thread-registry");
     publish_echo_operation(&registry_root, "global", "global_search", "global").await;
     publish_echo_operation(&registry_root, "thread", "thread_search", "thread").await;
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
-        CapsuleBindingsConfig::default()
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
             .with_registry_root(&registry_root)
             .with_global_operation_name("global"),
     )
@@ -9174,7 +9784,7 @@ async fn app_server_capsule_bindings_reject_thread_operation_scope_injection() {
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "capsuleBindings": {
                     "operationNames": ["global"]
                 }
@@ -9195,11 +9805,12 @@ async fn app_server_capsule_bindings_reject_thread_operation_scope_injection() {
 async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope() {
     let registry_root = unique_test_root("capsule-binding-methods");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
-    let client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
-        CapsuleBindingsConfig::default().with_registry_root(&registry_root),
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&registry_root),
     )
     .await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -9209,7 +9820,7 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
         .dispatch_request(
             &connection,
             "capsule/binding/set",
-            Some(json!({
+            Some(serde_json::json!({
                 "scope": { "kind": "global" },
                 "operationName": "search",
                 "artifactHash": record.active_artifact_hash,
@@ -9224,7 +9835,11 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
     );
 
     let resolved = app
-        .dispatch_request(&connection, "capsule/binding/resolve", Some(json!({})))
+        .dispatch_request(
+            &connection,
+            "capsule/binding/resolve",
+            Some(serde_json::json!({})),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -9233,14 +9848,14 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
     );
 
     let bound_thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let bound_thread_id = bound_thread["thread"]["id"].as_str().unwrap().to_string();
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": bound_thread_id,
             "input": [{ "type": "text", "text": "with search", "text_elements": [] }],
         })),
@@ -9253,7 +9868,7 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
         .dispatch_request(
             &connection,
             "capsule/binding/delete",
-            Some(json!({
+            Some(serde_json::json!({
                 "scope": { "kind": "global" },
                 "operationName": "search",
             })),
@@ -9269,7 +9884,7 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
         .dispatch_request(
             &connection,
             "capsule/binding/list",
-            Some(json!({ "scope": { "kind": "global" } })),
+            Some(serde_json::json!({ "scope": { "kind": "global" } })),
         )
         .await
         .unwrap();
@@ -9279,14 +9894,14 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
     );
 
     let unbound_thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let unbound_thread_id = unbound_thread["thread"]["id"].as_str().unwrap().to_string();
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": unbound_thread_id,
             "input": [{ "type": "text", "text": "without search", "text_elements": [] }],
         })),
@@ -9307,11 +9922,12 @@ async fn app_server_capsule_binding_methods_do_not_update_manifest_runtime_scope
 async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_scope() {
     let registry_root = unique_test_root("capsule-binding-reload");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
-    let first_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = first_client;
+    let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
     let app = test_app_with_provider_and_capsule_bindings(
         provider_client,
-        CapsuleBindingsConfig::default().with_registry_root(&registry_root),
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&registry_root),
     )
     .await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -9320,7 +9936,7 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
     app.dispatch_request(
         &connection,
         "capsule/binding/set",
-        Some(json!({
+        Some(serde_json::json!({
             "scope": { "kind": "global" },
             "operationName": "search",
             "artifactHash": record.active_artifact_hash,
@@ -9330,18 +9946,23 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
     .unwrap();
 
     // lexicon-allow: capsule - existing test helper type
-    let second_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = second_client.clone();
+    let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
     let restarted = test_app_with_provider_and_capsule_bindings(
         provider_client,
-        CapsuleBindingsConfig::default().with_registry_root(&registry_root),
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&registry_root),
     )
     .await;
     let (restarted_connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
 
     let thread = restarted
-        .dispatch_request(&restarted_connection, "thread/start", Some(json!({})))
+        .dispatch_request(
+            &restarted_connection,
+            "thread/start",
+            Some(serde_json::json!({})),
+        )
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -9349,7 +9970,7 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
         .dispatch_request(
             &restarted_connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "after restart", "text_elements": [] }],
             })),
@@ -9372,13 +9993,13 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
     std::fs::create_dir_all(&first_cwd).unwrap();
     std::fs::create_dir_all(&restarted_cwd).unwrap();
     let thread_id = {
-        let first_client = Arc::new(InspectingCapsuleClient::default());
-        let provider_client: Arc<dyn ProviderClient> = first_client.clone();
+        let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
         let app = test_app_with_provider_root(
             &root,
             &first_cwd,
             provider_client,
-            CapsuleBindingsConfig::default(),
+            crate::adapters::app_server::CapsuleBindingsConfig::default(),
         )
         .await;
         let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -9388,7 +10009,7 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
             .dispatch_request(
                 &connection,
                 "thread/start",
-                Some(json!({ "cwd": cwd_string(&first_cwd), "ephemeral": true })),
+                Some(serde_json::json!({ "cwd": crate::adapters::app_server::connection::cwd_string(&first_cwd), "ephemeral": true })),
             )
             .await
             .unwrap();
@@ -9396,7 +10017,7 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
         app.dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "first durable turn", "text_elements": [] }],
             })),
@@ -9408,27 +10029,31 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
         thread_id
     };
 
-    let second_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = second_client.clone();
+    let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
     let restarted = test_app_with_provider_root(
         &root,
         &restarted_cwd,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
     let (restarted_connection, _outbound_rx) = test_connection(restarted.clone()).await;
     initialize_for_test(&restarted_connection).await;
 
     let loaded = restarted
-        .dispatch_request(&restarted_connection, "thread/loaded/list", Some(json!({})))
+        .dispatch_request(
+            &restarted_connection,
+            "thread/loaded/list",
+            Some(serde_json::json!({})),
+        )
         .await
         .unwrap();
     let loaded_ids = loaded["data"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(Value::as_str)
+        .filter_map(serde_json::Value::as_str)
         .collect::<Vec<_>>();
     assert_eq!(loaded_ids, vec![thread_id.as_str()]);
 
@@ -9436,13 +10061,13 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
         .dispatch_request(
             &restarted_connection,
             "thread/read",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
     assert_eq!(
         thread["thread"]["cwd"].as_str(),
-        Some(cwd_string(&first_cwd).as_str())
+        Some(crate::adapters::app_server::connection::cwd_string(&first_cwd).as_str())
     );
     assert_eq!(thread["thread"]["ephemeral"].as_bool(), Some(true));
 
@@ -9450,7 +10075,7 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
             .dispatch_request(
                 &restarted_connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "input": [{ "type": "text", "text": "second turn after restart", "text_elements": [] }],
                 })),
@@ -9483,20 +10108,20 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let thread_id = {
-        let first_client = Arc::new(InspectingCapsuleClient::default());
-        let provider_client: Arc<dyn ProviderClient> = first_client.clone();
+        let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
         let app = test_app_with_provider_root(
             &root,
             &workspace,
             provider_client,
-            CapsuleBindingsConfig::default(),
+            crate::adapters::app_server::CapsuleBindingsConfig::default(),
         )
         .await;
         let (connection, mut outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread = app
-            .dispatch_request(&connection, "thread/start", Some(json!({})))
+            .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
             .await
             .unwrap();
         let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -9508,7 +10133,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
                 .dispatch_request(
                     &connection,
                     "turn/start",
-                    Some(json!({
+                    Some(serde_json::json!({
                         "threadId": thread_id,
                         "input": [{ "type": "text", "text": text, "text_elements": [] }],
                     })),
@@ -9528,7 +10153,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
             .dispatch_request(
                 &connection,
                 "thread/read",
-                Some(json!({ "threadId": thread_id })),
+                Some(serde_json::json!({ "threadId": thread_id })),
             )
             .await
             .unwrap();
@@ -9543,13 +10168,13 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
         thread_id
     };
 
-    let second_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = second_client.clone();
+    let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
     let restarted = test_app_with_provider_root(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
     let (restarted_connection, mut restarted_outbound_rx) =
@@ -9572,7 +10197,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
         .dispatch_request(
             &restarted_connection,
             "thread/read",
-            Some(json!({ "threadId": thread_id })),
+            Some(serde_json::json!({ "threadId": thread_id })),
         )
         .await
         .unwrap();
@@ -9592,7 +10217,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
             .dispatch_request(
                 &restarted_connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "input": [{ "type": "text", "text": "third turn after restore", "text_elements": [] }],
                 })),
@@ -9616,15 +10241,15 @@ async fn fast_stream_completion_reads_saved_assistant_when_projection_is_empty()
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let expected = "FIRST:VERLET_APP_RESUME_debug1";
-    let client = Arc::new(SequencedStreamCapsuleClient::new_modes([
+    let client = std::sync::Arc::new(SequencedStreamCapsuleClient::new_modes([
         SequencedStreamResponse::text_delta(expected),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
     .await;
@@ -9632,14 +10257,14 @@ async fn fast_stream_completion_reads_saved_assistant_when_projection_is_empty()
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
     let turn_id = submit_provider_turn_without_subscription(
         &app,
         &thread_id,
-        vec![json!({ "type": "text", "text": "instant stream", "text_elements": [] })],
+        vec![serde_json::json!({ "type": "text", "text": "instant stream", "text_elements": [] })],
     )
     .await;
     wait_for_provider_requests(&client, 1).await;
@@ -9652,13 +10277,19 @@ async fn fast_stream_completion_reads_saved_assistant_when_projection_is_empty()
         turn.assistant_started = true;
         turn.assistant_completed = true;
         turn.assistant_text.clear();
-        turn.items
-            .retain(|item| item.get("type").and_then(Value::as_str) != Some("agentMessage"));
+        turn.items.retain(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) != Some("agentMessage")
+        });
     }
 
     let handle = app.handle_for_thread(&thread_id).await.unwrap();
     connection.subscribe_thread(handle).await;
-    complete_turn_after_settle(app.clone(), thread_id.clone(), turn_id.clone()).await;
+    crate::adapters::app_server::subscriptions::complete_turn_after_settle(
+        app.clone(),
+        thread_id.clone(),
+        turn_id.clone(),
+    )
+    .await;
 
     let completed =
         wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &turn_id).await;
@@ -9667,7 +10298,9 @@ async fn fast_stream_completion_reads_saved_assistant_when_projection_is_empty()
         Some(expected)
     );
     assert_eq!(
-        latest_assistant_text(&app, &thread_id).await.as_deref(),
+        crate::adapters::app_server::subscriptions::latest_assistant_text(&app, &thread_id)
+            .await
+            .as_deref(),
         Some(expected)
     );
 
@@ -9683,13 +10316,14 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
         .map(|index| format!("{index:04}|"))
         .collect::<Vec<_>>();
     let expected = deltas.concat();
-    let provider_client: Arc<dyn ProviderClient> = Arc::new(BurstStreamClient { deltas });
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> =
+        std::sync::Arc::new(BurstStreamClient { deltas });
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
         provider_client,
         // lexicon-allow: capsule - existing app-server test fixture config type
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
     .await;
@@ -9697,7 +10331,7 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -9705,7 +10339,7 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "burst", "text_elements": [] }],
             })),
@@ -9722,7 +10356,10 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
                     .recv()
                     .await
                     .expect("notification stream closed");
-                let JsonRpcMessage::Notification(notification) = message else {
+                let crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+                    notification,
+                ) = message
+                else {
                     continue;
                 };
                 match notification.method.as_str() {
@@ -9758,7 +10395,9 @@ async fn lagged_thread_stream_resnapshots_from_durable_truth() {
         .expect("resync snapshot should contain assistant text");
     assert_eq!(resynced_text, expected);
     assert_eq!(
-        latest_assistant_text(&app, &thread_id).await.as_deref(),
+        crate::adapters::app_server::subscriptions::latest_assistant_text(&app, &thread_id)
+            .await
+            .as_deref(),
         Some(expected.as_str()),
         "durable session truth should contain the complete stream",
     );
@@ -9773,7 +10412,7 @@ async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -9785,18 +10424,18 @@ async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
         thread.active_turn_id = Some(turn_id.clone());
         thread.turns.insert(
             turn_id.clone(),
-            AppServerTurnState::new(
+            crate::adapters::app_server::threads::AppServerTurnState::new(
                 turn_id.clone(),
-                vec![json!({ "type": "text", "text": "ingress", "text_elements": [] })],
+                vec![serde_json::json!({ "type": "text", "text": "ingress", "text_elements": [] })],
             ),
         );
     }
     handle
         .append_thread_event_record(crate::NewEventRecord::discharged(
             handle.context().coordinates.clone(),
-            EventKind::TurnSubmitted,
-            json!({
-                "schema": EventKind::TurnSubmitted.payload_schema_id(),
+            crate::EventKind::TurnSubmitted,
+            serde_json::json!({
+                "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
                 "turn_id": turn_id,
             }),
             crate::EventProvenance {
@@ -9810,28 +10449,39 @@ async fn lag_resync_degrades_when_turn_submission_has_no_entry_id() {
         .unwrap();
 
     assert!(
-        resynchronize_thread_after_lag(&app, &handle, &thread_id, 1, Some(&turn_id)).await,
+        crate::adapters::app_server::subscriptions::resynchronize_thread_after_lag(
+            &app,
+            &handle,
+            &thread_id,
+            1,
+            Some(&turn_id)
+        )
+        .await,
         "missing entry_id should degrade the lag resync instead of failing it",
     );
 
-    let resynced = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let message = outbound_rx
-                .recv()
-                .await
-                .expect("notification stream closed");
-            let JsonRpcMessage::Notification(notification) = message else {
-                continue;
-            };
-            match notification.method.as_str() {
-                "thread/resynced" => break notification.params.expect("resync params"),
-                "thread/resync/failed" => panic!("degraded lag resync unexpectedly failed"),
-                _ => {}
+    let resynced =
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let message = outbound_rx
+                    .recv()
+                    .await
+                    .expect("notification stream closed");
+                let crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+                    notification,
+                ) = message
+                else {
+                    continue;
+                };
+                match notification.method.as_str() {
+                    "thread/resynced" => break notification.params.expect("resync params"),
+                    "thread/resync/failed" => panic!("degraded lag resync unexpectedly failed"),
+                    _ => {}
+                }
             }
-        }
-    })
-    .await
-    .expect("degraded lag resync did not complete");
+        })
+        .await
+        .expect("degraded lag resync did not complete");
 
     let resynced_turn = resynced["thread"]["turns"]
         .as_array()
@@ -9856,16 +10506,16 @@ async fn lagged_idle_thread_resynchronizes_without_another_status_change() {
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
     let handle = app.handle_for_thread(&thread_id).await.unwrap();
-    assert_eq!(handle.status(), ThreadStatus::Idle);
+    assert_eq!(handle.status(), crate::ThreadStatus::Idle);
     tokio::task::yield_now().await;
 
     for index in 0..1_100 {
-        handle.emit_runtime(RuntimeEventKind::TextDelta {
+        handle.emit_runtime(crate::RuntimeEventKind::TextDelta {
             text: format!("idle-{index}"),
         });
     }
@@ -9878,7 +10528,10 @@ async fn lagged_idle_thread_resynchronizes_without_another_status_change() {
                     .recv()
                     .await
                     .expect("notification stream closed");
-                let JsonRpcMessage::Notification(notification) = message else {
+                let crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+                    notification,
+                ) = message
+                else {
                     continue;
                 };
                 match notification.method.as_str() {
@@ -9901,14 +10554,14 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
     let root = unique_test_root("app-server-lag-resync-status-race");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let client = Arc::new(LagThenBlockStreamClient::default());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(LagThenBlockStreamClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
         provider_client,
         // lexicon-allow: capsule - existing app-server test fixture config type
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
     .await;
@@ -9916,15 +10569,16 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
-    let gate = install_thread_resync_test_gate(&thread_id);
+    let gate =
+        crate::adapters::app_server::subscriptions::install_thread_resync_test_gate(&thread_id);
     app.dispatch_request(
         &connection,
         "turn/start",
-        Some(json!({
+        Some(serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": "lag first turn", "text_elements": [] }],
         })),
@@ -9943,7 +10597,7 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "block second turn", "text_elements": [] }],
             })),
@@ -9959,29 +10613,33 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
     .expect("second provider turn did not start");
     assert_eq!(
         app.handle_for_thread(&thread_id).await.unwrap().status(),
-        ThreadStatus::Running
+        crate::ThreadStatus::Running
     );
     gate.release();
 
-    let status_after_resync = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        let mut saw_resynced = false;
-        loop {
-            let message = outbound_rx
-                .recv()
-                .await
-                .expect("notification stream closed");
-            let JsonRpcMessage::Notification(notification) = message else {
-                continue;
-            };
-            if notification.method == "thread/resynced" {
-                saw_resynced = true;
-            } else if saw_resynced && notification.method == "thread/status/changed" {
-                break notification.params.expect("thread status params");
+    let status_after_resync =
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut saw_resynced = false;
+            loop {
+                let message = outbound_rx
+                    .recv()
+                    .await
+                    .expect("notification stream closed");
+                let crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+                    notification,
+                ) = message
+                else {
+                    continue;
+                };
+                if notification.method == "thread/resynced" {
+                    saw_resynced = true;
+                } else if saw_resynced && notification.method == "thread/status/changed" {
+                    break notification.params.expect("thread status params");
+                }
             }
-        }
-    })
-    .await
-    .expect("watcher did not publish status after resynchronization");
+        })
+        .await
+        .expect("watcher did not publish status after resynchronization");
 
     assert_eq!(status_after_resync["status"]["type"], "active");
     {
@@ -9991,7 +10649,7 @@ async fn lag_resync_does_not_apply_stale_idle_to_a_new_running_turn() {
             thread.active_turn_id.as_deref(),
             Some(second_turn_id.as_str())
         );
-        assert_eq!(thread.status, ThreadStatus::Running);
+        assert_eq!(thread.status, crate::ThreadStatus::Running);
     }
     client.release_second_request();
     wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &second_turn_id).await;
@@ -10004,15 +10662,15 @@ async fn fast_stream_after_thread_start_idle_completes_with_assistant_text() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let expected = "FIRST:VERLET_APP_RESUME_after_idle";
-    let client = Arc::new(SequencedStreamCapsuleClient::new_modes([
+    let client = std::sync::Arc::new(SequencedStreamCapsuleClient::new_modes([
         SequencedStreamResponse::text_delta(expected),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
     .await;
@@ -10020,7 +10678,7 @@ async fn fast_stream_after_thread_start_idle_completes_with_assistant_text() {
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -10028,7 +10686,7 @@ async fn fast_stream_after_thread_start_idle_completes_with_assistant_text() {
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{
                     "type": "text",
@@ -10050,7 +10708,9 @@ async fn fast_stream_after_thread_start_idle_completes_with_assistant_text() {
         Some(expected)
     );
     assert_eq!(
-        latest_assistant_text(&app, &thread_id).await.as_deref(),
+        crate::adapters::app_server::subscriptions::latest_assistant_text(&app, &thread_id)
+            .await
+            .as_deref(),
         Some(expected)
     );
 
@@ -10062,13 +10722,13 @@ async fn provider_failure_turn_completed_carries_error() {
     let root = unique_test_root("app-server-provider-failure");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let client = Arc::new(FailingProviderClient::new("scripted provider failure"));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let client = std::sync::Arc::new(FailingProviderClient::new("scripted provider failure"));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
     .await;
@@ -10076,7 +10736,7 @@ async fn provider_failure_turn_completed_carries_error() {
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -10084,7 +10744,7 @@ async fn provider_failure_turn_completed_carries_error() {
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "please fail", "text_elements": [] }],
             })),
@@ -10098,7 +10758,7 @@ async fn provider_failure_turn_completed_carries_error() {
         wait_for_failed_turn_and_closed_thread(&mut outbound_rx, &thread_id, turn_id).await;
     assert_eq!(completed["turn"]["status"].as_str(), Some("failed"));
     let error = &completed["turn"]["error"];
-    assert_ne!(error, &Value::Null);
+    assert_ne!(error, &serde_json::Value::Null);
     assert_eq!(error["codexErrorInfo"].as_str(), Some("other"));
     assert!(
         error["message"]
@@ -10117,20 +10777,20 @@ async fn restored_thread_provider_requests_end_with_current_input() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let thread_id = {
-        let first_client = Arc::new(InspectingCapsuleClient::default());
-        let provider_client: Arc<dyn ProviderClient> = first_client.clone();
+        let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
         let app = test_app_with_provider_root(
             &root,
             &workspace,
             provider_client,
-            CapsuleBindingsConfig::default(),
+            crate::adapters::app_server::CapsuleBindingsConfig::default(),
         )
         .await;
         let (connection, mut outbound_rx) = test_connection(app.clone()).await;
         initialize_for_test(&connection).await;
 
         let thread = app
-            .dispatch_request(&connection, "thread/start", Some(json!({})))
+            .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
             .await
             .unwrap();
         let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -10138,7 +10798,7 @@ async fn restored_thread_provider_requests_end_with_current_input() {
             .dispatch_request(
                 &connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "input": [{ "type": "text", "text": "before restart", "text_elements": [] }],
                 })),
@@ -10159,13 +10819,13 @@ async fn restored_thread_provider_requests_end_with_current_input() {
         thread_id
     };
 
-    let second_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = second_client.clone();
+    let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
     let restarted = test_app_with_provider_root(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
     let (restarted_connection, mut restarted_outbound_rx) =
@@ -10176,7 +10836,7 @@ async fn restored_thread_provider_requests_end_with_current_input() {
         .dispatch_request(
             &restarted_connection,
             "thread/resume",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "excludeTurns": true,
             })),
@@ -10192,7 +10852,7 @@ async fn restored_thread_provider_requests_end_with_current_input() {
             .dispatch_request(
                 &restarted_connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "input": [{ "type": "text", "text": text, "text_elements": [] }],
                 })),
@@ -10224,15 +10884,15 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let thread_id = {
-        let first_client = Arc::new(SequencedStreamCapsuleClient::new([
+        let first_client = std::sync::Arc::new(SequencedStreamCapsuleClient::new([
             "before restart completion",
         ]));
-        let provider_client: Arc<dyn ProviderClient> = first_client.clone();
+        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
         let app = test_app_with_provider_root_and_stream(
             &root,
             &workspace,
             provider_client,
-            CapsuleBindingsConfig::default(),
+            crate::adapters::app_server::CapsuleBindingsConfig::default(),
             true,
         )
         .await;
@@ -10240,7 +10900,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
         initialize_for_test(&connection).await;
 
         let thread = app
-            .dispatch_request(&connection, "thread/start", Some(json!({})))
+            .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
             .await
             .unwrap();
         let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -10248,7 +10908,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
             .dispatch_request(
                 &connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "input": [{ "type": "text", "text": "before restart", "text_elements": [] }],
                 })),
@@ -10266,16 +10926,16 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
         thread_id
     };
 
-    let second_client = Arc::new(SequencedStreamCapsuleClient::new([
+    let second_client = std::sync::Arc::new(SequencedStreamCapsuleClient::new([
         "restored completion one",
         "restored completion two",
     ]));
-    let provider_client: Arc<dyn ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
     let restarted = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
     .await;
@@ -10287,7 +10947,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
         .dispatch_request(
             &restarted_connection,
             "thread/resume",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "excludeTurns": true,
             })),
@@ -10306,7 +10966,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
             .dispatch_request(
                 &restarted_connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "input": [{ "type": "text", "text": input, "text_elements": [] }],
                 })),
@@ -10347,15 +11007,17 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let thread_id = {
-        let first_client = Arc::new(SequencedStreamCapsuleClient::new([
+        // lexicon-allow: capsule - existing app-server test surface; line shifted by repo-wide path qualification
+        let first_client = std::sync::Arc::new(SequencedStreamCapsuleClient::new([
             "before restart completion",
         ]));
-        let provider_client: Arc<dyn ProviderClient> = first_client.clone();
+        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client.clone();
         let app = test_app_with_provider_root_and_stream(
             &root,
             &workspace,
             provider_client,
-            CapsuleBindingsConfig::default(),
+            // lexicon-allow: capsule - existing app-server test surface; line shifted by repo-wide path qualification
+            crate::adapters::app_server::CapsuleBindingsConfig::default(),
             true,
         )
         .await;
@@ -10363,7 +11025,7 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
         initialize_for_test(&connection).await;
 
         let thread = app
-            .dispatch_request(&connection, "thread/start", Some(json!({})))
+            .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
             .await
             .unwrap();
         let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -10371,7 +11033,7 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
             .dispatch_request(
                 &connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "input": [{ "type": "text", "text": "before restart", "text_elements": [] }],
                 })),
@@ -10384,16 +11046,18 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
         thread_id
     };
 
-    let second_client = Arc::new(SequencedStreamCapsuleClient::new_modes([
+    // lexicon-allow: capsule - existing app-server test surface; line shifted by repo-wide path qualification
+    let second_client = std::sync::Arc::new(SequencedStreamCapsuleClient::new_modes([
         SequencedStreamResponse::text_delta("streamed once"),
         SequencedStreamResponse::content("fallback once"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = second_client.clone();
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
     let restarted = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
         provider_client,
-        CapsuleBindingsConfig::default(),
+        // lexicon-allow: capsule - existing app-server test surface; line shifted by repo-wide path qualification
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
     .await;
@@ -10407,7 +11071,7 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
             .dispatch_request(
                 connection,
                 "thread/resume",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "excludeTurns": true,
                 })),
@@ -10427,7 +11091,7 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
             .dispatch_request(
                 &requesting_connection,
                 "turn/start",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "input": [{ "type": "text", "text": input, "text_elements": [] }],
                 })),
@@ -10473,23 +11137,25 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
 #[tokio::test]
 async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread() {
     let root = unique_test_root("app-server-socket-load-session");
-    let socket = PathBuf::from("/tmp").join(format!("cdis-{}.sock", Uuid::now_v7().simple()));
+    let socket = std::path::PathBuf::from("/tmp")
+        .join(format!("cdis-{}.sock", uuid::Uuid::now_v7().simple()));
     let first_cwd = root.join("workspace-a");
     let restarted_cwd = root.join("workspace-b");
     std::fs::create_dir_all(&first_cwd).unwrap();
     std::fs::create_dir_all(&restarted_cwd).unwrap();
 
     let thread_id = {
-        let first_client = Arc::new(InspectingCapsuleClient::default());
-        let provider_client: Arc<dyn ProviderClient> = first_client;
-        let listen = AppServerListenAddr::Unix(socket.clone());
+        // lexicon-allow: capsule - existing app-server test surface; line shifted by repo-wide path qualification
+        let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+        let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
         let app = test_app_with_provider_root_and_listen(
             &root,
             &first_cwd,
             listen.clone(),
             provider_client,
             // lexicon-allow: capsule - existing test helper parameter type
-            CapsuleBindingsConfig::default(),
+            crate::adapters::app_server::CapsuleBindingsConfig::default(),
         )
         .await;
         let server = app.clone();
@@ -10497,7 +11163,7 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
         let mut client = connect_tui_test_client(&socket, "socket-load-first").await;
 
         let thread = client
-            .thread_start(json!({ "cwd": cwd_string(&first_cwd), "ephemeral": true }))
+            .thread_start(serde_json::json!({ "cwd": crate::adapters::app_server::connection::cwd_string(&first_cwd), "ephemeral": true }))
             .await
             .unwrap();
         let turn = client
@@ -10519,16 +11185,16 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
     };
 
     // lexicon-allow: capsule - existing test provider helper type
-    let second_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = second_client.clone();
-    let listen = AppServerListenAddr::Unix(socket.clone());
+    let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = second_client.clone();
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
     let restarted = test_app_with_provider_root_and_listen(
         &root,
         &restarted_cwd,
         listen.clone(),
         provider_client,
         // lexicon-allow: capsule - existing test helper parameter type
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
     let server = restarted.clone();
@@ -10540,20 +11206,20 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(Value::as_str)
+        .filter_map(serde_json::Value::as_str)
         .collect::<Vec<_>>();
     assert_eq!(loaded_ids, vec![thread_id.as_str()]);
 
     let resumed = client
         .request(
             "thread/resume",
-            json!({ "threadId": thread_id, "excludeTurns": true }),
+            serde_json::json!({ "threadId": thread_id, "excludeTurns": true }),
         )
         .await
         .unwrap();
     assert_eq!(
         resumed["thread"]["cwd"].as_str(),
-        Some(cwd_string(&first_cwd).as_str())
+        Some(crate::adapters::app_server::connection::cwd_string(&first_cwd).as_str())
     );
     assert_eq!(resumed["thread"]["ephemeral"].as_bool(), Some(true));
 
@@ -10593,16 +11259,18 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
 async fn app_server_websocket_listen_accepts_codex_tui_client() {
     let root = unique_test_root("app-server-websocket-listen");
     let addr = unused_loopback_addr();
-    let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::parse(&format!("ws://{addr}/rpc"))
+            .unwrap();
     // lexicon-allow: capsule - existing test helper type
-    let first_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = first_client;
+    let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
     let app = test_app_with_provider_root_and_listen(
         &root,
         &root,
         listen.clone(),
         provider_client,
-        CapsuleBindingsConfig::default(), // lexicon-allow: capsule - existing test helper parameter type
+        crate::adapters::app_server::CapsuleBindingsConfig::default(), // lexicon-allow: capsule - existing test helper parameter type
     )
     .await;
     let token = mint_app_server_test_token(&app).await;
@@ -10643,23 +11311,32 @@ async fn app_server_websocket_query_methods_are_callable() {
     let operation_registry_root = root.join("operations");
     publish_echo_operation(&operation_registry_root, "lookup", "lookup", "wire").await;
     let addr = unused_loopback_addr();
-    let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
-    let mut config = VerletAppServerConfig::local(listen.clone(), &workspace)
-        // lexicon-allow: capsule - existing app-server config method.
-        .with_capsule_bindings(
-            // lexicon-allow: capsule - existing app-server config type.
-            CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
-        );
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::parse(&format!("ws://{addr}/rpc"))
+            .unwrap();
+    let mut config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen.clone(), &workspace)
+            // lexicon-allow: capsule - existing app-server config method.
+            .with_capsule_bindings(
+                // lexicon-allow: capsule - existing app-server config type.
+                crate::adapters::app_server::CapsuleBindingsConfig::default()
+                    .with_registry_root(&operation_registry_root),
+            );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let token = mint_app_server_test_token(&app).await;
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve(listen).await });
     let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &token).await;
 
-    let agents = client.request("agent/list", json!({})).await.unwrap();
+    let agents = client
+        .request("agent/list", serde_json::json!({}))
+        .await
+        .unwrap();
     assert!(
         agents["data"]
             .as_array()
@@ -10669,13 +11346,19 @@ async fn app_server_websocket_query_methods_are_callable() {
     );
     assert_eq!(
         client
-            .request("agent/read", json!({ "ref": "agent://wire-runner@latest" }))
+            .request(
+                "agent/read",
+                serde_json::json!({ "ref": "agent://wire-runner@latest" })
+            )
             .await
             .unwrap()["aliasResolutionReceipt"]["alias"]
             .as_str(),
         Some("latest")
     );
-    let operations = client.request("operation/list", json!({})).await.unwrap();
+    let operations = client
+        .request("operation/list", serde_json::json!({}))
+        .await
+        .unwrap();
     assert_eq!(
         operation_record_by_name(operations["data"].as_array().unwrap(), "lookup")["name"].as_str(),
         Some("lookup")
@@ -10687,7 +11370,7 @@ async fn app_server_websocket_query_methods_are_callable() {
     );
 
     let thread = client
-        .thread_start(json!({ "agentRef": "agent://wire-runner@latest" }))
+        .thread_start(serde_json::json!({ "agentRef": "agent://wire-runner@latest" }))
         .await
         .unwrap();
     let turn = client
@@ -10701,7 +11384,7 @@ async fn app_server_websocket_query_methods_are_callable() {
     let events = client
         .request(
             "thread/events/list",
-            json!({
+            serde_json::json!({
                 "threadId": thread.id,
                 "kinds": ["context.compile.completed"],
             }),
@@ -10723,17 +11406,19 @@ async fn app_server_websocket_query_methods_are_callable() {
 async fn app_server_websocket_listen_serves_health_endpoints() {
     let root = unique_test_root("app-server-websocket-health");
     let addr = unused_loopback_addr();
-    let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::parse(&format!("ws://{addr}/rpc"))
+            .unwrap();
     // lexicon-allow: capsule - existing test client name
-    let first_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = first_client;
+    let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
     let app = test_app_with_provider_root_and_listen(
         &root,
         &root,
         listen.clone(),
         provider_client,
         // lexicon-allow: capsule - existing app-server config type
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
     let server_task = tokio::spawn(async move { app.serve(listen).await });
@@ -10745,7 +11430,7 @@ async fn app_server_websocket_listen_serves_health_endpoints() {
             "unexpected {path} response: {response:?}"
         );
         assert!(
-            response.contains(APP_SERVER_HEALTH_RESPONSE_BODY),
+            response.contains(crate::adapters::app_server::APP_SERVER_HEALTH_RESPONSE_BODY),
             "unexpected {path} response body: {response:?}"
         );
     }
@@ -10773,13 +11458,20 @@ async fn app_server_websocket_listen_serves_console_assets() {
     std::fs::write(assets.join("favicon.png"), "png").unwrap();
 
     let addr = unused_loopback_addr();
-    let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
-    let mut config = VerletAppServerConfig::local(listen.clone(), std::env::current_dir().unwrap())
-        .with_console_assets(&assets, "fixture-token");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::parse(&format!("ws://{addr}/rpc"))
+            .unwrap();
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen.clone(),
+        std::env::current_dir().unwrap(),
+    )
+    .with_console_assets(&assets, "fixture-token");
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let server_task = tokio::spawn(async move { app.serve(listen).await });
 
     let response = get_tcp_response(addr, "/").await;
@@ -10809,7 +11501,7 @@ async fn app_server_websocket_listen_serves_console_assets() {
 
     let response = get_tcp_response(addr, "/healthz").await;
     assert!(response.starts_with("HTTP/1.1 200 OK"));
-    assert!(response.contains(APP_SERVER_HEALTH_RESPONSE_BODY));
+    assert!(response.contains(crate::adapters::app_server::APP_SERVER_HEALTH_RESPONSE_BODY));
 
     server_task.abort();
     let _ = server_task.await;
@@ -10828,13 +11520,20 @@ async fn app_server_websocket_listen_requires_console_session_token() {
     .unwrap();
 
     let addr = unused_loopback_addr();
-    let listen = AppServerListenAddr::parse(&format!("ws://{addr}/rpc")).unwrap();
-    let mut config = VerletAppServerConfig::local(listen.clone(), std::env::current_dir().unwrap())
-        .with_console_assets(&assets, "fixture-token");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::parse(&format!("ws://{addr}/rpc"))
+            .unwrap();
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen.clone(),
+        std::env::current_dir().unwrap(),
+    )
+    .with_console_assets(&assets, "fixture-token");
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let server_task = tokio::spawn(async move { app.serve(listen).await });
     let index = get_tcp_response(addr, "/").await;
     let session_token = console_token_from_response(&index);
@@ -10877,30 +11576,41 @@ async fn app_server_websocket_listen_requires_console_session_token() {
 
 #[test]
 fn boundary_bearer_parser_accepts_case_and_whitespace_and_skips_unrelated_protocols() {
-    let authorization = parse_http_request_head(
+    let authorization = crate::adapters::app_server::parse_http_request_head(
         b"GET /rpc HTTP/1.1\r\naUtHoRiZaTiOn:   bEaReR\t boundary-token   \r\n\r\n",
     )
     .unwrap();
     assert_eq!(
-        request_bearer_token(&authorization),
-        Some(("boundary-token", BoundarySurface::Websocket))
+        crate::adapters::app_server::request_bearer_token(&authorization),
+        Some((
+            "boundary-token",
+            crate::daemon::identity::BoundarySurface::Websocket
+        ))
     );
 
-    let protocols = parse_http_request_head(
+    let protocols = crate::adapters::app_server::parse_http_request_head(
         b"GET /rpc HTTP/1.1\r\nSec-WebSocket-Protocol: unrelated.v1\r\nsEc-WeBsOcKeT-pRoToCoL: metrics.v1, cooldis-console-token.console-secret\r\n\r\n",
     )
     .unwrap();
     assert_eq!(
-        request_bearer_token(&protocols),
-        Some(("console-secret", BoundarySurface::Console))
+        crate::adapters::app_server::request_bearer_token(&protocols),
+        Some((
+            "console-secret",
+            crate::daemon::identity::BoundarySurface::Console
+        ))
     );
 }
 
 #[test]
 fn session_close_witness_failure_does_not_mask_the_read_error() {
-    let read_error = VerletError::RuntimeFactory("original websocket read error".to_string());
-    let close_error = VerletError::History("close witness failed".to_string());
-    let error = finish_websocket_session(Err(read_error), Err(close_error)).unwrap_err();
+    let read_error =
+        crate::VerletError::RuntimeFactory("original websocket read error".to_string());
+    let close_error = crate::VerletError::History("close witness failed".to_string());
+    let error = crate::adapters::app_server::connection::finish_websocket_session(
+        Err(read_error),
+        Err(close_error),
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("original websocket read error"));
     assert!(!error.to_string().contains("close witness failed"));
 }
@@ -10914,7 +11624,7 @@ async fn unix_peer_mapping_rejects_a_uid_other_than_the_daemon_euid() {
     let request = b"GET /rpc HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
     client.write_all(request).await.unwrap();
 
-    let mismatched_uid = current_effective_uid().wrapping_add(1);
+    let mismatched_uid = crate::adapters::app_server::current_effective_uid().wrapping_add(1);
     let resolved = app
         .authenticate_unix_websocket(&mut server, mismatched_uid)
         .await
@@ -10941,7 +11651,7 @@ async fn aborted_websocket_session_still_witnesses_its_close() {
     let resolved_principal = app
         .inner
         .identity_authority
-        .resolve_peer_uid(current_effective_uid())
+        .resolve_peer_uid(crate::adapters::app_server::current_effective_uid())
         .await
         .unwrap()
         .unwrap();
@@ -10949,13 +11659,17 @@ async fn aborted_websocket_session_still_witnesses_its_close() {
     let websocket = tokio_tungstenite::WebSocketStream::from_raw_socket(
         server_io,
         tokio_tungstenite::tungstenite::protocol::Role::Server,
-        Some(websocket_config()),
+        Some(crate::adapters::app_server::websocket_config()),
     )
     .await;
     let server = app.clone();
     let task = tokio::spawn(async move {
         server
-            .handle_websocket(websocket, resolved_principal, BoundarySurface::UnixSocket)
+            .handle_websocket(
+                websocket,
+                resolved_principal,
+                crate::daemon::identity::BoundarySurface::UnixSocket,
+            )
             .await
     });
 
@@ -10981,7 +11695,7 @@ async fn local_dispatch_error_still_witnesses_its_session_close() {
     let store_path = app.session_store_path().to_path_buf();
 
     let error = app
-        .local_json_rpc_request("not/a-method", json!({}))
+        .local_json_rpc_request("not/a-method", serde_json::json!({}))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("unsupported method"));
@@ -11000,12 +11714,12 @@ async fn failed_session_close_rearms_the_drop_witness() {
     let app = test_app().await;
     let store_path = app.session_store_path().to_path_buf();
     let (connection_state, _outbound_rx) = test_connection(app.clone()).await;
-    let mut close_witness = SessionCloseWitness::new(
-        Arc::clone(&app.inner.identity_authority),
-        Arc::clone(&app.inner.identity_clock),
+    let mut close_witness = crate::adapters::app_server::SessionCloseWitness::new(
+        std::sync::Arc::clone(&app.inner.identity_authority),
+        std::sync::Arc::clone(&app.inner.identity_clock),
         connection_state.witnessed_session_id.clone(),
     );
-    let store = SqliteSessionStore::open(&store_path).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&store_path).await.unwrap();
     let database = store.sqlite_database();
     let database_connection = database.connect().await.unwrap();
     database_connection
@@ -11038,24 +11752,40 @@ async fn failed_session_close_rearms_the_drop_witness() {
 
 #[tokio::test(start_paused = true)]
 async fn pre_upgrade_reads_and_upgrade_are_bounded_when_no_data_arrives() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let connect = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
     let (mut server, _) = listener.accept().await.unwrap();
     let _client = connect.await.unwrap();
 
-    assert!(peek_http_request(&server).await.unwrap().is_none());
-    consume_http_request_headers(&mut server).await.unwrap();
+    assert!(
+        crate::adapters::app_server::peek_http_request(&server)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    crate::adapters::app_server::consume_http_request_headers(&mut server)
+        .await
+        .unwrap();
 
     #[cfg(unix)]
     {
         let (_client, mut server) = tokio::net::UnixStream::pair().unwrap();
-        assert!(peek_unix_http_request(&server).await.unwrap().is_none());
-        consume_http_request_headers(&mut server).await.unwrap();
+        assert!(
+            crate::adapters::app_server::peek_unix_http_request(&server)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        crate::adapters::app_server::consume_http_request_headers(&mut server)
+            .await
+            .unwrap();
     }
 
     let (_client_io, server_io) = tokio::io::duplex(1024);
-    let error = accept_authenticated_websocket(server_io).await.unwrap_err();
+    let error = crate::adapters::app_server::accept_authenticated_websocket(server_io)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("timed out"));
 }
 
@@ -11063,14 +11793,14 @@ async fn pre_upgrade_reads_and_upgrade_are_bounded_when_no_data_arrives() {
 async fn oversized_pre_upgrade_headers_fail_closed_with_one_witness() {
     let app = test_app().await;
     let store_path = app.session_store_path().to_path_buf();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+    let connect = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
     let (mut server, _) = listener.accept().await.unwrap();
     let mut client = connect.await.unwrap();
     let request = format!(
         "GET /rpc HTTP/1.1\r\nHost: {addr}\r\nX-Oversized: {}\r\n\r\n",
-        "x".repeat(MAX_HTTP_REQUEST_HEADER_BYTES)
+        "x".repeat(crate::adapters::app_server::MAX_HTTP_REQUEST_HEADER_BYTES)
     );
     client.write_all(request.as_bytes()).await.unwrap();
 
@@ -11081,10 +11811,13 @@ async fn oversized_pre_upgrade_headers_fail_closed_with_one_witness() {
             .is_none()
     );
     let mut response = vec![0_u8; 256];
-    let len = tokio::time::timeout(Duration::from_secs(30), client.read(&mut response))
-        .await
-        .unwrap()
-        .unwrap();
+    let len = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.read(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(response[..len].starts_with(b"HTTP/1.1 401 Unauthorized"));
     assert_eq!(
         identity_sql_count(
@@ -11097,15 +11830,15 @@ async fn oversized_pre_upgrade_headers_fail_closed_with_one_witness() {
     response.fill(0);
 }
 
-async fn identity_sql_count(path: &Path, query: &str) -> i64 {
-    let store = SqliteSessionStore::open(path).await.unwrap();
+async fn identity_sql_count(path: &std::path::Path, query: &str) -> i64 {
+    let store = crate::SqliteSessionStore::open(path).await.unwrap();
     let connection = store.sqlite_database().connect().await.unwrap();
     let mut rows = connection.query(query, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn wait_for_identity_sql_count(path: &Path, query: &str, expected: i64) {
-    tokio::time::timeout(Duration::from_secs(30), async {
+async fn wait_for_identity_sql_count(path: &std::path::Path, query: &str, expected: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if identity_sql_count(path, query).await >= expected {
                 return;
@@ -11121,23 +11854,23 @@ async fn wait_for_identity_sql_count(path: &Path, query: &str, expected: i64) {
 fn app_server_listen_addr_parses_websocket_urls() {
     let addr: std::net::SocketAddr = "127.0.0.1:8765".parse().unwrap();
     assert_eq!(
-        AppServerListenAddr::parse("ws://127.0.0.1:8765/rpc").unwrap(),
-        AppServerListenAddr::WebSocket(addr)
+        crate::adapters::app_server::AppServerListenAddr::parse("ws://127.0.0.1:8765/rpc").unwrap(),
+        crate::adapters::app_server::AppServerListenAddr::WebSocket(addr)
     );
     assert_eq!(
-        AppServerListenAddr::parse("ws://127.0.0.1:8765")
+        crate::adapters::app_server::AppServerListenAddr::parse("ws://127.0.0.1:8765")
             .unwrap()
             .display(),
         "ws://127.0.0.1:8765/rpc"
     );
     assert!(
-        AppServerListenAddr::parse("ws://127.0.0.1:8765/not-rpc")
+        crate::adapters::app_server::AppServerListenAddr::parse("ws://127.0.0.1:8765/not-rpc")
             .unwrap_err()
             .to_string()
             .contains("expected /rpc")
     );
     assert!(
-        AppServerListenAddr::parse("tcp://127.0.0.1:8765")
+        crate::adapters::app_server::AppServerListenAddr::parse("tcp://127.0.0.1:8765")
             .unwrap_err()
             .to_string()
             .contains("unix://PATH or ws://HOST:PORT")
@@ -11147,17 +11880,18 @@ fn app_server_listen_addr_parses_websocket_urls() {
 #[tokio::test]
 async fn app_server_websocket_listen_rejects_non_loopback_without_auth() {
     let root = unique_test_root("app-server-websocket-non-loopback");
-    let listen = AppServerListenAddr::parse("ws://0.0.0.0:0/rpc").unwrap();
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::parse("ws://0.0.0.0:0/rpc").unwrap();
     // lexicon-allow: capsule - existing test client name
-    let first_client = Arc::new(InspectingCapsuleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = first_client;
+    let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = first_client;
     let app = test_app_with_provider_root_and_listen(
         &root,
         &root,
         listen.clone(),
         provider_client,
         // lexicon-allow: capsule - existing app-server config type
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
 
@@ -11175,7 +11909,7 @@ async fn fs_methods_cover_basic_host_file_operations() {
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
-    let root = std::env::temp_dir().join(format!("verlet-vfs-test-{}", Uuid::now_v7()));
+    let root = std::env::temp_dir().join(format!("verlet-vfs-test-{}", uuid::Uuid::now_v7()));
     let nested = root.join("nested");
     let file = nested.join("hello.txt");
     let copied = nested.join("copy.txt");
@@ -11184,30 +11918,30 @@ async fn fs_methods_cover_basic_host_file_operations() {
         .dispatch_request(
             &connection,
             "fs/createDirectory",
-            Some(json!({ "path": cwd_string(&nested), "recursive": true })),
+            Some(serde_json::json!({ "path": crate::adapters::app_server::connection::cwd_string(&nested), "recursive": true })),
         )
         .await
         .unwrap();
-    assert_eq!(mkdir, json!({}));
+    assert_eq!(mkdir, serde_json::json!({}));
 
     let write = app
         .dispatch_request(
             &connection,
             "fs/writeFile",
-            Some(json!({
-                "path": cwd_string(&file),
+            Some(serde_json::json!({
+                "path": crate::adapters::app_server::connection::cwd_string(&file),
                 "dataBase64": "aGVsbG8=",
             })),
         )
         .await
         .unwrap();
-    assert_eq!(write, json!({}));
+    assert_eq!(write, serde_json::json!({}));
 
     let read = app
         .dispatch_request(
             &connection,
             "fs/readFile",
-            Some(json!({ "path": cwd_string(&file) })),
+            Some(serde_json::json!({ "path": crate::adapters::app_server::connection::cwd_string(&file) })),
         )
         .await
         .unwrap();
@@ -11217,7 +11951,7 @@ async fn fs_methods_cover_basic_host_file_operations() {
         .dispatch_request(
             &connection,
             "fs/getMetadata",
-            Some(json!({ "path": cwd_string(&file) })),
+            Some(serde_json::json!({ "path": crate::adapters::app_server::connection::cwd_string(&file) })),
         )
         .await
         .unwrap();
@@ -11228,7 +11962,7 @@ async fn fs_methods_cover_basic_host_file_operations() {
         .dispatch_request(
             &connection,
             "fs/readDirectory",
-            Some(json!({ "path": cwd_string(&nested) })),
+            Some(serde_json::json!({ "path": crate::adapters::app_server::connection::cwd_string(&nested) })),
         )
         .await
         .unwrap();
@@ -11241,49 +11975,49 @@ async fn fs_methods_cover_basic_host_file_operations() {
         .dispatch_request(
             &connection,
             "fs/watch",
-            Some(json!({ "watchId": "watch-1", "path": cwd_string(&nested) })),
+            Some(serde_json::json!({ "watchId": "watch-1", "path": crate::adapters::app_server::connection::cwd_string(&nested) })),
         )
         .await
         .unwrap();
     let canonical_nested = std::fs::canonicalize(&nested).unwrap();
     assert_eq!(
         watch["path"].as_str(),
-        Some(cwd_string(&canonical_nested).as_str())
+        Some(crate::adapters::app_server::connection::cwd_string(&canonical_nested).as_str())
     );
 
     let copy = app
         .dispatch_request(
             &connection,
             "fs/copy",
-            Some(json!({
-                "sourcePath": cwd_string(&file),
-                "destinationPath": cwd_string(&copied),
+            Some(serde_json::json!({
+                "sourcePath": crate::adapters::app_server::connection::cwd_string(&file),
+                "destinationPath": crate::adapters::app_server::connection::cwd_string(&copied),
             })),
         )
         .await
         .unwrap();
-    assert_eq!(copy, json!({}));
+    assert_eq!(copy, serde_json::json!({}));
     assert_eq!(std::fs::read_to_string(&copied).unwrap(), "hello");
 
     let unwatch = app
         .dispatch_request(
             &connection,
             "fs/unwatch",
-            Some(json!({ "watchId": "watch-1" })),
+            Some(serde_json::json!({ "watchId": "watch-1" })),
         )
         .await
         .unwrap();
-    assert_eq!(unwatch, json!({}));
+    assert_eq!(unwatch, serde_json::json!({}));
 
     let remove = app
         .dispatch_request(
             &connection,
             "fs/remove",
-            Some(json!({ "path": cwd_string(&root), "recursive": true })),
+            Some(serde_json::json!({ "path": crate::adapters::app_server::connection::cwd_string(&root), "recursive": true })),
         )
         .await
         .unwrap();
-    assert_eq!(remove, json!({}));
+    assert_eq!(remove, serde_json::json!({}));
     assert!(!root.exists());
 }
 
@@ -11292,16 +12026,16 @@ async fn command_exec_returns_buffered_output() {
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
-    let root = std::env::temp_dir().join(format!("verlet-command-test-{}", Uuid::now_v7()));
+    let root = std::env::temp_dir().join(format!("verlet-command-test-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
 
     let response = app
             .dispatch_request(
                 &connection,
                 "command/exec",
-                Some(json!({
+                Some(serde_json::json!({
                     "command": ["/bin/sh", "-c", "printf \"$VERLET_TEST:$PWD\"; printf err >&2; exit 7"],
-                    "cwd": cwd_string(&root),
+                    "cwd": crate::adapters::app_server::connection::cwd_string(&root),
                     "env": { "VERLET_TEST": "ok" },
                     "disableTimeout": true,
                 })),
@@ -11312,7 +12046,13 @@ async fn command_exec_returns_buffered_output() {
     let canonical_root = std::fs::canonicalize(&root).unwrap();
     assert_eq!(
         response["stdout"].as_str(),
-        Some(format!("ok:{}", cwd_string(&canonical_root)).as_str())
+        Some(
+            format!(
+                "ok:{}",
+                crate::adapters::app_server::connection::cwd_string(&canonical_root)
+            )
+            .as_str()
+        )
     );
     assert_eq!(response["stderr"].as_str(), Some("err"));
 
@@ -11325,7 +12065,7 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -11334,7 +12074,7 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
         .dispatch_request(
             &connection,
             "command/exec",
-            Some(json!({
+            Some(serde_json::json!({
                 "command": ["/bin/sh", "-c", "cat"],
                 "streamStdin": true,
                 "streamStdoutStderr": true,
@@ -11352,9 +12092,9 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
         .dispatch_request(
             &connection,
             "command/exec/write",
-            Some(json!({
+            Some(serde_json::json!({
                 "processId": process_id,
-                "deltaBase64": STANDARD.encode("hello\n"),
+                "deltaBase64": base64::engine::general_purpose::STANDARD.encode("hello\n"),
                 "yieldTimeMs": 100,
             })),
         )
@@ -11367,7 +12107,7 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
         .dispatch_request(
             &connection,
             "command/exec/terminate",
-            Some(json!({
+            Some(serde_json::json!({
                 "processId": process_id,
                 "reason": "test complete",
                 "yieldTimeMs": 1000,
@@ -11392,11 +12132,11 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
                 .messages
                 .iter()
                 .filter_map(|message| match message {
-                    CanonicalMessage::User { content, .. } => Some(
+                    crate::CanonicalMessage::User { content, .. } => Some(
                         content
                             .iter()
                             .filter_map(|content| match content {
-                                CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                                crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                                 _ => None,
                             })
                             .collect::<Vec<_>>()
@@ -11420,7 +12160,7 @@ async fn command_exec_streaming_session_can_poll_write_and_terminate() {
         .dispatch_request(
             &connection,
             "command/exec/resize",
-            Some(json!({ "processId": process_id })),
+            Some(serde_json::json!({ "processId": process_id })),
         )
         .await
         .unwrap_err();
@@ -11434,7 +12174,7 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -11443,7 +12183,7 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
         .dispatch_request(
             &connection,
             "command/exec",
-            Some(json!({
+            Some(serde_json::json!({
                 "command": ["/bin/sh", "-c", "sleep 0.05; printf done"],
                 "streamStdoutStderr": true,
                 "yieldTimeMs": 5,
@@ -11460,7 +12200,7 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
         .dispatch_request(
             &connection,
             "command/exec",
-            Some(json!({
+            Some(serde_json::json!({
                 "processId": process_id,
                 "yieldTimeMs": 1000,
             })),
@@ -11475,26 +12215,18 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
 
 #[tokio::test]
 async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
-    use verlet_io_core::{
-        ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoDelivery,
-        IoPrincipal, IoSource,
-    };
-    use verlet_runtime_contracts::{
-        DispatchId, HANDLE_DISPATCH_CONTENT_KIND, HANDLE_OUTCOME_CONTENT_KIND, HandleId,
-        HandleTerminalEnvelope, HandleTerminalOutcome,
-    };
-
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
-    let marker = std::env::temp_dir().join(format!("verlet-process-dispatch-{}", Uuid::now_v7()));
-    let dispatch_id = format!("process-dispatch-{}", Uuid::now_v7());
-    let params = json!({
+    let marker =
+        std::env::temp_dir().join(format!("verlet-process-dispatch-{}", uuid::Uuid::now_v7()));
+    let dispatch_id = format!("process-dispatch-{}", uuid::Uuid::now_v7());
+    let params = serde_json::json!({
         "command": [
             "/bin/sh",
             "-c",
@@ -11535,9 +12267,12 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
             let outcomes = events
                 .iter()
                 .filter(|event| {
-                    event.kind == EventKind::IoIngressReceived
-                        && event.payload.get("route_id").and_then(Value::as_str)
-                            == Some(HANDLE_OUTCOME_CONTENT_KIND)
+                    event.kind == crate::EventKind::IoIngressReceived
+                        && event
+                            .payload
+                            .get("route_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND)
                 })
                 .count();
             let thread_events = store
@@ -11546,7 +12281,7 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
                 .unwrap();
             let turns = thread_events
                 .iter()
-                .filter(|event| event.kind == EventKind::TurnSubmitted)
+                .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
                 .count();
             if outcomes == 1 && turns == 1 {
                 break (events, thread_events);
@@ -11561,9 +12296,12 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
         events
             .iter()
             .filter(|event| {
-                event.kind == EventKind::IoIngressReceived
-                    && event.payload.get("route_id").and_then(Value::as_str)
-                        == Some(HANDLE_DISPATCH_CONTENT_KIND)
+                event.kind == crate::EventKind::IoIngressReceived
+                    && event
+                        .payload
+                        .get("route_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND)
             })
             .count(),
         1
@@ -11571,15 +12309,15 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
     assert_eq!(
         thread_events
             .iter()
-            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
             .count(),
         1
     );
 
-    let terminal = HandleTerminalEnvelope {
-        dispatch_id: DispatchId::new(dispatch_id.clone()),
-        handle: HandleId::process(process_id),
-        outcome: HandleTerminalOutcome::Completed,
+    let terminal = verlet_runtime_contracts::HandleTerminalEnvelope {
+        dispatch_id: verlet_runtime_contracts::DispatchId::new(dispatch_id.clone()),
+        handle: verlet_runtime_contracts::HandleId::process(process_id),
+        outcome: verlet_runtime_contracts::HandleTerminalOutcome::Completed,
         outcome_reason: Some("exit status 0".to_string()),
         result: None,
         result_schema_id: None,
@@ -11587,39 +12325,48 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
         usage: None,
         retryable: false,
     };
-    let mut duplicate = IngressEnvelope::new(
-        IoSource::new("cooldis.handle", "process"),
-        IoConversation::new(format!("thread:{thread_id}"), ConversationKind::System),
-        IngressContent::Event {
-            kind: HANDLE_OUTCOME_CONTENT_KIND.to_string(),
+    let mut duplicate = verlet_io_core::IngressEnvelope::new(
+        verlet_io_core::IoSource::new("cooldis.handle", "process"),
+        verlet_io_core::IoConversation::new(
+            format!("thread:{thread_id}"),
+            verlet_io_core::ConversationKind::System,
+        ),
+        verlet_io_core::IngressContent::Event {
+            kind: verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
             payload: serde_json::to_value(terminal).unwrap(),
         },
         1,
     )
-    .with_dedupe_key(IoDedupeKey::new(
-        HANDLE_OUTCOME_CONTENT_KIND,
+    .with_dedupe_key(verlet_io_core::IoDedupeKey::new(
+        verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
         dispatch_id.clone(),
     ))
-    .with_delivery(IoDelivery::new(dispatch_id.clone()))
-    .with_principal(IoPrincipal::new(
+    .with_delivery(verlet_io_core::IoDelivery::new(dispatch_id.clone()))
+    .with_principal(verlet_io_core::IoPrincipal::new(
         app.tenant_id(),
         app.user_id(),
         format!("handle:{dispatch_id}"),
     ))
-    .with_metadata("cooldis_route_id", HANDLE_OUTCOME_CONTENT_KIND)
+    .with_metadata(
+        "cooldis_route_id",
+        verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+    )
     .with_metadata("cooldis_route_policy", "queue_per_conversation");
     duplicate.id = events
         .iter()
         .find(|event| {
-            event.kind == EventKind::IoIngressReceived
-                && event.payload.get("route_id").and_then(Value::as_str)
-                    == Some(HANDLE_OUTCOME_CONTENT_KIND)
+            event.kind == crate::EventKind::IoIngressReceived
+                && event
+                    .payload
+                    .get("route_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND)
         })
         .and_then(|event| event.payload.get("ingress_message_id"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .unwrap()
         .to_string();
-    let bridge = VerletDaemonIoBridge::from_app_server(&app);
+    let bridge = crate::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(&app);
     bridge
         .submit_durable_handle_envelope(duplicate.clone())
         .await
@@ -11637,9 +12384,12 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
         events
             .iter()
             .filter(|event| {
-                event.kind == EventKind::IoIngressReceived
-                    && event.payload.get("route_id").and_then(Value::as_str)
-                        == Some(HANDLE_OUTCOME_CONTENT_KIND)
+                event.kind == crate::EventKind::IoIngressReceived
+                    && event
+                        .payload
+                        .get("route_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND)
             })
             .count(),
         1
@@ -11650,7 +12400,7 @@ async fn process_dispatch_retry_and_duplicate_terminal_deliver_once() {
             .await
             .unwrap()
             .iter()
-            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
             .count(),
         1
     );
@@ -11667,39 +12417,39 @@ async fn local_ui_affordance_methods_return_safe_shapes() {
         app.dispatch_request(&connection, "app/list", None)
             .await
             .unwrap(),
-        json!({ "data": [], "nextCursor": null })
+        serde_json::json!({ "data": [], "nextCursor": null })
     );
     assert_eq!(
         app.dispatch_request(&connection, "experimentalFeature/list", None)
             .await
             .unwrap(),
-        json!({ "data": [], "nextCursor": null })
+        serde_json::json!({ "data": [], "nextCursor": null })
     );
     assert_eq!(
         app.dispatch_request(&connection, "hooks/list", None)
             .await
             .unwrap(),
-        json!({ "data": [], "witnessing": true })
+        serde_json::json!({ "data": [], "witnessing": true })
     );
     assert_eq!(
         app.dispatch_request(
             &connection,
             "experimentalFeature/enablement/set",
-            Some(json!({ "enablement": { "example": true } })),
+            Some(serde_json::json!({ "enablement": { "example": true } })),
         )
         .await
         .unwrap(),
-        json!({ "enablement": { "example": true } })
+        serde_json::json!({ "enablement": { "example": true } })
     );
     assert_eq!(
         app.dispatch_request(
             &connection,
             "getAuthStatus",
-            Some(json!({ "includeToken": true, "refreshToken": false })),
+            Some(serde_json::json!({ "includeToken": true, "refreshToken": false })),
         )
         .await
         .unwrap(),
-        json!({
+        serde_json::json!({
             "authMethod": null,
             "authToken": null,
             "principalId": "local_user",
@@ -11709,7 +12459,7 @@ async fn local_ui_affordance_methods_return_safe_shapes() {
     );
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap();
@@ -11717,7 +12467,7 @@ async fn local_ui_affordance_methods_return_safe_shapes() {
         .dispatch_request(
             &connection,
             "getConversationSummary",
-            Some(json!({ "conversationId": thread_id })),
+            Some(serde_json::json!({ "conversationId": thread_id })),
         )
         .await
         .unwrap();
@@ -11735,7 +12485,7 @@ async fn thread_shell_command_emits_command_execution_item() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
@@ -11743,14 +12493,14 @@ async fn thread_shell_command_emits_command_execution_item() {
         .dispatch_request(
             &connection,
             "thread/shellCommand",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "command": "printf shell-output",
             })),
         )
         .await
         .unwrap();
-    assert_eq!(response, json!({}));
+    assert_eq!(response, serde_json::json!({}));
 
     let mut saw_delta = false;
     let mut saw_completed = false;
@@ -11761,7 +12511,7 @@ async fn thread_shell_command_emits_command_execution_item() {
         tokio::select! {
             _ = &mut deadline => break,
             message = outbound_rx.recv() => {
-                let Some(JsonRpcMessage::Notification(notification)) = message else {
+                let Some(crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification)) = message else {
                     continue;
                 };
                 observed.push((notification.method.clone(), notification.params.clone()));
@@ -11770,7 +12520,7 @@ async fn thread_shell_command_emits_command_execution_item() {
                         .params
                         .as_ref()
                         .and_then(|params| params.get("delta"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         .is_some_and(|delta| delta.contains("shell-output"))
                 {
                     saw_delta = true;
@@ -11781,7 +12531,7 @@ async fn thread_shell_command_emits_command_execution_item() {
                         .as_ref()
                         .and_then(|params| params.get("item"))
                         .and_then(|item| item.get("type"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         == Some("commandExecution")
                 {
                     saw_completed = true;
@@ -11803,7 +12553,7 @@ async fn bridge_flow_uses_local_offline_provider() {
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
@@ -11812,7 +12562,7 @@ async fn bridge_flow_uses_local_offline_provider() {
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "hello", "text_elements": [] }],
             })),
@@ -11833,7 +12583,7 @@ async fn bridge_flow_uses_local_offline_provider() {
                 let Some(message) = message else {
                     break;
                 };
-                if let JsonRpcMessage::Notification(notification) = message {
+                if let crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification) = message {
                     methods.push(notification.method.clone());
                     if notification.method == "item/agentMessage/delta" {
                         saw_delta = true;
@@ -11844,7 +12594,7 @@ async fn bridge_flow_uses_local_offline_provider() {
                             .as_ref()
                             .and_then(|params| params.get("turn"))
                             .and_then(|turn| turn.get("id"))
-                            .and_then(Value::as_str)
+                            .and_then(serde_json::Value::as_str)
                             == Some(turn_id.as_str())
                     {
                         saw_completed = true;
@@ -11855,7 +12605,8 @@ async fn bridge_flow_uses_local_offline_provider() {
         }
     }
     let snapshot = app.inner.supervisor.snapshot().await;
-    let session_messages = latest_assistant_text(&app, &thread_id).await;
+    let session_messages =
+        crate::adapters::app_server::subscriptions::latest_assistant_text(&app, &thread_id).await;
     assert!(
         saw_delta,
         "notifications: {methods:?}; latest assistant: {session_messages:?}; snapshot: {:?}",
@@ -11873,27 +12624,31 @@ async fn thinking_precedence_flows_to_provider_requests() {
     let root = unique_test_root("app-server-thinking-precedence");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let client = Arc::new(ThinkingRecorderClient::new());
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-app-server-test-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, &workspace);
+    let client = std::sync::Arc::new(ThinkingRecorderClient::new());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-app-server-test-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     let mut runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    runtime_config.thinking = Some(ThinkingConfig::Budget { budget_tokens: 99 });
-    let runtime_factory =
-        runtime_factory_from_provider_parts(runtime_config, provider_client, Default::default());
-    let app = VerletAppServer::with_runtime_factory(config, runtime_factory)
-        .await
-        .unwrap();
+        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    runtime_config.thinking = Some(crate::ThinkingConfig::Budget { budget_tokens: 99 });
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        provider_client,
+        Default::default(),
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
+            .await
+            .unwrap();
     let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let default_thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let default_thread_id = default_thread["thread"]["id"].as_str().unwrap().to_string();
@@ -11903,14 +12658,14 @@ async fn thinking_precedence_flows_to_provider_requests() {
         .await;
     assert_eq!(
         client.requests()[0].thinking,
-        Some(ThinkingConfig::Budget { budget_tokens: 99 })
+        Some(crate::ThinkingConfig::Budget { budget_tokens: 99 })
     );
 
     let thread_start = app
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "thinking": { "type": "effort", "effort": "high" },
             })),
         )
@@ -11922,8 +12677,8 @@ async fn thinking_precedence_flows_to_provider_requests() {
     wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &inherited_turn_id).await;
     assert_eq!(
         client.requests()[1].thinking,
-        Some(ThinkingConfig::Effort {
-            effort: ThinkingEffort::High
+        Some(crate::ThinkingConfig::Effort {
+            effort: crate::ThinkingEffort::High
         })
     );
 
@@ -11931,7 +12686,7 @@ async fn thinking_precedence_flows_to_provider_requests() {
         .dispatch_request(
             &connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": "override", "text_elements": [] }],
                 "thinking": { "type": "disabled" },
@@ -11944,7 +12699,7 @@ async fn thinking_precedence_flows_to_provider_requests() {
     wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &override_turn_id).await;
     assert_eq!(
         client.requests()[2].thinking,
-        Some(ThinkingConfig::Disabled)
+        Some(crate::ThinkingConfig::Disabled)
     );
 
     let next_turn_id = start_text_turn(&app, &connection, &thread_id, "thread-level-again").await;
@@ -11952,8 +12707,8 @@ async fn thinking_precedence_flows_to_provider_requests() {
     wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &next_turn_id).await;
     assert_eq!(
         client.requests()[3].thinking,
-        Some(ThinkingConfig::Effort {
-            effort: ThinkingEffort::High
+        Some(crate::ThinkingConfig::Effort {
+            effort: crate::ThinkingEffort::High
         })
     );
 
@@ -11965,7 +12720,7 @@ async fn thinking_stream_projects_as_distinct_items() {
     let root = unique_test_root("app-server-thinking-stream");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let client = Arc::new(ThinkingRecorderClient::with_stream(vec![
+    let client = std::sync::Arc::new(ThinkingRecorderClient::with_stream(vec![
         crate::ProviderStreamEvent::ThinkingDelta {
             text: "plan ".to_string(),
         },
@@ -11976,10 +12731,10 @@ async fn thinking_stream_projects_as_distinct_items() {
             text: "check".to_string(),
         },
         crate::ProviderStreamEvent::Done {
-            stop_reason: CanonicalStopReason::EndTurn,
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         },
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -11992,7 +12747,7 @@ async fn thinking_stream_projects_as_distinct_items() {
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -12022,7 +12777,7 @@ async fn thinking_stream_projects_as_distinct_items() {
         .dispatch_request(
             &connection,
             "thread/read",
-            Some(json!({ "threadId": thread_id, "includeTurns": true })),
+            Some(serde_json::json!({ "threadId": thread_id, "includeTurns": true })),
         )
         .await
         .unwrap();
@@ -12044,15 +12799,15 @@ async fn non_stream_thinking_delta_precedes_text_when_content_does() {
     let root = unique_test_root("app-server-thinking-non-stream-order");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let client = Arc::new(ThinkingRecorderClient::with_complete_content(vec![
-        CanonicalContent::Thinking {
+    let client = std::sync::Arc::new(ThinkingRecorderClient::with_complete_content(vec![
+        crate::CanonicalContent::Thinking {
             text: "plan".to_string(),
             provider: crate::ThinkingProvider::Other("unit".to_string()),
             metadata: crate::ThinkingMetadata::None,
         },
-        CanonicalContent::text("answer"),
+        crate::CanonicalContent::text("answer"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client;
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
     let app = test_app_with_provider_root_and_stream(
         &root,
         &workspace,
@@ -12065,7 +12820,7 @@ async fn non_stream_thinking_delta_precedes_text_when_content_does() {
     initialize_for_test(&connection).await;
 
     let thread = app
-        .dispatch_request(&connection, "thread/start", Some(json!({})))
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
@@ -12094,7 +12849,7 @@ async fn local_thread_read_echoes_thread_thinking_config() {
         .dispatch_request(
             &connection,
             "thread/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "thinking": { "type": "effort", "effort": "low" },
             })),
         )
@@ -12103,20 +12858,20 @@ async fn local_thread_read_echoes_thread_thinking_config() {
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
     assert_eq!(
         thread_start["thread"]["thinking"],
-        json!({ "type": "effort", "effort": "low" })
+        serde_json::json!({ "type": "effort", "effort": "low" })
     );
 
     let read = app
         .dispatch_request(
             &connection,
             "thread/read",
-            Some(json!({ "threadId": thread_id, "includeTurns": false })),
+            Some(serde_json::json!({ "threadId": thread_id, "includeTurns": false })),
         )
         .await
         .unwrap();
     assert_eq!(
         read["thread"]["thinking"],
-        json!({ "type": "effort", "effort": "low" })
+        serde_json::json!({ "type": "effort", "effort": "low" })
     );
 
     let list = app
@@ -12125,17 +12880,17 @@ async fn local_thread_read_echoes_thread_thinking_config() {
         .unwrap();
     assert_eq!(
         list["data"][0]["thinking"],
-        json!({ "type": "effort", "effort": "low" })
+        serde_json::json!({ "type": "effort", "effort": "low" })
     );
 
     app.dispatch_request(
         &connection,
         "thread/name/set",
-        Some(json!({ "threadId": thread_id, "name": "keeps thinking" })),
+        Some(serde_json::json!({ "threadId": thread_id, "name": "keeps thinking" })),
     )
     .await
     .unwrap();
-    let parsed = ThreadId::parse_str(&thread_id).unwrap();
+    let parsed = crate::ThreadId::parse_str(&thread_id).unwrap();
     let lifecycle = app
         .inner
         .metadata_store
@@ -12144,16 +12899,17 @@ async fn local_thread_read_echoes_thread_thinking_config() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        thread_metadata_thinking(&lifecycle.metadata).unwrap(),
-        Some(ThinkingConfig::Effort {
-            effort: ThinkingEffort::Low
+        crate::adapters::app_server::threads::thread_metadata_thinking(&lifecycle.metadata)
+            .unwrap(),
+        Some(crate::ThinkingConfig::Effort {
+            effort: crate::ThinkingEffort::Low
         })
     );
 
     app.dispatch_request(
         &connection,
         "thread/resume",
-        Some(json!({ "threadId": thread_id, "excludeTurns": true })),
+        Some(serde_json::json!({ "threadId": thread_id, "excludeTurns": true })),
     )
     .await
     .unwrap();
@@ -12165,9 +12921,10 @@ async fn local_thread_read_echoes_thread_thinking_config() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        thread_metadata_thinking(&lifecycle.metadata).unwrap(),
-        Some(ThinkingConfig::Effort {
-            effort: ThinkingEffort::Low
+        crate::adapters::app_server::threads::thread_metadata_thinking(&lifecycle.metadata)
+            .unwrap(),
+        Some(crate::ThinkingConfig::Effort {
+            effort: crate::ThinkingEffort::Low
         })
     );
 }
@@ -12185,14 +12942,19 @@ async fn unsupported_methods_return_method_not_found() {
     assert!(err.message.contains("not/a-method"));
 }
 
-async fn test_app() -> VerletAppServer {
-    let root = std::env::temp_dir().join(format!("verlet-app-server-test-{}", Uuid::now_v7()));
+async fn test_app() -> crate::adapters::app_server::VerletAppServer {
+    let root =
+        std::env::temp_dir().join(format!("verlet-app-server-test-{}", uuid::Uuid::now_v7()));
     test_app_at_root(&root).await
 }
 
-async fn test_app_at_root(root: &Path) -> VerletAppServer {
-    let listen = AppServerListenAddr::Unix(root.join("app-server.sock"));
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+async fn test_app_at_root(root: &std::path::Path) -> crate::adapters::app_server::VerletAppServer {
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(root.join("app-server.sock"));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
@@ -12201,54 +12963,71 @@ async fn test_app_at_root(root: &Path) -> VerletAppServer {
     config.agent_registry_root = root.join("agents");
     config.blob_registry_root = root.join("blobs");
     config.skill_registry_root = root.join("skills");
-    VerletAppServer::new_local(config).await.unwrap()
+    crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap()
 }
 
 async fn test_connection(
-    app: VerletAppServer,
-) -> (ConnectionState, mpsc::UnboundedReceiver<JsonRpcMessage>) {
-    let (outbound, rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
-    let resolved_principal = ResolvedPrincipal {
-        principal_id: PrincipalId::new(app.user_id()),
-        kind: PrincipalKind::Operator,
-        auth: AuthenticationPath::PeerUid {
-            uid: current_effective_uid(),
+    app: crate::adapters::app_server::VerletAppServer,
+) -> (
+    crate::adapters::app_server::connection::ConnectionState,
+    tokio::sync::mpsc::UnboundedReceiver<crate::adapters::app_server::connection::JsonRpcMessage>,
+) {
+    let (outbound, rx) = tokio::sync::mpsc::unbounded_channel::<
+        crate::adapters::app_server::connection::JsonRpcMessage,
+    >();
+    let resolved_principal = crate::daemon::identity::ResolvedPrincipal {
+        principal_id: crate::daemon::identity::PrincipalId::new(app.user_id()),
+        kind: crate::daemon::identity::PrincipalKind::Operator,
+        auth: crate::daemon::identity::AuthenticationPath::PeerUid {
+            uid: crate::adapters::app_server::current_effective_uid(),
         },
     };
-    let witnessed_session_id = format!("test-session-{}", Uuid::now_v7());
+    let witnessed_session_id = format!("test-session-{}", uuid::Uuid::now_v7());
     app.inner
         .identity_authority
-        .witness_session_opened(&IdentitySessionV1 {
-            schema: IDENTITY_SESSION_SCHEMA_V1.to_string(),
+        .witness_session_opened(&crate::daemon::identity::IdentitySessionV1 {
+            schema: crate::daemon::identity::IDENTITY_SESSION_SCHEMA_V1.to_string(),
             session_id: witnessed_session_id.clone(),
             principal_id: resolved_principal.principal_id.clone(),
             kind: resolved_principal.kind,
-            surface: BoundarySurface::UnixSocket,
-            credential_ref: credential_ref(&resolved_principal.auth),
+            surface: crate::daemon::identity::BoundarySurface::UnixSocket,
+            credential_ref: crate::adapters::app_server::credential_ref(&resolved_principal.auth),
             opened_at_ms: app.inner.identity_clock.now().timestamp_millis(),
             closed_at_ms: None,
         })
         .await
         .unwrap();
     (
-        ConnectionState {
+        crate::adapters::app_server::connection::ConnectionState {
             app,
             resolved_principal,
             witnessed_session_id,
-            boundary_surface: BoundarySurface::UnixSocket,
+            boundary_surface: crate::daemon::identity::BoundarySurface::UnixSocket,
             outbound,
-            handshake: Arc::new(Mutex::new(HandshakeState::default())),
-            opt_out_notifications: Arc::new(RwLock::new(HashSet::new())),
-            subscriptions: Arc::new(Mutex::new(HashMap::new())),
-            fs_watches: Arc::new(Mutex::new(HashMap::new())),
+            handshake: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::adapters::app_server::connection::HandshakeState::default(),
+            )),
+            opt_out_notifications: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
+            subscriptions: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            fs_watches: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         },
         rx,
     )
 }
 
-async fn initialize_for_test(connection: &ConnectionState) {
+async fn initialize_for_test(
+    connection: &crate::adapters::app_server::connection::ConnectionState,
+) {
     connection
-        .handle_initialize(Some(json!({
+        .handle_initialize(Some(serde_json::json!({
             "clientInfo": {
                 "name": "test",
                 "title": null,
@@ -12262,58 +13041,63 @@ async fn initialize_for_test(connection: &ConnectionState) {
 
 // lexicon-allow: capsule - existing app-server test helper name
 async fn test_app_with_provider_and_capsule_bindings(
-    provider_client: Arc<dyn ProviderClient>,
+    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type and parameter
-    capsule_bindings: CapsuleBindingsConfig,
-) -> VerletAppServer {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-app-server-test-{}.sock", Uuid::now_v7())),
-    );
-    let root = std::env::temp_dir().join(format!("verlet-app-server-test-{}", Uuid::now_v7()));
+    capsule_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
+) -> crate::adapters::app_server::VerletAppServer {
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-app-server-test-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let root =
+        std::env::temp_dir().join(format!("verlet-app-server-test-{}", uuid::Uuid::now_v7()));
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     // lexicon-allow: capsule - existing app-server config method and parameter
-    let mut config = VerletAppServerConfig::local(listen, &workspace)
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
         .with_capsule_bindings(capsule_bindings.clone()); // lexicon-allow: capsule - existing app-server config method and parameter
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     let mut runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
     // lexicon-allow: capsule - existing app-server config parameter
-    let runtime_factory =
-        runtime_factory_from_provider_parts(runtime_config, provider_client, capsule_bindings); // lexicon-allow: capsule - existing app-server config parameter
-    VerletAppServer::with_runtime_factory(config, runtime_factory)
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server test surface; line shifted by repo-wide path qualification
+        capsule_bindings,
+    ); // lexicon-allow: capsule - existing app-server config parameter
+    crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
         .await
         .unwrap()
 }
 
 async fn test_app_with_provider_root(
-    root: &Path,
-    cwd: &Path,
-    provider_client: Arc<dyn ProviderClient>,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
     // lexicon-allow: capsule - existing operation binding config type
-    operation_bindings: CapsuleBindingsConfig,
-) -> VerletAppServer {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-app-server-test-{}.sock", Uuid::now_v7())),
-    );
+    operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
+) -> crate::adapters::app_server::VerletAppServer {
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-app-server-test-{}.sock", uuid::Uuid::now_v7()),
+    ));
     test_app_with_provider_root_and_listen(root, cwd, listen, provider_client, operation_bindings)
         .await
 }
 
 async fn test_app_with_provider_root_and_stream(
-    root: &Path,
-    cwd: &Path,
-    provider_client: Arc<dyn ProviderClient>,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
     // lexicon-allow: capsule - existing operation binding config type
-    operation_bindings: CapsuleBindingsConfig,
+    operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
     stream: bool,
-) -> VerletAppServer {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-app-server-test-{}.sock", Uuid::now_v7())),
-    );
+) -> crate::adapters::app_server::VerletAppServer {
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-app-server-test-{}.sock", uuid::Uuid::now_v7()),
+    ));
     test_app_with_provider_root_listen_and_stream(
         root,
         cwd,
@@ -12326,13 +13110,13 @@ async fn test_app_with_provider_root_and_stream(
 }
 
 async fn test_app_with_provider_root_and_listen(
-    root: &Path,
-    cwd: &Path,
-    listen: AppServerListenAddr,
-    provider_client: Arc<dyn ProviderClient>,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    listen: crate::adapters::app_server::AppServerListenAddr,
+    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
     // lexicon-allow: capsule - existing operation binding config type
-    operation_bindings: CapsuleBindingsConfig,
-) -> VerletAppServer {
+    operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
+) -> crate::adapters::app_server::VerletAppServer {
     test_app_with_provider_root_listen_and_stream(
         root,
         cwd,
@@ -12345,17 +13129,17 @@ async fn test_app_with_provider_root_and_listen(
 }
 
 async fn test_app_with_provider_root_listen_and_stream(
-    root: &Path,
-    cwd: &Path,
-    listen: AppServerListenAddr,
-    provider_client: Arc<dyn ProviderClient>,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    listen: crate::adapters::app_server::AppServerListenAddr,
+    provider_client: std::sync::Arc<dyn crate::ProviderClient>,
     // lexicon-allow: capsule - existing operation binding config type
-    operation_bindings: CapsuleBindingsConfig,
+    operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
     stream: bool,
-) -> VerletAppServer {
+) -> crate::adapters::app_server::VerletAppServer {
     // lexicon-allow: capsule - existing app-server test helper
-    let mut config =
-        VerletAppServerConfig::local(listen, cwd).with_capsule_bindings(operation_bindings.clone()); // lexicon-allow: capsule - existing app-server test helper
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, cwd)
+        .with_capsule_bindings(operation_bindings.clone()); // lexicon-allow: capsule - existing app-server test helper
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
@@ -12368,16 +13152,19 @@ async fn test_app_with_provider_root_listen_and_stream(
         );
     }
     let mut runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
     runtime_config.max_tokens = 128;
     runtime_config.stream = stream;
     // lexicon-allow: capsule - existing app-server test helper
-    let runtime_factory =
-        runtime_factory_from_provider_parts(runtime_config, provider_client, operation_bindings); // lexicon-allow: capsule - existing app-server test helper
-    let metadata_store = SqliteMetadataStore::open(config.metadata_store_path())
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        provider_client,
+        operation_bindings,
+    ); // lexicon-allow: capsule - existing app-server test helper
+    let metadata_store = crate::SqliteMetadataStore::open(config.metadata_store_path())
         .await
         .unwrap();
-    VerletAppServer::with_runtime_factory_and_metadata_store(
+    crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
         config,
         runtime_factory,
         metadata_store,
@@ -12387,24 +13174,28 @@ async fn test_app_with_provider_root_listen_and_stream(
 }
 
 async fn submit_provider_turn_without_subscription(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
-    input_values: Vec<Value>,
+    input_values: Vec<serde_json::Value>,
 ) -> String {
     let handle = app.handle_for_thread(thread_id).await.unwrap();
     let coordinates = handle.context().coordinates.clone();
-    let turn_id = format!("turn-{}", Uuid::now_v7());
-    let input = turn_input_from_values(&input_values)
+    let turn_id = format!("turn-{}", uuid::Uuid::now_v7());
+    let input = crate::adapters::app_server::threads::turn_input_from_values(&input_values)
         .with_provider(app.inner.model_provider.clone())
         .with_model(app.inner.model.clone());
     {
         let mut state = app.inner.state.write().await;
         let thread = state.threads.get_mut(thread_id).unwrap();
-        let turn = AppServerTurnState::new(turn_id.clone(), input_values.clone());
+        let turn = crate::adapters::app_server::threads::AppServerTurnState::new(
+            turn_id.clone(),
+            input_values.clone(),
+        );
         if thread.preview.is_empty() {
-            thread.preview = user_input_preview(&input_values);
+            thread.preview =
+                crate::adapters::app_server::threads::user_input_preview(&input_values);
         }
-        thread.updated_at_ms = now_ms();
+        thread.updated_at_ms = crate::adapters::app_server::connection::now_ms();
         thread.active_turn_id = Some(turn_id.clone());
         thread.turns.insert(turn_id.clone(), turn);
     }
@@ -12414,7 +13205,7 @@ async fn submit_provider_turn_without_subscription(
             &coordinates,
             turn_id.clone(),
             input,
-            TurnSubmissionMode::Queue,
+            crate::TurnSubmissionMode::Queue,
         )
         .await
         .unwrap();
@@ -12422,8 +13213,8 @@ async fn submit_provider_turn_without_subscription(
 }
 
 async fn start_text_turn(
-    app: &VerletAppServer,
-    connection: &ConnectionState,
+    app: &crate::adapters::app_server::VerletAppServer,
+    connection: &crate::adapters::app_server::connection::ConnectionState,
     thread_id: &str,
     text: &str,
 ) -> String {
@@ -12431,7 +13222,7 @@ async fn start_text_turn(
         .dispatch_request(
             connection,
             "turn/start",
-            Some(json!({
+            Some(serde_json::json!({
                 "threadId": thread_id,
                 "input": [{ "type": "text", "text": text, "text_elements": [] }],
             })),
@@ -12441,11 +13232,11 @@ async fn start_text_turn(
     turn["turn"]["id"].as_str().unwrap().to_string()
 }
 
-fn unique_test_root(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("{name}-{}", Uuid::now_v7()))
+fn unique_test_root(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("{name}-{}", uuid::Uuid::now_v7()))
 }
 
-fn default_agent_version_count(agent_registry_root: &Path) -> usize {
+fn default_agent_version_count(agent_registry_root: &std::path::Path) -> usize {
     let version_dir = agent_registry_root.join("versions").join("default");
     if !version_dir.exists() {
         return 0;
@@ -12470,7 +13261,7 @@ fn default_agent_version_count(agent_registry_root: &Path) -> usize {
 }
 
 async fn publish_echo_operation(
-    registry_root: &Path,
+    registry_root: &std::path::Path,
     record_name: &str,
     operation_name: &str,
     prefix: &str,
@@ -12496,7 +13287,7 @@ async fn publish_echo_operation(
 }
 
 async fn publish_multi_echo_operation(
-    registry_root: &Path,
+    registry_root: &std::path::Path,
     record_name: &str,
     operations: &[(&str, &str)],
 ) -> crate::PublishedOperationRecord {
@@ -12521,8 +13312,8 @@ async fn publish_multi_echo_operation(
 }
 
 fn publish_agent_manifest(
-    root: &Path,
-    agent_registry_root: &Path,
+    root: &std::path::Path,
+    agent_registry_root: &std::path::Path,
     name: &str,
     title: &str,
     summary: &str,
@@ -12558,43 +13349,45 @@ streaming = false
         ),
     )
     .unwrap();
-    LocalAgentRegistry::new(agent_registry_root)
+    crate::LocalAgentRegistry::new(agent_registry_root)
         .publish_manifest_path(&manifest_path)
         .unwrap()
 }
 
-fn write_skill_fixture(package_dir: &Path, name: &str, body: &str) {
+fn write_skill_fixture(package_dir: &std::path::Path, name: &str, body: &str) {
     let dir = package_dir.join(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), body).unwrap();
 }
 
 async fn app_server_with_tool_client<T>(
-    root: &Path,
-    workspace: &Path,
-    agent_registry_root: &Path,
-    client: Arc<T>,
-) -> VerletAppServer
+    root: &std::path::Path,
+    workspace: &std::path::Path,
+    agent_registry_root: &std::path::Path,
+    client: std::sync::Arc<T>,
+) -> crate::adapters::app_server::VerletAppServer
 where
-    T: ProviderClient + 'static,
+    T: crate::ProviderClient + 'static,
 {
-    let listen = AppServerListenAddr::Unix(
-        std::env::temp_dir().join(format!("verlet-tool-universe-{}.sock", Uuid::now_v7())),
-    );
-    let mut config = VerletAppServerConfig::local(listen, workspace);
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-tool-universe-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, workspace);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.to_path_buf();
-    let runtime_config = AgentLoopConfig::new(
-        ProviderApi::Other(APP_SERVER_LOCAL_PROVIDER.to_string()),
-        APP_SERVER_LOCAL_PROVIDER,
-        APP_SERVER_LOCAL_MODEL,
+    let runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
     );
-    let factory = runtime_factory_from_provider_parts_with_store_paths(
+    let factory = crate::adapters::app_server::runtime_factory_from_provider_parts_with_store_paths(
         runtime_config,
         client,
         // lexicon-allow: capsule - existing app-server test helper
-        CapsuleBindingsConfig::default(),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
         None,
         Some(config.metadata_store_path()),
         None,
@@ -12605,78 +13398,81 @@ where
         None,
         config.default_placement.clone(),
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
-    VerletAppServer::with_runtime_factory(config, factory)
+    crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, factory)
         .await
         .unwrap()
 }
 
 #[derive(Default)]
 struct UniverseCallingClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     step: std::sync::Mutex<usize>,
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for UniverseCallingClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for UniverseCallingClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let mut step = self.step.lock().unwrap();
         let response = match *step {
             0 => {
                 let names = tool_names(request);
-                assert!(names.contains(&TOOL_SEARCH_TOOL.to_string()));
-                assert!(names.contains(&TOOL_DESCRIBE_TOOL.to_string()));
-                assert!(names.contains(&TOOL_CALL_TOOL.to_string()));
+                assert!(names.contains(&crate::TOOL_SEARCH_TOOL.to_string()));
+                assert!(names.contains(&crate::TOOL_DESCRIBE_TOOL.to_string()));
+                assert!(names.contains(&crate::TOOL_CALL_TOOL.to_string()));
                 assert!(!names.contains(&"verlet_mcp_echo".to_string()));
-                ProviderResponse {
-                    content: vec![CanonicalContent::tool_call(
+                crate::ProviderResponse {
+                    content: vec![crate::CanonicalContent::tool_call(
                         "call_search",
-                        TOOL_SEARCH_TOOL,
-                        json!({"query": "echo"}),
+                        crate::TOOL_SEARCH_TOOL,
+                        serde_json::json!({"query": "echo"}),
                     )],
-                    usage: CanonicalUsage::default(),
-                    stop_reason: CanonicalStopReason::ToolUse,
+                    usage: crate::CanonicalUsage::default(),
+                    stop_reason: crate::CanonicalStopReason::ToolUse,
                 }
             }
             1 => {
                 let text = text_from_canonical_messages(&request.messages);
                 assert!(text.contains("verlet_mcp_echo"));
-                ProviderResponse {
-                    content: vec![CanonicalContent::tool_call(
+                crate::ProviderResponse {
+                    content: vec![crate::CanonicalContent::tool_call(
                         "call_describe",
-                        TOOL_DESCRIBE_TOOL,
-                        json!({"tool": "verlet_mcp_echo"}),
+                        crate::TOOL_DESCRIBE_TOOL,
+                        serde_json::json!({"tool": "verlet_mcp_echo"}),
                     )],
-                    usage: CanonicalUsage::default(),
-                    stop_reason: CanonicalStopReason::ToolUse,
+                    usage: crate::CanonicalUsage::default(),
+                    stop_reason: crate::CanonicalStopReason::ToolUse,
                 }
             }
             2 => {
                 let text = text_from_canonical_messages(&request.messages);
                 assert!(text.contains("SCHEMA HASH"));
                 assert!(text.contains("mcp://arcade"));
-                ProviderResponse {
-                    content: vec![CanonicalContent::tool_call(
+                crate::ProviderResponse {
+                    content: vec![crate::CanonicalContent::tool_call(
                         "call_universe",
-                        TOOL_CALL_TOOL,
-                        json!({
+                        crate::TOOL_CALL_TOOL,
+                        serde_json::json!({
                             "tool": "verlet_mcp_echo",
                             "arguments": {"message": "hello"}
                         }),
                     )],
-                    usage: CanonicalUsage::default(),
-                    stop_reason: CanonicalStopReason::ToolUse,
+                    usage: crate::CanonicalUsage::default(),
+                    stop_reason: crate::CanonicalStopReason::ToolUse,
                 }
             }
             _ => {
                 let text = text_from_canonical_messages(&request.messages);
                 assert!(text.contains("REMOTE_MCP_OK hello"));
-                ProviderResponse {
-                    content: vec![CanonicalContent::text("universe completed")],
-                    usage: CanonicalUsage::default(),
-                    stop_reason: CanonicalStopReason::EndTurn,
+                crate::ProviderResponse {
+                    content: vec![crate::CanonicalContent::text("universe completed")],
+                    usage: crate::CanonicalUsage::default(),
+                    stop_reason: crate::CanonicalStopReason::EndTurn,
                 }
             }
         };
@@ -12687,35 +13483,38 @@ impl ProviderClient for UniverseCallingClient {
 
 #[derive(Default)]
 struct PinnedDirectCallingClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     step: std::sync::Mutex<usize>,
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for PinnedDirectCallingClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for PinnedDirectCallingClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let mut step = self.step.lock().unwrap();
         let response = if *step == 0 {
             let names = tool_names(request);
-            assert!(names.contains(&TOOL_SEARCH_TOOL.to_string()));
+            assert!(names.contains(&crate::TOOL_SEARCH_TOOL.to_string()));
             assert!(names.contains(&"verlet_mcp_echo".to_string()));
-            ProviderResponse {
-                content: vec![CanonicalContent::tool_call(
+            crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::tool_call(
                     "call_direct",
                     "verlet_mcp_echo",
-                    json!({"message": "hello"}),
+                    serde_json::json!({"message": "hello"}),
                 )],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::ToolUse,
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::ToolUse,
             }
         } else {
             let text = text_from_canonical_messages(&request.messages);
             assert!(text.contains("REMOTE_MCP_OK hello"));
-            ProviderResponse {
-                content: vec![CanonicalContent::text("pinned completed")],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::EndTurn,
+            crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::text("pinned completed")],
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::EndTurn,
             }
         };
         *step += 1;
@@ -12762,7 +13561,7 @@ async fn spawn_app_mcp_http_fixture(
                 }
                 buffer.extend_from_slice(&chunk[..read]);
             }
-            let request: Value =
+            let request: serde_json::Value =
                 serde_json::from_slice(&buffer[body_start..body_start + content_length]).unwrap();
             let body = app_mcp_fixture_response(&request, message_type);
             let raw = format!(
@@ -12780,10 +13579,10 @@ fn find_http_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn app_mcp_fixture_response(request: &Value, message_type: &str) -> String {
+fn app_mcp_fixture_response(request: &serde_json::Value, message_type: &str) -> String {
     let id = request.get("id").cloned();
-    match request.get("method").and_then(Value::as_str) {
-        Some("initialize") => json!({
+    match request.get("method").and_then(serde_json::Value::as_str) {
+        Some("initialize") => serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": {
@@ -12792,11 +13591,11 @@ fn app_mcp_fixture_response(request: &Value, message_type: &str) -> String {
                 "serverInfo": {"name": "app-mcp-fixture", "version": "1"}
             }
         }),
-        Some("notifications/initialized") => json!({
+        Some("notifications/initialized") => serde_json::json!({
             "jsonrpc": "2.0",
             "result": {}
         }),
-        Some("tools/list") => json!({
+        Some("tools/list") => serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": {
@@ -12810,9 +13609,9 @@ fn app_mcp_fixture_response(request: &Value, message_type: &str) -> String {
         Some("tools/call") => {
             let message = request
                 .pointer("/params/arguments/message")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            json!({
+            serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
@@ -12821,7 +13620,7 @@ fn app_mcp_fixture_response(request: &Value, message_type: &str) -> String {
                 }
             })
         }
-        _ => json!({
+        _ => serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": -32601, "message": "unknown method"}
@@ -12830,8 +13629,8 @@ fn app_mcp_fixture_response(request: &Value, message_type: &str) -> String {
     .to_string()
 }
 
-fn app_mcp_echo_schema(message_type: &str) -> Value {
-    json!({
+fn app_mcp_echo_schema(message_type: &str) -> serde_json::Value {
+    serde_json::json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -12845,18 +13644,18 @@ fn app_mcp_echo_schema(message_type: &str) -> Value {
 }
 
 async fn wait_for_event_kind(
-    app: &VerletAppServer,
-    connection: &ConnectionState,
+    app: &crate::adapters::app_server::VerletAppServer,
+    connection: &crate::adapters::app_server::connection::ConnectionState,
     thread_id: &str,
     kind: &str,
-) -> Value {
+) -> serde_json::Value {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let page = app
             .dispatch_request(
                 connection,
                 "thread/events/list",
-                Some(json!({
+                Some(serde_json::json!({
                     "threadId": thread_id,
                     "kinds": [kind],
                 })),
@@ -13028,8 +13827,8 @@ fn wat_bytes(bytes: &[u8]) -> String {
 
 #[derive(Default)]
 struct ThinkingRecorderClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
-    complete_content: std::sync::Mutex<Option<Vec<CanonicalContent>>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    complete_content: std::sync::Mutex<Option<Vec<crate::CanonicalContent>>>,
     stream_events: std::sync::Mutex<Option<Vec<crate::ProviderStreamEvent>>>,
 }
 
@@ -13042,7 +13841,7 @@ impl ThinkingRecorderClient {
         }
     }
 
-    fn with_complete_content(complete_content: Vec<CanonicalContent>) -> Self {
+    fn with_complete_content(complete_content: Vec<crate::CanonicalContent>) -> Self {
         Self {
             requests: std::sync::Mutex::new(Vec::new()),
             complete_content: std::sync::Mutex::new(Some(complete_content)),
@@ -13058,31 +13857,34 @@ impl ThinkingRecorderClient {
         }
     }
 
-    fn requests(&self) -> Vec<ProviderRequest> {
+    fn requests(&self) -> Vec<crate::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for ThinkingRecorderClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for ThinkingRecorderClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
-        Ok(ProviderResponse {
+        Ok(crate::ProviderResponse {
             content: self
                 .complete_content
                 .lock()
                 .unwrap()
                 .clone()
-                .unwrap_or_else(|| vec![CanonicalContent::text("thinking recorded")]),
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+                .unwrap_or_else(|| vec![crate::CanonicalContent::text("thinking recorded")]),
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 
     async fn stream(
         &self,
-        request: &ProviderRequest,
-    ) -> ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
         self.requests.lock().unwrap().push(request.clone());
         Ok(self
             .stream_events
@@ -13095,7 +13897,7 @@ impl ProviderClient for ThinkingRecorderClient {
                         text: "thinking recorded".to_string(),
                     },
                     crate::ProviderStreamEvent::Done {
-                        stop_reason: CanonicalStopReason::EndTurn,
+                        stop_reason: crate::CanonicalStopReason::EndTurn,
                     },
                 ]
             }))
@@ -13105,12 +13907,12 @@ impl ProviderClient for ThinkingRecorderClient {
 #[derive(Default)]
 // lexicon-allow: capsule - existing test client name
 struct InspectingCapsuleClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
 }
 
 // lexicon-allow: capsule - existing test client name
 impl InspectingCapsuleClient {
-    fn requests(&self) -> Vec<ProviderRequest> {
+    fn requests(&self) -> Vec<crate::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
@@ -13118,19 +13920,22 @@ impl InspectingCapsuleClient {
 // lexicon-allow: capsule - existing test client name
 #[async_trait::async_trait]
 // lexicon-allow: capsule - existing test client name
-impl ProviderClient for InspectingCapsuleClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for InspectingCapsuleClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::text("inspected")],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text("inspected")],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 }
 
 struct ThreadSpawnAgentRefClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     agent_ref: String,
     cancel_calls: std::sync::Mutex<usize>,
 }
@@ -13146,54 +13951,57 @@ impl ThreadSpawnAgentRefClient {
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for ThreadSpawnAgentRefClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for ThreadSpawnAgentRefClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
         if has_tool_result {
             if latest_user_text(request).as_deref() == Some("cancel worker")
                 && *self.cancel_calls.lock().unwrap() == 0
-                && tool_names(request).contains(&THREAD_CANCEL_OPERATION.to_string())
+                && tool_names(request).contains(&crate::THREAD_CANCEL_OPERATION.to_string())
             {
                 *self.cancel_calls.lock().unwrap() += 1;
-                return Ok(ProviderResponse {
-                    content: vec![CanonicalContent::tool_call(
+                return Ok(crate::ProviderResponse {
+                    content: vec![crate::CanonicalContent::tool_call(
                         "call_thread_cancel_1",
-                        THREAD_CANCEL_OPERATION,
-                        json!({ "task_name": "worker" }),
+                        crate::THREAD_CANCEL_OPERATION,
+                        serde_json::json!({ "task_name": "worker" }),
                     )],
-                    usage: CanonicalUsage::default(),
-                    stop_reason: CanonicalStopReason::ToolUse,
+                    usage: crate::CanonicalUsage::default(),
+                    stop_reason: crate::CanonicalStopReason::ToolUse,
                 });
             }
-            return Ok(ProviderResponse {
-                content: vec![CanonicalContent::text("root observed child spawn")],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::EndTurn,
+            return Ok(crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::text("root observed child spawn")],
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::EndTurn,
             });
         }
-        if tool_names(request).contains(&THREAD_SPAWN_OPERATION.to_string()) {
-            return Ok(ProviderResponse {
-                content: vec![CanonicalContent::tool_call(
+        if tool_names(request).contains(&crate::THREAD_SPAWN_OPERATION.to_string()) {
+            return Ok(crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::tool_call(
                     "call_thread_spawn_1",
-                    THREAD_SPAWN_OPERATION,
-                    json!({
+                    crate::THREAD_SPAWN_OPERATION,
+                    serde_json::json!({
                         "task_name": "worker",
                         "message": "hello bound child",
                         "agent_ref": self.agent_ref,
                     }),
                 )],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::ToolUse,
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::ToolUse,
             });
         }
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::text("child agent replied")],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text("child agent replied")],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -13206,17 +14014,20 @@ impl ProviderRequestRecorder for ThreadSpawnAgentRefClient {
 
 #[derive(Default)]
 struct ScheduleMandateStartClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for ScheduleMandateStartClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for ScheduleMandateStartClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
         if has_tool_result {
             let text = text_from_canonical_messages(&request.messages);
             assert!(
@@ -13227,29 +14038,29 @@ impl ProviderClient for ScheduleMandateStartClient {
                 text.contains("mandate_event_id"),
                 "expected mandate event id in provider context: {text}"
             );
-            return Ok(ProviderResponse {
-                content: vec![CanonicalContent::text("schedule mandate started")],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::EndTurn,
+            return Ok(crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::text("schedule mandate started")],
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::EndTurn,
             });
         }
 
         let names = tool_names(request);
         assert!(
-            names.contains(&MANDATE_START_OPERATION.to_string()),
+            names.contains(&crate::MANDATE_START_OPERATION.to_string()),
             "expected mandate_start direct tool in {names:?}"
         );
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::tool_call(
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::tool_call(
                 "call_mandate_start_1",
-                MANDATE_START_OPERATION,
-                json!({
+                crate::MANDATE_START_OPERATION,
+                serde_json::json!({
                     "schedule": { "interval": { "every_ms": 60_000 } },
                     "input_template": "remind me in a minute"
                 }),
             )],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::ToolUse,
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::ToolUse,
         })
     }
 }
@@ -13284,7 +14095,7 @@ impl SequencedStreamResponse {
 
 // lexicon-allow: capsule - existing test client name
 struct SequencedStreamCapsuleClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     responses: std::sync::Mutex<Vec<SequencedStreamResponse>>,
 }
 
@@ -13310,19 +14121,22 @@ impl LagThenBlockStreamClient {
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for BurstStreamClient {
-    async fn complete(&self, _request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::text(self.deltas.concat())],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+impl crate::ProviderClient for BurstStreamClient {
+    async fn complete(
+        &self,
+        _request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text(self.deltas.concat())],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 
     async fn stream(
         &self,
-        _request: &ProviderRequest,
-    ) -> ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        _request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
         let mut events = self
             .deltas
             .iter()
@@ -13330,26 +14144,29 @@ impl ProviderClient for BurstStreamClient {
             .map(|text| crate::ProviderStreamEvent::TextDelta { text })
             .collect::<Vec<_>>();
         events.push(crate::ProviderStreamEvent::Done {
-            stop_reason: CanonicalStopReason::EndTurn,
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         });
         Ok(events)
     }
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for LagThenBlockStreamClient {
-    async fn complete(&self, _request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::text("lag race completion")],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+impl crate::ProviderClient for LagThenBlockStreamClient {
+    async fn complete(
+        &self,
+        _request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text("lag race completion")],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 
     async fn stream(
         &self,
-        _request: &ProviderRequest,
-    ) -> ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        _request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
         let request_index = self
             .request_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -13360,7 +14177,7 @@ impl ProviderClient for LagThenBlockStreamClient {
                 })
                 .collect::<Vec<_>>();
             events.push(crate::ProviderStreamEvent::Done {
-                stop_reason: CanonicalStopReason::EndTurn,
+                stop_reason: crate::CanonicalStopReason::EndTurn,
             });
             return Ok(events);
         }
@@ -13372,7 +14189,7 @@ impl ProviderClient for LagThenBlockStreamClient {
                 text: "second turn complete".to_string(),
             },
             crate::ProviderStreamEvent::Done {
-                stop_reason: CanonicalStopReason::EndTurn,
+                stop_reason: crate::CanonicalStopReason::EndTurn,
             },
         ])
     }
@@ -13391,7 +14208,7 @@ impl SequencedStreamCapsuleClient {
         }
     }
 
-    fn next_response(&self, request: &ProviderRequest) -> SequencedStreamResponse {
+    fn next_response(&self, request: &crate::ProviderRequest) -> SequencedStreamResponse {
         self.requests.lock().unwrap().push(request.clone());
         let mut responses = self.responses.lock().unwrap();
         if responses.is_empty() {
@@ -13404,20 +14221,23 @@ impl SequencedStreamCapsuleClient {
 // lexicon-allow: capsule - existing test client name
 #[async_trait::async_trait]
 // lexicon-allow: capsule - existing test client name
-impl ProviderClient for SequencedStreamCapsuleClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for SequencedStreamCapsuleClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         let text = self.next_response(request).text().to_string();
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::text(text)],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text(text)],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 
     async fn stream(
         &self,
-        request: &ProviderRequest,
-    ) -> ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
         let response = self.next_response(request);
         let mut events = match response {
             SequencedStreamResponse::TextDelta(text) => {
@@ -13425,19 +14245,19 @@ impl ProviderClient for SequencedStreamCapsuleClient {
             }
             SequencedStreamResponse::Content(text) => {
                 vec![crate::ProviderStreamEvent::Content {
-                    content: CanonicalContent::text(text),
+                    content: crate::CanonicalContent::text(text),
                 }]
             }
         };
         events.push(crate::ProviderStreamEvent::Done {
-            stop_reason: CanonicalStopReason::EndTurn,
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         });
         Ok(events)
     }
 }
 
 struct FailingProviderClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     message: String,
 }
 
@@ -13449,40 +14269,46 @@ impl FailingProviderClient {
         }
     }
 
-    fn record(&self, request: &ProviderRequest) -> ProviderError {
+    fn record(&self, request: &crate::ProviderRequest) -> crate::ProviderError {
         self.requests.lock().unwrap().push(request.clone());
-        ProviderError::Decode(self.message.clone())
+        crate::ProviderError::Decode(self.message.clone())
     }
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for FailingProviderClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for FailingProviderClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         Err(self.record(request))
     }
 
     async fn stream(
         &self,
-        request: &ProviderRequest,
-    ) -> ProviderResult<Vec<crate::ProviderStreamEvent>> {
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
         Err(self.record(request))
     }
 }
 
 #[derive(Default)]
 struct SkillResourceClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for SkillResourceClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for SkillResourceClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let text = text_from_canonical_messages(&request.messages);
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             assert!(
                 text.contains("alpha — Alpha description."),
@@ -13490,16 +14316,16 @@ impl ProviderClient for SkillResourceClient {
             );
             let names = tool_names(request);
             assert!(names.contains(&"bash".to_string()));
-            return Ok(ProviderResponse {
-                content: vec![CanonicalContent::tool_call(
+            return Ok(crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::tool_call(
                     "call_bash_skill",
                     "bash",
-                    json!({
+                    serde_json::json!({
                         "command": "cat /skills/alpha.md; printf '\\nWRITE:\\n'; echo nope > /skills/alpha.md"
                     }),
                 )],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::ToolUse,
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::ToolUse,
             });
         }
 
@@ -13511,28 +14337,31 @@ impl ProviderClient for SkillResourceClient {
             text.contains("read-only") || text.contains("denied"),
             "bash result did not include read-only denial: {text}"
         );
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::text("skill read completed")],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text("skill read completed")],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 }
 
 #[derive(Default)]
 struct WorkspaceSkillDiscoveryClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for WorkspaceSkillDiscoveryClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for WorkspaceSkillDiscoveryClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let text = text_from_canonical_messages(&request.messages);
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             assert!(
                 text.contains(
@@ -13541,26 +14370,28 @@ impl ProviderClient for WorkspaceSkillDiscoveryClient {
                 "provider request did not include the witnessed workspace skill index: {text}"
             );
             assert!(tool_names(request).contains(&"bash".to_string()));
-            return Ok(ProviderResponse {
-                content: vec![CanonicalContent::tool_call(
+            return Ok(crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::tool_call(
                     "call_bash_workspace_skill",
                     "bash",
-                    json!({
+                    serde_json::json!({
                         "command": "cat /work/.agents/skills/alpha/SKILL.md"
                     }),
                 )],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::ToolUse,
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::ToolUse,
             });
         }
         assert!(
             text.contains("Changed discovery body marker."),
             "workspace bash did not read the live edited skill body: {text}"
         );
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::text("workspace skill read completed")],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text(
+                "workspace skill read completed",
+            )],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -13573,24 +14404,27 @@ impl ProviderRequestRecorder for WorkspaceSkillDiscoveryClient {
 
 #[derive(Default)]
 struct WorkspaceBindingClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for WorkspaceBindingClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for WorkspaceBindingClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             assert!(tool_names(request).contains(&"bash".to_string()));
-            return Ok(ProviderResponse {
-                content: vec![CanonicalContent::tool_call(
+            return Ok(crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::tool_call(
                     "call_workspace_bash",
                     "bash",
-                    json!({
+                    serde_json::json!({
                         "command": r#"ls /work
 cat /work/note.txt
 apply_patch <<'PATCH'
@@ -13607,8 +14441,8 @@ printf traversal > /work/../outside.txt
 printf absolute > /absolute-outside.txt"#
                     }),
                 )],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::ToolUse,
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::ToolUse,
             });
         }
 
@@ -13627,10 +14461,10 @@ printf absolute > /absolute-outside.txt"#
                 || text.contains("Permission denied"),
             "symlink escape denial was not returned: {text}"
         );
-        Ok(ProviderResponse {
-            content: vec![CanonicalContent::text("workspace edit completed")],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+        Ok(crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text("workspace edit completed")],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -13643,7 +14477,7 @@ impl ProviderRequestRecorder for WorkspaceBindingClient {
 
 // lexicon-allow: capsule - existing test client name
 struct BashCallingCapsuleClient {
-    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     direct_tool_name: String,
     shell_command_name: String,
     command: String,
@@ -13667,20 +14501,23 @@ impl BashCallingCapsuleClient {
         }
     }
 
-    fn requests(&self) -> Vec<ProviderRequest> {
+    fn requests(&self) -> Vec<crate::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
 #[async_trait::async_trait]
 // lexicon-allow: capsule - existing test client name
-impl ProviderClient for BashCallingCapsuleClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+impl crate::ProviderClient for BashCallingCapsuleClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             let names = tool_names(request);
             assert!(
@@ -13690,14 +14527,14 @@ impl ProviderClient for BashCallingCapsuleClient {
                 names
             );
             assert_bash_tool_describes(request, &self.shell_command_name);
-            return Ok(ProviderResponse {
-                content: vec![CanonicalContent::tool_call(
+            return Ok(crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::tool_call(
                     "call_bash_1",
                     "bash",
-                    json!({ "command": self.command }),
+                    serde_json::json!({ "command": self.command }),
                 )],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::ToolUse,
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::ToolUse,
             });
         }
 
@@ -13707,16 +14544,16 @@ impl ProviderClient for BashCallingCapsuleClient {
             "expected bash result to contain {:?}, got: {text}",
             self.expected_output
         );
-        Ok(ProviderResponse {
+        Ok(crate::ProviderResponse {
             // lexicon-allow: capsule - existing fixture response text
-            content: vec![CanonicalContent::text("capsule command completed")],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::EndTurn,
+            content: vec![crate::CanonicalContent::text("capsule command completed")],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         })
     }
 }
 
-async fn wait_for_provider_requests<T>(client: &Arc<T>, count: usize)
+async fn wait_for_provider_requests<T>(client: &std::sync::Arc<T>, count: usize)
 where
     T: ProviderRequestRecorder + ?Sized,
 {
@@ -13733,10 +14570,10 @@ where
 }
 
 async fn wait_for_lifecycle_status(
-    store: &SqliteMetadataStore,
-    thread_id: ThreadId,
+    store: &crate::SqliteMetadataStore,
+    thread_id: crate::ThreadId,
     status: crate::ThreadLifecycleStatus,
-) -> ThreadLifecycleRecord {
+) -> crate::ThreadLifecycleRecord {
     for _ in 0..1_500 {
         if let Some(record) = store.get_thread_lifecycle(thread_id).await.unwrap()
             && record.status == status
@@ -13748,8 +14585,12 @@ async fn wait_for_lifecycle_status(
     panic!("timed out waiting for lifecycle status {status:?} on {thread_id}");
 }
 
-async fn wait_for_session_text(app: &VerletAppServer, thread_id: &str, expected: &str) {
-    let parsed = ThreadId::parse_str(thread_id).unwrap();
+async fn wait_for_session_text(
+    app: &crate::adapters::app_server::VerletAppServer,
+    thread_id: &str,
+    expected: &str,
+) {
+    let parsed = crate::ThreadId::parse_str(thread_id).unwrap();
     for _ in 0..1_500 {
         if let Ok(handle) = app
             .inner
@@ -13769,10 +14610,12 @@ async fn wait_for_session_text(app: &VerletAppServer, thread_id: &str, expected:
 }
 
 async fn wait_for_turn_completed_notification(
-    outbound_rx: &mut mpsc::UnboundedReceiver<JsonRpcMessage>,
+    outbound_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        crate::adapters::app_server::connection::JsonRpcMessage,
+    >,
     thread_id: &str,
     turn_id: &str,
-) -> Value {
+) -> serde_json::Value {
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
@@ -13784,7 +14627,7 @@ async fn wait_for_turn_completed_notification(
                 );
             }
             message = outbound_rx.recv() => {
-                let Some(JsonRpcMessage::Notification(notification)) = message else {
+                let Some(crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification)) = message else {
                     continue;
                 };
                 observed.push(notification.method.clone());
@@ -13793,17 +14636,17 @@ async fn wait_for_turn_completed_notification(
                         .params
                         .as_ref()
                         .and_then(|params| params.get("threadId"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         == Some(thread_id)
                     && notification
                         .params
                         .as_ref()
                         .and_then(|params| params.get("turn"))
                         .and_then(|turn| turn.get("id"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         == Some(turn_id)
                 {
-                    return notification.params.unwrap_or(Value::Null);
+                    return notification.params.unwrap_or(serde_json::Value::Null);
                 }
             }
         }
@@ -13811,10 +14654,12 @@ async fn wait_for_turn_completed_notification(
 }
 
 async fn wait_for_failed_turn_and_closed_thread(
-    outbound_rx: &mut mpsc::UnboundedReceiver<JsonRpcMessage>,
+    outbound_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        crate::adapters::app_server::connection::JsonRpcMessage,
+    >,
     thread_id: &str,
     turn_id: &str,
-) -> Value {
+) -> serde_json::Value {
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
@@ -13835,14 +14680,14 @@ async fn wait_for_failed_turn_and_closed_thread(
                 );
             }
             message = outbound_rx.recv() => {
-                let Some(JsonRpcMessage::Notification(notification)) = message else {
+                let Some(crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification)) = message else {
                     continue;
                 };
                 observed.push(notification.method.clone());
                 let Some(params) = notification.params.as_ref() else {
                     continue;
                 };
-                if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+                if params.get("threadId").and_then(serde_json::Value::as_str) != Some(thread_id) {
                     continue;
                 }
                 match notification.method.as_str() {
@@ -13850,7 +14695,7 @@ async fn wait_for_failed_turn_and_closed_thread(
                         if params
                             .get("status")
                             .and_then(|status| status.get("type"))
-                            .and_then(Value::as_str)
+                            .and_then(serde_json::Value::as_str)
                             == Some("systemError") =>
                     {
                         saw_failed_status = true;
@@ -13862,7 +14707,7 @@ async fn wait_for_failed_turn_and_closed_thread(
                         if params
                             .get("turn")
                             .and_then(|turn| turn.get("id"))
-                            .and_then(Value::as_str)
+                            .and_then(serde_json::Value::as_str)
                             == Some(turn_id) =>
                     {
                         completed = Some(params.clone());
@@ -13875,10 +14720,12 @@ async fn wait_for_failed_turn_and_closed_thread(
 }
 
 async fn collect_agent_deltas_until_turn_completed(
-    outbound_rx: &mut mpsc::UnboundedReceiver<JsonRpcMessage>,
+    outbound_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        crate::adapters::app_server::connection::JsonRpcMessage,
+    >,
     thread_id: &str,
     turn_id: &str,
-) -> (String, Value) {
+) -> (String, serde_json::Value) {
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
@@ -13891,7 +14738,7 @@ async fn collect_agent_deltas_until_turn_completed(
                 );
             }
             message = outbound_rx.recv() => {
-                let Some(JsonRpcMessage::Notification(notification)) = message else {
+                let Some(crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification)) = message else {
                     continue;
                 };
                 observed.push(notification.method.clone());
@@ -13899,7 +14746,7 @@ async fn collect_agent_deltas_until_turn_completed(
                     .params
                     .as_ref()
                     .and_then(|params| params.get("threadId"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     != Some(thread_id)
                 {
                     continue;
@@ -13908,7 +14755,7 @@ async fn collect_agent_deltas_until_turn_completed(
                     .params
                     .as_ref()
                     .and_then(|params| params.get("turnId"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     == Some(turn_id)
                     && notification.method == "item/agentMessage/delta"
                 {
@@ -13916,7 +14763,7 @@ async fn collect_agent_deltas_until_turn_completed(
                         .params
                         .as_ref()
                         .and_then(|params| params.get("delta"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                     {
                         deltas.push_str(delta);
                     }
@@ -13927,10 +14774,10 @@ async fn collect_agent_deltas_until_turn_completed(
                         .as_ref()
                         .and_then(|params| params.get("turn"))
                         .and_then(|turn| turn.get("id"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         == Some(turn_id)
                 {
-                    return (deltas, notification.params.unwrap_or(Value::Null));
+                    return (deltas, notification.params.unwrap_or(serde_json::Value::Null));
                 }
             }
         }
@@ -13938,10 +14785,12 @@ async fn collect_agent_deltas_until_turn_completed(
 }
 
 async fn collect_message_and_thinking_deltas_until_turn_completed(
-    outbound_rx: &mut mpsc::UnboundedReceiver<JsonRpcMessage>,
+    outbound_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        crate::adapters::app_server::connection::JsonRpcMessage,
+    >,
     thread_id: &str,
     turn_id: &str,
-) -> (String, String, Value) {
+) -> (String, String, serde_json::Value) {
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(deadline);
     let mut observed = Vec::new();
@@ -13955,7 +14804,7 @@ async fn collect_message_and_thinking_deltas_until_turn_completed(
                 );
             }
             message = outbound_rx.recv() => {
-                let Some(JsonRpcMessage::Notification(notification)) = message else {
+                let Some(crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification)) = message else {
                     continue;
                 };
                 observed.push(notification.method.clone());
@@ -13963,7 +14812,7 @@ async fn collect_message_and_thinking_deltas_until_turn_completed(
                     .params
                     .as_ref()
                     .and_then(|params| params.get("threadId"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     != Some(thread_id)
                 {
                     continue;
@@ -13972,7 +14821,7 @@ async fn collect_message_and_thinking_deltas_until_turn_completed(
                     .params
                     .as_ref()
                     .and_then(|params| params.get("turnId"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     == Some(turn_id)
                 {
                     match notification.method.as_str() {
@@ -13981,7 +14830,7 @@ async fn collect_message_and_thinking_deltas_until_turn_completed(
                                 .params
                                 .as_ref()
                                 .and_then(|params| params.get("delta"))
-                                .and_then(Value::as_str)
+                                .and_then(serde_json::Value::as_str)
                             {
                                 message_deltas.push_str(delta);
                             }
@@ -13991,7 +14840,7 @@ async fn collect_message_and_thinking_deltas_until_turn_completed(
                                 .params
                                 .as_ref()
                                 .and_then(|params| params.get("delta"))
-                                .and_then(Value::as_str)
+                                .and_then(serde_json::Value::as_str)
                             {
                                 thinking_deltas.push_str(delta);
                             }
@@ -14005,13 +14854,13 @@ async fn collect_message_and_thinking_deltas_until_turn_completed(
                         .as_ref()
                         .and_then(|params| params.get("turn"))
                         .and_then(|turn| turn.get("id"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         == Some(turn_id)
                 {
                     return (
                         message_deltas,
                         thinking_deltas,
-                        notification.params.unwrap_or(Value::Null),
+                        notification.params.unwrap_or(serde_json::Value::Null),
                     );
                 }
             }
@@ -14020,7 +14869,9 @@ async fn collect_message_and_thinking_deltas_until_turn_completed(
 }
 
 async fn collect_delta_methods_until_turn_completed(
-    outbound_rx: &mut mpsc::UnboundedReceiver<JsonRpcMessage>,
+    outbound_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        crate::adapters::app_server::connection::JsonRpcMessage,
+    >,
     thread_id: &str,
     turn_id: &str,
 ) -> Vec<String> {
@@ -14035,14 +14886,14 @@ async fn collect_delta_methods_until_turn_completed(
                 );
             }
             message = outbound_rx.recv() => {
-                let Some(JsonRpcMessage::Notification(notification)) = message else {
+                let Some(crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification)) = message else {
                     continue;
                 };
                 if notification
                     .params
                     .as_ref()
                     .and_then(|params| params.get("threadId"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     != Some(thread_id)
                 {
                     continue;
@@ -14051,7 +14902,7 @@ async fn collect_delta_methods_until_turn_completed(
                     .params
                     .as_ref()
                     .and_then(|params| params.get("turnId"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     == Some(turn_id)
                 {
                     match notification.method.as_str() {
@@ -14067,7 +14918,7 @@ async fn collect_delta_methods_until_turn_completed(
                         .as_ref()
                         .and_then(|params| params.get("turn"))
                         .and_then(|turn| turn.get("id"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         == Some(turn_id)
                 {
                     return observed;
@@ -14078,7 +14929,9 @@ async fn collect_delta_methods_until_turn_completed(
 }
 
 async fn assert_no_extra_turn_delta_or_completed(
-    outbound_rx: &mut mpsc::UnboundedReceiver<JsonRpcMessage>,
+    outbound_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        crate::adapters::app_server::connection::JsonRpcMessage,
+    >,
     thread_id: &str,
     turn_id: &str,
 ) {
@@ -14087,20 +14940,24 @@ async fn assert_no_extra_turn_delta_or_completed(
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let message = tokio::time::timeout(remaining, outbound_rx.recv()).await;
-        let Ok(Some(JsonRpcMessage::Notification(notification))) = message else {
+        let Ok(Some(crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+            notification,
+        ))) = message
+        else {
             continue;
         };
         let Some(params) = notification.params.as_ref() else {
             continue;
         };
-        if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+        if params.get("threadId").and_then(serde_json::Value::as_str) != Some(thread_id) {
             continue;
         }
-        let matches_turn_id = params.get("turnId").and_then(Value::as_str) == Some(turn_id)
+        let matches_turn_id = params.get("turnId").and_then(serde_json::Value::as_str)
+            == Some(turn_id)
             || params
                 .get("turn")
                 .and_then(|turn| turn.get("id"))
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 == Some(turn_id);
         if matches_turn_id
             && matches!(
@@ -14117,11 +14974,11 @@ async fn assert_no_extra_turn_delta_or_completed(
 }
 
 async fn wait_for_assistant_texts(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     expected_count: usize,
 ) -> Vec<String> {
-    let parsed = ThreadId::parse_str(thread_id).unwrap();
+    let parsed = crate::ThreadId::parse_str(thread_id).unwrap();
     for _ in 0..1_500 {
         if let Ok(handle) = app
             .inner
@@ -14140,20 +14997,22 @@ async fn wait_for_assistant_texts(
     panic!("timed out waiting for {expected_count} assistant message(s) in {thread_id}");
 }
 
-fn assistant_texts(messages: &[CanonicalMessage]) -> Vec<String> {
+fn assistant_texts(messages: &[crate::CanonicalMessage]) -> Vec<String> {
     messages
         .iter()
         .filter_map(|message| match message {
-            CanonicalMessage::Assistant { content, .. } => {
-                Some(text_from_canonical_content(content))
+            crate::CanonicalMessage::Assistant { content, .. } => Some(
+                crate::adapters::app_server::text_from_canonical_content(content),
+            ),
+            crate::CanonicalMessage::User { .. } | crate::CanonicalMessage::ToolResult { .. } => {
+                None
             }
-            CanonicalMessage::User { .. } | CanonicalMessage::ToolResult { .. } => None,
         })
         .filter(|text| !text.is_empty())
         .collect()
 }
 
-fn turn_item_texts(turns: &[Value]) -> Vec<Vec<String>> {
+fn turn_item_texts(turns: &[serde_json::Value]) -> Vec<Vec<String>> {
     turns
         .iter()
         .map(|turn| {
@@ -14167,7 +15026,7 @@ fn turn_item_texts(turns: &[Value]) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn turn_has_agent_delta(turn_completed_params: &Value, expected: &str) -> bool {
+fn turn_has_agent_delta(turn_completed_params: &serde_json::Value, expected: &str) -> bool {
     turn_completed_params["turn"]["items"]
         .as_array()
         .is_some_and(|items| {
@@ -14178,43 +15037,45 @@ fn turn_has_agent_delta(turn_completed_params: &Value, expected: &str) -> bool {
         })
 }
 
-fn completed_turn_agent_text(turn_completed_params: &Value) -> Option<String> {
+fn completed_turn_agent_text(turn_completed_params: &serde_json::Value) -> Option<String> {
     turn_completed_params["turn"]["items"]
         .as_array()?
         .iter()
-        .find(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"))
+        .find(|item| item.get("type").and_then(serde_json::Value::as_str) == Some("agentMessage"))
         .and_then(item_text)
 }
 
-fn item_text_by_type(items: &[Value], item_type: &str) -> Option<String> {
+fn item_text_by_type(items: &[serde_json::Value], item_type: &str) -> Option<String> {
     items
         .iter()
-        .find(|item| item.get("type").and_then(Value::as_str) == Some(item_type))
+        .find(|item| item.get("type").and_then(serde_json::Value::as_str) == Some(item_type))
         .and_then(item_text)
 }
 
-fn last_user_message_text(request: &ProviderRequest) -> Option<String> {
+fn last_user_message_text(request: &crate::ProviderRequest) -> Option<String> {
     request
         .messages
         .iter()
         .rev()
         .find_map(|message| match message {
-            CanonicalMessage::User { content, .. } => Some(text_from_canonical_content(content)),
+            crate::CanonicalMessage::User { content, .. } => Some(
+                crate::adapters::app_server::text_from_canonical_content(content),
+            ),
             _ => None,
         })
         .filter(|text| !text.is_empty())
 }
 
-fn item_text(item: &Value) -> Option<String> {
-    if let Some(text) = item.get("text").and_then(Value::as_str) {
+fn item_text(item: &serde_json::Value) -> Option<String> {
+    if let Some(text) = item.get("text").and_then(serde_json::Value::as_str) {
         return Some(text.to_string());
     }
     item.get("content")
-        .and_then(Value::as_array)
+        .and_then(serde_json::Value::as_array)
         .map(|content| {
             content
                 .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -14223,7 +15084,7 @@ fn item_text(item: &Value) -> Option<String> {
 
 #[cfg(unix)]
 async fn connect_tui_test_client(
-    socket: &Path,
+    socket: &std::path::Path,
     client_name: &str,
 ) -> crate::CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
@@ -14280,14 +15141,18 @@ async fn connect_ws_tui_test_client(
     );
 }
 
-async fn mint_app_server_test_token(app: &VerletAppServer) -> String {
-    let store = SqliteSessionStore::open(app.session_store_path())
+async fn mint_app_server_test_token(app: &crate::adapters::app_server::VerletAppServer) -> String {
+    let store = crate::SqliteSessionStore::open(app.session_store_path())
         .await
         .unwrap();
-    let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None)
-        .await
-        .unwrap();
-    let principal = PrincipalId::new(app.user_id());
+    let authority = crate::daemon::identity::SqliteIdentityAuthority::new(
+        store,
+        std::sync::Arc::new(crate::SystemDaemonClock),
+        None,
+    )
+    .await
+    .unwrap();
+    let principal = crate::daemon::identity::PrincipalId::new(app.user_id());
     authority
         .mint_credential(&principal, &principal, None)
         .await
@@ -14317,11 +15182,12 @@ async fn get_tcp_response(addr: std::net::SocketAddr, path: &str) -> String {
 }
 
 async fn get_tcp_raw_response(addr: std::net::SocketAddr, request: &str) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
 
     let mut last_error = None;
     for _ in 0..1_500 {
-        match TcpStream::connect(addr).await {
+        match tokio::net::TcpStream::connect(addr).await {
             Ok(mut stream) => {
                 stream.write_all(request.as_bytes()).await.unwrap();
                 let mut response = String::new();
@@ -14383,7 +15249,7 @@ impl ProviderRequestRecorder for BashCallingCapsuleClient {
     }
 }
 
-fn tool_names(request: &ProviderRequest) -> Vec<String> {
+fn tool_names(request: &crate::ProviderRequest) -> Vec<String> {
     request
         .tools
         .iter()
@@ -14391,35 +15257,41 @@ fn tool_names(request: &ProviderRequest) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
-fn latest_user_text(request: &ProviderRequest) -> Option<String> {
+fn latest_user_text(request: &crate::ProviderRequest) -> Option<String> {
     request.messages.iter().rev().find_map(|message| {
-        let CanonicalMessage::User { content, .. } = message else {
+        let crate::CanonicalMessage::User { content, .. } = message else {
             return None;
         };
-        Some(text_from_canonical_content(content))
+        Some(crate::adapters::app_server::text_from_canonical_content(
+            content,
+        ))
     })
 }
 
 fn thread_operation_names() -> Vec<&'static str> {
     vec![
-        THREAD_SPAWN_OPERATION,
-        THREAD_SUBMIT_OPERATION,
-        THREAD_WAIT_OPERATION,
-        THREAD_STATUS_OPERATION,
-        THREAD_CANCEL_OPERATION,
+        crate::THREAD_SPAWN_OPERATION,
+        crate::THREAD_SUBMIT_OPERATION,
+        crate::THREAD_WAIT_OPERATION,
+        crate::THREAD_STATUS_OPERATION,
+        crate::THREAD_CANCEL_OPERATION,
     ]
 }
 
 fn thread_operation_capability(operation: &str) -> &'static str {
     match operation {
-        THREAD_SPAWN_OPERATION => THREADS_SPAWN_CAPABILITY,
-        THREAD_SUBMIT_OPERATION | THREAD_CANCEL_OPERATION => THREADS_CONTROL_CAPABILITY,
-        THREAD_WAIT_OPERATION | THREAD_STATUS_OPERATION => THREADS_READ_CAPABILITY,
+        crate::THREAD_SPAWN_OPERATION => crate::THREADS_SPAWN_CAPABILITY,
+        crate::THREAD_SUBMIT_OPERATION | crate::THREAD_CANCEL_OPERATION => {
+            crate::THREADS_CONTROL_CAPABILITY
+        }
+        crate::THREAD_WAIT_OPERATION | crate::THREAD_STATUS_OPERATION => {
+            crate::THREADS_READ_CAPABILITY
+        }
         other => panic!("unknown thread operation {other}"),
     }
 }
 
-fn json_array_string_set(value: &Value) -> BTreeSet<String> {
+fn json_array_string_set(value: &serde_json::Value) -> std::collections::BTreeSet<String> {
     value
         .as_array()
         .unwrap_or_else(|| panic!("expected JSON array, got {value}"))
@@ -14432,7 +15304,7 @@ fn json_array_string_set(value: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-fn assert_bash_tool_describes(request: &ProviderRequest, command: &str) {
+fn assert_bash_tool_describes(request: &crate::ProviderRequest, command: &str) {
     let description = bash_tool_description(request);
     assert!(
         description.contains(command),
@@ -14440,7 +15312,7 @@ fn assert_bash_tool_describes(request: &ProviderRequest, command: &str) {
     );
 }
 
-fn assert_bash_tool_omits(request: &ProviderRequest, command: &str) {
+fn assert_bash_tool_omits(request: &crate::ProviderRequest, command: &str) {
     let description = bash_tool_description(request);
     assert!(
         !description.contains(command),
@@ -14448,7 +15320,7 @@ fn assert_bash_tool_omits(request: &ProviderRequest, command: &str) {
     );
 }
 
-fn assert_bash_tool_absent_or_omits(request: &ProviderRequest, command: &str) {
+fn assert_bash_tool_absent_or_omits(request: &crate::ProviderRequest, command: &str) {
     let Some(description) = request
         .tools
         .iter()
@@ -14463,7 +15335,7 @@ fn assert_bash_tool_absent_or_omits(request: &ProviderRequest, command: &str) {
     );
 }
 
-fn bash_tool_description(request: &ProviderRequest) -> String {
+fn bash_tool_description(request: &crate::ProviderRequest) -> String {
     request
         .tools
         .iter()
@@ -14472,13 +15344,15 @@ fn bash_tool_description(request: &ProviderRequest) -> String {
         .expect("bash tool should be advertised")
 }
 
-fn text_from_canonical_messages(messages: &[CanonicalMessage]) -> String {
+fn text_from_canonical_messages(messages: &[crate::CanonicalMessage]) -> String {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => text_from_canonical_content(content),
+            crate::CanonicalMessage::User { content, .. }
+            | crate::CanonicalMessage::Assistant { content, .. }
+            | crate::CanonicalMessage::ToolResult { content, .. } => {
+                crate::adapters::app_server::text_from_canonical_content(content)
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")

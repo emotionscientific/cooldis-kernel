@@ -1,34 +1,31 @@
-use super::*;
-use crate::{ProviderApi, ThreadContext, ThreadCoordinates, TurnBudget};
-
 #[test]
 fn context_compilation_is_deterministic_and_reports_drops() {
     let input = compile_input(
         vec![
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("old"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("old"),
             },
-            SessionEntryKind::CustomContextMessage {
-                message: CanonicalMessage::user_text("hook"),
+            crate::SessionEntryKind::CustomContextMessage {
+                message: crate::CanonicalMessage::user_text("hook"),
             },
-            SessionEntryKind::Message {
-                message: CanonicalMessage::assistant(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::assistant(
                     "openai",
-                    ProviderApi::OpenAIResponses,
+                    crate::ProviderApi::OpenAIResponses,
                     "gpt-test",
-                    vec![CanonicalContent::text("abcdef")],
+                    vec![crate::CanonicalContent::text("abcdef")],
                     crate::CanonicalStopReason::EndTurn,
                 ),
             },
         ],
-        AgentContextCompilePolicy {
+        crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: Some(2),
             max_text_bytes: Some(5),
         },
     );
 
-    let first = AgentContextCompiler::compile(input.clone());
-    let second = AgentContextCompiler::compile(input);
+    let first = crate::kernel::context_compiler::AgentContextCompiler::compile(input.clone());
+    let second = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     assert_eq!(first, second);
     assert_eq!(first.diagnostics.dropped_entries.len(), 1);
@@ -41,17 +38,17 @@ fn context_compilation_is_deterministic_and_reports_drops() {
 fn synthetic_context_rebuild_preserves_persisted_timestamps() {
     let mut input = compile_input(
         vec![
-            SessionEntryKind::Message {
+            crate::SessionEntryKind::Message {
                 message: user_message_at("old", 100),
             },
-            SessionEntryKind::Compaction {
+            crate::SessionEntryKind::Compaction {
                 summary: "old facts".to_string(),
             },
-            SessionEntryKind::CustomContextMessage {
+            crate::SessionEntryKind::CustomContextMessage {
                 message: user_message_at("persisted hook", 300),
             },
         ],
-        AgentContextCompilePolicy::unbounded(),
+        crate::kernel::context_compiler::AgentContextCompilePolicy::unbounded(),
     );
     input.session_entries[0].created_at_ms = 100;
     input.session_entries[1].created_at_ms = 200;
@@ -60,16 +57,18 @@ fn synthetic_context_rebuild_preserves_persisted_timestamps() {
     input.environment_contexts = vec!["environment".to_string()];
     input.hook_contexts = vec!["active hook".to_string()];
     input.turn_context.model_visible_context = vec!["turn context".to_string()];
-    input.attachments.push(AgentContextAttachment {
-        path: PathBuf::from("notes.md"),
-        mime_type: None,
-        size_bytes: None,
-        sha256: None,
-        metadata: BTreeMap::new(),
-    });
+    input
+        .attachments
+        .push(crate::kernel::context_compiler::AgentContextAttachment {
+            path: std::path::PathBuf::from("notes.md"),
+            mime_type: None,
+            size_bytes: None,
+            sha256: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
-    let first = AgentContextCompiler::compile(input.clone());
-    let reopened = AgentContextCompiler::compile(input);
+    let first = crate::kernel::context_compiler::AgentContextCompiler::compile(input.clone());
+    let reopened = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     assert_eq!(first, reopened);
     assert_eq!(
@@ -92,20 +91,20 @@ fn synthetic_context_rebuild_preserves_persisted_timestamps() {
 fn compaction_entry_replaces_prior_model_visible_context() {
     let input = compile_input(
         vec![
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("old"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("old"),
             },
-            SessionEntryKind::Compaction {
+            crate::SessionEntryKind::Compaction {
                 summary: "old facts".to_string(),
             },
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("new"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("new"),
             },
         ],
-        AgentContextCompilePolicy::unbounded(),
+        crate::kernel::context_compiler::AgentContextCompilePolicy::unbounded(),
     );
 
-    let compiled = AgentContextCompiler::compile(input);
+    let compiled = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     assert_eq!(
         message_texts(&compiled.messages),
@@ -120,17 +119,22 @@ fn compaction_entry_replaces_prior_model_visible_context() {
 
 #[test]
 fn environment_and_attachment_inputs_are_explicit_context() {
-    let mut input = compile_input(Vec::new(), AgentContextCompilePolicy::unbounded());
-    input.turn_context.cwd = Some(PathBuf::from("/tmp/work"));
-    input.attachments.push(AgentContextAttachment {
-        path: PathBuf::from("notes.md"),
-        mime_type: Some("text/markdown".to_string()),
-        size_bytes: Some(42),
-        sha256: None,
-        metadata: BTreeMap::new(),
-    });
+    let mut input = compile_input(
+        Vec::new(),
+        crate::kernel::context_compiler::AgentContextCompilePolicy::unbounded(),
+    );
+    input.turn_context.cwd = Some(std::path::PathBuf::from("/tmp/work"));
+    input
+        .attachments
+        .push(crate::kernel::context_compiler::AgentContextAttachment {
+            path: std::path::PathBuf::from("notes.md"),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(42),
+            sha256: None,
+            metadata: std::collections::BTreeMap::new(),
+        });
 
-    let compiled = AgentContextCompiler::compile(input);
+    let compiled = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     assert_eq!(compiled.diagnostics.attachment_count, 1);
     assert_eq!(
@@ -145,13 +149,16 @@ fn environment_and_attachment_inputs_are_explicit_context() {
 
 #[test]
 fn static_sources_prepend_system_blocks_in_pipeline_order() {
-    let mut input = compile_input(Vec::new(), AgentContextCompilePolicy::unbounded());
+    let mut input = compile_input(
+        Vec::new(),
+        crate::kernel::context_compiler::AgentContextCompilePolicy::unbounded(),
+    );
     input.static_system_sources = vec![
         static_source("identity", "Prompt identity."),
         static_source("persona", "Second static source."),
     ];
 
-    let compiled = AgentContextCompiler::compile(input);
+    let compiled = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     let system = compiled
         .system
@@ -168,10 +175,10 @@ fn static_sources_prepend_system_blocks_in_pipeline_order() {
 #[test]
 fn budget_shared_static_sources_consume_text_budget() {
     let mut input = compile_input(
-        vec![SessionEntryKind::Message {
-            message: CanonicalMessage::user_text("abcdef"),
+        vec![crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::user_text("abcdef"),
         }],
-        AgentContextCompilePolicy {
+        crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: None,
             max_text_bytes: Some(10),
         },
@@ -181,7 +188,7 @@ fn budget_shared_static_sources_consume_text_budget() {
         budgeted_static_source("playbook", "123456"),
     ];
 
-    let compiled = AgentContextCompiler::compile(input);
+    let compiled = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     assert_eq!(
         compiled
@@ -199,10 +206,10 @@ fn budget_shared_static_sources_consume_text_budget() {
 #[test]
 fn fractional_static_sources_are_capped_before_history_budget() {
     let mut input = compile_input(
-        vec![SessionEntryKind::Message {
-            message: CanonicalMessage::user_text("abcdef"),
+        vec![crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::user_text("abcdef"),
         }],
-        AgentContextCompilePolicy {
+        crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: None,
             max_text_bytes: Some(10),
         },
@@ -210,7 +217,7 @@ fn fractional_static_sources_are_capped_before_history_budget() {
     input.static_system_sources =
         vec![budgeted_static_source_with_share("playbook", "123456", 0.3)];
 
-    let compiled = AgentContextCompiler::compile(input);
+    let compiled = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     assert_eq!(
         compiled
@@ -228,17 +235,17 @@ fn fractional_static_sources_are_capped_before_history_budget() {
 #[test]
 fn tiny_static_source_budget_truncates_on_utf8_boundary_without_false_retention() {
     let mut input = compile_input(
-        vec![SessionEntryKind::Message {
-            message: CanonicalMessage::user_text("abcdef"),
+        vec![crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::user_text("abcdef"),
         }],
-        AgentContextCompilePolicy {
+        crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: None,
             max_text_bytes: Some(1),
         },
     );
     input.static_system_sources = vec![budgeted_static_source("identity", "éabc")];
 
-    let compiled = AgentContextCompiler::compile(input);
+    let compiled = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     assert_eq!(
         compiled
@@ -256,17 +263,17 @@ fn tiny_static_source_budget_truncates_on_utf8_boundary_without_false_retention(
 #[test]
 fn static_source_prefix_that_trims_empty_does_not_consume_message_budget() {
     let mut input = compile_input(
-        vec![SessionEntryKind::Message {
-            message: CanonicalMessage::user_text("abcdef"),
+        vec![crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::user_text("abcdef"),
         }],
-        AgentContextCompilePolicy {
+        crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: None,
             max_text_bytes: Some(2),
         },
     );
     input.static_system_sources = vec![budgeted_static_source("identity", "  abc")];
 
-    let compiled = AgentContextCompiler::compile(input);
+    let compiled = crate::kernel::context_compiler::AgentContextCompiler::compile(input);
 
     assert_eq!(
         compiled
@@ -282,21 +289,21 @@ fn static_source_prefix_that_trims_empty_does_not_consume_message_budget() {
 }
 
 fn compile_input(
-    kinds: Vec<SessionEntryKind>,
-    policy: AgentContextCompilePolicy,
-) -> AgentContextCompileInput {
-    let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+    kinds: Vec<crate::SessionEntryKind>,
+    policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
+) -> crate::kernel::context_compiler::AgentContextCompileInput {
+    let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
     let entries = kinds
         .into_iter()
-        .map(|kind| SessionEntry::new(coordinates.clone(), None, kind))
+        .map(|kind| crate::SessionEntry::new(coordinates.clone(), None, kind))
         .collect::<Vec<_>>();
-    let thread = ThreadContext::root(coordinates);
-    AgentContextCompileInput {
-        system: vec![SystemBlock::text("system")],
+    let thread = crate::ThreadContext::root(coordinates);
+    crate::kernel::context_compiler::AgentContextCompileInput {
+        system: vec![crate::SystemBlock::text("system")],
         static_system_sources: Vec::new(),
         session_entries: entries,
         turn_anchor_timestamp_ms: 123,
-        turn_context: TurnContextSnapshot {
+        turn_context: crate::TurnContextSnapshot {
             turn_id: "turn".to_string(),
             trace_id: "trace".to_string(),
             coordinates: thread.coordinates,
@@ -308,17 +315,17 @@ fn compile_input(
             provider: Some("openai".to_string()),
             thinking: None,
             permission_profile: None,
-            provider_metadata: BTreeMap::new(),
-            metadata: BTreeMap::new(),
-            environment: BTreeMap::new(),
+            provider_metadata: std::collections::BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
+            environment: std::collections::BTreeMap::new(),
             model_visible_context: Vec::new(),
-            budget: TurnBudget::default(),
+            budget: crate::TurnBudget::default(),
             cancellation_requested: false,
         },
         hook_contexts: Vec::new(),
         environment_contexts: Vec::new(),
         attachments: Vec::new(),
-        tools: vec![ToolDefinition::new(
+        tools: vec![crate::ToolDefinition::new(
             "tool",
             "tool",
             serde_json::json!({"type":"object"}),
@@ -327,26 +334,26 @@ fn compile_input(
     }
 }
 
-fn user_message_at(text: &str, timestamp_ms: i64) -> CanonicalMessage {
-    CanonicalMessage::User {
-        content: vec![CanonicalContent::text(text)],
+fn user_message_at(text: &str, timestamp_ms: i64) -> crate::CanonicalMessage {
+    crate::CanonicalMessage::User {
+        content: vec![crate::CanonicalContent::text(text)],
         timestamp_ms,
     }
 }
 
-fn message_timestamps(messages: &[CanonicalMessage]) -> Vec<i64> {
+fn message_timestamps(messages: &[crate::CanonicalMessage]) -> Vec<i64> {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { timestamp_ms, .. }
-            | CanonicalMessage::Assistant { timestamp_ms, .. }
-            | CanonicalMessage::ToolResult { timestamp_ms, .. } => *timestamp_ms,
+            crate::CanonicalMessage::User { timestamp_ms, .. }
+            | crate::CanonicalMessage::Assistant { timestamp_ms, .. }
+            | crate::CanonicalMessage::ToolResult { timestamp_ms, .. } => *timestamp_ms,
         })
         .collect()
 }
 
-fn static_source(id: &str, content: &str) -> AgentManifestStaticContextSegment {
-    AgentManifestStaticContextSegment {
+fn static_source(id: &str, content: &str) -> crate::AgentManifestStaticContextSegment {
+    crate::AgentManifestStaticContextSegment {
         id: id.to_string(),
         assembler: "kernel://assembler/static".to_string(),
         input: id.to_string(),
@@ -358,7 +365,7 @@ fn static_source(id: &str, content: &str) -> AgentManifestStaticContextSegment {
     }
 }
 
-fn budgeted_static_source(id: &str, content: &str) -> AgentManifestStaticContextSegment {
+fn budgeted_static_source(id: &str, content: &str) -> crate::AgentManifestStaticContextSegment {
     budgeted_static_source_with_share(id, content, 1.0)
 }
 
@@ -366,24 +373,24 @@ fn budgeted_static_source_with_share(
     id: &str,
     content: &str,
     budget_share: f64,
-) -> AgentManifestStaticContextSegment {
-    AgentManifestStaticContextSegment {
+) -> crate::AgentManifestStaticContextSegment {
+    crate::AgentManifestStaticContextSegment {
         pinned: false,
         budget_share: Some(budget_share),
         ..static_source(id, content)
     }
 }
 
-fn message_texts(messages: &[CanonicalMessage]) -> Vec<String> {
+fn message_texts(messages: &[crate::CanonicalMessage]) -> Vec<String> {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => content
+            crate::CanonicalMessage::User { content, .. }
+            | crate::CanonicalMessage::Assistant { content, .. }
+            | crate::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .filter_map(|content| match content {
-                    CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                    crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

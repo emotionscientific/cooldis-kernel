@@ -7,9 +7,6 @@
 //! `crates/verlet-kernel/tests/fixtures/wasm-vfs-tools` in the workspace for
 //! the `cat` / `tail` fixture.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-
 mod contract;
 pub mod testkit;
 
@@ -26,73 +23,77 @@ pub mod prelude {
 
 #[doc(hidden)]
 pub mod __private {
-    use serde::Serialize;
-    use serde::de::DeserializeOwned;
 
-    use crate::{
-        COUPLING_INVOCATION_ABI, CouplingContext, Discharge, GuestError, OperationManifest, Sink,
-        Source, StatusCode, read_source_to_end, write_sink,
-    };
-
-    pub fn read_json_input<T: DeserializeOwned>(source: Source) -> Result<T, GuestError> {
-        let bytes = read_source_to_end(source).map_err(GuestError::Host)?;
+    pub fn read_json_input<T: serde::de::DeserializeOwned>(
+        source: crate::Source,
+    ) -> Result<T, crate::GuestError> {
+        let bytes = crate::read_source_to_end(source).map_err(crate::GuestError::Host)?;
         serde_json::from_slice(&bytes)
-            .map_err(|err| GuestError::BadInput(format!("operation input: {err}")))
+            .map_err(|err| crate::GuestError::BadInput(format!("operation input: {err}")))
     }
 
-    pub fn write_json_output<T: Serialize>(sink: Sink, value: &T) -> Result<(), GuestError> {
+    pub fn write_json_output<T: serde::Serialize>(
+        sink: crate::Sink,
+        value: &T,
+    ) -> Result<(), crate::GuestError> {
         let bytes = serde_json::to_vec(value)
-            .map_err(|err| GuestError::Internal(format!("operation output: {err}")))?;
-        write_sink(sink, &bytes).map_err(GuestError::Host)?;
+            .map_err(|err| crate::GuestError::Internal(format!("operation output: {err}")))?;
+        crate::write_sink(sink, &bytes).map_err(crate::GuestError::Host)?;
         Ok(())
     }
 
-    pub fn write_manifest(sink: Sink, manifest: &OperationManifest) -> Result<(), GuestError> {
+    pub fn write_manifest(
+        sink: crate::Sink,
+        manifest: &crate::OperationManifest,
+    ) -> Result<(), crate::GuestError> {
         let bytes = manifest
             .to_json_vec()
-            .map_err(|err| GuestError::Internal(format!("operation manifest: {err}")))?;
-        write_sink(sink, &bytes).map_err(GuestError::Host)?;
+            .map_err(|err| crate::GuestError::Internal(format!("operation manifest: {err}")))?;
+        crate::write_sink(sink, &bytes).map_err(crate::GuestError::Host)?;
         Ok(())
     }
 
-    pub fn read_coupling_context(source: Source) -> Result<CouplingContext, GuestError> {
-        let bytes = read_source_to_end(source).map_err(GuestError::Host)?;
+    pub fn read_coupling_context(
+        source: crate::Source,
+    ) -> Result<crate::CouplingContext, crate::GuestError> {
+        let bytes = crate::read_source_to_end(source).map_err(crate::GuestError::Host)?;
         let invocation = crate::CouplingInvocation::from_json_slice(&bytes)
-            .map_err(|err| GuestError::BadInput(format!("coupling invocation: {err}")))?;
-        if invocation.abi != COUPLING_INVOCATION_ABI {
-            return Err(GuestError::BadInput(format!(
+            .map_err(|err| crate::GuestError::BadInput(format!("coupling invocation: {err}")))?;
+        if invocation.abi != crate::COUPLING_INVOCATION_ABI {
+            return Err(crate::GuestError::BadInput(format!(
                 "coupling invocation abi {:?} is not {COUPLING_INVOCATION_ABI:?}",
-                invocation.abi
+                invocation.abi,
+                COUPLING_INVOCATION_ABI = crate::COUPLING_INVOCATION_ABI
             )));
         }
-        Ok(CouplingContext::from_invocation(invocation))
+        Ok(crate::CouplingContext::from_invocation(invocation))
     }
 
     pub fn write_coupling_discharge_output(
-        sink: Sink,
-        discharge: Discharge,
-    ) -> Result<(), GuestError> {
+        sink: crate::Sink,
+        discharge: crate::Discharge,
+    ) -> Result<(), crate::GuestError> {
         let bytes = discharge
             .into_coupling_discharge()
             .to_json_vec()
-            .map_err(|err| GuestError::Internal(format!("coupling discharge: {err}")))?;
-        write_sink(sink, &bytes).map_err(GuestError::Host)?;
+            .map_err(|err| crate::GuestError::Internal(format!("coupling discharge: {err}")))?;
+        crate::write_sink(sink, &bytes).map_err(crate::GuestError::Host)?;
         Ok(())
     }
 
-    pub fn status_from_guest_result(result: Result<(), GuestError>) -> i32 {
+    pub fn status_from_guest_result(result: Result<(), crate::GuestError>) -> i32 {
         match result {
             Ok(()) => crate::STATUS_OK,
             Err(err) => status_from_guest_error(err),
         }
     }
 
-    fn status_from_guest_error(err: GuestError) -> i32 {
+    fn status_from_guest_error(err: crate::GuestError) -> i32 {
         match err {
-            GuestError::BadInput(_) => crate::STATUS_INVALID_ARGUMENT,
-            GuestError::Unsupported(_) => crate::STATUS_NOT_FOUND,
-            GuestError::Host(status) => status.as_raw(),
-            GuestError::Internal(_) => StatusCode::TransportError.as_raw(),
+            crate::GuestError::BadInput(_) => crate::STATUS_INVALID_ARGUMENT,
+            crate::GuestError::Unsupported(_) => crate::STATUS_NOT_FOUND,
+            crate::GuestError::Host(status) => status.as_raw(),
+            crate::GuestError::Internal(_) => crate::StatusCode::TransportError.as_raw(),
         }
     }
 }
@@ -190,7 +191,7 @@ impl StatusCode {
 }
 
 /// Manifest exported by a Wasm operation guest.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct OperationManifest {
     /// Manifest ABI version.
     pub abi: String,
@@ -214,7 +215,7 @@ impl OperationManifest {
 }
 
 /// One operation entry in a Wasm guest manifest.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct OperationDefinition {
     /// Stable numeric id used by `__verlet_call_operation__`.
     pub id: u32,
@@ -238,7 +239,7 @@ pub struct OperationDefinition {
 }
 
 /// Input envelope for a custom coupling Wasm guest.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingInvocation {
     /// Invocation ABI version.
     pub abi: String,
@@ -249,7 +250,7 @@ pub struct CouplingInvocation {
     pub selected_events: Vec<CouplingInvocationEvent>,
     #[serde(default)]
     /// Manifest-supplied coupling configuration.
-    pub config: JsonValue,
+    pub config: serde_json::Value,
     /// Invocation metadata supplied by the kernel.
     pub invocation_meta: CouplingInvocationMeta,
 }
@@ -262,7 +263,7 @@ impl CouplingInvocation {
 }
 
 /// Event shape included in a coupling invocation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingInvocationEvent {
     /// Stable event id.
     pub id: String,
@@ -276,11 +277,11 @@ pub struct CouplingInvocationEvent {
     pub origin: String,
     #[serde(default)]
     /// Event payload.
-    pub payload: JsonValue,
+    pub payload: serde_json::Value,
 }
 
 /// Kernel metadata attached to a coupling invocation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingInvocationMeta {
     /// Coupling id from the manifest binding.
     pub coupling_id: String,
@@ -291,7 +292,7 @@ pub struct CouplingInvocationMeta {
 }
 
 /// Output envelope for a custom coupling Wasm guest.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingDischarge {
     /// Discharge ABI version.
     pub abi: String,
@@ -316,7 +317,7 @@ impl CouplingDischarge {
 }
 
 /// One event proposed by a coupling discharge.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingDischargeEvent {
     /// Target event stream.
     pub stream: String,
@@ -324,10 +325,10 @@ pub struct CouplingDischargeEvent {
     pub kind: String,
     #[serde(default)]
     /// Event payload.
-    pub payload: JsonValue,
+    pub payload: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Optional guest-supplied provenance; the kernel stamps authoritative provenance.
-    pub provenance: Option<JsonValue>,
+    pub provenance: Option<serde_json::Value>,
 }
 
 impl OperationDefinition {
@@ -376,7 +377,7 @@ impl OperationDefinition {
 }
 
 /// Value encoding declared by an operation manifest entry.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationValueKind {
     /// Opaque bytes.
@@ -389,7 +390,7 @@ pub enum OperationValueKind {
 }
 
 /// Event encoding declared by an operation manifest entry.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationEventKind {
     /// The operation does not emit events.
@@ -400,7 +401,7 @@ pub enum OperationEventKind {
 }
 
 /// Execution mode declared by an operation manifest entry.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationMode {
     /// The operation completes during one host call.
@@ -413,7 +414,7 @@ pub enum OperationMode {
 }
 
 /// HTTP request envelope passed to the Verlet host import.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct HttpRequest {
     /// HTTP ABI version.
     pub abi: String,
@@ -492,7 +493,7 @@ impl HttpRequest {
 }
 
 /// HTTP response metadata returned by the Verlet host import.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct HttpResponse {
     /// HTTP ABI version.
     pub abi: String,
@@ -804,12 +805,11 @@ mod imports {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn manifest_serializes_to_verlet_operation_abi() {
-        let manifest = OperationManifest::new(vec![
-            OperationDefinition::new(1, "search")
+        let manifest = crate::OperationManifest::new(vec![
+            crate::OperationDefinition::new(1, "search")
                 .json_input()
                 .json_output()
                 .jsonl_events()
@@ -819,7 +819,7 @@ mod tests {
 
         let value: serde_json::Value =
             serde_json::from_slice(&manifest.to_json_vec().unwrap()).unwrap();
-        assert_eq!(value["abi"], OPERATION_ABI);
+        assert_eq!(value["abi"], crate::OPERATION_ABI);
         assert_eq!(value["operations"][0]["name"], "search");
         assert_eq!(value["operations"][0]["input"], "json");
         assert_eq!(value["operations"][0]["output"], "json");
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn http_request_serializes_to_verlet_http_abi() {
-        let request = HttpRequest::new("POST", "https://api.example.invalid/search")
+        let request = crate::HttpRequest::new("POST", "https://api.example.invalid/search")
             .header("content-type", "application/json")
             .secret_header("x-api-key", "EXAMPLE_API_KEY")
             .timeout_ms(5000)
@@ -840,7 +840,7 @@ mod tests {
 
         let value: serde_json::Value =
             serde_json::from_slice(&request.to_json_vec().unwrap()).unwrap();
-        assert_eq!(value["abi"], HTTP_ABI);
+        assert_eq!(value["abi"], crate::HTTP_ABI);
         assert_eq!(value["method"], "POST");
         assert_eq!(value["headers"][0][0], "content-type");
         assert_eq!(value["secret_headers"][0][1], "EXAMPLE_API_KEY");
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn coupling_discharge_serializes_to_verlet_coupling_abi() {
-        let discharge = CouplingDischarge::new(vec![CouplingDischargeEvent {
+        let discharge = crate::CouplingDischarge::new(vec![crate::CouplingDischargeEvent {
             stream: "derived:counter".to_string(),
             kind: "placement.decision".to_string(),
             payload: serde_json::json!({"count": 3}),
@@ -857,7 +857,7 @@ mod tests {
 
         let value: serde_json::Value =
             serde_json::from_slice(&discharge.to_json_vec().unwrap()).unwrap();
-        assert_eq!(value["abi"], COUPLING_DISCHARGE_ABI);
+        assert_eq!(value["abi"], crate::COUPLING_DISCHARGE_ABI);
         assert_eq!(value["events"][0]["stream"], "derived:counter");
         assert_eq!(value["events"][0]["provenance"]["guest"], "ignored");
     }
@@ -865,28 +865,28 @@ mod tests {
     #[test]
     fn native_host_import_wrappers_fail_closed() {
         assert_eq!(
-            read_source(Source(1), &mut [0u8; 4]).unwrap_err(),
-            StatusCode::TransportError
+            crate::read_source(crate::Source(1), &mut [0u8; 4]).unwrap_err(),
+            crate::StatusCode::TransportError
         );
         assert_eq!(
-            write_sink(Sink(1), b"hello").unwrap_err(),
-            StatusCode::TransportError
+            crate::write_sink(crate::Sink(1), b"hello").unwrap_err(),
+            crate::StatusCode::TransportError
         );
         assert_eq!(
-            check_cancelled(Invocation(1)).unwrap_err(),
-            StatusCode::TransportError
+            crate::check_cancelled(crate::Invocation(1)).unwrap_err(),
+            crate::StatusCode::TransportError
         );
         assert_eq!(
-            open_file_read("/workspace/input.txt").unwrap_err(),
-            StatusCode::TransportError
+            crate::open_file_read("/workspace/input.txt").unwrap_err(),
+            crate::StatusCode::TransportError
         );
         assert_eq!(
-            read_file(FileHandle(1), &mut [0u8; 4]).unwrap_err(),
-            StatusCode::TransportError
+            crate::read_file(crate::FileHandle(1), &mut [0u8; 4]).unwrap_err(),
+            crate::StatusCode::TransportError
         );
         assert_eq!(
-            close_file(FileHandle(1)).unwrap_err(),
-            StatusCode::TransportError
+            crate::close_file(crate::FileHandle(1)).unwrap_err(),
+            crate::StatusCode::TransportError
         );
     }
 }

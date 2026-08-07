@@ -1,36 +1,24 @@
-use chrono::{TimeZone, Utc};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Barrier as ThreadBarrier, Mutex};
-use tokio::sync::Barrier;
-use uuid::Uuid;
-use verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig;
-use verlet::daemon::remote_store::lease::{
-    LeaseFenceDecision, LeaseFencedAppendOutcome, SqliteStreamLeaseAuthority, StreamLeaseAuthority,
-    StreamLeaseLineage, StreamPrefixScope, SyncCredentialAuthority,
-};
-use verlet::{
-    DaemonClock, EventKind, EventSequence, EventStore, EventStreamId, NewEventRecord,
-    SqliteSessionStore, VerletError,
-};
-use verlet_runtime_contracts::{DispatchId, ThreadCoordinates};
-use verlet_sqlite::{Db, DbConfig, TransactionBehavior, params};
+use chrono::TimeZone as _;
+use verlet::DaemonClock as _;
+use verlet::EventStore as _;
+use verlet::daemon::remote_store::lease::StreamLeaseAuthority as _;
+use verlet::daemon::remote_store::lease::SyncCredentialAuthority as _;
 
 struct ClockReadGate {
-    entered: ThreadBarrier,
-    release: ThreadBarrier,
+    entered: std::sync::Barrier,
+    release: std::sync::Barrier,
 }
 
 impl ClockReadGate {
     fn new() -> Self {
         Self {
-            entered: ThreadBarrier::new(2),
-            release: ThreadBarrier::new(2),
+            entered: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
         }
     }
 
-    async fn wait_until_entered(self: &Arc<Self>) {
-        let gate = Arc::clone(self);
+    async fn wait_until_entered(self: &std::sync::Arc<Self>) {
+        let gate = std::sync::Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             gate.entered.wait();
         })
@@ -38,8 +26,8 @@ impl ClockReadGate {
         .unwrap();
     }
 
-    async fn release(self: &Arc<Self>) {
-        let gate = Arc::clone(self);
+    async fn release(self: &std::sync::Arc<Self>) {
+        let gate = std::sync::Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             gate.release.wait();
         })
@@ -49,63 +37,65 @@ impl ClockReadGate {
 }
 
 struct TestClock {
-    now_ms: AtomicI64,
-    next_read_gate: Mutex<Option<Arc<ClockReadGate>>>,
+    now_ms: std::sync::atomic::AtomicI64,
+    next_read_gate: std::sync::Mutex<Option<std::sync::Arc<ClockReadGate>>>,
 }
 
 impl TestClock {
     fn new(now_ms: i64) -> Self {
         Self {
-            now_ms: AtomicI64::new(now_ms),
-            next_read_gate: Mutex::new(None),
+            now_ms: std::sync::atomic::AtomicI64::new(now_ms),
+            next_read_gate: std::sync::Mutex::new(None),
         }
     }
 
     fn set(&self, now_ms: i64) {
-        self.now_ms.store(now_ms, Ordering::SeqCst);
+        self.now_ms
+            .store(now_ms, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn gate_next_read(&self) -> Arc<ClockReadGate> {
-        let gate = Arc::new(ClockReadGate::new());
+    fn gate_next_read(&self) -> std::sync::Arc<ClockReadGate> {
+        let gate = std::sync::Arc::new(ClockReadGate::new());
         let mut next = self.next_read_gate.lock().unwrap();
-        assert!(next.replace(Arc::clone(&gate)).is_none());
+        assert!(next.replace(std::sync::Arc::clone(&gate)).is_none());
         gate
     }
 }
 
-impl DaemonClock for TestClock {
-    fn now(&self) -> chrono::DateTime<Utc> {
+impl verlet::DaemonClock for TestClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
         let gate = self.next_read_gate.lock().unwrap().take();
         if let Some(gate) = gate {
             gate.entered.wait();
             gate.release.wait();
         }
-        Utc.timestamp_millis_opt(self.now_ms.load(Ordering::SeqCst))
+        chrono::Utc
+            .timestamp_millis_opt(self.now_ms.load(std::sync::atomic::Ordering::SeqCst))
             .single()
             .expect("test timestamp should be representable")
     }
 }
 
 struct Fixture {
-    path: PathBuf,
-    store: SqliteSessionStore,
-    authority: SqliteStreamLeaseAuthority,
-    clock: Arc<TestClock>,
+    path: std::path::PathBuf,
+    store: verlet::SqliteSessionStore,
+    authority: verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority,
+    clock: std::sync::Arc<TestClock>,
 }
 
 impl Fixture {
     async fn new(test_name: &str, now_ms: i64, lease_ttl_secs: u32) -> Self {
         let path = temp_db_path(test_name);
-        let store = SqliteSessionStore::open(&path).await.unwrap();
-        let clock = Arc::new(TestClock::new(now_ms));
-        let config = VerletDaemonSyncConfig {
+        let store = verlet::SqliteSessionStore::open(&path).await.unwrap();
+        let clock = std::sync::Arc::new(TestClock::new(now_ms));
+        let config = verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
             lease_ttl_secs,
-            ..VerletDaemonSyncConfig::default()
+            ..verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default()
         };
-        let authority = SqliteStreamLeaseAuthority::new(
+        let authority = verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
             store.clone(),
             config,
-            Arc::clone(&clock) as Arc<dyn DaemonClock>,
+            std::sync::Arc::clone(&clock) as std::sync::Arc<dyn verlet::DaemonClock>,
         )
         .await
         .unwrap();
@@ -122,13 +112,13 @@ impl Fixture {
 async fn first_grant_overlap_and_racing_releases_fail_closed() {
     let fixture = Fixture::new("grant-race", 1_000, 60).await;
 
-    let occupied = StreamPrefixScope::new("thread:child-7");
+    let occupied = verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:child-7");
     let first = fixture
         .authority
         .grant_lease(
             &occupied,
-            &DispatchId::new("dispatch-first"),
-            StreamLeaseLineage::default(),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-first"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
@@ -138,8 +128,8 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             .authority
             .grant_lease(
                 &occupied,
-                &DispatchId::new("dispatch-empty-lineage-loser"),
-                StreamLeaseLineage::default(),
+                &verlet_runtime_contracts::DispatchId::new("dispatch-empty-lineage-loser"),
+                verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
             )
             .await
             .is_err(),
@@ -150,9 +140,11 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             fixture
                 .authority
                 .grant_lease(
-                    &StreamPrefixScope::new(overlapping),
-                    &DispatchId::new(format!("dispatch-overlap-{overlapping}")),
-                    StreamLeaseLineage::default(),
+                    &verlet::daemon::remote_store::lease::StreamPrefixScope::new(overlapping),
+                    &verlet_runtime_contracts::DispatchId::new(format!(
+                        "dispatch-overlap-{overlapping}"
+                    )),
+                    verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
                 )
                 .await
                 .is_err(),
@@ -162,9 +154,9 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
     let sibling = fixture
         .authority
         .grant_lease(
-            &StreamPrefixScope::new("thread:child-8"),
-            &DispatchId::new("dispatch-sibling"),
-            StreamLeaseLineage::default(),
+            &verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:child-8"),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-sibling"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .expect("sibling scopes do not overlap");
@@ -173,8 +165,8 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             .authority
             .grant_lease(
                 &occupied,
-                &DispatchId::new("dispatch-wrong-scope-predecessor"),
-                StreamLeaseLineage {
+                &verlet_runtime_contracts::DispatchId::new("dispatch-wrong-scope-predecessor"),
+                verlet::daemon::remote_store::lease::StreamLeaseLineage {
                     superseded_lease_id: Some(sibling.lease_id),
                 },
             )
@@ -183,11 +175,11 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
         "a predecessor from a different scope cannot satisfy lineage"
     );
 
-    let barrier = Arc::new(Barrier::new(3));
-    let authority = Arc::new(fixture.authority.clone());
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let authority = std::sync::Arc::new(fixture.authority.clone());
     let race = |dispatch: &'static str| {
-        let barrier = Arc::clone(&barrier);
-        let authority = Arc::clone(&authority);
+        let barrier = std::sync::Arc::clone(&barrier);
+        let authority = std::sync::Arc::clone(&authority);
         let scope = occupied.clone();
         let predecessor = first.lease_id.clone();
         tokio::spawn(async move {
@@ -195,8 +187,8 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             authority
                 .grant_lease(
                     &scope,
-                    &DispatchId::new(dispatch),
-                    StreamLeaseLineage {
+                    &verlet_runtime_contracts::DispatchId::new(dispatch),
+                    verlet::daemon::remote_store::lease::StreamLeaseLineage {
                         superseded_lease_id: Some(predecessor),
                     },
                 )
@@ -217,7 +209,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
     assert!(
         matches!(
             loser_error,
-            VerletError::History(ref message)
+            verlet::VerletError::History(ref message)
                 if message == "lease lineage does not name the immediately preceding grant"
         ),
         "the serialized loser must observe the winning generation, not reach the UNIQUE fallback: {loser_error}"
@@ -226,8 +218,8 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
         authority
             .grant_lease(
                 &occupied,
-                &DispatchId::new("dispatch-superseded-predecessor"),
-                StreamLeaseLineage {
+                &verlet_runtime_contracts::DispatchId::new("dispatch-superseded-predecessor"),
+                verlet::daemon::remote_store::lease::StreamLeaseLineage {
                     superseded_lease_id: Some(first.lease_id.clone()),
                 },
             )
@@ -242,7 +234,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
     let database = fixture.store.sqlite_database();
     let mut connection = database.connect().await.unwrap();
     let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
         .await
         .unwrap();
     transaction
@@ -250,7 +242,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             "UPDATE cooldis_stream_leases
              SET released_at_ms = ?2
              WHERE lease_id = ?1",
-            params![first.lease_id.as_str(), 1_001_i64],
+            verlet_sqlite::params![first.lease_id.as_str(), 1_001_i64],
         )
         .await
         .unwrap();
@@ -262,24 +254,26 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
     drop(fixture.authority);
     drop(fixture.store);
 
-    let reopened_store = SqliteSessionStore::open(&fixture.path).await.unwrap();
-    let reopened = SqliteStreamLeaseAuthority::new(
+    let reopened_store = verlet::SqliteSessionStore::open(&fixture.path)
+        .await
+        .unwrap();
+    let reopened = verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
         reopened_store.clone(),
-        VerletDaemonSyncConfig {
+        verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
             lease_ttl_secs: 60,
-            ..VerletDaemonSyncConfig::default()
+            ..verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default()
         },
-        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
     )
     .await
     .unwrap();
-    let stream_id = EventStreamId::new("thread:child-7");
+    let stream_id = verlet::EventStreamId::new("thread:child-7");
     assert_eq!(
         reopened
             .check_fence(&stream_id, &first.lease_id)
             .await
             .unwrap(),
-        LeaseFenceDecision::Superseded,
+        verlet::daemon::remote_store::lease::LeaseFenceDecision::Superseded,
         "a fresh authority must re-derive supersession without disclosing the winner id"
     );
     assert_eq!(
@@ -287,21 +281,21 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             .check_fence(&stream_id, &winner.lease_id)
             .await
             .unwrap(),
-        LeaseFenceDecision::Current
+        verlet::daemon::remote_store::lease::LeaseFenceDecision::Current
     );
 }
 
 #[tokio::test]
 async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
     let fixture = Fixture::new("expiry-recovery", 1_000, 1).await;
-    let scope = StreamPrefixScope::new("thread:offline-child");
-    let stream_id = EventStreamId::new(scope.as_str());
+    let scope = verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:offline-child");
+    let stream_id = verlet::EventStreamId::new(scope.as_str());
     let grant = fixture
         .authority
         .grant_lease(
             &scope,
-            &DispatchId::new("dispatch-offline"),
-            StreamLeaseLineage::default(),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-offline"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
@@ -313,15 +307,15 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
         .append_if_current(
             &stream_id,
             &grant.lease_id,
-            EventSequence::new(1),
+            verlet::EventSequence::new(1),
             vec![record("rejected-while-expired")],
         )
         .await
         .unwrap();
     assert_eq!(
         expired,
-        LeaseFencedAppendOutcome::LeaseRejected {
-            fence: LeaseFenceDecision::Expired
+        verlet::daemon::remote_store::lease::LeaseFencedAppendOutcome::LeaseRejected {
+            fence: verlet::daemon::remote_store::lease::LeaseFenceDecision::Expired
         }
     );
     assert!(
@@ -345,24 +339,24 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
         .append_if_current(
             &stream_id,
             &grant.lease_id,
-            EventSequence::new(1),
+            verlet::EventSequence::new(1),
             vec![record("accepted-after-renewal")],
         )
         .await
         .unwrap();
     assert!(matches!(
         appended,
-        LeaseFencedAppendOutcome::Appended { ack }
-            if ack.start_sequence == EventSequence::new(1)
-                && ack.end_sequence == EventSequence::new(1)
+        verlet::daemon::remote_store::lease::LeaseFencedAppendOutcome::Appended { ack }
+            if ack.start_sequence == verlet::EventSequence::new(1)
+                && ack.end_sequence == verlet::EventSequence::new(1)
     ));
 
     let successor = fixture
         .authority
         .grant_lease(
             &scope,
-            &DispatchId::new("dispatch-successor"),
-            StreamLeaseLineage {
+            &verlet_runtime_contracts::DispatchId::new("dispatch-successor"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(grant.lease_id.clone()),
             },
         )
@@ -392,8 +386,10 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
             .authority
             .grant_lease(
                 &scope,
-                &DispatchId::new("dispatch-after-release-without-lineage"),
-                StreamLeaseLineage::default(),
+                &verlet_runtime_contracts::DispatchId::new(
+                    "dispatch-after-release-without-lineage"
+                ),
+                verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
             )
             .await
             .is_err(),
@@ -403,8 +399,8 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
         .authority
         .grant_lease(
             &scope,
-            &DispatchId::new("dispatch-after-release"),
-            StreamLeaseLineage {
+            &verlet_runtime_contracts::DispatchId::new("dispatch-after-release"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(successor.lease_id),
             },
         )
@@ -415,29 +411,29 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
 #[tokio::test]
 async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
     let fixture = Fixture::new("takeover-comeback-race", 10_000, 1).await;
-    let scope = StreamPrefixScope::new("thread:takeover-race");
-    let stream_id = EventStreamId::new(scope.as_str());
+    let scope = verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:takeover-race");
+    let stream_id = verlet::EventStreamId::new(scope.as_str());
     let predecessor = fixture
         .authority
         .grant_lease(
             &scope,
-            &DispatchId::new("dispatch-predecessor"),
-            StreamLeaseLineage::default(),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-predecessor"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
     fixture.clock.set(11_000);
 
-    let barrier = Arc::new(Barrier::new(3));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
     let renew_authority = fixture.authority.clone();
-    let renew_barrier = Arc::clone(&barrier);
+    let renew_barrier = std::sync::Arc::clone(&barrier);
     let renew_id = predecessor.lease_id.clone();
     let renew = tokio::spawn(async move {
         renew_barrier.wait().await;
         renew_authority.renew_lease(&renew_id).await
     });
     let grant_authority = fixture.authority.clone();
-    let grant_barrier = Arc::clone(&barrier);
+    let grant_barrier = std::sync::Arc::clone(&barrier);
     let grant_scope = scope.clone();
     let grant_predecessor = predecessor.lease_id.clone();
     let takeover = tokio::spawn(async move {
@@ -445,8 +441,8 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
         grant_authority
             .grant_lease(
                 &grant_scope,
-                &DispatchId::new("dispatch-takeover"),
-                StreamLeaseLineage {
+                &verlet_runtime_contracts::DispatchId::new("dispatch-takeover"),
+                verlet::daemon::remote_store::lease::StreamLeaseLineage {
                     superseded_lease_id: Some(grant_predecessor),
                 },
             )
@@ -465,7 +461,7 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
             .check_fence(&stream_id, &predecessor.lease_id)
             .await
             .unwrap(),
-        LeaseFenceDecision::Superseded
+        verlet::daemon::remote_store::lease::LeaseFenceDecision::Superseded
     );
     assert_eq!(
         fixture
@@ -473,7 +469,7 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
             .check_fence(&stream_id, &successor.lease_id)
             .await
             .unwrap(),
-        LeaseFenceDecision::Current,
+        verlet::daemon::remote_store::lease::LeaseFenceDecision::Current,
         "regardless of which transaction acquired the writer lock first, one lease is current"
     );
     if let Ok(renewed) = renew_result {
@@ -481,14 +477,15 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
         assert!(renewed.expires_at_ms > fixture.clock.now().timestamp_millis());
     }
 
-    let renew_first_scope = StreamPrefixScope::new("thread:renew-first");
-    let renew_first_stream = EventStreamId::new(renew_first_scope.as_str());
+    let renew_first_scope =
+        verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:renew-first");
+    let renew_first_stream = verlet::EventStreamId::new(renew_first_scope.as_str());
     let renew_first = fixture
         .authority
         .grant_lease(
             &renew_first_scope,
-            &DispatchId::new("dispatch-renew-first-predecessor"),
-            StreamLeaseLineage::default(),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-renew-first-predecessor"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
@@ -502,8 +499,8 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
         .authority
         .grant_lease(
             &renew_first_scope,
-            &DispatchId::new("dispatch-after-renew"),
-            StreamLeaseLineage {
+            &verlet_runtime_contracts::DispatchId::new("dispatch-after-renew"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(renew_first.lease_id.clone()),
             },
         )
@@ -515,16 +512,17 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
             .check_fence(&renew_first_stream, &after_renew.lease_id)
             .await
             .unwrap(),
-        LeaseFenceDecision::Current
+        verlet::daemon::remote_store::lease::LeaseFenceDecision::Current
     );
 
-    let grant_first_scope = StreamPrefixScope::new("thread:grant-first");
+    let grant_first_scope =
+        verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:grant-first");
     let grant_first = fixture
         .authority
         .grant_lease(
             &grant_first_scope,
-            &DispatchId::new("dispatch-grant-first-predecessor"),
-            StreamLeaseLineage::default(),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-grant-first-predecessor"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
@@ -533,8 +531,8 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
         .authority
         .grant_lease(
             &grant_first_scope,
-            &DispatchId::new("dispatch-grant-first-successor"),
-            StreamLeaseLineage {
+            &verlet_runtime_contracts::DispatchId::new("dispatch-grant-first-successor"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(grant_first.lease_id.clone()),
             },
         )
@@ -553,14 +551,14 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving() {
     let fixture = Fixture::new("atomic-append", 1_000, 60).await;
-    let scope = StreamPrefixScope::new("thread:atomic-child");
-    let stream_id = EventStreamId::new(scope.as_str());
+    let scope = verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:atomic-child");
+    let stream_id = verlet::EventStreamId::new(scope.as_str());
     let first = fixture
         .authority
         .grant_lease(
             &scope,
-            &DispatchId::new("dispatch-first"),
-            StreamLeaseLineage::default(),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-first"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
@@ -570,15 +568,15 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
             .check_fence(&stream_id, &first.lease_id)
             .await
             .unwrap(),
-        LeaseFenceDecision::Current
+        verlet::daemon::remote_store::lease::LeaseFenceDecision::Current
     );
 
     let replacement = fixture
         .authority
         .grant_lease(
             &scope,
-            &DispatchId::new("dispatch-replacement"),
-            StreamLeaseLineage {
+            &verlet_runtime_contracts::DispatchId::new("dispatch-replacement"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(first.lease_id.clone()),
             },
         )
@@ -593,7 +591,7 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
             .append_if_current(
                 &append_stream_id,
                 &stale_lease_id,
-                EventSequence::new(1),
+                verlet::EventSequence::new(1),
                 vec![record("must-not-land")],
             )
             .await
@@ -604,7 +602,7 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
     let mut probe = database.connect().await.unwrap();
     probe.busy_timeout(std::time::Duration::ZERO).unwrap();
     let competing_writer = probe
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
         .await;
     let writer_was_blocked = match competing_writer {
         Ok(transaction) => {
@@ -622,8 +620,8 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
     let stale_append = stale_append.await.unwrap().unwrap();
     assert_eq!(
         stale_append,
-        LeaseFencedAppendOutcome::LeaseRejected {
-            fence: LeaseFenceDecision::Superseded
+        verlet::daemon::remote_store::lease::LeaseFencedAppendOutcome::LeaseRejected {
+            fence: verlet::daemon::remote_store::lease::LeaseFenceDecision::Superseded
         }
     );
     assert!(
@@ -640,7 +638,7 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
         .append_if_current(
             &stream_id,
             &replacement.lease_id,
-            EventSequence::new(1),
+            verlet::EventSequence::new(1),
             vec![record("winner")],
         )
         .await
@@ -650,15 +648,15 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
         .append_if_current(
             &stream_id,
             &replacement.lease_id,
-            EventSequence::new(1),
+            verlet::EventSequence::new(1),
             vec![record("wrong-tail")],
         )
         .await
         .unwrap();
     assert_eq!(
         conflict,
-        LeaseFencedAppendOutcome::SequenceFenceConflict {
-            actual_next_sequence: EventSequence::new(2)
+        verlet::daemon::remote_store::lease::LeaseFencedAppendOutcome::SequenceFenceConflict {
+            actual_next_sequence: verlet::EventSequence::new(2)
         }
     );
     let events = fixture.store.read_events(&stream_id, None).await.unwrap();
@@ -669,13 +667,14 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
 #[tokio::test]
 async fn credentials_verify_revoke_and_never_persist_or_render_the_bearer() {
     let fixture = Fixture::new("credential-hygiene", 1_000, 60).await;
-    let scope = StreamPrefixScope::new("thread:credential-child");
+    let scope =
+        verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:credential-child");
     let grant = fixture
         .authority
         .grant_lease(
             &scope,
-            &DispatchId::new("dispatch-credential"),
-            StreamLeaseLineage::default(),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-credential"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
@@ -708,8 +707,8 @@ async fn credentials_verify_revoke_and_never_persist_or_render_the_bearer() {
         .authority
         .grant_lease(
             &scope,
-            &DispatchId::new("dispatch-credential-successor"),
-            StreamLeaseLineage {
+            &verlet_runtime_contracts::DispatchId::new("dispatch-credential-successor"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(grant.lease_id.clone()),
             },
         )
@@ -748,7 +747,9 @@ async fn credentials_verify_revoke_and_never_persist_or_render_the_bearer() {
     let path = fixture.path.clone();
     drop(fixture.authority);
     drop(fixture.store);
-    let db = Db::open(&path, DbConfig::default()).await.unwrap();
+    let db = verlet_sqlite::Db::open(&path, verlet_sqlite::DbConfig::default())
+        .await
+        .unwrap();
     let connection = db.connect().await.unwrap();
     let mut rows = connection
         .query(
@@ -789,23 +790,26 @@ async fn credentials_verify_revoke_and_never_persist_or_render_the_bearer() {
     assert_file_family_excludes(&path, release_token.as_bytes());
 }
 
-fn record(entry_id: &str) -> NewEventRecord {
-    NewEventRecord::witnessed(
-        ThreadCoordinates::new("tenant-a", "user-a", "session-a"),
-        EventKind::SessionEntryAppended,
+fn record(entry_id: &str) -> verlet::NewEventRecord {
+    verlet::NewEventRecord::witnessed(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant-a", "user-a", "session-a"),
+        verlet::EventKind::SessionEntryAppended,
         serde_json::json!({"entry_id": entry_id}),
     )
 }
 
-fn temp_db_path(test_name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("verlet-{test_name}-{}.sqlite3", Uuid::now_v7()))
+fn temp_db_path(test_name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "verlet-{test_name}-{}.sqlite3",
+        uuid::Uuid::now_v7()
+    ))
 }
 
-fn assert_file_family_excludes(path: &Path, needle: &[u8]) {
+fn assert_file_family_excludes(path: &std::path::Path, needle: &[u8]) {
     for candidate in [
         path.to_path_buf(),
-        PathBuf::from(format!("{}-wal", path.display())),
-        PathBuf::from(format!("{}-shm", path.display())),
+        std::path::PathBuf::from(format!("{}-wal", path.display())),
+        std::path::PathBuf::from(format!("{}-shm", path.display())),
     ] {
         let Ok(bytes) = std::fs::read(&candidate) else {
             continue;

@@ -1,8 +1,4 @@
-use serde::Serialize;
-use std::path::Path;
-use std::process::{Command, Stdio};
-
-#[derive(Debug, Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct SandboxProbe {
     host_os: String,
     host_arch: String,
@@ -22,7 +18,7 @@ struct SandboxProbe {
     unavailable_reasons: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum HypervisorBackend {
     Kvm,
@@ -30,7 +26,7 @@ enum HypervisorBackend {
     Missing,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ProbeStatus {
     Ready,
@@ -40,7 +36,7 @@ enum ProbeStatus {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host_os = std::env::consts::OS.to_string();
     let host_arch = std::env::consts::ARCH.to_string();
-    let dev_kvm_exists = Path::new("/dev/kvm").exists();
+    let dev_kvm_exists = std::path::Path::new("/dev/kvm").exists();
     let macos_hvf_candidate = host_os == "macos" && host_arch == "aarch64";
     let hypervisor_backend = if dev_kvm_exists {
         HypervisorBackend::Kvm
@@ -122,19 +118,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn pkg_config_available(name: &str) -> bool {
-    Command::new("pkg-config")
+    std::process::Command::new("pkg-config")
         .args(["--exists", name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
 
 fn command_available(name: &str) -> bool {
-    Command::new(name)
+    std::process::Command::new(name)
         .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -147,5 +143,7 @@ fn library_hint_present(env_var: &str, path_needle: &str, common_paths: &[&str])
         || verlet_runtime_contracts::env_compat::var_os("LD_LIBRARY_PATH")
             .map(|paths| paths.to_string_lossy().contains(path_needle))
             .unwrap_or(false)
-        || common_paths.iter().any(|path| Path::new(path).exists())
+        || common_paths
+            .iter()
+            .any(|path| std::path::Path::new(path).exists())
 }

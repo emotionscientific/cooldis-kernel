@@ -1,18 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::timeout;
-use uuid::Uuid;
-use verlet::{
-    AgentLoopConfig, AgentLoopFactory, LocalOperationRegistry, LocalPluginCatalog,
-    LocalPluginCatalogConfig, OpenAIReasoningSummary, OpenAIResponsesAdapter, PluginMount,
-    ProviderApi, ProviderEndpoint, ProviderHttpClient, ProviderWireAdapter,
-    PublishOperationRequest, PublishedOperationSource, RuntimeEventKind, RuntimeHost,
-    RustWasmBuildOptions, SystemBlock, ThreadCoordinates, ThreadEvent, ThreadTopology,
-    build_rust_wasm_module,
-};
-
 const DEFAULT_ENV_FILE: &str = ".env";
 const TOOL_NAME: &str = "tailcat_cat";
 const EXPECTED_FILE_CONTENT: &str = "hello from live plugin llm smoke\n";
@@ -21,59 +6,64 @@ const FINAL_MARKER: &str = "VERLET_PLUGIN_TOOL_OK";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = SmokeConfig::load()?;
-    let temp = std::env::temp_dir().join(format!("verlet-plugin-live-{}", Uuid::now_v7()));
+    let temp = std::env::temp_dir().join(format!("verlet-plugin-live-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&temp)?;
     let registry_root = temp.join("plugins");
     let workspace = temp.join("workspace");
     std::fs::create_dir_all(&workspace)?;
     std::fs::write(workspace.join("input.txt"), EXPECTED_FILE_CONTENT)?;
 
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
-    let build = build_rust_wasm_module(RustWasmBuildOptions::new(&module_path))?;
-    LocalOperationRegistry::new(&registry_root)
-        .publish_artifact(PublishOperationRequest {
+    let build = verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(&module_path))?;
+    verlet::LocalOperationRegistry::new(&registry_root)
+        .publish_artifact(verlet::PublishOperationRequest {
             name: "tailcat".to_string(),
             artifact_path: build.artifact_path,
-            source: PublishedOperationSource::Rust {
+            source: verlet::PublishedOperationSource::Rust {
                 module_path,
                 release: true,
             },
             interface: None,
-            capability_grants: BTreeSet::new(),
-            metadata: BTreeMap::new(),
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
         })
         .await?;
 
-    let catalog = LocalPluginCatalog::load(
-        LocalPluginCatalogConfig::new(&registry_root)
-            .with_mount(PluginMount::host_read_only("/workspace", &workspace)),
+    let catalog = verlet::LocalPluginCatalog::load(
+        verlet::LocalPluginCatalogConfig::new(&registry_root).with_mount(
+            verlet::PluginMount::host_read_only("/workspace", &workspace),
+        ),
     )
     .await?;
 
-    let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(OpenAIResponsesAdapter {
-        include_encrypted_reasoning: false,
-        reasoning_summary: OpenAIReasoningSummary::Auto,
-    });
-    let client = Arc::new(ProviderHttpClient::new(
-        ProviderEndpoint::openai_responses(&config.base_url, config.api_key.clone()),
+    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet::OpenAIResponsesAdapter {
+            include_encrypted_reasoning: false,
+            reasoning_summary: verlet::OpenAIReasoningSummary::Auto,
+        });
+    let client = std::sync::Arc::new(verlet::ProviderHttpClient::new(
+        verlet::ProviderEndpoint::openai_responses(&config.base_url, config.api_key.clone()),
         adapter,
     )?);
-    let mut runtime_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", config.model.clone());
+    let mut runtime_config = verlet::AgentLoopConfig::new(
+        verlet::ProviderApi::OpenAIResponses,
+        "openai",
+        config.model.clone(),
+    );
     runtime_config.max_tokens = 256;
-    runtime_config.system.push(SystemBlock::text(format!(
+    runtime_config.system.push(verlet::SystemBlock::text(format!(
         "You are testing a newly installed Verlet plugin. You must call the {TOOL_NAME} tool with input /workspace/input.txt before answering. After the tool result is visible, reply with exactly: {FINAL_MARKER}: <file content>. Do not invent the file content."
     )));
 
-    let host = RuntimeHost::new(Arc::new(
-        AgentLoopFactory::new(runtime_config, client)
+    let host = verlet::RuntimeHost::new(std::sync::Arc::new(
+        verlet::AgentLoopFactory::new(runtime_config, client)
             .with_operation_registry(catalog.operation_registry()),
     ));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("smoke_tenant", "smoke_user", "plugin_live"),
-            ThreadTopology::root(),
+            verlet::ThreadCoordinates::new("smoke_tenant", "smoke_user", "plugin_live"),
+            verlet::ThreadTopology::root(),
         )
         .await?;
     let mut events = thread.subscribe_events();
@@ -108,8 +98,8 @@ impl SmokeConfig {
     fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let env_file = verlet_runtime_contracts::env_compat::var("VERLET_PLUGIN_LIVE_ENV_FILE")
             .or_else(|_| verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_ENV_FILE));
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_ENV_FILE));
         let file_env = read_env_file_if_exists(&env_file)?;
 
         let base_url = env_or_file("VERLET_PLUGIN_LIVE_BASE_URL", &file_env)
@@ -156,15 +146,18 @@ struct LivePluginTrace {
 }
 
 async fn collect_live_plugin_trace(
-    events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
 ) -> Result<LivePluginTrace, Box<dyn std::error::Error>> {
     let mut saw_tool_start = false;
     let mut saw_tool_result = false;
     let final_output = loop {
-        let event = timeout(Duration::from_secs(120), events.recv()).await??;
+        let event =
+            tokio::time::timeout(std::time::Duration::from_secs(120), events.recv()).await??;
         match event {
-            ThreadEvent::Runtime { event, .. } => match event.kind {
-                RuntimeEventKind::ToolCallStarted { name, input, .. } if name == TOOL_NAME => {
+            verlet::ThreadEvent::Runtime { event, .. } => match event.kind {
+                verlet::RuntimeEventKind::ToolCallStarted { name, input, .. }
+                    if name == TOOL_NAME =>
+                {
                     if input.get("input").and_then(|value| value.as_str())
                         != Some("/workspace/input.txt")
                     {
@@ -172,12 +165,12 @@ async fn collect_live_plugin_trace(
                     }
                     saw_tool_start = true;
                 }
-                RuntimeEventKind::ToolCallResult {
+                verlet::RuntimeEventKind::ToolCallResult {
                     output, success, ..
                 } if success && output == EXPECTED_FILE_CONTENT => {
                     saw_tool_result = true;
                 }
-                RuntimeEventKind::ToolCallResult {
+                verlet::RuntimeEventKind::ToolCallResult {
                     output, success, ..
                 } if success => {
                     return Err(format!(
@@ -188,12 +181,12 @@ async fn collect_live_plugin_trace(
                 }
                 _ => {}
             },
-            ThreadEvent::Output { text, .. } => {
+            verlet::ThreadEvent::Output { text, .. } => {
                 if text.contains(FINAL_MARKER) {
                     break text;
                 }
             }
-            ThreadEvent::Failed { message, .. } => return Err(message.into()),
+            verlet::ThreadEvent::Failed { message, .. } => return Err(message.into()),
             _ => {}
         }
     };
@@ -216,13 +209,13 @@ async fn collect_live_plugin_trace(
 }
 
 fn read_env_file_if_exists(
-    path: &Path,
-) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    path: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok(std::collections::HashMap::new());
     }
     let text = std::fs::read_to_string(path)?;
-    let mut env = HashMap::new();
+    let mut env = std::collections::HashMap::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -236,7 +229,7 @@ fn read_env_file_if_exists(
     Ok(env)
 }
 
-fn env_or_file(key: &str, file_env: &HashMap<String, String>) -> Option<String> {
+fn env_or_file(key: &str, file_env: &std::collections::HashMap<String, String>) -> Option<String> {
     verlet_runtime_contracts::env_compat::var(key)
         .ok()
         .filter(|value| !value.trim().is_empty())

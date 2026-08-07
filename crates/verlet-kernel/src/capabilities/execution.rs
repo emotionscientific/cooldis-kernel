@@ -1,29 +1,5 @@
-use crate::capabilities::vfs::{ObjectStoreMountConfig, VerletVfs};
-use crate::kernel::history::{
-    CanonicalContent, CanonicalMessage, CanonicalStopReason, ProviderApi,
-};
-use crate::kernel::process_handle_dispatch::{ProcessHandleDispatcher, command_digest};
-use crate::{
-    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider, AgentManifestGrantExpiry,
-    AgentRuntime, AgentRuntimeFactory, OperationRegistry, RuntimeEventKind, RuntimeServices,
-    RuntimeTerminalState, SessionEntryKind, ThreadCommand, ThreadContext, ThreadEvent,
-    ThreadSignal, ThreadStatus, ToolDefinition, ToolInvocationCancellation, TurnContextSnapshot,
-    TurnSubmissionMode, VerletError, VerletResult, emit_runtime_event,
-};
-use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::thread;
-use std::time::Duration;
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
-use tokio_util::sync::CancellationToken;
-use verlet_runtime_contracts::DispatchId;
+use base64::Engine as _;
+use sha2::Digest as _;
 pub use verlet_vbash::{
     BASH_TOOL, BashExecutionPolicy, BashkitExecutionConfig, BashkitExecutionHarness,
     BashkitLiveBackend, CommandRoute, CommandRoutingPolicy, OverflowPlan,
@@ -48,7 +24,7 @@ pub use verlet_process::{
 pub const PROCESS_EXEC_TOOL: &str = "process_exec";
 pub const WRITE_STDIN_TOOL: &str = "write_stdin";
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutputSpillReceipt {
     pub path: String,
     pub total_bytes: usize,
@@ -57,7 +33,7 @@ pub struct ToolOutputSpillReceipt {
     pub retention_truncated: bool,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutputSpill {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout: Option<ToolOutputSpillReceipt>,
@@ -71,7 +47,7 @@ impl ToolOutputSpill {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BashToolResultPayload {
     pub stdout: String,
     pub stderr: String,
@@ -84,21 +60,21 @@ pub struct BashToolResultPayload {
 
 #[derive(Clone)]
 pub struct VirtualBashRuntimeConfig {
-    pub cwd: PathBuf,
-    pub execution_timeout: Duration,
-    pub parser_timeout: Duration,
+    pub cwd: std::path::PathBuf,
+    pub execution_timeout: std::time::Duration,
+    pub parser_timeout: std::time::Duration,
     pub max_commands: usize,
     pub max_loop_iterations: usize,
     pub max_output_bytes: usize,
     pub mounts: Vec<VirtualMount>,
-    pub operation_registry: Option<Arc<OperationRegistry>>,
+    pub operation_registry: Option<std::sync::Arc<crate::OperationRegistry>>,
     /// Thread workspace VFS shared with catalog-loaded operations when both surfaces
     /// must re-present one filesystem tree.
-    pub workspace_vfs: Option<Arc<VerletVfs>>,
-    pub capability_grants: BTreeSet<String>,
-    pub capability_grant_expiries: Vec<AgentManifestGrantExpiry>,
+    pub workspace_vfs: Option<std::sync::Arc<crate::capabilities::vfs::VerletVfs>>,
+    pub capability_grants: std::collections::BTreeSet<String>,
+    pub capability_grant_expiries: Vec<crate::AgentManifestGrantExpiry>,
     pub execution_policy: BashExecutionPolicy,
-    pub external_executor: Option<Arc<dyn ExternalCommandExecutor>>,
+    pub external_executor: Option<std::sync::Arc<dyn ExternalCommandExecutor>>,
 }
 
 impl std::fmt::Debug for VirtualBashRuntimeConfig {
@@ -139,16 +115,16 @@ impl std::fmt::Debug for VirtualBashRuntimeConfig {
 impl Default for VirtualBashRuntimeConfig {
     fn default() -> Self {
         Self {
-            cwd: PathBuf::from("/workspace"),
-            execution_timeout: Duration::from_secs(10),
-            parser_timeout: Duration::from_secs(2),
+            cwd: std::path::PathBuf::from("/workspace"),
+            execution_timeout: std::time::Duration::from_secs(10),
+            parser_timeout: std::time::Duration::from_secs(2),
             max_commands: 10_000,
             max_loop_iterations: 10_000,
             max_output_bytes: 1_048_576,
             mounts: default_virtual_mounts(),
             operation_registry: None,
             workspace_vfs: None,
-            capability_grants: BTreeSet::new(),
+            capability_grants: std::collections::BTreeSet::new(),
             capability_grant_expiries: Vec::new(),
             execution_policy: BashExecutionPolicy::virtual_only(),
             external_executor: None,
@@ -162,14 +138,14 @@ impl VirtualBashRuntimeConfig {
         self
     }
 
-    pub fn with_writable_mount(mut self, path: impl Into<PathBuf>) -> Self {
+    pub fn with_writable_mount(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.mounts.push(VirtualMount::writable(path));
         self
     }
 
     pub fn with_readonly_mount(
         mut self,
-        path: impl Into<PathBuf>,
+        path: impl Into<std::path::PathBuf>,
         files: Vec<VirtualFile>,
     ) -> Self {
         self.mounts.push(VirtualMount::readonly(path, files));
@@ -178,8 +154,8 @@ impl VirtualBashRuntimeConfig {
 
     pub fn with_object_store_mount(
         mut self,
-        path: impl Into<PathBuf>,
-        config: ObjectStoreMountConfig,
+        path: impl Into<std::path::PathBuf>,
+        config: crate::capabilities::vfs::ObjectStoreMountConfig,
     ) -> Self {
         self.mounts.push(VirtualMount::object_store(path, config));
         self
@@ -187,8 +163,8 @@ impl VirtualBashRuntimeConfig {
 
     pub fn with_readonly_object_store_mount(
         mut self,
-        path: impl Into<PathBuf>,
-        config: ObjectStoreMountConfig,
+        path: impl Into<std::path::PathBuf>,
+        config: crate::capabilities::vfs::ObjectStoreMountConfig,
     ) -> Self {
         self.mounts
             .push(VirtualMount::readonly_object_store(path, config));
@@ -197,12 +173,13 @@ impl VirtualBashRuntimeConfig {
 
     pub fn with_readonly_skill_file(
         mut self,
-        path: impl Into<PathBuf>,
+        path: impl Into<std::path::PathBuf>,
         content: impl Into<Vec<u8>>,
     ) -> Self {
         let file = VirtualFile::new(path, content);
         if let Some(skills) = self.mounts.iter_mut().find(|mount| {
-            mount.path == Path::new("/skills") && mount.mode == VirtualMountMode::ReadOnly
+            mount.path == std::path::Path::new("/skills")
+                && mount.mode == VirtualMountMode::ReadOnly
         }) {
             skills.files.push(file);
         } else {
@@ -212,13 +189,19 @@ impl VirtualBashRuntimeConfig {
         self
     }
 
-    pub fn with_operation_registry(mut self, registry: Arc<OperationRegistry>) -> Self {
+    pub fn with_operation_registry(
+        mut self,
+        registry: std::sync::Arc<crate::OperationRegistry>,
+    ) -> Self {
         self.operation_registry = Some(registry);
         self
     }
 
     /// Reuse a thread workspace VFS instead of constructing a private bash tree.
-    pub fn with_workspace_vfs(mut self, vfs: Arc<VerletVfs>) -> Self {
+    pub fn with_workspace_vfs(
+        mut self,
+        vfs: std::sync::Arc<crate::capabilities::vfs::VerletVfs>,
+    ) -> Self {
         self.workspace_vfs = Some(vfs);
         self
     }
@@ -235,7 +218,7 @@ impl VirtualBashRuntimeConfig {
 
     pub fn with_capability_grant_expiries(
         mut self,
-        expiries: impl IntoIterator<Item = AgentManifestGrantExpiry>,
+        expiries: impl IntoIterator<Item = crate::AgentManifestGrantExpiry>,
     ) -> Self {
         self.capability_grant_expiries.extend(expiries);
         self
@@ -246,13 +229,19 @@ impl VirtualBashRuntimeConfig {
         self
     }
 
-    pub fn with_external_executor(mut self, executor: Arc<dyn ExternalCommandExecutor>) -> Self {
+    pub fn with_external_executor(
+        mut self,
+        executor: std::sync::Arc<dyn ExternalCommandExecutor>,
+    ) -> Self {
         self.external_executor = Some(executor);
         self
     }
 
-    pub fn with_host_bash_executor(mut self, workspace_root: impl Into<PathBuf>) -> Self {
-        self.external_executor = Some(Arc::new(HostBashExecutor::new(workspace_root)));
+    pub fn with_host_bash_executor(
+        mut self,
+        workspace_root: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.external_executor = Some(std::sync::Arc::new(HostBashExecutor::new(workspace_root)));
         self
     }
 }
@@ -268,8 +257,8 @@ impl From<VirtualBashRuntimeConfig> for BashkitExecutionConfig {
             max_output_bytes: config.max_output_bytes,
             mounts: config.mounts,
             operation_registry: config.operation_registry.map(|registry| {
-                Arc::new(KernelVbashOperationRegistry::new(registry))
-                    as Arc<dyn VbashOperationRegistry>
+                std::sync::Arc::new(KernelVbashOperationRegistry::new(registry))
+                    as std::sync::Arc<dyn VbashOperationRegistry>
             }),
             workspace_vfs: config.workspace_vfs,
             capability_grants: config.capability_grants,
@@ -279,7 +268,7 @@ impl From<VirtualBashRuntimeConfig> for BashkitExecutionConfig {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl VbashOperationRegistry for KernelVbashOperationRegistry {
     async fn describe(&self, name: &str) -> Option<verlet_operations::RegisteredOperation> {
         self.registry.describe(name).await
@@ -305,51 +294,55 @@ impl VbashOperationRegistry for KernelVbashOperationRegistry {
 }
 
 struct KernelVbashOperationRegistry {
-    registry: Arc<OperationRegistry>,
+    registry: std::sync::Arc<crate::OperationRegistry>,
 }
 
 impl KernelVbashOperationRegistry {
-    fn new(registry: Arc<OperationRegistry>) -> Self {
+    fn new(registry: std::sync::Arc<crate::OperationRegistry>) -> Self {
         Self { registry }
     }
 }
 
 pub struct BashToolProvider {
     config: VirtualBashRuntimeConfig,
-    harness: Mutex<Option<BashkitExecutionHarness>>,
+    harness: tokio::sync::Mutex<Option<BashkitExecutionHarness>>,
     process_manager: AsyncExecutionManager,
-    live_backend: Arc<dyn LiveProcessBackend>,
-    process_dispatcher: Option<ProcessHandleDispatcher>,
+    live_backend: std::sync::Arc<dyn LiveProcessBackend>,
+    process_dispatcher: Option<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
 }
 
 impl BashToolProvider {
     pub fn new(config: VirtualBashRuntimeConfig) -> Self {
-        let live_backend: Arc<dyn LiveProcessBackend> =
-            Arc::new(BashkitLiveBackend::new(config.clone()));
+        let live_backend: std::sync::Arc<dyn LiveProcessBackend> =
+            std::sync::Arc::new(BashkitLiveBackend::new(config.clone()));
         Self {
             config,
-            harness: Mutex::new(None),
+            harness: tokio::sync::Mutex::new(None),
             process_manager: AsyncExecutionManager::default(),
             live_backend,
             process_dispatcher: None,
         }
     }
 
-    pub fn with_process_dispatcher(mut self, dispatcher: ProcessHandleDispatcher) -> Self {
+    pub fn with_process_dispatcher(
+        mut self,
+        dispatcher: crate::kernel::process_handle_dispatch::ProcessHandleDispatcher,
+    ) -> Self {
         self.process_dispatcher = Some(dispatcher);
         self
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for BashToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for BashToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
         let mut description =
             "Run a command inside the Verlet virtual bash environment.".to_string();
         if let Some(registry) = &self.config.operation_registry {
             let reserved_commands =
                 operation_shell_reserved_commands(&self.config.execution_policy);
-            let registry_adapter = KernelVbashOperationRegistry::new(Arc::clone(registry));
+            let registry_adapter =
+                KernelVbashOperationRegistry::new(std::sync::Arc::clone(registry));
             let shell_commands =
                 operation_shell_command_names(&registry_adapter, &reserved_commands).await;
             if !shell_commands.is_empty() {
@@ -360,10 +353,10 @@ impl AgentKernelToolProvider for BashToolProvider {
             }
         }
         vec![
-            ToolDefinition::new(
+            crate::ToolDefinition::new(
                 BASH_TOOL,
                 description,
-                json!({
+                serde_json::json!({
                     "type": "object",
                     "properties": {
                         "command": {
@@ -375,10 +368,10 @@ impl AgentKernelToolProvider for BashToolProvider {
                     "additionalProperties": false
                 }),
             ),
-            ToolDefinition::new(
+            crate::ToolDefinition::new(
                 PROCESS_EXEC_TOOL,
                 "Start or poll a Codex-style process handle. This is the provider-safe projection of process.exec over Verlet virtual bash.",
-                json!({
+                serde_json::json!({
                     "type": "object",
                     "properties": {
                         "command": {
@@ -408,10 +401,10 @@ impl AgentKernelToolProvider for BashToolProvider {
                     "additionalProperties": false
                 }),
             ),
-            ToolDefinition::new(
+            crate::ToolDefinition::new(
                 WRITE_STDIN_TOOL,
                 "Write bytes to a Verlet process handle, then poll it. Bashkit virtual bash returns structured unsupported until it has an input sink.",
-                json!({
+                serde_json::json!({
                     "type": "object",
                     "properties": {
                         "process_id": {
@@ -442,16 +435,16 @@ impl AgentKernelToolProvider for BashToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::kernel::history::CanonicalMessage>> {
         self.invoke_tool_call_inner(call, None).await
     }
 
     async fn invoke_tool_call_at(
         &self,
-        call: AgentKernelToolCall,
+        call: crate::AgentKernelToolCall,
         now_ms: i64,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+    ) -> crate::VerletResult<Option<crate::kernel::history::CanonicalMessage>> {
         crate::agent::manifest_bind::ensure_grant_expiries_live(
             &self.config.capability_grant_expiries,
             now_ms,
@@ -461,36 +454,36 @@ impl AgentKernelToolProvider for BashToolProvider {
 
     async fn invoke_tool_call_cancellable(
         &self,
-        call: AgentKernelToolCall,
-        cancellation: ToolInvocationCancellation,
-    ) -> VerletResult<AgentKernelToolOutcome> {
+        call: crate::AgentKernelToolCall,
+        cancellation: crate::ToolInvocationCancellation,
+    ) -> crate::VerletResult<crate::AgentKernelToolOutcome> {
         self.invoke_tool_call_inner(call, Some(cancellation))
             .await
-            .map(AgentKernelToolOutcome::Completed)
+            .map(crate::AgentKernelToolOutcome::Completed)
     }
 
     async fn invoke_tool_call_cancellable_at(
         &self,
-        call: AgentKernelToolCall,
-        cancellation: ToolInvocationCancellation,
+        call: crate::AgentKernelToolCall,
+        cancellation: crate::ToolInvocationCancellation,
         now_ms: i64,
-    ) -> VerletResult<AgentKernelToolOutcome> {
+    ) -> crate::VerletResult<crate::AgentKernelToolOutcome> {
         crate::agent::manifest_bind::ensure_grant_expiries_live(
             &self.config.capability_grant_expiries,
             now_ms,
         )?;
         self.invoke_tool_call_inner(call, Some(cancellation))
             .await
-            .map(AgentKernelToolOutcome::Completed)
+            .map(crate::AgentKernelToolOutcome::Completed)
     }
 }
 
 impl BashToolProvider {
     async fn invoke_tool_call_inner(
         &self,
-        call: AgentKernelToolCall,
-        cancellation: Option<ToolInvocationCancellation>,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::AgentKernelToolCall,
+        cancellation: Option<crate::ToolInvocationCancellation>,
+    ) -> crate::VerletResult<Option<crate::kernel::history::CanonicalMessage>> {
         match call.tool_name.as_str() {
             BASH_TOOL => self
                 .invoke_bash_tool(call, cancellation.as_ref())
@@ -510,11 +503,11 @@ impl BashToolProvider {
 
     async fn invoke_bash_tool(
         &self,
-        call: AgentKernelToolCall,
-        cancellation: Option<&ToolInvocationCancellation>,
-    ) -> VerletResult<CanonicalMessage> {
+        call: crate::AgentKernelToolCall,
+        cancellation: Option<&crate::ToolInvocationCancellation>,
+    ) -> crate::VerletResult<crate::kernel::history::CanonicalMessage> {
         let args: BashToolArgs = serde_json::from_value(call.arguments).map_err(|err| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "tool {BASH_TOOL:?} has invalid arguments: {err}"
             ))
         })?;
@@ -523,7 +516,7 @@ impl BashToolProvider {
             *harness = Some(BashkitExecutionHarness::new(self.config.clone()).await?);
         }
         let harness = harness.as_mut().ok_or_else(|| {
-            VerletError::RuntimeExecution("bash harness did not initialize".to_string())
+            crate::VerletError::RuntimeExecution("bash harness did not initialize".to_string())
         })?;
         let output = match cancellation {
             Some(cancellation) => {
@@ -554,7 +547,7 @@ impl BashToolProvider {
             stdout: stdout_spill,
             stderr: stderr_spill,
         };
-        let mut output = json!({
+        let mut output = serde_json::json!({
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": output.exit_code,
@@ -563,7 +556,7 @@ impl BashToolProvider {
         });
         insert_spill(&mut output, spill)?;
         let output_json = serde_json::to_string(&output).map_err(execution_error)?;
-        Ok(CanonicalMessage::tool_result(
+        Ok(crate::kernel::history::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             output_json,
@@ -573,14 +566,14 @@ impl BashToolProvider {
 
     async fn invoke_process_exec_tool(
         &self,
-        call: AgentKernelToolCall,
-        cancellation: Option<&ToolInvocationCancellation>,
-    ) -> VerletResult<CanonicalMessage> {
+        call: crate::AgentKernelToolCall,
+        cancellation: Option<&crate::ToolInvocationCancellation>,
+    ) -> crate::VerletResult<crate::kernel::history::CanonicalMessage> {
         let call_id = call.call_id;
         let tool_name = call.tool_name;
         let turn_context = call.turn_context;
         let args: ProcessExecToolArgs = serde_json::from_value(call.arguments).map_err(|err| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "tool {PROCESS_EXEC_TOOL:?} has invalid arguments: {err}"
             ))
         })?;
@@ -589,7 +582,7 @@ impl BashToolProvider {
         let mut dispatch_id = None;
         let outcome = if let Some(process_id) = args.process_id {
             let process_id = process_id.parse::<VerletProcessId>().map_err(|err| {
-                VerletError::RuntimeExecution(format!(
+                crate::VerletError::RuntimeExecution(format!(
                     "tool {PROCESS_EXEC_TOOL:?} requires a valid Verlet process_id: {err}"
                 ))
             })?;
@@ -619,7 +612,7 @@ impl BashToolProvider {
             }
         } else {
             let command = args.command.ok_or_else(|| {
-                VerletError::RuntimeExecution(format!(
+                crate::VerletError::RuntimeExecution(format!(
                     "tool {PROCESS_EXEC_TOOL:?} requires command or process_id"
                 ))
             })?;
@@ -627,21 +620,21 @@ impl BashToolProvider {
                 .as_ref()
                 .map(|context| context.coordinates.clone())
                 .ok_or_else(|| {
-                    VerletError::RuntimeExecution(
+                    crate::VerletError::RuntimeExecution(
                         "process_exec requires a turn context for durable consumer binding"
                             .to_string(),
                     )
                 })?;
             let dispatcher = self.process_dispatcher.as_ref().ok_or_else(|| {
-                VerletError::RuntimeExecution(
+                crate::VerletError::RuntimeExecution(
                     "process_exec requires the durable process dispatch ingress lane".to_string(),
                 )
             })?;
             let timeout = args
                 .timeout_ms
-                .map(Duration::from_millis)
+                .map(std::time::Duration::from_millis)
                 .unwrap_or(self.config.execution_timeout);
-            let digest = command_digest(command.as_bytes());
+            let digest = crate::kernel::process_handle_dispatch::command_digest(command.as_bytes());
             let request = AsyncProcessStartRequest::virtual_bash_script(command)
                 .with_owner(process_tool_owner(
                     &turn_context,
@@ -651,7 +644,7 @@ impl BashToolProvider {
                 .with_deadline(ExecutionDeadline::from_now(timeout))
                 .with_yield_time(yield_time)
                 .with_output_cap_bytes(SPILL_RETENTION_MAX_BYTES);
-            let id = DispatchId::new(call_id.clone());
+            let id = verlet_runtime_contracts::DispatchId::new(call_id.clone());
             let mut outcome = match cancellation {
                 Some(cancellation) => {
                     dispatcher
@@ -660,7 +653,7 @@ impl BashToolProvider {
                             id.clone(),
                             digest,
                             self.process_manager.clone(),
-                            Arc::clone(&self.live_backend),
+                            std::sync::Arc::clone(&self.live_backend),
                             request,
                             cancellation.token().clone(),
                         )
@@ -673,7 +666,7 @@ impl BashToolProvider {
                             id.clone(),
                             digest,
                             self.process_manager.clone(),
-                            Arc::clone(&self.live_backend),
+                            std::sync::Arc::clone(&self.live_backend),
                             request,
                         )
                         .await?
@@ -696,10 +689,10 @@ impl BashToolProvider {
             .process_snapshot_json_with_spill(&outcome.snapshot, &call_id, output_cap)
             .await?;
         if let Some(dispatch_id) = dispatch_id {
-            output["dispatch_id"] = json!(dispatch_id.to_string());
+            output["dispatch_id"] = serde_json::json!(dispatch_id.to_string());
         }
         let output_json = serde_json::to_string(&output).map_err(execution_error)?;
-        Ok(CanonicalMessage::tool_result(
+        Ok(crate::kernel::history::CanonicalMessage::tool_result(
             call_id,
             tool_name,
             output_json,
@@ -709,27 +702,29 @@ impl BashToolProvider {
 
     async fn invoke_write_stdin_tool(
         &self,
-        call: AgentKernelToolCall,
-        cancellation: Option<&ToolInvocationCancellation>,
-    ) -> VerletResult<CanonicalMessage> {
+        call: crate::AgentKernelToolCall,
+        cancellation: Option<&crate::ToolInvocationCancellation>,
+    ) -> crate::VerletResult<crate::kernel::history::CanonicalMessage> {
         let call_id = call.call_id;
         let tool_name = call.tool_name;
         let args: WriteStdinToolArgs = serde_json::from_value(call.arguments).map_err(|err| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "tool {WRITE_STDIN_TOOL:?} has invalid arguments: {err}"
             ))
         })?;
         let process_id = args.process_id.parse::<VerletProcessId>().map_err(|err| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "tool {WRITE_STDIN_TOOL:?} requires a valid Verlet process_id: {err}"
             ))
         })?;
         self.require_process_handle(process_id).await?;
-        let bytes = STANDARD.decode(args.delta_base64).map_err(|err| {
-            VerletError::RuntimeExecution(format!(
-                "tool {WRITE_STDIN_TOOL:?} requires valid base64 delta_base64: {err}"
-            ))
-        })?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(args.delta_base64)
+            .map_err(|err| {
+                crate::VerletError::RuntimeExecution(format!(
+                    "tool {WRITE_STDIN_TOOL:?} requires valid base64 delta_base64: {err}"
+                ))
+            })?;
         let output_cap = process_output_cap(args.output_bytes_cap, self.config.max_output_bytes);
         let yield_time = process_yield_time(args.yield_time_ms);
         let execution = match cancellation {
@@ -763,7 +758,7 @@ impl BashToolProvider {
                     .process_snapshot_json_with_spill(&outcome.snapshot, &call_id, output_cap)
                     .await?;
                 let output_json = serde_json::to_string(&output).map_err(execution_error)?;
-                Ok(CanonicalMessage::tool_result(
+                Ok(crate::kernel::history::CanonicalMessage::tool_result(
                     call_id,
                     tool_name,
                     output_json,
@@ -771,13 +766,13 @@ impl BashToolProvider {
                 ))
             }
             Err(err) => {
-                let output_json = serde_json::to_string(&json!({
+                let output_json = serde_json::to_string(&serde_json::json!({
                     "status": "unsupported",
                     "process_id": process_id.to_string(),
                     "error": err.to_string(),
                 }))
                 .map_err(execution_error)?;
-                Ok(CanonicalMessage::tool_result(
+                Ok(crate::kernel::history::CanonicalMessage::tool_result(
                     call_id,
                     tool_name,
                     output_json,
@@ -792,7 +787,7 @@ impl BashToolProvider {
     async fn terminate_process_for_tool(
         &self,
         process_id: VerletProcessId,
-        grace: Duration,
+        grace: std::time::Duration,
     ) -> VerletProcessResult<verlet_process::AsyncProcessOutcome> {
         let mut outcome = self
             .process_manager
@@ -808,7 +803,7 @@ impl BashToolProvider {
                 .process_manager
                 .poll(
                     process_id,
-                    Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
                     SPILL_RETENTION_MAX_BYTES,
                 )
                 .await?;
@@ -816,11 +811,11 @@ impl BashToolProvider {
         Ok(outcome)
     }
 
-    async fn require_process_handle(&self, process_id: VerletProcessId) -> VerletResult<()> {
+    async fn require_process_handle(&self, process_id: VerletProcessId) -> crate::VerletResult<()> {
         self.process_dispatcher
             .as_ref()
             .ok_or_else(|| {
-                VerletError::RuntimeExecution(
+                crate::VerletError::RuntimeExecution(
                     "process handle verbs require the durable process dispatch ingress lane"
                         .to_string(),
                 )
@@ -835,13 +830,13 @@ impl BashToolProvider {
         snapshot: &AsyncProcessSnapshot,
         call_id: &str,
         output_cap: usize,
-    ) -> VerletResult<serde_json::Value> {
+    ) -> crate::VerletResult<serde_json::Value> {
         let mut harness = self.harness.lock().await;
         if harness.is_none() {
             *harness = Some(BashkitExecutionHarness::new(self.config.clone()).await?);
         }
         let harness = harness.as_ref().ok_or_else(|| {
-            VerletError::RuntimeExecution("bash harness did not initialize".to_string())
+            crate::VerletError::RuntimeExecution("bash harness did not initialize".to_string())
         })?;
         let (stdout, stdout_spill, stdout_spilled) = present_output_stream(
             harness,
@@ -860,14 +855,14 @@ impl BashToolProvider {
         )
         .await;
         let mut output = process_snapshot_json(snapshot, stdout, stderr);
-        output["truncated"] = json!(
+        output["truncated"] = serde_json::json!(
             snapshot.stdout_truncated
                 || snapshot.stderr_truncated
                 || stdout_spilled
                 || stderr_spilled
         );
-        output["stdout_truncated"] = json!(snapshot.stdout_truncated || stdout_spilled);
-        output["stderr_truncated"] = json!(snapshot.stderr_truncated || stderr_spilled);
+        output["stdout_truncated"] = serde_json::json!(snapshot.stdout_truncated || stdout_spilled);
+        output["stderr_truncated"] = serde_json::json!(snapshot.stderr_truncated || stderr_spilled);
         insert_spill(
             &mut output,
             ToolOutputSpill {
@@ -879,13 +874,13 @@ impl BashToolProvider {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BashToolArgs {
     command: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessExecToolArgs {
     command: Option<String>,
@@ -895,7 +890,7 @@ struct ProcessExecToolArgs {
     output_bytes_cap: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WriteStdinToolArgs {
     process_id: String,
@@ -905,7 +900,7 @@ struct WriteStdinToolArgs {
 }
 
 fn process_tool_owner(
-    turn_context: &Option<TurnContextSnapshot>,
+    turn_context: &Option<crate::TurnContextSnapshot>,
     call_id: &str,
     surface: &str,
 ) -> AsyncProcessOwner {
@@ -921,8 +916,8 @@ fn process_tool_owner(
     }
 }
 
-fn process_yield_time(yield_time_ms: Option<u64>) -> Duration {
-    Duration::from_millis(yield_time_ms.unwrap_or(10_000).min(30_000))
+fn process_yield_time(yield_time_ms: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_millis(yield_time_ms.unwrap_or(10_000).min(30_000))
 }
 
 fn process_output_cap(output_bytes_cap: Option<usize>, default_cap: usize) -> usize {
@@ -947,7 +942,7 @@ fn process_snapshot_json(
     stdout: String,
     stderr: String,
 ) -> serde_json::Value {
-    json!({
+    serde_json::json!({
         "process_id": snapshot.process_id.map(|process_id| process_id.to_string()),
         "backend": snapshot.backend,
         "label": snapshot.label,
@@ -994,7 +989,7 @@ async fn present_output_stream(
     }
 }
 
-fn insert_spill(output: &mut serde_json::Value, spill: ToolOutputSpill) -> VerletResult<()> {
+fn insert_spill(output: &mut serde_json::Value, spill: ToolOutputSpill) -> crate::VerletResult<()> {
     if spill.is_empty() {
         return Ok(());
     }
@@ -1026,7 +1021,7 @@ fn spill_path(call_id: &str, stream: &str) -> String {
         call_id.to_string()
     };
     if safe_call_id.len() > MAX_COMPONENT_BYTES {
-        let digest = Sha256::digest(call_id.as_bytes());
+        let digest = sha2::Sha256::digest(call_id.as_bytes());
         let mut digest_hex = String::with_capacity(digest.len() * 2);
         for byte in digest {
             push_hex_byte(&mut digest_hex, byte);
@@ -1063,9 +1058,12 @@ impl Default for VirtualBashRuntimeFactory {
     }
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for VirtualBashRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::AgentRuntimeFactory for VirtualBashRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::ThreadContext,
+    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
         Ok(Box::new(VirtualBashRuntime {
             config: self.config.clone(),
         }))
@@ -1076,24 +1074,24 @@ struct VirtualBashRuntime {
     config: VirtualBashRuntimeConfig,
 }
 
-#[async_trait]
-impl AgentRuntime for VirtualBashRuntime {
+#[async_trait::async_trait]
+impl crate::AgentRuntime for VirtualBashRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        context: crate::ThreadContext,
+        services: crate::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
         let harness = match BashkitExecutionHarness::new(self.config).await {
             Ok(harness) => harness,
             Err(err) => {
-                let _ = status.send(ThreadStatus::Failed);
-                let _ = events.send(ThreadEvent::Failed {
+                let _ = status.send(crate::ThreadStatus::Failed);
+                let _ = events.send(crate::ThreadEvent::Failed {
                     thread_id,
                     message: err.to_string(),
                 });
@@ -1102,33 +1100,35 @@ impl AgentRuntime for VirtualBashRuntime {
         };
         let mut harness = Some(harness);
 
-        emit_runtime_event(
+        crate::emit_runtime_event(
             &events,
             &coordinates,
-            RuntimeEventKind::ThreadStarted {
+            crate::RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
                 metadata: context.metadata.clone(),
             },
         );
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
-        let mut pending_submits = VecDeque::new();
+        let _ = events.send(crate::ThreadEvent::Started { context });
+        let _ = status.send(crate::ThreadStatus::Idle);
+        let mut pending_submits = std::collections::VecDeque::new();
 
         loop {
-            if let Some(ThreadCommand::Submit { turn_id, input, .. }) = pending_submits.pop_front()
+            if let Some(crate::ThreadCommand::Submit { turn_id, input, .. }) =
+                pending_submits.pop_front()
             {
-                let _ = status.send(ThreadStatus::Running);
+                let _ = status.send(crate::ThreadStatus::Running);
                 match services
                     .append_user_turn_input(&coordinates, &turn_id, &input)
                     .await
                 {
                     Ok(entry) => {
-                        let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                        let _ =
+                            events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
                     }
                     Err(err) => {
-                        let _ = status.send(ThreadStatus::Failed);
-                        let _ = events.send(ThreadEvent::Failed {
+                        let _ = status.send(crate::ThreadStatus::Failed);
+                        let _ = events.send(crate::ThreadEvent::Failed {
                             thread_id,
                             message: err.to_string(),
                         });
@@ -1168,26 +1168,26 @@ impl AgentRuntime for VirtualBashRuntime {
                         break;
                     };
                     match command {
-                        ThreadCommand::Submit { turn_id, input, mode } => {
-                            if mode == TurnSubmissionMode::Steer {
-                                emit_runtime_event(
+                        crate::ThreadCommand::Submit { turn_id, input, mode } => {
+                            if mode == crate::TurnSubmissionMode::Steer {
+                                crate::emit_runtime_event(
                                     &events,
                                     &coordinates,
-                                    RuntimeEventKind::PolicyRejected {
+                                    crate::RuntimeEventKind::PolicyRejected {
                                         code: "no_active_turn".to_string(),
                                         message: "steer input requires an active virtual bash turn".to_string(),
                                     },
                                 );
                                 continue;
                             }
-                            let _ = status.send(ThreadStatus::Running);
+                            let _ = status.send(crate::ThreadStatus::Running);
                             match services.append_user_turn_input(&coordinates, &turn_id, &input).await {
                                 Ok(entry) => {
-                                    let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                                    let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
                                 }
                                 Err(err) => {
-                                    let _ = status.send(ThreadStatus::Failed);
-                                    let _ = events.send(ThreadEvent::Failed {
+                                    let _ = status.send(crate::ThreadStatus::Failed);
+                                    let _ = events.send(crate::ThreadEvent::Failed {
                                         thread_id,
                                         message: err.to_string(),
                                     });
@@ -1213,48 +1213,48 @@ impl AgentRuntime for VirtualBashRuntime {
                                 break;
                             }
                         }
-                        ThreadCommand::Cancel { reason } => {
-                            let _ = status.send(ThreadStatus::Cancelling);
-                            let _ = events.send(ThreadEvent::Signal {
+                        crate::ThreadCommand::Cancel { reason } => {
+                            let _ = status.send(crate::ThreadStatus::Cancelling);
+                            let _ = events.send(crate::ThreadEvent::Signal {
                                 thread_id,
-                                signal: ThreadSignal::interrupt_cancel(&coordinates, reason.clone()),
+                                signal: crate::ThreadSignal::interrupt_cancel(&coordinates, reason.clone()),
                             });
-                            let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        ThreadCommand::CancelTurn { .. } => {}
-                        ThreadCommand::Compact { .. } => {
-                            emit_runtime_event(
+                        crate::ThreadCommand::CancelTurn { .. } => {}
+                        crate::ThreadCommand::Compact { .. } => {
+                            crate::emit_runtime_event(
                                 &events,
                                 &coordinates,
-                                RuntimeEventKind::PolicyRejected {
+                                crate::RuntimeEventKind::PolicyRejected {
                                     code: "compact_unsupported".to_string(),
                                     message: "Virtual bash runtime does not support Verlet compaction commands".to_string(),
                                 },
                             );
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        ThreadCommand::ResumeToolCall { .. } => {
-                            emit_runtime_event(
+                        crate::ThreadCommand::ResumeToolCall { .. } => {
+                            crate::emit_runtime_event(
                                 &events,
                                 &coordinates,
-                                RuntimeEventKind::PolicyRejected {
+                                crate::RuntimeEventKind::PolicyRejected {
                                     code: "tool_resume_unsupported".to_string(),
                                     message: "Virtual bash runtime does not support provider tool-call resume".to_string(),
                                 },
                             );
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        ThreadCommand::Shutdown => {
-                            let _ = events.send(ThreadEvent::Signal {
+                        crate::ThreadCommand::Shutdown => {
+                            let _ = events.send(crate::ThreadEvent::Signal {
                                 thread_id,
-                                signal: ThreadSignal::shutdown(&coordinates),
+                                signal: crate::ThreadSignal::shutdown(&coordinates),
                             });
-                            emit_runtime_event(
+                            crate::emit_runtime_event(
                                 &events,
                                 &coordinates,
-                                RuntimeEventKind::Terminal {
-                                    state: RuntimeTerminalState::Stopped,
+                                crate::RuntimeEventKind::Terminal {
+                                    state: crate::RuntimeTerminalState::Stopped,
                                 },
                             );
                             break;
@@ -1264,34 +1264,34 @@ impl AgentRuntime for VirtualBashRuntime {
             }
         }
 
-        emit_runtime_event(
+        crate::emit_runtime_event(
             &events,
             &coordinates,
-            RuntimeEventKind::Terminal {
-                state: RuntimeTerminalState::Stopped,
+            crate::RuntimeEventKind::Terminal {
+                state: crate::RuntimeTerminalState::Stopped,
             },
         );
-        let _ = status.send(ThreadStatus::Stopped);
-        let _ = events.send(ThreadEvent::Stopped { thread_id });
+        let _ = status.send(crate::ThreadStatus::Stopped);
+        let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
     }
 }
 
 async fn run_virtual_turn(
     harness: &mut Option<BashkitExecutionHarness>,
-    services: &RuntimeServices,
+    services: &crate::RuntimeServices,
     coordinates: &crate::ThreadCoordinates,
     thread_id: crate::ThreadId,
     input: String,
     watchdog_token_id: Option<u64>,
-    events: &broadcast::Sender<ThreadEvent>,
-    status: &watch::Sender<ThreadStatus>,
-    commands: &mut mpsc::Receiver<ThreadCommand>,
-    cancellation: &CancellationToken,
-    pending_submits: &mut VecDeque<ThreadCommand>,
+    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    status: &tokio::sync::watch::Sender<crate::ThreadStatus>,
+    commands: &mut tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+    cancellation: &tokio_util::sync::CancellationToken,
+    pending_submits: &mut std::collections::VecDeque<crate::ThreadCommand>,
 ) -> bool {
     let Some(turn_harness) = harness.take() else {
-        let _ = status.send(ThreadStatus::Failed);
-        let _ = events.send(ThreadEvent::Failed {
+        let _ = status.send(crate::ThreadStatus::Failed);
+        let _ = events.send(crate::ThreadEvent::Failed {
             thread_id,
             message: "virtual bash execution harness was unavailable".to_string(),
         });
@@ -1306,8 +1306,8 @@ async fn run_virtual_turn(
     let mut execute = match spawn_virtual_bash_execution(turn_harness, input) {
         Ok(execute) => execute,
         Err(err) => {
-            let _ = status.send(ThreadStatus::Failed);
-            let _ = events.send(ThreadEvent::Failed {
+            let _ = status.send(crate::ThreadStatus::Failed);
+            let _ = events.send(crate::ThreadEvent::Failed {
                 thread_id,
                 message: err.to_string(),
             });
@@ -1321,7 +1321,7 @@ async fn run_virtual_turn(
 
             _ = cancellation.cancelled(), if !runtime_cancellation_observed => {
                 runtime_cancellation_observed = true;
-                cancel_flag.store(true, Ordering::SeqCst);
+                cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 cancelled_reason = Some("runtime cancellation requested".to_string());
                 accept_control_commands = false;
             }
@@ -1329,143 +1329,143 @@ async fn run_virtual_turn(
             // wins races with a finishing virtual-bash turn.
             command = commands.recv(), if accept_control_commands => {
                 match command {
-                    Some(ThreadCommand::Cancel { reason }) => {
-                        let _ = status.send(ThreadStatus::Cancelling);
-                        let _ = events.send(ThreadEvent::Signal {
+                    Some(crate::ThreadCommand::Cancel { reason }) => {
+                        let _ = status.send(crate::ThreadStatus::Cancelling);
+                        let _ = events.send(crate::ThreadEvent::Signal {
                             thread_id,
-                            signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
+                            signal: crate::ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
                         });
-                        emit_runtime_event(
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::Cancelled {
+                            crate::RuntimeEventKind::Cancelled {
                                 reason: reason.clone(),
                             },
                         );
-                        cancel_flag.store(true, Ordering::SeqCst);
+                        cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         cancelled_reason = Some(reason);
                         accept_control_commands = false;
                     }
-                    Some(ThreadCommand::CancelTurn {
+                    Some(crate::ThreadCommand::CancelTurn {
                         watchdog_token_id: target_token_id,
                         reason,
                     }) => {
                         if watchdog_token_id != Some(target_token_id) {
                             continue;
                         }
-                        let _ = status.send(ThreadStatus::Cancelling);
-                        let _ = events.send(ThreadEvent::Signal {
+                        let _ = status.send(crate::ThreadStatus::Cancelling);
+                        let _ = events.send(crate::ThreadEvent::Signal {
                             thread_id,
-                            signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
+                            signal: crate::ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
                         });
-                        emit_runtime_event(
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::Cancelled {
+                            crate::RuntimeEventKind::Cancelled {
                                 reason: reason.clone(),
                             },
                         );
-                        cancel_flag.store(true, Ordering::SeqCst);
+                        cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         cancelled_reason = Some(reason);
                         accept_control_commands = false;
                     }
-                    Some(ThreadCommand::Shutdown) => {
-                        let _ = events.send(ThreadEvent::Signal {
+                    Some(crate::ThreadCommand::Shutdown) => {
+                        let _ = events.send(crate::ThreadEvent::Signal {
                             thread_id,
-                            signal: ThreadSignal::shutdown(coordinates),
+                            signal: crate::ThreadSignal::shutdown(coordinates),
                         });
-                        emit_runtime_event(
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::Terminal {
-                                state: RuntimeTerminalState::Stopped,
+                            crate::RuntimeEventKind::Terminal {
+                                state: crate::RuntimeTerminalState::Stopped,
                             },
                         );
-                        cancel_flag.store(true, Ordering::SeqCst);
+                        cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         shutdown_after_turn = true;
                         accept_control_commands = false;
                     }
-                    Some(ThreadCommand::Submit { turn_id, input, mode }) => {
+                    Some(crate::ThreadCommand::Submit { turn_id, input, mode }) => {
                         match mode {
-                            TurnSubmissionMode::Queue => {
-                                let _ = events.send(ThreadEvent::Signal {
+                            crate::TurnSubmissionMode::Queue => {
+                                let _ = events.send(crate::ThreadEvent::Signal {
                                     thread_id,
-                                    signal: ThreadSignal::user_queue(coordinates, turn_id.clone()),
+                                    signal: crate::ThreadSignal::user_queue(coordinates, turn_id.clone()),
                                 });
-                                pending_submits.push_back(ThreadCommand::Submit {
+                                pending_submits.push_back(crate::ThreadCommand::Submit {
                                     turn_id,
                                     input,
                                     mode,
                                 });
                             }
-                            TurnSubmissionMode::Steer => {
-                                emit_runtime_event(
+                            crate::TurnSubmissionMode::Steer => {
+                                crate::emit_runtime_event(
                                     events,
                                     coordinates,
-                                    RuntimeEventKind::PolicyRejected {
+                                    crate::RuntimeEventKind::PolicyRejected {
                                         code: "active_turn_not_steerable".to_string(),
                                         message: "Virtual bash runtime does not support same-turn steering".to_string(),
                                     },
                                 );
                             }
-                            TurnSubmissionMode::Interrupt => {
+                            crate::TurnSubmissionMode::Interrupt => {
                                 let reason = format!("interrupted by turn {turn_id}");
-                                let _ = status.send(ThreadStatus::Cancelling);
-                                let _ = events.send(ThreadEvent::Signal {
+                                let _ = status.send(crate::ThreadStatus::Cancelling);
+                                let _ = events.send(crate::ThreadEvent::Signal {
                                     thread_id,
-                                    signal: ThreadSignal::user_interrupt(coordinates, turn_id.clone()),
+                                    signal: crate::ThreadSignal::user_interrupt(coordinates, turn_id.clone()),
                                 });
-                                emit_runtime_event(
+                                crate::emit_runtime_event(
                                     events,
                                     coordinates,
-                                    RuntimeEventKind::Cancelled {
+                                    crate::RuntimeEventKind::Cancelled {
                                         reason: reason.clone(),
                                     },
                                 );
-                                cancel_flag.store(true, Ordering::SeqCst);
+                                cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                                 cancelled_reason = Some(reason);
                                 accept_control_commands = false;
-                                pending_submits.push_front(ThreadCommand::Submit {
+                                pending_submits.push_front(crate::ThreadCommand::Submit {
                                     turn_id,
                                     input,
-                                    mode: TurnSubmissionMode::Queue,
+                                    mode: crate::TurnSubmissionMode::Queue,
                                 });
                             }
                         }
                     }
-                    Some(ThreadCommand::Compact { .. }) => {
-                        emit_runtime_event(
+                    Some(crate::ThreadCommand::Compact { .. }) => {
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::PolicyRejected {
+                            crate::RuntimeEventKind::PolicyRejected {
                                 code: "compact_unsupported".to_string(),
                                 message: "Virtual bash runtime does not support Verlet compaction commands".to_string(),
                             },
                         );
                     }
-                    Some(ThreadCommand::ResumeToolCall { .. }) => {
-                        emit_runtime_event(
+                    Some(crate::ThreadCommand::ResumeToolCall { .. }) => {
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::PolicyRejected {
+                            crate::RuntimeEventKind::PolicyRejected {
                                 code: "tool_resume_unsupported".to_string(),
                                 message: "Virtual bash runtime does not support provider tool-call resume".to_string(),
                             },
                         );
                     }
                     None => {
-                        let _ = events.send(ThreadEvent::Signal {
+                        let _ = events.send(crate::ThreadEvent::Signal {
                             thread_id,
-                            signal: ThreadSignal::shutdown(coordinates),
+                            signal: crate::ThreadSignal::shutdown(coordinates),
                         });
-                        emit_runtime_event(
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::Terminal {
-                                state: RuntimeTerminalState::Stopped,
+                            crate::RuntimeEventKind::Terminal {
+                                state: crate::RuntimeTerminalState::Stopped,
                             },
                         );
-                        cancel_flag.store(true, Ordering::SeqCst);
+                        cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         shutdown_after_turn = true;
                         accept_control_commands = false;
                     }
@@ -1478,7 +1478,7 @@ async fn run_virtual_turn(
                         break result;
                     }
                     Err(err) => {
-                        break Err(VerletError::RuntimeExecution(format!(
+                        break Err(crate::VerletError::RuntimeExecution(format!(
                             "virtual bash execution thread stopped before returning a result: {err}"
                         )));
                     }
@@ -1489,26 +1489,26 @@ async fn run_virtual_turn(
 
     let was_cancelled = cancelled_reason.is_some();
     if let Some(reason) = cancelled_reason {
-        let _ = status.send(ThreadStatus::Idle);
-        emit_runtime_event(
+        let _ = status.send(crate::ThreadStatus::Idle);
+        crate::emit_runtime_event(
             events,
             coordinates,
-            RuntimeEventKind::Terminal {
-                state: RuntimeTerminalState::Cancelled,
+            crate::RuntimeEventKind::Terminal {
+                state: crate::RuntimeTerminalState::Cancelled,
             },
         );
-        let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
+        let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
     } else {
         match result {
             Ok(output) => {
                 let text = output.event_text();
                 if !text.is_empty() {
-                    emit_runtime_event(
+                    crate::emit_runtime_event(
                         events,
                         coordinates,
-                        RuntimeEventKind::TextDelta { text: text.clone() },
+                        crate::RuntimeEventKind::TextDelta { text: text.clone() },
                     );
-                    let _ = events.send(ThreadEvent::Output {
+                    let _ = events.send(crate::ThreadEvent::Output {
                         thread_id,
                         text: text.clone(),
                     });
@@ -1516,20 +1516,20 @@ async fn run_virtual_turn(
                 }
             }
             Err(err) => {
-                let _ = status.send(ThreadStatus::Failed);
-                let _ = events.send(ThreadEvent::Signal {
+                let _ = status.send(crate::ThreadStatus::Failed);
+                let _ = events.send(crate::ThreadEvent::Signal {
                     thread_id,
-                    signal: ThreadSignal::failed(coordinates, err.to_string()),
+                    signal: crate::ThreadSignal::failed(coordinates, err.to_string()),
                 });
-                emit_runtime_event(
+                crate::emit_runtime_event(
                     events,
                     coordinates,
-                    RuntimeEventKind::Failed {
+                    crate::RuntimeEventKind::Failed {
                         code: "runtime_execution".to_string(),
                         message: err.to_string(),
                     },
                 );
-                let _ = events.send(ThreadEvent::Failed {
+                let _ = events.send(crate::ThreadEvent::Failed {
                     thread_id,
                     message: err.to_string(),
                 });
@@ -1539,22 +1539,22 @@ async fn run_virtual_turn(
     }
 
     if !shutdown_after_turn && !was_cancelled && !failed {
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = status.send(crate::ThreadStatus::Idle);
     }
     shutdown_after_turn || failed
 }
 
 struct VirtualBashExecutionResult {
     harness: BashkitExecutionHarness,
-    result: VerletResult<VirtualCommandOutput>,
+    result: crate::VerletResult<VirtualCommandOutput>,
 }
 
 fn spawn_virtual_bash_execution(
     mut harness: BashkitExecutionHarness,
     input: String,
-) -> VerletResult<oneshot::Receiver<VirtualBashExecutionResult>> {
-    let (tx, rx) = oneshot::channel();
-    thread::Builder::new()
+) -> crate::VerletResult<tokio::sync::oneshot::Receiver<VirtualBashExecutionResult>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
         .name("verlet-vbash".to_string())
         .spawn(move || {
             let result = tokio::runtime::Builder::new_current_thread()
@@ -1569,34 +1569,34 @@ fn spawn_virtual_bash_execution(
 }
 
 async fn mirror_virtual_output(
-    services: &RuntimeServices,
+    services: &crate::RuntimeServices,
     coordinates: &crate::ThreadCoordinates,
     thread_id: crate::ThreadId,
     text: String,
-    events: &broadcast::Sender<ThreadEvent>,
+    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
 ) {
     if let Ok(entry) = services
         .append_session_entry(
             coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::assistant(
+            crate::SessionEntryKind::Message {
+                message: crate::kernel::history::CanonicalMessage::assistant(
                     "verlet",
-                    ProviderApi::Other("virtual_bash".to_string()),
+                    crate::kernel::history::ProviderApi::Other("virtual_bash".to_string()),
                     "bashkit",
-                    vec![CanonicalContent::text(text)],
-                    CanonicalStopReason::EndTurn,
+                    vec![crate::kernel::history::CanonicalContent::text(text)],
+                    crate::kernel::history::CanonicalStopReason::EndTurn,
                 ),
             },
         )
         .await
     {
-        let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+        let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
     }
 }
 
-fn execution_error(err: impl std::fmt::Display) -> VerletError {
-    VerletError::RuntimeExecution(err.to_string())
+fn execution_error(err: impl std::fmt::Display) -> crate::VerletError {
+    crate::VerletError::RuntimeExecution(err.to_string())
 }
 
 #[cfg(test)]

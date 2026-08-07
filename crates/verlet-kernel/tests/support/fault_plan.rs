@@ -23,10 +23,6 @@
 //! `After` timing is eligible only for the store append family and queue
 //! `complete_ingress`; all other v1 directives fire before the operation.
 
-use serde::Serialize;
-use std::collections::BTreeSet;
-use std::time::Duration;
-
 /// Version of the fault vocabulary below. Bumped when sites, cuts, or the
 /// derivation algorithm change; old seeds keep their meaning under the
 /// version that produced them and are never reinterpreted.
@@ -73,7 +69,7 @@ impl SplitMix64 {
 }
 
 /// How much probability mass a derivation spends across the schedule.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Intensity {
     Sparse,
     Moderate,
@@ -82,7 +78,7 @@ pub enum Intensity {
 
 /// Which seam a directive drives: one of the three `fault.rs` wrappers, or
 /// the process crash-cut harness.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum FaultComponent {
     Store,
     Queue,
@@ -93,7 +89,7 @@ pub enum FaultComponent {
 /// When the fault fires relative to its operation. `Before` is what the
 /// wrappers implement today; `After` (effect durable, caller told it
 /// failed) is a wrapper extension owned by the fault-plan engine ticket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum FaultTiming {
     Before,
     After,
@@ -101,10 +97,10 @@ pub enum FaultTiming {
 
 /// What fires. Error construction is component-specific: the engine maps
 /// `Fail` to the wrapped trait's error type when applying a directive.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum PlannedAction {
     Fail,
-    Delay(Duration),
+    Delay(std::time::Duration),
 }
 
 /// One planned fault: the nth occurrence (one-based, matching the
@@ -117,7 +113,7 @@ pub enum PlannedAction {
 /// provenance rather than a matching key. Unifying the lanes is a
 /// vocabulary-v2 decision (EMO-410); changing it under v1 would silently
 /// re-key every recorded seed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct FaultDirective {
     pub component: FaultComponent,
     /// Trait-method name for wrapper components (store `append_events`,
@@ -170,7 +166,7 @@ pub const CUTS_V1: &[&str] = &[
 
 /// A derived fault plan: a pure function of (seed, vocabulary version,
 /// intensity). See ADR 0004 for the derivation contract.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct FaultPlan {
     pub seed: u64,
     pub vocabulary_version: u32,
@@ -233,7 +229,7 @@ fn derive_wrapper_lane(
         Intensity::Moderate => 6,
         Intensity::Hostile => 10,
     };
-    let mut occupied = BTreeSet::new();
+    let mut occupied = std::collections::BTreeSet::new();
     (0..count)
         .map(|_| {
             let mut operation_index = rng.next_below(operations.len() as u64) as usize;
@@ -270,7 +266,7 @@ fn derive_wrapper_lane(
             };
             let action = if rng.next_below(4) == 0 {
                 let delay = [1, 10, 50][rng.next_below(3) as usize];
-                PlannedAction::Delay(Duration::from_millis(delay))
+                PlannedAction::Delay(std::time::Duration::from_millis(delay))
             } else {
                 PlannedAction::Fail
             };
@@ -296,7 +292,7 @@ fn derive_process_lane(mut rng: SplitMix64, intensity: Intensity) -> Vec<FaultDi
         Intensity::Moderate => 6,
         Intensity::Hostile => 10,
     };
-    let mut occupied = BTreeSet::new();
+    let mut occupied = std::collections::BTreeSet::new();
     (0..count)
         .map(|_| {
             let mut operation_index = rng.next_below(CUTS_V1.len() as u64) as usize;
@@ -320,7 +316,7 @@ fn derive_process_lane(mut rng: SplitMix64, intensity: Intensity) -> Vec<FaultDi
 }
 
 /// Existing v1 seam selected by a named process cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum CrashCutSeam {
     PauseAfterIngressClaim,
     PersistedInputRuntimeNotify,
@@ -332,7 +328,7 @@ pub enum CrashCutSeam {
 }
 
 /// Registry entry connecting the stable cut vocabulary to its existing seam.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct CrashCutRegistration {
     pub name: &'static str,
     pub seam: CrashCutSeam,
@@ -423,7 +419,6 @@ pub async fn run_crash_cut<H: CrashCutHost>(name: &str, mut host: H) -> H {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     const FIXTURE_SEED: u64 = 0xE399_0004_D15E_A5E5;
 
@@ -453,7 +448,7 @@ mod tests {
 
     #[test]
     fn splitmix64_output_is_pinned_permanently() {
-        let mut rng = SplitMix64::new(0);
+        let mut rng = crate::support::fault_plan::SplitMix64::new(0);
         assert_eq!(rng.next_u64(), 0xE220_A839_7B1D_CDAF);
         assert_eq!(rng.next_u64(), 0x6E78_9E6A_A1B9_65F4);
         assert_eq!(rng.next_u64(), 0x06C4_5D18_8009_454F);
@@ -461,24 +456,28 @@ mod tests {
 
     #[test]
     fn next_below_is_pinned_permanently() {
-        let mut rng = SplitMix64::new(42);
+        let mut rng = crate::support::fault_plan::SplitMix64::new(42);
         let draws: Vec<u64> = (0..4).map(|_| rng.next_below(6)).collect();
         assert_eq!(draws, vec![4, 0, 1, 2]);
     }
 
     #[test]
     fn split_lanes_are_pinned_permanently() {
-        let mut rng = SplitMix64::new(7);
+        let mut rng = crate::support::fault_plan::SplitMix64::new(7);
         let mut store_lane = rng.split("store");
         assert_eq!(store_lane.next_u64(), 0x1D60_7A07_C3D0_3D6E);
     }
 
     #[test]
     fn same_seed_and_intensity_derive_identical_directives() {
-        for intensity in [Intensity::Sparse, Intensity::Moderate, Intensity::Hostile] {
+        for intensity in [
+            crate::support::fault_plan::Intensity::Sparse,
+            crate::support::fault_plan::Intensity::Moderate,
+            crate::support::fault_plan::Intensity::Hostile,
+        ] {
             assert_eq!(
-                FaultPlan::derive(FIXTURE_SEED, intensity),
-                FaultPlan::derive(FIXTURE_SEED, intensity)
+                crate::support::fault_plan::FaultPlan::derive(FIXTURE_SEED, intensity),
+                crate::support::fault_plan::FaultPlan::derive(FIXTURE_SEED, intensity)
             );
         }
     }
@@ -487,7 +486,11 @@ mod tests {
     fn sparse_derivation_is_fixture_pinned() {
         assert_json_fixture(
             "fault_plans/sparse.json",
-            serde_json::to_value(FaultPlan::derive(FIXTURE_SEED, Intensity::Sparse)).unwrap(),
+            serde_json::to_value(crate::support::fault_plan::FaultPlan::derive(
+                FIXTURE_SEED,
+                crate::support::fault_plan::Intensity::Sparse,
+            ))
+            .unwrap(),
         );
     }
 
@@ -495,7 +498,11 @@ mod tests {
     fn moderate_derivation_is_fixture_pinned() {
         assert_json_fixture(
             "fault_plans/moderate.json",
-            serde_json::to_value(FaultPlan::derive(FIXTURE_SEED, Intensity::Moderate)).unwrap(),
+            serde_json::to_value(crate::support::fault_plan::FaultPlan::derive(
+                FIXTURE_SEED,
+                crate::support::fault_plan::Intensity::Moderate,
+            ))
+            .unwrap(),
         );
     }
 
@@ -503,48 +510,67 @@ mod tests {
     fn hostile_derivation_is_fixture_pinned() {
         assert_json_fixture(
             "fault_plans/hostile.json",
-            serde_json::to_value(FaultPlan::derive(FIXTURE_SEED, Intensity::Hostile)).unwrap(),
+            serde_json::to_value(crate::support::fault_plan::FaultPlan::derive(
+                FIXTURE_SEED,
+                crate::support::fault_plan::Intensity::Hostile,
+            ))
+            .unwrap(),
         );
     }
 
     #[test]
     fn process_lane_emits_at_most_two_known_cuts() {
-        for intensity in [Intensity::Sparse, Intensity::Moderate, Intensity::Hostile] {
-            let plan = FaultPlan::derive(FIXTURE_SEED, intensity);
+        for intensity in [
+            crate::support::fault_plan::Intensity::Sparse,
+            crate::support::fault_plan::Intensity::Moderate,
+            crate::support::fault_plan::Intensity::Hostile,
+        ] {
+            let plan = crate::support::fault_plan::FaultPlan::derive(FIXTURE_SEED, intensity);
             let process = plan
                 .directives
                 .iter()
-                .filter(|directive| directive.component == FaultComponent::Process)
+                .filter(|directive| {
+                    directive.component == crate::support::fault_plan::FaultComponent::Process
+                })
                 .collect::<Vec<_>>();
             assert!(process.len() <= 2);
-            assert!(
-                process
-                    .iter()
-                    .all(|directive| CUTS_V1.contains(&directive.operation))
-            );
+            assert!(process.iter().all(|directive| {
+                crate::support::fault_plan::CUTS_V1.contains(&directive.operation)
+            }));
         }
     }
 
     #[test]
     fn every_v1_cut_is_registered_once() {
-        let names = CRASH_CUT_REGISTRY
+        let names = crate::support::fault_plan::CRASH_CUT_REGISTRY
             .iter()
             .map(|registration| registration.name)
             .collect::<Vec<_>>();
         assert_eq!(
             names.len(),
-            names.iter().copied().collect::<BTreeSet<_>>().len(),
+            names
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             "crash-cut registry names must be unique"
         );
-        assert!(CUTS_V1.iter().all(|name| names.contains(name)));
-        for name in CUTS_V1 {
-            assert_eq!(crash_cut(name).unwrap().name, *name);
+        assert!(
+            crate::support::fault_plan::CUTS_V1
+                .iter()
+                .all(|name| names.contains(name))
+        );
+        for name in crate::support::fault_plan::CUTS_V1 {
+            assert_eq!(
+                crate::support::fault_plan::crash_cut(name).unwrap().name,
+                *name
+            );
         }
     }
 
     #[derive(Debug)]
     struct ProbeStore {
-        durable_effects: Vec<CrashCutSeam>,
+        durable_effects: Vec<crate::support::fault_plan::CrashCutSeam>,
         recoveries: usize,
     }
 
@@ -553,10 +579,10 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl CrashCutHost for ProbeHost {
+    impl crate::support::fault_plan::CrashCutHost for ProbeHost {
         type StoreState = ProbeStore;
 
-        async fn run_to_cut(&mut self, seam: CrashCutSeam) {
+        async fn run_to_cut(&mut self, seam: crate::support::fault_plan::CrashCutSeam) {
             self.store.durable_effects.push(seam);
         }
 
@@ -574,7 +600,7 @@ mod tests {
     }
 
     async fn assert_cut_smoke(name: &str) {
-        let rebuilt = run_crash_cut(
+        let rebuilt = crate::support::fault_plan::run_crash_cut(
             name,
             ProbeHost {
                 store: ProbeStore {
@@ -586,7 +612,7 @@ mod tests {
         .await;
         assert_eq!(
             rebuilt.store.durable_effects,
-            vec![crash_cut(name).unwrap().seam]
+            vec![crate::support::fault_plan::crash_cut(name).unwrap().seam]
         );
         assert_eq!(rebuilt.store.recoveries, 1);
     }

@@ -1,19 +1,11 @@
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixStream};
-use tokio::task::JoinHandle;
-use uuid::Uuid;
-use verlet::daemon::identity::{IdentityAuthority, PrincipalId, SqliteIdentityAuthority};
-use verlet::{
-    AppServerListenAddr, CodexTuiConnectConfig, CodexTuiTestClient, SqliteSessionStore,
-    SystemDaemonClock, VerletAppServer, VerletAppServerConfig,
-};
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
+use verlet::daemon::identity::IdentityAuthority as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from("/tmp").join(format!("cdis-app-server-{}", Uuid::now_v7().simple()));
+    let root = std::path::PathBuf::from("/tmp")
+        .join(format!("cdis-app-server-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app-server.sock");
     let server_task = start_server(&root, &socket).await?;
 
@@ -30,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(matches!(models["data"].as_array(), Some(models) if !models.is_empty()));
 
     let first_completed = client
-        .run_prompt("smoke before restart", Duration::from_secs(5))
+        .run_prompt("smoke before restart", std::time::Duration::from_secs(5))
         .await?;
     let saw_first_delta = first_completed
         .notifications
@@ -78,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .wait_for_turn_completed(
             &first_completed.thread_id,
             &second_turn.id,
-            Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
         )
         .await?;
     let saw_second_completed = second_completed
@@ -103,7 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     let tcp_completed = tcp_client
-        .run_prompt("smoke over tcp websocket", Duration::from_secs(5))
+        .run_prompt(
+            "smoke over tcp websocket",
+            std::time::Duration::from_secs(5),
+        )
         .await?;
     let saw_tcp_completed = tcp_completed
         .notifications
@@ -123,29 +118,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn start_server(
-    root: &Path,
-    socket: &Path,
-) -> Result<JoinHandle<verlet::VerletResult<()>>, Box<dyn std::error::Error>> {
-    let listen = AppServerListenAddr::Unix(socket.to_path_buf());
-    let mut config = VerletAppServerConfig::local(listen.clone(), std::env::current_dir()?);
+    root: &std::path::Path,
+    socket: &std::path::Path,
+) -> Result<tokio::task::JoinHandle<verlet::VerletResult<()>>, Box<dyn std::error::Error>> {
+    let listen = verlet::AppServerListenAddr::Unix(socket.to_path_buf());
+    let mut config = verlet::VerletAppServerConfig::local(listen.clone(), std::env::current_dir()?);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let server = VerletAppServer::new_local(config).await?;
+    let server = verlet::VerletAppServer::new_local(config).await?;
     Ok(tokio::spawn(async move { server.serve(listen).await }))
 }
 
 async fn start_tcp_server(
-    root: &Path,
+    root: &std::path::Path,
     addr: std::net::SocketAddr,
-) -> Result<(JoinHandle<verlet::VerletResult<()>>, String), Box<dyn std::error::Error>> {
-    let listen = AppServerListenAddr::WebSocket(addr);
-    let mut config = VerletAppServerConfig::local(listen.clone(), std::env::current_dir()?);
+) -> Result<(tokio::task::JoinHandle<verlet::VerletResult<()>>, String), Box<dyn std::error::Error>>
+{
+    let listen = verlet::AppServerListenAddr::WebSocket(addr);
+    let mut config = verlet::VerletAppServerConfig::local(listen.clone(), std::env::current_dir()?);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let server = VerletAppServer::new_local(config).await?;
-    let store = SqliteSessionStore::open(server.session_store_path()).await?;
-    let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None).await?;
-    let principal = PrincipalId::new(server.user_id());
+    let server = verlet::VerletAppServer::new_local(config).await?;
+    let store = verlet::SqliteSessionStore::open(server.session_store_path()).await?;
+    let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(
+        store,
+        std::sync::Arc::new(verlet::SystemDaemonClock),
+        None,
+    )
+    .await?;
+    let principal = verlet::daemon::identity::PrincipalId::new(server.user_id());
     let token = authority
         .mint_credential(&principal, &principal, None)
         .await?
@@ -157,16 +158,16 @@ async fn start_tcp_server(
 }
 
 async fn connect_client(
-    socket: &Path,
+    socket: &std::path::Path,
     client_name: &str,
-) -> Result<CodexTuiTestClient<UnixStream>, Box<dyn std::error::Error>> {
+) -> Result<verlet::CodexTuiTestClient<tokio::net::UnixStream>, Box<dyn std::error::Error>> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match CodexTuiTestClient::connect_unix(
+        match verlet::CodexTuiTestClient::connect_unix(
             socket,
-            CodexTuiConnectConfig {
+            verlet::CodexTuiConnectConfig {
                 client_name: client_name.to_string(),
-                ..CodexTuiConnectConfig::default()
+                ..verlet::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -174,7 +175,7 @@ async fn connect_client(
             Ok(client) => return Ok(client),
             Err(err) => {
                 last_error = Some(err.to_string());
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
     }
@@ -190,15 +191,15 @@ async fn connect_tcp_client(
     url: &str,
     client_name: &str,
     token: &str,
-) -> Result<CodexTuiTestClient<TcpStream>, Box<dyn std::error::Error>> {
+) -> Result<verlet::CodexTuiTestClient<tokio::net::TcpStream>, Box<dyn std::error::Error>> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match CodexTuiTestClient::connect_websocket(
+        match verlet::CodexTuiTestClient::connect_websocket(
             url,
-            CodexTuiConnectConfig {
+            verlet::CodexTuiConnectConfig {
                 client_name: client_name.to_string(),
                 bearer_token: Some(token.to_string()),
-                ..CodexTuiConnectConfig::default()
+                ..verlet::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -206,7 +207,7 @@ async fn connect_tcp_client(
             Ok(client) => return Ok(client),
             Err(err) => {
                 last_error = Some(err.to_string());
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
     }
@@ -223,7 +224,7 @@ async fn tcp_health_response(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match TcpStream::connect(addr).await {
+        match tokio::net::TcpStream::connect(addr).await {
             Ok(mut stream) => {
                 let request =
                     format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
@@ -234,7 +235,7 @@ async fn tcp_health_response(
             }
             Err(err) => {
                 last_error = Some(err.to_string());
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
     }

@@ -6,9 +6,6 @@
 //! assertion keywords fail closed so a schema never silently means less than it
 //! says.
 
-use serde_json::Value;
-use std::collections::BTreeMap;
-
 pub const MAX_JSON_SCHEMA_SUBSET_DEPTH: usize = 64;
 
 pub type JsonSchemaResult<T> = Result<T, JsonSchemaValidationError>;
@@ -56,7 +53,7 @@ impl std::error::Error for JsonSchemaValidationError {}
 
 #[derive(Clone, Debug, Default)]
 pub struct SchemaRegistry {
-    schemas: BTreeMap<String, Value>,
+    schemas: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl SchemaRegistry {
@@ -67,7 +64,7 @@ impl SchemaRegistry {
     pub fn register(
         &mut self,
         schema_id: impl Into<String>,
-        schema: Value,
+        schema: serde_json::Value,
     ) -> JsonSchemaResult<()> {
         let schema_id = schema_id.into();
         validate_json_schema_subset(&schema, &schema_id)?;
@@ -75,7 +72,7 @@ impl SchemaRegistry {
         Ok(())
     }
 
-    pub fn validate(&self, schema_id: &str, value: &Value) -> JsonSchemaResult<()> {
+    pub fn validate(&self, schema_id: &str, value: &serde_json::Value) -> JsonSchemaResult<()> {
         let schema = self.schemas.get(schema_id).ok_or_else(|| {
             JsonSchemaValidationError::new(
                 schema_id,
@@ -87,13 +84,16 @@ impl SchemaRegistry {
     }
 }
 
-pub fn validate_json_schema_subset(schema: &Value, label: &str) -> JsonSchemaResult<()> {
+pub fn validate_json_schema_subset(
+    schema: &serde_json::Value,
+    label: &str,
+) -> JsonSchemaResult<()> {
     validate_schema_interpretable(schema, "$", label, 0)
 }
 
 pub fn validate_json_value_against_schema(
-    schema: &Value,
-    value: &Value,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
     label: &str,
 ) -> JsonSchemaResult<()> {
     validate_schema_interpretable(schema, "$", label, 0)?;
@@ -101,8 +101,8 @@ pub fn validate_json_value_against_schema(
 }
 
 fn validate_schema_value(
-    schema: &Value,
-    value: &Value,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
     path: &str,
     label: &str,
     depth: usize,
@@ -181,8 +181,8 @@ fn validate_schema_value(
 }
 
 fn validate_object_schema(
-    schema: &serde_json::Map<String, Value>,
-    value: &Value,
+    schema: &serde_json::Map<String, serde_json::Value>,
+    value: &serde_json::Value,
     path: &str,
     label: &str,
     depth: usize,
@@ -229,15 +229,15 @@ fn validate_object_schema(
             continue;
         }
         match schema.get("additionalProperties") {
-            Some(Value::Bool(true)) => {}
-            Some(Value::Bool(false)) | None => {
+            Some(serde_json::Value::Bool(true)) => {}
+            Some(serde_json::Value::Bool(false)) | None => {
                 return Err(schema_error(
                     label,
                     path,
                     format!("unexpected property {name:?}; fail closed"),
                 ));
             }
-            Some(extra_schema @ Value::Object(_)) => {
+            Some(extra_schema @ serde_json::Value::Object(_)) => {
                 validate_schema_value(
                     extra_schema,
                     property_value,
@@ -259,8 +259,8 @@ fn validate_object_schema(
 }
 
 fn validate_array_schema(
-    schema: &serde_json::Map<String, Value>,
-    value: &Value,
+    schema: &serde_json::Map<String, serde_json::Value>,
+    value: &serde_json::Value,
     path: &str,
     label: &str,
     depth: usize,
@@ -280,15 +280,15 @@ fn validate_array_schema(
         )
     })?;
     match items {
-        Value::Bool(true) => Ok(()),
-        Value::Bool(false) => {
+        serde_json::Value::Bool(true) => Ok(()),
+        serde_json::Value::Bool(false) => {
             if value.is_empty() {
                 Ok(())
             } else {
                 Err(schema_error(label, path, "array schema disallows items"))
             }
         }
-        Value::Object(_) => {
+        serde_json::Value::Object(_) => {
             for (index, item) in value.iter().enumerate() {
                 validate_schema_value(items, item, &format!("{path}[{index}]"), label, depth + 1)?;
             }
@@ -303,7 +303,7 @@ fn validate_array_schema(
 }
 
 fn validate_schema_interpretable(
-    schema: &Value,
+    schema: &serde_json::Value,
     path: &str,
     label: &str,
     depth: usize,
@@ -364,7 +364,7 @@ fn validate_schema_interpretable(
 }
 
 fn validate_nested_schema_keywords(
-    schema: &serde_json::Map<String, Value>,
+    schema: &serde_json::Map<String, serde_json::Value>,
     path: &str,
     label: &str,
     depth: usize,
@@ -383,8 +383,8 @@ fn validate_nested_schema_keywords(
         }
     }
     match schema.get("additionalProperties") {
-        Some(Value::Bool(_)) | None => {}
-        Some(extra_schema @ Value::Object(_)) => {
+        Some(serde_json::Value::Bool(_)) | None => {}
+        Some(extra_schema @ serde_json::Value::Object(_)) => {
             validate_schema_interpretable(extra_schema, &format!("{path}.*"), label, depth + 1)?;
         }
         Some(_) => {
@@ -396,8 +396,8 @@ fn validate_nested_schema_keywords(
         }
     }
     match schema.get("items") {
-        Some(Value::Bool(_)) | None => {}
-        Some(items @ Value::Object(_)) => {
+        Some(serde_json::Value::Bool(_)) | None => {}
+        Some(items @ serde_json::Value::Object(_)) => {
             validate_schema_interpretable(items, &format!("{path}[]"), label, depth + 1)?;
         }
         Some(_) => {
@@ -411,10 +411,14 @@ fn validate_nested_schema_keywords(
     Ok(())
 }
 
-fn schema_type_names(value: &Value, label: &str, path: &str) -> JsonSchemaResult<Vec<String>> {
+fn schema_type_names(
+    value: &serde_json::Value,
+    label: &str,
+    path: &str,
+) -> JsonSchemaResult<Vec<String>> {
     match value {
-        Value::String(name) => Ok(vec![validate_schema_type_name(name, label, path)?]),
-        Value::Array(values) => {
+        serde_json::Value::String(name) => Ok(vec![validate_schema_type_name(name, label, path)?]),
+        serde_json::Value::Array(values) => {
             if values.is_empty() {
                 return Err(schema_error(
                     label,
@@ -455,7 +459,7 @@ fn validate_schema_type_name(name: &str, label: &str, path: &str) -> JsonSchemaR
     }
 }
 
-fn schema_value_type_matches(schema_type: &str, value: &Value) -> bool {
+fn schema_value_type_matches(schema_type: &str, value: &serde_json::Value) -> bool {
     match schema_type {
         "object" => value.is_object(),
         "array" => value.is_array(),
@@ -480,7 +484,11 @@ fn check_schema_depth(label: &str, path: &str, depth: usize) -> JsonSchemaResult
     }
 }
 
-fn required_properties(value: &Value, label: &str, path: &str) -> JsonSchemaResult<Vec<String>> {
+fn required_properties(
+    value: &serde_json::Value,
+    label: &str,
+    path: &str,
+) -> JsonSchemaResult<Vec<String>> {
     let values = value
         .as_array()
         .ok_or_else(|| schema_error(label, path, "\"required\" must be an array"))?;
@@ -496,10 +504,10 @@ fn required_properties(value: &Value, label: &str, path: &str) -> JsonSchemaResu
 }
 
 fn schema_properties(
-    value: &Value,
+    value: &serde_json::Value,
     label: &str,
     path: &str,
-) -> JsonSchemaResult<serde_json::Map<String, Value>> {
+) -> JsonSchemaResult<serde_json::Map<String, serde_json::Value>> {
     value
         .as_object()
         .cloned()
@@ -527,7 +535,7 @@ fn is_supported_schema_key(key: &str) -> bool {
     )
 }
 
-fn is_json_integer(value: &Value) -> bool {
+fn is_json_integer(value: &serde_json::Value) -> bool {
     value.as_i64().is_some()
         || value.as_u64().is_some()
         || value
@@ -535,15 +543,15 @@ fn is_json_integer(value: &Value) -> bool {
             .is_some_and(|value| value.is_finite() && value.fract() == 0.0)
 }
 
-fn json_type_name(value: &Value) -> &'static str {
+fn json_type_name(value: &serde_json::Value) -> &'static str {
     match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -553,12 +561,10 @@ fn schema_error(label: &str, path: &str, message: impl Into<String>) -> JsonSche
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
 
     #[test]
     fn schema_engine_validates_the_supported_runtime_subset() {
-        let schema = json!({
+        let schema = serde_json::json!({
             "type": "object",
             "required": ["message", "tags"],
             "additionalProperties": false,
@@ -573,9 +579,9 @@ mod tests {
             }
         });
 
-        validate_json_value_against_schema(
+        crate::schema::validate_json_value_against_schema(
             &schema,
-            &json!({
+            &serde_json::json!({
                 "message": "hello",
                 "count": 2,
                 "tags": ["a", "b"],
@@ -588,36 +594,41 @@ mod tests {
 
     #[test]
     fn schema_engine_fails_closed_for_bad_values_and_unsupported_keywords() {
-        let schema = json!({
+        let schema = serde_json::json!({
             "type": "object",
             "required": ["message"],
             "additionalProperties": false,
             "properties": {"message": {"type": "string"}}
         });
 
-        let missing = validate_json_value_against_schema(&schema, &json!({}), "tool").unwrap_err();
+        let missing = crate::schema::validate_json_value_against_schema(
+            &schema,
+            &serde_json::json!({}),
+            "tool",
+        )
+        .unwrap_err();
         assert!(missing.to_string().contains("missing required"));
         assert_eq!(missing.path(), "$");
 
-        let extra = validate_json_value_against_schema(
+        let extra = crate::schema::validate_json_value_against_schema(
             &schema,
-            &json!({"message": "ok", "extra": true}),
+            &serde_json::json!({"message": "ok", "extra": true}),
             "tool",
         )
         .unwrap_err();
         assert!(extra.to_string().contains("unexpected property"));
 
-        let unsupported = json!({
+        let unsupported = serde_json::json!({
             "type": "object",
             "oneOf": [{"type": "object"}]
         });
-        let err = validate_json_schema_subset(&unsupported, "tool").unwrap_err();
+        let err = crate::schema::validate_json_schema_subset(&unsupported, "tool").unwrap_err();
         assert!(err.to_string().contains("unsupported schema keyword"));
     }
 
     #[test]
     fn schema_engine_accepts_nullable_type_unions() {
-        let schema = json!({
+        let schema = serde_json::json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
@@ -630,9 +641,9 @@ mod tests {
             }
         });
 
-        validate_json_value_against_schema(
+        crate::schema::validate_json_value_against_schema(
             &schema,
-            &json!({
+            &serde_json::json!({
                 "message": "ok",
                 "note": null,
                 "metadata": {"rank": 1.5, "score": null}
@@ -640,9 +651,9 @@ mod tests {
             "tool",
         )
         .unwrap();
-        validate_json_value_against_schema(
+        crate::schema::validate_json_value_against_schema(
             &schema,
-            &json!({
+            &serde_json::json!({
                 "message": "ok",
                 "note": "present",
                 "metadata": null
@@ -651,9 +662,9 @@ mod tests {
         )
         .unwrap();
 
-        let err = validate_json_value_against_schema(
+        let err = crate::schema::validate_json_value_against_schema(
             &schema,
-            &json!({"message": "ok", "note": false}),
+            &serde_json::json!({"message": "ok", "note": false}),
             "tool",
         )
         .unwrap_err();
@@ -663,7 +674,7 @@ mod tests {
 
     #[test]
     fn schema_engine_preflights_bad_type_unions_in_unreached_branches() {
-        let invalid_optional = json!({
+        let invalid_optional = serde_json::json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
@@ -671,33 +682,33 @@ mod tests {
                 "unused": {"type": ["string", "wat"]}
             }
         });
-        let err = validate_json_value_against_schema(
+        let err = crate::schema::validate_json_value_against_schema(
             &invalid_optional,
-            &json!({"message": "ok"}),
+            &serde_json::json!({"message": "ok"}),
             "tool",
         )
         .unwrap_err();
         assert!(err.to_string().contains("unsupported schema type"));
         assert_eq!(err.path(), "$.unused");
 
-        let empty_union = json!({
+        let empty_union = serde_json::json!({
             "type": "object",
             "properties": {
                 "unused": {"type": []}
             }
         });
-        let err = validate_json_schema_subset(&empty_union, "tool").unwrap_err();
+        let err = crate::schema::validate_json_schema_subset(&empty_union, "tool").unwrap_err();
         assert!(err.to_string().contains("\"type\" union must not be empty"));
         assert_eq!(err.path(), "$.unused");
     }
 
     #[test]
     fn schema_registry_validates_by_schema_id() {
-        let mut registry = SchemaRegistry::new();
+        let mut registry = crate::schema::SchemaRegistry::new();
         registry
             .register(
                 "verlet.fixture/1",
-                json!({
+                serde_json::json!({
                     "type": "object",
                     "required": ["schema"],
                     "properties": {"schema": {"enum": ["verlet.fixture/1"]}},
@@ -709,12 +720,12 @@ mod tests {
         registry
             .validate(
                 "verlet.fixture/1",
-                &json!({"schema": "verlet.fixture/1", "ok": true}),
+                &serde_json::json!({"schema": "verlet.fixture/1", "ok": true}),
             )
             .unwrap();
 
         let missing = registry
-            .validate("verlet.missing/1", &json!({}))
+            .validate("verlet.missing/1", &serde_json::json!({}))
             .unwrap_err();
         assert!(missing.to_string().contains("unknown schema id"));
     }

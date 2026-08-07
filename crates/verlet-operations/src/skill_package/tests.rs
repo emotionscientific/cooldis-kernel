@@ -1,7 +1,3 @@
-use super::*;
-use std::fs;
-use uuid::Uuid;
-
 #[test]
 fn publish_skill_directory_is_deterministic_and_preserves_entries() {
     let root = temp_root("skill-package-deterministic");
@@ -37,18 +33,18 @@ More body.
 Unicode description line.
 "#,
     );
-    let registry = LocalSkillRegistry::new(root.join("skills-registry"));
+    let registry = crate::skill_package::LocalSkillRegistry::new(root.join("skills-registry"));
 
     let first = registry
-        .publish_directory(PublishSkillPackageRequest {
+        .publish_directory(crate::skill_package::PublishSkillPackageRequest {
             package_dir: package_dir.clone(),
             name: None,
         })
         .unwrap();
     let active_record_path = registry.record_path("karl-skills").unwrap();
-    let first_active_record = fs::read(&active_record_path).unwrap();
+    let first_active_record = std::fs::read(&active_record_path).unwrap();
     let second = registry
-        .publish_directory(PublishSkillPackageRequest {
+        .publish_directory(crate::skill_package::PublishSkillPackageRequest {
             package_dir,
             name: None,
         })
@@ -56,7 +52,7 @@ Unicode description line.
 
     assert_eq!(first.active_artifact_hash, second.active_artifact_hash);
     assert_eq!(
-        fs::read(&active_record_path).unwrap(),
+        std::fs::read(&active_record_path).unwrap(),
         first_active_record,
         "an identical re-publish must leave the active record stable"
     );
@@ -93,7 +89,7 @@ Unicode description line.
         first.package
     );
     assert_eq!(
-        fs::read_dir(root.join("skills-registry/versions/karl-skills"))
+        std::fs::read_dir(root.join("skills-registry/versions/karl-skills"))
             .unwrap()
             .count(),
         1,
@@ -101,13 +97,13 @@ Unicode description line.
     );
 
     let plain_file = root.join("karl-skills/plain/SKILL.md");
-    fs::write(
+    std::fs::write(
         &plain_file,
         "# Plain Skill\n\nChanged description.\n\nChanged body.\n",
     )
     .unwrap();
     let changed = registry
-        .publish_directory(PublishSkillPackageRequest {
+        .publish_directory(crate::skill_package::PublishSkillPackageRequest {
             package_dir: root.join("karl-skills"),
             name: None,
         })
@@ -130,12 +126,12 @@ Unicode description line.
         "publishing a new latest version must preserve prior pinned versions"
     );
     assert_eq!(
-        fs::read_dir(root.join("skills-registry/versions/karl-skills"))
+        std::fs::read_dir(root.join("skills-registry/versions/karl-skills"))
             .unwrap()
             .count(),
         2
     );
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -143,25 +139,31 @@ fn declared_skill_refs_distinguish_floating_and_pinned_without_masking_hash_erro
     let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     assert_eq!(
-        DeclaredSkillPackageRef::parse("skill://karl-skills").unwrap(),
-        DeclaredSkillPackageRef::Floating {
+        crate::skill_package::DeclaredSkillPackageRef::parse("skill://karl-skills").unwrap(),
+        crate::skill_package::DeclaredSkillPackageRef::Floating {
             name: "karl-skills".to_string(),
         }
     );
     assert_eq!(
-        DeclaredSkillPackageRef::parse(&format!("skill://karl-skills@sha256:{hash}")).unwrap(),
-        DeclaredSkillPackageRef::Pinned(SkillPackageRef {
-            name: "karl-skills".to_string(),
-            artifact_hash: hash.to_string(),
-        })
+        crate::skill_package::DeclaredSkillPackageRef::parse(&format!(
+            "skill://karl-skills@sha256:{hash}"
+        ))
+        .unwrap(),
+        crate::skill_package::DeclaredSkillPackageRef::Pinned(
+            crate::skill_package::SkillPackageRef {
+                name: "karl-skills".to_string(),
+                artifact_hash: hash.to_string(),
+            }
+        )
     );
 
-    let bad_hash = DeclaredSkillPackageRef::parse("skill://karl-skills@sha256:short")
-        .unwrap_err()
-        .to_string();
+    let bad_hash =
+        crate::skill_package::DeclaredSkillPackageRef::parse("skill://karl-skills@sha256:short")
+            .unwrap_err()
+            .to_string();
     assert!(bad_hash.contains("artifact hash"), "{bad_hash}");
     assert!(bad_hash.contains("sha256 hex digest"), "{bad_hash}");
-    let bad_name = DeclaredSkillPackageRef::parse("skill://bad/name")
+    let bad_name = crate::skill_package::DeclaredSkillPackageRef::parse("skill://bad/name")
         .unwrap_err()
         .to_string();
     assert!(bad_name.contains("record name"), "{bad_name}");
@@ -182,10 +184,10 @@ description "missing colon"
 body
 "#,
     );
-    let registry = LocalSkillRegistry::new(root.join("skills-registry"));
+    let registry = crate::skill_package::LocalSkillRegistry::new(root.join("skills-registry"));
 
     let err = registry
-        .publish_directory(PublishSkillPackageRequest {
+        .publish_directory(crate::skill_package::PublishSkillPackageRequest {
             package_dir,
             name: None,
         })
@@ -194,13 +196,13 @@ body
     let text = err.to_string();
     assert!(text.contains("malformed frontmatter"));
     assert!(text.contains(&skill_file.display().to_string()));
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn frontmatter_name_does_not_require_a_directory_name_fallback() {
-    let entry = SkillPackageEntry::from_skill_body(
-        Path::new("/"),
+    let entry = crate::skill_package::SkillPackageEntry::from_skill_body(
+        std::path::Path::new("/"),
         "---\nname: declared-skill\ndescription: Declared description.\n---\n# Declared Skill\n"
             .to_string(),
     )
@@ -217,19 +219,22 @@ fn missing_frontmatter_name_still_requires_a_directory_name_fallback() {
         "---\ndescription: Declared description.\n---\n# Declared Skill\n",
         "---\nname: \"\"\ndescription: Declared description.\n---\n# Declared Skill\n",
     ] {
-        let error =
-            SkillPackageEntry::from_skill_body(Path::new("/"), body.to_string()).unwrap_err();
+        let error = crate::skill_package::SkillPackageEntry::from_skill_body(
+            std::path::Path::new("/"),
+            body.to_string(),
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("has no unicode name"), "{error}");
     }
 }
 
-fn temp_root(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("{name}-{}", Uuid::now_v7()))
+fn temp_root(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("{name}-{}", uuid::Uuid::now_v7()))
 }
 
-fn write_skill(package_dir: &Path, name: &str, body: &str) {
+fn write_skill(package_dir: &std::path::Path, name: &str, body: &str) {
     let dir = package_dir.join(name);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("SKILL.md"), body).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
 }

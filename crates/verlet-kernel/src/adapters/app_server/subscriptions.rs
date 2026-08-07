@@ -1,8 +1,3 @@
-use super::connection::{ConnectionState, now_ms, turn_error};
-use super::threads::*;
-use super::*;
-use crate::{EventKind, EventRecord, ToolCallCompletedPayload};
-
 const INITIAL_THREAD_STATUS_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const FAILED_THREAD_EVENT_GRACE: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -10,25 +5,28 @@ const FAILED_THREAD_EVENT_GRACE: std::time::Duration = std::time::Duration::from
 pub(super) struct AppServerSubscriptions {
     pub(super) next_subscriber_id: u64,
     pub(super) next_watcher_id: u64,
-    pub(super) subscribers: HashMap<String, BTreeMap<u64, AppServerSubscriber>>,
-    pub(super) watchers: HashMap<String, AppServerThreadWatcher>,
+    pub(super) subscribers:
+        std::collections::HashMap<String, std::collections::BTreeMap<u64, AppServerSubscriber>>,
+    pub(super) watchers: std::collections::HashMap<String, AppServerThreadWatcher>,
 }
 
 #[derive(Clone)]
 pub(super) struct AppServerSubscriber {
-    pub(super) outbound: mpsc::UnboundedSender<JsonRpcMessage>,
-    pub(super) opt_out_notifications: Arc<RwLock<HashSet<String>>>,
+    pub(super) outbound:
+        tokio::sync::mpsc::UnboundedSender<crate::adapters::app_server::connection::JsonRpcMessage>,
+    pub(super) opt_out_notifications:
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
 pub(super) struct AppServerThreadWatcher {
     pub(super) id: u64,
-    pub(super) handle: JoinHandle<()>,
+    pub(super) handle: tokio::task::JoinHandle<()>,
 }
 
 enum ResyncedTurnItem {
     AgentMessage,
     AgentThinking,
-    DynamicTool(Value),
+    DynamicTool(serde_json::Value),
 }
 
 struct ResyncedTurnProjection {
@@ -39,15 +37,15 @@ struct ResyncedTurnProjection {
 
 struct ResyncedTurnFacts {
     entry_id: String,
-    completions: HashMap<String, ToolCallCompletedPayload>,
-    result_entry_ids: HashMap<String, String>,
+    completions: std::collections::HashMap<String, crate::ToolCallCompletedPayload>,
+    result_entry_ids: std::collections::HashMap<String, String>,
 }
 
 #[cfg(test)]
 #[derive(Clone)]
 pub(super) struct ThreadResyncTestGate {
-    entered: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Notify>,
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
 }
 
 #[cfg(test)]
@@ -64,8 +62,8 @@ impl ThreadResyncTestGate {
 #[cfg(test)]
 pub(super) fn install_thread_resync_test_gate(thread_id: &str) -> ThreadResyncTestGate {
     let gate = ThreadResyncTestGate {
-        entered: Arc::new(tokio::sync::Notify::new()),
-        release: Arc::new(tokio::sync::Notify::new()),
+        entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
     };
     thread_resync_test_gates()
         .lock()
@@ -75,10 +73,12 @@ pub(super) fn install_thread_resync_test_gate(thread_id: &str) -> ThreadResyncTe
 }
 
 #[cfg(test)]
-fn thread_resync_test_gates() -> &'static std::sync::Mutex<HashMap<String, ThreadResyncTestGate>> {
-    static GATES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ThreadResyncTestGate>>> =
-        std::sync::OnceLock::new();
-    GATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+fn thread_resync_test_gates()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, ThreadResyncTestGate>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ThreadResyncTestGate>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 #[cfg(test)]
@@ -99,10 +99,10 @@ async fn pause_thread_resync_for_test(thread_id: &str) {
         .remove(thread_id);
 }
 
-impl VerletAppServer {
+impl crate::adapters::app_server::VerletAppServer {
     pub(super) async fn subscribe_thread_connection(
         &self,
-        handle: RuntimeThreadHandle,
+        handle: crate::RuntimeThreadHandle,
         subscriber: AppServerSubscriber,
     ) -> u64 {
         let thread_id = handle.context().coordinates.thread_id.to_string();
@@ -213,7 +213,7 @@ impl VerletAppServer {
         &self,
         thread_id: &str,
         method: &str,
-        params: Value,
+        params: serde_json::Value,
     ) {
         let subscribers = {
             let subscriptions = self.inner.subscriptions.lock().await;
@@ -230,20 +230,25 @@ impl VerletAppServer {
 }
 
 impl AppServerSubscriber {
-    pub(super) async fn notify(&self, method: &str, params: Value) {
+    pub(super) async fn notify(&self, method: &str, params: serde_json::Value) {
         if self.opt_out_notifications.read().await.contains(method) {
             return;
         }
-        let _ = self
-            .outbound
-            .send(JsonRpcMessage::Notification(JsonRpcNotification {
-                method: method.to_string(),
-                params: Some(params),
-            }));
+        let _ = self.outbound.send(
+            crate::adapters::app_server::connection::JsonRpcMessage::Notification(
+                crate::adapters::app_server::connection::JsonRpcNotification {
+                    method: method.to_string(),
+                    params: Some(params),
+                },
+            ),
+        );
     }
 }
 
-pub(super) async fn watch_thread(app: VerletAppServer, handle: RuntimeThreadHandle) {
+pub(super) async fn watch_thread(
+    app: crate::adapters::app_server::VerletAppServer,
+    handle: crate::RuntimeThreadHandle,
+) {
     let thread_id = handle.context().coordinates.thread_id.to_string();
     let mut events = handle.subscribe_events();
     let mut status = handle.subscribe_status();
@@ -264,7 +269,7 @@ pub(super) async fn watch_thread(app: VerletAppServer, handle: RuntimeThreadHand
                             && events.len() == 0
                             && matches!(
                                 status_value,
-                                ThreadStatus::Idle | ThreadStatus::Stopped | ThreadStatus::Failed
+                                crate::ThreadStatus::Idle | crate::ThreadStatus::Stopped | crate::ThreadStatus::Failed
                             )
                         {
                             if !resynchronize_thread_after_lag(
@@ -284,7 +289,7 @@ pub(super) async fn watch_thread(app: VerletAppServer, handle: RuntimeThreadHand
                             lagged_turn = None;
                             status_value = handle.status();
                         }
-                        if matches!(status_value, ThreadStatus::Stopped | ThreadStatus::Failed)
+                        if matches!(status_value, crate::ThreadStatus::Stopped | crate::ThreadStatus::Failed)
                             && !app.thread_has_active_turn(&thread_id).await
                         {
                             if lagged_events > 0
@@ -320,7 +325,7 @@ pub(super) async fn watch_thread(app: VerletAppServer, handle: RuntimeThreadHand
                             app.notify_thread_subscribers(
                                 &thread_id,
                                 "thread/resync/started",
-                                json!({
+                                serde_json::json!({
                                     "threadId": thread_id,
                                     "reason": "broadcastLag",
                                     "laggedEvents": skipped,
@@ -362,7 +367,7 @@ pub(super) async fn watch_thread(app: VerletAppServer, handle: RuntimeThreadHand
                 if lagged_events > 0
                     && matches!(
                         status_value,
-                        ThreadStatus::Idle | ThreadStatus::Stopped | ThreadStatus::Failed
+                        crate::ThreadStatus::Idle | crate::ThreadStatus::Stopped | crate::ThreadStatus::Failed
                     )
                 {
                     if !resynchronize_thread_after_lag(
@@ -383,11 +388,11 @@ pub(super) async fn watch_thread(app: VerletAppServer, handle: RuntimeThreadHand
                     status_value = handle.status();
                 }
                 handle_thread_status(&app, &thread_id, status_value).await;
-                if status_value == ThreadStatus::Failed {
+                if status_value == crate::ThreadStatus::Failed {
                     handle_failed_thread_status(&app, &thread_id, &mut events).await;
                     break;
                 }
-                if status_value == ThreadStatus::Stopped {
+                if status_value == crate::ThreadStatus::Stopped {
                     break;
                 }
             }
@@ -396,8 +401,8 @@ pub(super) async fn watch_thread(app: VerletAppServer, handle: RuntimeThreadHand
 }
 
 pub(super) async fn resynchronize_thread_after_lag(
-    app: &VerletAppServer,
-    handle: &RuntimeThreadHandle,
+    app: &crate::adapters::app_server::VerletAppServer,
+    handle: &crate::RuntimeThreadHandle,
     thread_id: &str,
     lagged_events: u64,
     lagged_turn: Option<&str>,
@@ -456,13 +461,13 @@ pub(super) async fn resynchronize_thread_after_lag(
         let mut state = app.inner.state.write().await;
         state.threads.get_mut(thread_id).map(|thread| {
             thread.status = handle.status();
-            thread.updated_at_ms = now_ms();
+            thread.updated_at_ms = crate::adapters::app_server::connection::now_ms();
             if let (Some(turn_id), Some(projection)) = (lagged_turn, projection)
                 && let Some(turn) = thread.turns.get_mut(turn_id)
             {
                 apply_resynced_turn_projection(turn, projection);
             }
-            thread_json(thread, true)
+            crate::adapters::app_server::threads::thread_json(thread, true)
         })
     };
     let Some(thread) = thread else {
@@ -479,7 +484,7 @@ pub(super) async fn resynchronize_thread_after_lag(
     app.notify_thread_subscribers(
         thread_id,
         "thread/resynced",
-        json!({
+        serde_json::json!({
             "threadId": thread_id,
             "reason": "broadcastLag",
             "laggedEvents": lagged_events,
@@ -491,7 +496,7 @@ pub(super) async fn resynchronize_thread_after_lag(
 }
 
 async fn notify_thread_resync_failed(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     lagged_events: u64,
     message: String,
@@ -499,7 +504,7 @@ async fn notify_thread_resync_failed(
     app.notify_thread_subscribers(
         thread_id,
         "thread/resync/failed",
-        json!({
+        serde_json::json!({
             "threadId": thread_id,
             "reason": "broadcastLag",
             "laggedEvents": lagged_events,
@@ -513,17 +518,17 @@ async fn notify_thread_resync_failed(
 }
 
 fn resynced_turn_projection(
-    entries: &[SessionEntry],
+    entries: &[crate::SessionEntry],
     entry_id: &str,
-    completions: &HashMap<String, ToolCallCompletedPayload>,
-    result_entry_ids: &HashMap<String, String>,
+    completions: &std::collections::HashMap<String, crate::ToolCallCompletedPayload>,
+    result_entry_ids: &std::collections::HashMap<String, String>,
 ) -> Option<ResyncedTurnProjection> {
     let user_index = entries.iter().position(|entry| {
         entry.entry_id.to_string() == entry_id
             && matches!(
                 &entry.kind,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::User { .. }
+                crate::SessionEntryKind::Message {
+                    message: crate::CanonicalMessage::User { .. }
                 }
             )
     })?;
@@ -536,50 +541,52 @@ fn resynced_turn_projection(
     let mut saw_agent_thinking = false;
 
     for entry in &entries[user_index + 1..] {
-        let SessionEntryKind::Message { message } = &entry.kind else {
+        let crate::SessionEntryKind::Message { message } = &entry.kind else {
             continue;
         };
         match message {
-            CanonicalMessage::User { .. } => break,
-            CanonicalMessage::Assistant { content, .. } => {
+            crate::CanonicalMessage::User { .. } => break,
+            crate::CanonicalMessage::Assistant { content, .. } => {
                 for content in content {
                     match content {
-                        CanonicalContent::Text { text, .. } => {
+                        crate::CanonicalContent::Text { text, .. } => {
                             if !text.is_empty() && !saw_agent_message {
                                 projection.items.push(ResyncedTurnItem::AgentMessage);
                                 saw_agent_message = true;
                             }
                             projection.assistant_text.push_str(text);
                         }
-                        CanonicalContent::Thinking { text, .. } => {
+                        crate::CanonicalContent::Thinking { text, .. } => {
                             if !text.is_empty() && !saw_agent_thinking {
                                 projection.items.push(ResyncedTurnItem::AgentThinking);
                                 saw_agent_thinking = true;
                             }
                             projection.thinking_text.push_str(text);
                         }
-                        CanonicalContent::ToolCall {
+                        crate::CanonicalContent::ToolCall {
                             id,
                             name,
                             arguments,
                         } => {
-                            projection.items.push(ResyncedTurnItem::DynamicTool(json!({
-                                "type": "dynamicToolCall",
-                                "id": id,
-                                "namespace": null,
-                                "tool": name,
-                                "arguments": arguments,
-                                "status": "inProgress",
-                                "contentItems": null,
-                                "success": null,
-                                "durationMs": null,
-                            })));
+                            projection.items.push(ResyncedTurnItem::DynamicTool(
+                                serde_json::json!({
+                                    "type": "dynamicToolCall",
+                                    "id": id,
+                                    "namespace": null,
+                                    "tool": name,
+                                    "arguments": arguments,
+                                    "status": "inProgress",
+                                    "contentItems": null,
+                                    "success": null,
+                                    "durationMs": null,
+                                }),
+                            ));
                         }
-                        CanonicalContent::Image { .. } => {}
+                        crate::CanonicalContent::Image { .. } => {}
                     }
                 }
             }
-            CanonicalMessage::ToolResult {
+            crate::CanonicalMessage::ToolResult {
                 tool_call_id,
                 content,
                 is_error,
@@ -590,20 +597,21 @@ fn resynced_turn_projection(
                         matches!(
                             item,
                             ResyncedTurnItem::DynamicTool(value)
-                                if value.get("id").and_then(Value::as_str)
+                                if value.get("id").and_then(serde_json::Value::as_str)
                                     == Some(tool_call_id.as_str())
                         )
                     })
                 {
-                    item["status"] =
-                        Value::String(if *is_error { "failed" } else { "completed" }.to_string());
-                    item["success"] = Value::Bool(!is_error);
-                    item["contentItems"] = json!([{
+                    item["status"] = serde_json::Value::String(
+                        if *is_error { "failed" } else { "completed" }.to_string(),
+                    );
+                    item["success"] = serde_json::Value::Bool(!is_error);
+                    item["contentItems"] = serde_json::json!([{
                         "type": "inputText",
-                        "text": text_from_canonical_content(content),
+                        "text": crate::adapters::app_server::text_from_canonical_content(content),
                     }]);
                     if let Some(completion) = completions.get(tool_call_id) {
-                        item["status"] = Value::String(
+                        item["status"] = serde_json::Value::String(
                             if completion.success {
                                 "completed"
                             } else {
@@ -611,11 +619,11 @@ fn resynced_turn_projection(
                             }
                             .to_string(),
                         );
-                        item["success"] = Value::Bool(completion.success);
+                        item["success"] = serde_json::Value::Bool(completion.success);
                         item["durationMs"] = completion
                             .duration_ms
-                            .map(Value::from)
-                            .unwrap_or(Value::Null);
+                            .map(serde_json::Value::from)
+                            .unwrap_or(serde_json::Value::Null);
                     }
                 }
             }
@@ -628,13 +636,17 @@ fn resynced_turn_projection(
         let ResyncedTurnItem::DynamicTool(item) = item else {
             continue;
         };
-        let Some(call_id) = item.get("id").and_then(Value::as_str).map(str::to_string) else {
+        let Some(call_id) = item
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
             continue;
         };
         let Some(completion) = completions.get(&call_id) else {
             continue;
         };
-        item["status"] = Value::String(
+        item["status"] = serde_json::Value::String(
             if completion.success {
                 "completed"
             } else {
@@ -642,16 +654,16 @@ fn resynced_turn_projection(
             }
             .to_string(),
         );
-        item["success"] = Value::Bool(completion.success);
+        item["success"] = serde_json::Value::Bool(completion.success);
         item["durationMs"] = completion
             .duration_ms
-            .map(Value::from)
-            .unwrap_or(Value::Null);
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null);
         let result_entry_id = result_entry_ids.get(&call_id);
         if let Some(content) = entries.iter().find_map(|entry| match &entry.kind {
-            SessionEntryKind::Message {
+            crate::SessionEntryKind::Message {
                 message:
-                    CanonicalMessage::ToolResult {
+                    crate::CanonicalMessage::ToolResult {
                         tool_call_id,
                         content,
                         ..
@@ -664,9 +676,9 @@ fn resynced_turn_projection(
             }
             _ => None,
         }) {
-            item["contentItems"] = json!([{
+            item["contentItems"] = serde_json::json!([{
                 "type": "inputText",
-                "text": text_from_canonical_content(content),
+                "text": crate::adapters::app_server::text_from_canonical_content(content),
             }]);
         }
     }
@@ -674,20 +686,24 @@ fn resynced_turn_projection(
 }
 
 fn resynced_turn_facts(
-    events: &[EventRecord],
+    events: &[crate::EventRecord],
     turn_id: &str,
 ) -> Result<Option<ResyncedTurnFacts>, String> {
     let submitted = events
         .iter()
         .filter(|event| {
-            event.kind == EventKind::TurnSubmitted
-                && event.payload.get("turn_id").and_then(Value::as_str) == Some(turn_id)
+            event.kind == crate::EventKind::TurnSubmitted
+                && event
+                    .payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(turn_id)
         })
         .filter_map(|event| {
             event
                 .payload
                 .get("entry_id")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .map(|entry_id| (event.sequence.get(), entry_id.to_string()))
         })
         .max_by_key(|(sequence, _)| *sequence);
@@ -695,46 +711,47 @@ fn resynced_turn_facts(
         return Ok(None);
     };
 
-    let mut completions = HashMap::new();
-    let mut request_calls = HashMap::new();
+    let mut completions = std::collections::HashMap::new();
+    let mut request_calls = std::collections::HashMap::new();
     for event in events {
         match event.kind {
-            EventKind::ToolCallRequested
+            crate::EventKind::ToolCallRequested
                 if event
                     .payload
                     .get("subject")
                     .and_then(|subject| subject.get("turn_id"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     == Some(turn_id) =>
             {
                 let call_id = event
                     .payload
                     .get("subject")
                     .and_then(|subject| subject.get("call_id"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| format!("tool.call.requested {} has no call id", event.id))?;
                 request_calls.insert(event.id, call_id.to_string());
             }
-            EventKind::ToolCallCompleted
+            crate::EventKind::ToolCallCompleted
                 if event
                     .payload
                     .get("subject")
                     .and_then(|subject| subject.get("turn_id"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     == Some(turn_id) =>
             {
-                let payload =
-                    serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone())
-                        .map_err(|err| format!("tool.call.completed payload is invalid: {err}"))?;
+                let payload = serde_json::from_value::<crate::ToolCallCompletedPayload>(
+                    event.payload.clone(),
+                )
+                .map_err(|err| format!("tool.call.completed payload is invalid: {err}"))?;
                 completions.insert(payload.subject.call_id.clone(), payload);
             }
             _ => {}
         }
     }
-    let mut result_entry_ids = HashMap::new();
+    let mut result_entry_ids = std::collections::HashMap::new();
     for event in events
         .iter()
-        .filter(|event| event.kind == EventKind::SessionEntryAppended)
+        .filter(|event| event.kind == crate::EventKind::SessionEntryAppended)
     {
         let Some(call_id) = event
             .provenance
@@ -744,7 +761,11 @@ fn resynced_turn_facts(
         else {
             continue;
         };
-        let Some(result_entry_id) = event.payload.get("entry_id").and_then(Value::as_str) else {
+        let Some(result_entry_id) = event
+            .payload
+            .get("entry_id")
+            .and_then(serde_json::Value::as_str)
+        else {
             continue;
         };
         result_entry_ids.insert(call_id.clone(), result_entry_id.to_string());
@@ -757,22 +778,28 @@ fn resynced_turn_facts(
 }
 
 fn apply_resynced_turn_projection(
-    turn: &mut AppServerTurnState,
+    turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
     projection: ResyncedTurnProjection,
 ) {
     turn.items.retain(|item| {
         !matches!(
-            item.get("type").and_then(Value::as_str),
+            item.get("type").and_then(serde_json::Value::as_str),
             Some("agentMessage" | "agentThinking" | "dynamicToolCall")
         )
     });
     for item in projection.items {
         turn.items.push(match item {
             ResyncedTurnItem::AgentMessage => {
-                agent_message_item_from_text(&turn.assistant_item_id, &projection.assistant_text)
+                crate::adapters::app_server::threads::agent_message_item_from_text(
+                    &turn.assistant_item_id,
+                    &projection.assistant_text,
+                )
             }
             ResyncedTurnItem::AgentThinking => {
-                agent_thinking_item_from_text(&turn.thinking_item_id, &projection.thinking_text)
+                crate::adapters::app_server::threads::agent_thinking_item_from_text(
+                    &turn.thinking_item_id,
+                    &projection.thinking_text,
+                )
             }
             ResyncedTurnItem::DynamicTool(item) => item,
         });
@@ -785,14 +812,14 @@ fn apply_resynced_turn_projection(
     turn.thinking_completed = false;
 }
 
-pub(super) async fn wait_for_initial_thread_status(handle: &RuntimeThreadHandle) {
-    if handle.status() != ThreadStatus::Starting {
+pub(super) async fn wait_for_initial_thread_status(handle: &crate::RuntimeThreadHandle) {
+    if handle.status() != crate::ThreadStatus::Starting {
         return;
     }
     let mut status = handle.subscribe_status();
     let _ = tokio::time::timeout(INITIAL_THREAD_STATUS_WAIT_TIMEOUT, async {
         loop {
-            if *status.borrow() != ThreadStatus::Starting {
+            if *status.borrow() != crate::ThreadStatus::Starting {
                 return;
             }
             if status.changed().await.is_err() {
@@ -804,9 +831,9 @@ pub(super) async fn wait_for_initial_thread_status(handle: &RuntimeThreadHandle)
 }
 
 pub(super) async fn handle_thread_status(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
-    status: ThreadStatus,
+    status: crate::ThreadStatus,
 ) {
     let completion_to_schedule = {
         let mut state = app.inner.state.write().await;
@@ -814,14 +841,16 @@ pub(super) async fn handle_thread_status(
             return;
         };
         thread.status = status;
-        thread.updated_at_ms = now_ms();
-        if matches!(status, ThreadStatus::Running | ThreadStatus::Cancelling)
-            && let Some(turn_id) = thread.active_turn_id.clone()
+        thread.updated_at_ms = crate::adapters::app_server::connection::now_ms();
+        if matches!(
+            status,
+            crate::ThreadStatus::Running | crate::ThreadStatus::Cancelling
+        ) && let Some(turn_id) = thread.active_turn_id.clone()
             && let Some(turn) = thread.turns.get_mut(&turn_id)
         {
             turn.observed_running = true;
         }
-        if status == ThreadStatus::Idle {
+        if status == crate::ThreadStatus::Idle {
             thread.active_turn_id.as_ref().and_then(|turn_id| {
                 let turn = thread.turns.get_mut(turn_id)?;
                 if turn.completion_scheduled {
@@ -838,9 +867,9 @@ pub(super) async fn handle_thread_status(
     app.notify_thread_subscribers(
         thread_id,
         "thread/status/changed",
-        json!({
+        serde_json::json!({
             "threadId": thread_id,
-            "status": thread_status_json(status),
+            "status": crate::adapters::app_server::threads::thread_status_json(status),
         }),
     )
     .await;
@@ -852,18 +881,25 @@ pub(super) async fn handle_thread_status(
             complete_turn_after_settle(app, thread_id, turn_id).await;
         });
     }
-    if matches!(status, ThreadStatus::Stopped | ThreadStatus::Failed) {
-        app.notify_thread_subscribers(thread_id, "thread/closed", json!({ "threadId": thread_id }))
-            .await;
+    if matches!(
+        status,
+        crate::ThreadStatus::Stopped | crate::ThreadStatus::Failed
+    ) {
+        app.notify_thread_subscribers(
+            thread_id,
+            "thread/closed",
+            serde_json::json!({ "threadId": thread_id }),
+        )
+        .await;
     }
 }
 
 /// Lets queued runtime failure events provide their code and message before a
 /// failed thread status falls back to a generic failed-turn projection.
 pub(super) async fn handle_failed_thread_status(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
-    events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
 ) {
     if !app.thread_has_active_turn(thread_id).await {
         return;
@@ -884,7 +920,7 @@ pub(super) async fn handle_failed_thread_status(
 }
 
 pub(super) async fn complete_turn_after_settle(
-    app: VerletAppServer,
+    app: crate::adapters::app_server::VerletAppServer,
     thread_id: String,
     turn_id: String,
 ) {
@@ -901,10 +937,11 @@ pub(super) async fn complete_turn_after_settle(
         }
         thread.active_turn_id.take();
         thread.turns.get_mut(&turn_id).map(|turn| {
-            if turn.status == AppServerTurnStatus::InProgress {
-                turn.status = AppServerTurnStatus::Completed;
+            if turn.status == crate::adapters::app_server::threads::AppServerTurnStatus::InProgress
+            {
+                turn.status = crate::adapters::app_server::threads::AppServerTurnStatus::Completed;
             }
-            turn.completed_at_ms = Some(now_ms());
+            turn.completed_at_ms = Some(crate::adapters::app_server::connection::now_ms());
             let synthesized_message = current_turn_agent_content
                 .as_ref()
                 .map(|content| content.text.as_str())
@@ -913,7 +950,8 @@ pub(super) async fn complete_turn_after_settle(
                 .as_ref()
                 .map(|content| content.thinking.as_str())
                 .and_then(|text| reconcile_turn_thinking_text(turn, text));
-            let (turn, completed_items) = finalize_turn_payload(turn);
+            let (turn, completed_items) =
+                crate::adapters::app_server::threads::finalize_turn_payload(turn);
             (
                 turn,
                 synthesized_message,
@@ -932,11 +970,11 @@ pub(super) async fn complete_turn_after_settle(
             app.notify_thread_subscribers(
                 &thread_id,
                 "item/started",
-                json!({
+                serde_json::json!({
                     "item": item,
                     "threadId": thread_id,
                     "turnId": turn_id,
-                    "startedAtMs": now_ms(),
+                    "startedAtMs": crate::adapters::app_server::connection::now_ms(),
                 }),
             )
             .await;
@@ -944,7 +982,7 @@ pub(super) async fn complete_turn_after_settle(
         app.notify_thread_subscribers(
             &thread_id,
             "item/agentMessage/delta",
-            json!({
+            serde_json::json!({
                 "threadId": thread_id,
                 "turnId": turn_id,
                 "itemId": item_id,
@@ -958,11 +996,11 @@ pub(super) async fn complete_turn_after_settle(
             app.notify_thread_subscribers(
                 &thread_id,
                 "item/started",
-                json!({
+                serde_json::json!({
                     "item": item,
                     "threadId": thread_id,
                     "turnId": turn_id,
-                    "startedAtMs": now_ms(),
+                    "startedAtMs": crate::adapters::app_server::connection::now_ms(),
                 }),
             )
             .await;
@@ -970,7 +1008,7 @@ pub(super) async fn complete_turn_after_settle(
         app.notify_thread_subscribers(
             &thread_id,
             "item/agentThinking/delta",
-            json!({
+            serde_json::json!({
                 "threadId": thread_id,
                 "turnId": turn_id,
                 "itemId": item_id,
@@ -983,11 +1021,11 @@ pub(super) async fn complete_turn_after_settle(
         app.notify_thread_subscribers(
             &thread_id,
             "item/completed",
-            json!({
+            serde_json::json!({
                 "item": item,
                 "threadId": thread_id,
                 "turnId": turn_id,
-                "completedAtMs": now_ms(),
+                "completedAtMs": crate::adapters::app_server::connection::now_ms(),
             }),
         )
         .await;
@@ -995,7 +1033,7 @@ pub(super) async fn complete_turn_after_settle(
     app.notify_thread_subscribers(
         &thread_id,
         "turn/completed",
-        json!({ "threadId": thread_id, "turn": turn }),
+        serde_json::json!({ "threadId": thread_id, "turn": turn }),
     )
     .await;
     app.abort_thread_watcher_if_idle_and_unsubscribed(&thread_id)
@@ -1015,7 +1053,7 @@ impl AssistantContentProjection {
 }
 
 pub(super) async fn wait_for_current_turn_assistant_content(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     turn_id: &str,
 ) -> Option<AssistantContentProjection> {
@@ -1031,7 +1069,11 @@ pub(super) async fn wait_for_current_turn_assistant_content(
     None
 }
 
-pub(super) async fn turn_is_active(app: &VerletAppServer, thread_id: &str, turn_id: &str) -> bool {
+pub(super) async fn turn_is_active(
+    app: &crate::adapters::app_server::VerletAppServer,
+    thread_id: &str,
+    turn_id: &str,
+) -> bool {
     let state = app.inner.state.read().await;
     let Some(thread) = state.threads.get(thread_id) else {
         return false;
@@ -1042,16 +1084,17 @@ pub(super) async fn turn_is_active(app: &VerletAppServer, thread_id: &str, turn_
 /// Reconciles completion payloads from saved session text after fast runtime
 /// turns, because status notifications can outrun queued text notifications.
 pub(super) fn reconcile_turn_assistant_text(
-    turn: &mut AppServerTurnState,
+    turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
     text: &str,
-) -> Option<(Option<Value>, String, String)> {
+) -> Option<(Option<serde_json::Value>, String, String)> {
     if text.is_empty() {
         return None;
     }
 
     let item_id = turn.assistant_item_id.clone();
     if !turn.assistant_started {
-        let started_item = agent_message_item_from_text(&item_id, "");
+        let started_item =
+            crate::adapters::app_server::threads::agent_message_item_from_text(&item_id, "");
         turn.assistant_started = true;
         turn.assistant_completed = false;
         turn.assistant_text = text.to_string();
@@ -1061,8 +1104,8 @@ pub(super) fn reconcile_turn_assistant_text(
 
     let prior_text = turn.assistant_text.clone();
     let projected_item_matches = turn.items.iter().any(|item| {
-        item.get("id").and_then(Value::as_str) == Some(item_id.as_str())
-            && item.get("text").and_then(Value::as_str) == Some(text)
+        item.get("id").and_then(serde_json::Value::as_str) == Some(item_id.as_str())
+            && item.get("text").and_then(serde_json::Value::as_str) == Some(text)
     });
     if prior_text == text {
         if !projected_item_matches {
@@ -1089,16 +1132,17 @@ pub(super) fn reconcile_turn_assistant_text(
 }
 
 pub(super) fn reconcile_turn_thinking_text(
-    turn: &mut AppServerTurnState,
+    turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
     text: &str,
-) -> Option<(Option<Value>, String, String)> {
+) -> Option<(Option<serde_json::Value>, String, String)> {
     if text.is_empty() {
         return None;
     }
 
     let item_id = turn.thinking_item_id.clone();
     if !turn.thinking_started {
-        let started_item = agent_thinking_item_from_text(&item_id, "");
+        let started_item =
+            crate::adapters::app_server::threads::agent_thinking_item_from_text(&item_id, "");
         turn.thinking_started = true;
         turn.thinking_completed = false;
         turn.thinking_text = text.to_string();
@@ -1108,8 +1152,8 @@ pub(super) fn reconcile_turn_thinking_text(
 
     let prior_text = turn.thinking_text.clone();
     let projected_item_matches = turn.items.iter().any(|item| {
-        item.get("id").and_then(Value::as_str) == Some(item_id.as_str())
-            && item.get("text").and_then(Value::as_str) == Some(text)
+        item.get("id").and_then(serde_json::Value::as_str) == Some(item_id.as_str())
+            && item.get("text").and_then(serde_json::Value::as_str) == Some(text)
     });
     if prior_text == text {
         if !projected_item_matches {
@@ -1135,13 +1179,15 @@ pub(super) fn reconcile_turn_thinking_text(
     Some((None, delta.to_string(), item_id))
 }
 
-pub(super) fn upsert_agent_message_item(turn: &mut AppServerTurnState) {
+pub(super) fn upsert_agent_message_item(
+    turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
+) {
     let item_id = turn.assistant_item_id.clone();
-    let item = agent_message_item(turn);
+    let item = crate::adapters::app_server::threads::agent_message_item(turn);
     if let Some(existing) = turn
         .items
         .iter_mut()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(item_id.as_str()))
+        .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(item_id.as_str()))
     {
         *existing = item;
     } else {
@@ -1149,13 +1195,15 @@ pub(super) fn upsert_agent_message_item(turn: &mut AppServerTurnState) {
     }
 }
 
-pub(super) fn upsert_agent_thinking_item(turn: &mut AppServerTurnState) {
+pub(super) fn upsert_agent_thinking_item(
+    turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
+) {
     let item_id = turn.thinking_item_id.clone();
-    let item = agent_thinking_item(turn);
+    let item = crate::adapters::app_server::threads::agent_thinking_item(turn);
     if let Some(existing) = turn
         .items
         .iter_mut()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(item_id.as_str()))
+        .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(item_id.as_str()))
     {
         *existing = item;
     } else {
@@ -1164,7 +1212,7 @@ pub(super) fn upsert_agent_thinking_item(turn: &mut AppServerTurnState) {
 }
 
 pub(super) async fn current_turn_assistant_content(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     turn_id: &str,
 ) -> Option<AssistantContentProjection> {
@@ -1176,7 +1224,7 @@ pub(super) async fn current_turn_assistant_content(
         }
         turn_user_text(thread.turns.get(turn_id)?)?
     };
-    let parsed = ThreadId::parse_str(thread_id).ok()?;
+    let parsed = crate::ThreadId::parse_str(thread_id).ok()?;
     let handle = app
         .inner
         .supervisor
@@ -1187,39 +1235,45 @@ pub(super) async fn current_turn_assistant_content(
     assistant_content_after_latest_user(&context.messages, &user_text)
 }
 
-pub(super) fn turn_user_text(turn: &AppServerTurnState) -> Option<String> {
+pub(super) fn turn_user_text(
+    turn: &crate::adapters::app_server::threads::AppServerTurnState,
+) -> Option<String> {
     turn.items
         .iter()
-        .find(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
-        .and_then(|item| item.get("content").and_then(Value::as_array))
-        .map(|content| user_input_preview(content))
+        .find(|item| item.get("type").and_then(serde_json::Value::as_str) == Some("userMessage"))
+        .and_then(|item| item.get("content").and_then(serde_json::Value::as_array))
+        .map(|content| crate::adapters::app_server::threads::user_input_preview(content))
         .filter(|text| !text.is_empty())
 }
 
 pub(super) fn assistant_content_after_latest_user(
-    messages: &[CanonicalMessage],
+    messages: &[crate::CanonicalMessage],
     user_text: &str,
 ) -> Option<AssistantContentProjection> {
     let mut after_latest_user = false;
     let mut assistant_content = None;
     for message in messages {
         match message {
-            CanonicalMessage::User { content, .. } => {
-                after_latest_user = text_from_canonical_content(content) == user_text;
+            crate::CanonicalMessage::User { content, .. } => {
+                after_latest_user =
+                    crate::adapters::app_server::text_from_canonical_content(content) == user_text;
                 if after_latest_user {
                     assistant_content = None;
                 }
             }
-            CanonicalMessage::Assistant { content, .. } if after_latest_user => {
+            crate::CanonicalMessage::Assistant { content, .. } if after_latest_user => {
                 let content = AssistantContentProjection {
-                    text: text_from_canonical_content(content),
-                    thinking: thinking_text_from_canonical_content(content),
+                    text: crate::adapters::app_server::text_from_canonical_content(content),
+                    thinking: crate::adapters::app_server::thinking_text_from_canonical_content(
+                        content,
+                    ),
                 };
                 if !content.is_empty() {
                     assistant_content = Some(content);
                 }
             }
-            CanonicalMessage::Assistant { .. } | CanonicalMessage::ToolResult { .. } => {}
+            crate::CanonicalMessage::Assistant { .. }
+            | crate::CanonicalMessage::ToolResult { .. } => {}
         }
     }
     assistant_content
@@ -1227,10 +1281,10 @@ pub(super) fn assistant_content_after_latest_user(
 
 #[cfg(test)]
 pub(super) async fn latest_assistant_text(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
 ) -> Option<String> {
-    let parsed = ThreadId::parse_str(thread_id).ok()?;
+    let parsed = crate::ThreadId::parse_str(thread_id).ok()?;
     let handle = app
         .inner
         .supervisor
@@ -1243,27 +1297,29 @@ pub(super) async fn latest_assistant_text(
         .iter()
         .rev()
         .find_map(|message| match message {
-            CanonicalMessage::Assistant { content, .. } => {
-                let text = text_from_canonical_content(content);
+            crate::CanonicalMessage::Assistant { content, .. } => {
+                let text = crate::adapters::app_server::text_from_canonical_content(content);
                 (!text.is_empty()).then_some(text)
             }
-            CanonicalMessage::User { .. } | CanonicalMessage::ToolResult { .. } => None,
+            crate::CanonicalMessage::User { .. } | crate::CanonicalMessage::ToolResult { .. } => {
+                None
+            }
         })
 }
 
 pub(super) async fn complete_shell_command(
-    connection: ConnectionState,
+    connection: crate::adapters::app_server::connection::ConnectionState,
     thread_id: String,
     turn_id: String,
     item_id: String,
     command: String,
-    cwd: PathBuf,
+    cwd: std::path::PathBuf,
 ) {
-    let started_at = now_ms();
+    let started_at = crate::adapters::app_server::connection::now_ms();
     let (exit_code, stdout, stderr) = run_shell_command(cwd.clone(), command.clone()).await;
     let output = format!("{stdout}{stderr}");
-    let duration_ms = now_ms().saturating_sub(started_at);
-    let completed_item = command_execution_item(
+    let duration_ms = crate::adapters::app_server::connection::now_ms().saturating_sub(started_at);
+    let completed_item = crate::adapters::app_server::threads::command_execution_item(
         &item_id,
         &command,
         &cwd,
@@ -1277,7 +1333,7 @@ pub(super) async fn complete_shell_command(
         let Some(thread) = state.threads.get_mut(&thread_id) else {
             return;
         };
-        thread.updated_at_ms = now_ms();
+        thread.updated_at_ms = crate::adapters::app_server::connection::now_ms();
         if thread.active_turn_id.as_deref() == Some(turn_id.as_str()) {
             thread.active_turn_id.take();
         }
@@ -1285,21 +1341,21 @@ pub(super) async fn complete_shell_command(
             return;
         };
         for item in &mut turn.items {
-            if item.get("id").and_then(Value::as_str) == Some(item_id.as_str()) {
+            if item.get("id").and_then(serde_json::Value::as_str) == Some(item_id.as_str()) {
                 *item = completed_item.clone();
                 break;
             }
         }
-        turn.status = AppServerTurnStatus::Completed;
-        turn.completed_at_ms = Some(now_ms());
-        turn_json(turn)
+        turn.status = crate::adapters::app_server::threads::AppServerTurnStatus::Completed;
+        turn.completed_at_ms = Some(crate::adapters::app_server::connection::now_ms());
+        crate::adapters::app_server::threads::turn_json(turn)
     };
 
     if !output.is_empty() {
         connection
             .notify(
                 "item/commandExecution/outputDelta",
-                json!({
+                serde_json::json!({
                     "threadId": thread_id,
                     "turnId": turn_id,
                     "itemId": item_id,
@@ -1311,24 +1367,27 @@ pub(super) async fn complete_shell_command(
     connection
         .notify(
             "item/completed",
-            json!({
+            serde_json::json!({
                 "item": completed_item,
                 "threadId": thread_id,
                 "turnId": turn_id,
-                "completedAtMs": now_ms(),
+                "completedAtMs": crate::adapters::app_server::connection::now_ms(),
             }),
         )
         .await;
     connection
         .notify(
             "turn/completed",
-            json!({ "threadId": thread_id, "turn": completed_turn }),
+            serde_json::json!({ "threadId": thread_id, "turn": completed_turn }),
         )
         .await;
 }
 
-pub(super) async fn run_shell_command(cwd: PathBuf, command: String) -> (i32, String, String) {
-    let mut process = Command::new("/bin/sh");
+pub(super) async fn run_shell_command(
+    cwd: std::path::PathBuf,
+    command: String,
+) -> (i32, String, String) {
+    let mut process = tokio::process::Command::new("/bin/sh");
     process.arg("-c").arg(command).current_dir(cwd);
     process.kill_on_drop(true);
     match process.output().await {
@@ -1346,46 +1405,46 @@ pub(super) async fn run_shell_command(cwd: PathBuf, command: String) -> (i32, St
 }
 
 pub(super) async fn handle_thread_event(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
-    event: ThreadEvent,
+    event: crate::ThreadEvent,
 ) {
     match event {
-        ThreadEvent::Runtime { event, .. } => {
+        crate::ThreadEvent::Runtime { event, .. } => {
             handle_runtime_event(app, thread_id, event.kind).await;
         }
-        ThreadEvent::Failed { message, .. } => {
+        crate::ThreadEvent::Failed { message, .. } => {
             fail_active_turn(app, thread_id, "runtime_failed", message).await;
         }
-        ThreadEvent::Cancelled { reason, .. } => {
+        crate::ThreadEvent::Cancelled { reason, .. } => {
             interrupt_active_turn(app, thread_id, reason).await;
         }
-        ThreadEvent::Started { .. }
-        | ThreadEvent::CanonicalMirror { .. }
-        | ThreadEvent::Output { .. }
-        | ThreadEvent::Signal { .. }
-        | ThreadEvent::Stopped { .. } => {}
+        crate::ThreadEvent::Started { .. }
+        | crate::ThreadEvent::CanonicalMirror { .. }
+        | crate::ThreadEvent::Output { .. }
+        | crate::ThreadEvent::Signal { .. }
+        | crate::ThreadEvent::Stopped { .. } => {}
     }
 }
 
 pub(super) async fn handle_runtime_event(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
-    event: RuntimeEventKind,
+    event: crate::RuntimeEventKind,
 ) {
     match event {
-        RuntimeEventKind::TextDelta { text } => {
+        crate::RuntimeEventKind::TextDelta { text } => {
             append_agent_delta(app, thread_id, &text).await;
         }
-        RuntimeEventKind::ThinkingDelta { text } => {
+        crate::RuntimeEventKind::ThinkingDelta { text } => {
             append_agent_thinking_delta(app, thread_id, &text).await;
         }
-        RuntimeEventKind::ToolCallStarted {
+        crate::RuntimeEventKind::ToolCallStarted {
             call_id,
             name,
             input,
         } => {
-            let item = json!({
+            let item = serde_json::json!({
                 "type": "dynamicToolCall",
                 "id": call_id,
                 "namespace": null,
@@ -1412,16 +1471,16 @@ pub(super) async fn handle_runtime_event(
             app.notify_thread_subscribers(
                 thread_id,
                 "item/started",
-                json!({
+                serde_json::json!({
                     "item": item,
                     "threadId": thread_id,
                     "turnId": turn_id,
-                    "startedAtMs": now_ms(),
+                    "startedAtMs": crate::adapters::app_server::connection::now_ms(),
                 }),
             )
             .await;
         }
-        RuntimeEventKind::ToolCallResult {
+        crate::RuntimeEventKind::ToolCallResult {
             call_id,
             output,
             success,
@@ -1433,17 +1492,17 @@ pub(super) async fn handle_runtime_event(
                 app.notify_thread_subscribers(
                     thread_id,
                     "item/completed",
-                    json!({
+                    serde_json::json!({
                         "item": item,
                         "threadId": thread_id,
                         "turnId": turn_id,
-                        "completedAtMs": now_ms(),
+                        "completedAtMs": crate::adapters::app_server::connection::now_ms(),
                     }),
                 )
                 .await;
             }
         }
-        RuntimeEventKind::Usage { usage } => {
+        crate::RuntimeEventKind::Usage { usage } => {
             let turn_id = {
                 let state = app.inner.state.read().await;
                 state
@@ -1455,7 +1514,7 @@ pub(super) async fn handle_runtime_event(
                 app.notify_thread_subscribers(
                     thread_id,
                     "turn/usage",
-                    json!({
+                    serde_json::json!({
                         "threadId": thread_id,
                         "turnId": turn_id,
                         "usage": {
@@ -1469,43 +1528,47 @@ pub(super) async fn handle_runtime_event(
                 .await;
             }
         }
-        RuntimeEventKind::Cancelled { reason } => {
+        crate::RuntimeEventKind::Cancelled { reason } => {
             interrupt_active_turn(app, thread_id, reason).await;
         }
-        RuntimeEventKind::Failed { code, message } => {
+        crate::RuntimeEventKind::Failed { code, message } => {
             fail_active_turn(app, thread_id, code, message).await;
         }
-        RuntimeEventKind::Terminal {
-            state: RuntimeTerminalState::Cancelled,
+        crate::RuntimeEventKind::Terminal {
+            state: crate::RuntimeTerminalState::Cancelled,
         } => {
             interrupt_active_turn(app, thread_id, "turn cancelled".to_string()).await;
         }
-        RuntimeEventKind::Terminal { .. }
-        | RuntimeEventKind::ThreadStarted { .. }
-        | RuntimeEventKind::ThreadInteraction { .. }
-        | RuntimeEventKind::ToolLog { .. }
-        | RuntimeEventKind::HookStarted { .. }
-        | RuntimeEventKind::HookCompleted { .. }
-        | RuntimeEventKind::ApprovalRequested { .. }
-        | RuntimeEventKind::ApprovalResolved { .. }
-        | RuntimeEventKind::PermissionDecision { .. }
-        | RuntimeEventKind::ContextCompiled { .. }
-        | RuntimeEventKind::ModelRequestStarted { .. }
-        | RuntimeEventKind::ModelRequestRetryScheduled { .. }
-        | RuntimeEventKind::ModelRequestFallbackSelected { .. }
-        | RuntimeEventKind::ModelRequestCompleted { .. }
-        | RuntimeEventKind::ModelRequestFailed { .. }
-        | RuntimeEventKind::Timeout { .. }
-        | RuntimeEventKind::PolicyRejected { .. }
-        | RuntimeEventKind::Recovery { .. }
-        | RuntimeEventKind::SubthreadStarted { .. }
-        | RuntimeEventKind::SubthreadFinished { .. }
-        | RuntimeEventKind::Checkpoint { .. }
-        | RuntimeEventKind::Compaction { .. } => {}
+        crate::RuntimeEventKind::Terminal { .. }
+        | crate::RuntimeEventKind::ThreadStarted { .. }
+        | crate::RuntimeEventKind::ThreadInteraction { .. }
+        | crate::RuntimeEventKind::ToolLog { .. }
+        | crate::RuntimeEventKind::HookStarted { .. }
+        | crate::RuntimeEventKind::HookCompleted { .. }
+        | crate::RuntimeEventKind::ApprovalRequested { .. }
+        | crate::RuntimeEventKind::ApprovalResolved { .. }
+        | crate::RuntimeEventKind::PermissionDecision { .. }
+        | crate::RuntimeEventKind::ContextCompiled { .. }
+        | crate::RuntimeEventKind::ModelRequestStarted { .. }
+        | crate::RuntimeEventKind::ModelRequestRetryScheduled { .. }
+        | crate::RuntimeEventKind::ModelRequestFallbackSelected { .. }
+        | crate::RuntimeEventKind::ModelRequestCompleted { .. }
+        | crate::RuntimeEventKind::ModelRequestFailed { .. }
+        | crate::RuntimeEventKind::Timeout { .. }
+        | crate::RuntimeEventKind::PolicyRejected { .. }
+        | crate::RuntimeEventKind::Recovery { .. }
+        | crate::RuntimeEventKind::SubthreadStarted { .. }
+        | crate::RuntimeEventKind::SubthreadFinished { .. }
+        | crate::RuntimeEventKind::Checkpoint { .. }
+        | crate::RuntimeEventKind::Compaction { .. } => {}
     }
 }
 
-pub(super) async fn append_agent_delta(app: &VerletAppServer, thread_id: &str, delta: &str) {
+pub(super) async fn append_agent_delta(
+    app: &crate::adapters::app_server::VerletAppServer,
+    thread_id: &str,
+    delta: &str,
+) {
     let appended = {
         let mut state = app.inner.state.write().await;
         let Some(thread) = state.threads.get_mut(thread_id) else {
@@ -1522,14 +1585,14 @@ pub(super) async fn append_agent_delta(app: &VerletAppServer, thread_id: &str, d
         }
         let item = if !turn.assistant_started {
             turn.assistant_started = true;
-            let item = agent_message_item(turn);
+            let item = crate::adapters::app_server::threads::agent_message_item(turn);
             turn.items.push(item.clone());
             Some((turn_id.clone(), item))
         } else {
             None
         };
         turn.assistant_text.push_str(delta);
-        thread.updated_at_ms = now_ms();
+        thread.updated_at_ms = crate::adapters::app_server::connection::now_ms();
         (turn_id, turn.assistant_item_id.clone(), item)
     };
 
@@ -1538,11 +1601,11 @@ pub(super) async fn append_agent_delta(app: &VerletAppServer, thread_id: &str, d
         app.notify_thread_subscribers(
             thread_id,
             "item/started",
-            json!({
+            serde_json::json!({
                 "item": item,
                 "threadId": thread_id,
                 "turnId": turn_id,
-                "startedAtMs": now_ms(),
+                "startedAtMs": crate::adapters::app_server::connection::now_ms(),
             }),
         )
         .await;
@@ -1551,7 +1614,7 @@ pub(super) async fn append_agent_delta(app: &VerletAppServer, thread_id: &str, d
     app.notify_thread_subscribers(
         thread_id,
         "item/agentMessage/delta",
-        json!({
+        serde_json::json!({
             "threadId": thread_id,
             "turnId": turn_id,
             "itemId": item_id,
@@ -1562,7 +1625,7 @@ pub(super) async fn append_agent_delta(app: &VerletAppServer, thread_id: &str, d
 }
 
 pub(super) async fn append_agent_thinking_delta(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     delta: &str,
 ) {
@@ -1582,14 +1645,14 @@ pub(super) async fn append_agent_thinking_delta(
         }
         let item = if !turn.thinking_started {
             turn.thinking_started = true;
-            let item = agent_thinking_item(turn);
+            let item = crate::adapters::app_server::threads::agent_thinking_item(turn);
             turn.items.push(item.clone());
             Some((turn_id.clone(), item))
         } else {
             None
         };
         turn.thinking_text.push_str(delta);
-        thread.updated_at_ms = now_ms();
+        thread.updated_at_ms = crate::adapters::app_server::connection::now_ms();
         (turn_id, turn.thinking_item_id.clone(), item)
     };
 
@@ -1598,11 +1661,11 @@ pub(super) async fn append_agent_thinking_delta(
         app.notify_thread_subscribers(
             thread_id,
             "item/started",
-            json!({
+            serde_json::json!({
                 "item": item,
                 "threadId": thread_id,
                 "turnId": turn_id,
-                "startedAtMs": now_ms(),
+                "startedAtMs": crate::adapters::app_server::connection::now_ms(),
             }),
         )
         .await;
@@ -1611,7 +1674,7 @@ pub(super) async fn append_agent_thinking_delta(
     app.notify_thread_subscribers(
         thread_id,
         "item/agentThinking/delta",
-        json!({
+        serde_json::json!({
             "threadId": thread_id,
             "turnId": turn_id,
             "itemId": item_id,
@@ -1622,31 +1685,37 @@ pub(super) async fn append_agent_thinking_delta(
 }
 
 pub(super) async fn complete_dynamic_tool(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     call_id: &str,
     output: String,
     success: bool,
     duration_ms: Option<u64>,
-) -> Option<(String, Value)> {
+) -> Option<(String, serde_json::Value)> {
     let mut state = app.inner.state.write().await;
     let thread = state.threads.get_mut(thread_id)?;
     let turn_id = thread.active_turn_id.clone()?;
     let turn = thread.turns.get_mut(&turn_id)?;
     for item in &mut turn.items {
-        if item.get("id").and_then(Value::as_str) == Some(call_id) {
+        if item.get("id").and_then(serde_json::Value::as_str) == Some(call_id) {
             item["status"] =
-                Value::String(if success { "completed" } else { "failed" }.to_string());
-            item["success"] = Value::Bool(success);
-            item["durationMs"] = duration_ms.map(Value::from).unwrap_or(Value::Null);
-            item["contentItems"] = json!([{ "type": "inputText", "text": output }]);
+                serde_json::Value::String(if success { "completed" } else { "failed" }.to_string());
+            item["success"] = serde_json::Value::Bool(success);
+            item["durationMs"] = duration_ms
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null);
+            item["contentItems"] = serde_json::json!([{ "type": "inputText", "text": output }]);
             return Some((turn_id, item.clone()));
         }
     }
     None
 }
 
-pub(super) async fn interrupt_active_turn(app: &VerletAppServer, thread_id: &str, reason: String) {
+pub(super) async fn interrupt_active_turn(
+    app: &crate::adapters::app_server::VerletAppServer,
+    thread_id: &str,
+    reason: String,
+) {
     let completed = {
         let mut state = app.inner.state.write().await;
         let Some(thread) = state.threads.get_mut(thread_id) else {
@@ -1656,10 +1725,13 @@ pub(super) async fn interrupt_active_turn(app: &VerletAppServer, thread_id: &str
             return;
         };
         thread.turns.get_mut(&turn_id).map(|turn| {
-            turn.status = AppServerTurnStatus::Interrupted;
-            turn.completed_at_ms = Some(now_ms());
-            turn.error = Some(turn_error(reason, None));
-            let (turn, completed_items) = finalize_turn_payload(turn);
+            turn.status = crate::adapters::app_server::threads::AppServerTurnStatus::Interrupted;
+            turn.completed_at_ms = Some(crate::adapters::app_server::connection::now_ms());
+            turn.error = Some(crate::adapters::app_server::connection::turn_error(
+                reason, None,
+            ));
+            let (turn, completed_items) =
+                crate::adapters::app_server::threads::finalize_turn_payload(turn);
             (turn_id, turn, completed_items)
         })
     };
@@ -1668,11 +1740,11 @@ pub(super) async fn interrupt_active_turn(app: &VerletAppServer, thread_id: &str
             app.notify_thread_subscribers(
                 thread_id,
                 "item/completed",
-                json!({
+                serde_json::json!({
                     "item": item,
                     "threadId": thread_id,
                     "turnId": turn_id,
-                    "completedAtMs": now_ms(),
+                    "completedAtMs": crate::adapters::app_server::connection::now_ms(),
                 }),
             )
             .await;
@@ -1680,14 +1752,14 @@ pub(super) async fn interrupt_active_turn(app: &VerletAppServer, thread_id: &str
         app.notify_thread_subscribers(
             thread_id,
             "turn/completed",
-            json!({ "threadId": thread_id, "turn": turn }),
+            serde_json::json!({ "threadId": thread_id, "turn": turn }),
         )
         .await;
     }
 }
 
 pub(super) async fn fail_active_turn(
-    app: &VerletAppServer,
+    app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     code: impl Into<String>,
     message: String,
@@ -1702,15 +1774,19 @@ pub(super) async fn fail_active_turn(
             return;
         };
         thread.turns.get_mut(&turn_id).map(|turn| {
-            turn.status = AppServerTurnStatus::Failed;
-            turn.completed_at_ms = Some(now_ms());
-            turn.error = Some(turn_error(message.clone(), Some(code.clone())));
-            let (turn_json, completed_items) = finalize_turn_payload(turn);
+            turn.status = crate::adapters::app_server::threads::AppServerTurnStatus::Failed;
+            turn.completed_at_ms = Some(crate::adapters::app_server::connection::now_ms());
+            turn.error = Some(crate::adapters::app_server::connection::turn_error(
+                message.clone(),
+                Some(code.clone()),
+            ));
+            let (turn_json, completed_items) =
+                crate::adapters::app_server::threads::finalize_turn_payload(turn);
             (
                 turn_id,
                 turn_json,
                 completed_items,
-                turn.error.clone().unwrap_or(Value::Null),
+                turn.error.clone().unwrap_or(serde_json::Value::Null),
             )
         })
     };
@@ -1718,7 +1794,7 @@ pub(super) async fn fail_active_turn(
         app.notify_thread_subscribers(
             thread_id,
             "error",
-            json!({
+            serde_json::json!({
                 "error": error,
                 "willRetry": false,
                 "threadId": thread_id,
@@ -1730,11 +1806,11 @@ pub(super) async fn fail_active_turn(
             app.notify_thread_subscribers(
                 thread_id,
                 "item/completed",
-                json!({
+                serde_json::json!({
                     "item": item,
                     "threadId": thread_id,
                     "turnId": turn_id,
-                    "completedAtMs": now_ms(),
+                    "completedAtMs": crate::adapters::app_server::connection::now_ms(),
                 }),
             )
             .await;
@@ -1742,7 +1818,7 @@ pub(super) async fn fail_active_turn(
         app.notify_thread_subscribers(
             thread_id,
             "turn/completed",
-            json!({ "threadId": thread_id, "turn": turn }),
+            serde_json::json!({ "threadId": thread_id, "turn": turn }),
         )
         .await;
     }
@@ -1750,27 +1826,22 @@ pub(super) async fn fail_active_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        CanonicalStopReason, ProviderApi, SessionEntry, ThreadCoordinates, ToolCallCancellation,
-        ToolCallSubject,
-    };
 
     #[test]
     fn resync_projects_a_detached_completion_appended_after_the_next_user_entry() {
-        let coordinates = ThreadCoordinates::new("tenant", "user", "late-completion");
-        let old_user = SessionEntry::new(
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "late-completion");
+        let old_user = crate::SessionEntry::new(
             coordinates.clone(),
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("older turn"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("older turn"),
             },
         );
-        let old_result = SessionEntry::new(
+        let old_result = crate::SessionEntry::new(
             coordinates.clone(),
             Some(old_user.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::tool_result(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::tool_result(
                     "call-late",
                     "bash",
                     "older result with a reused call id",
@@ -1778,42 +1849,42 @@ mod tests {
                 ),
             },
         );
-        let user = SessionEntry::new(
+        let user = crate::SessionEntry::new(
             coordinates.clone(),
             Some(old_result.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("first turn"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("first turn"),
             },
         );
-        let assistant = SessionEntry::new(
+        let assistant = crate::SessionEntry::new(
             coordinates.clone(),
             Some(user.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::assistant(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::assistant(
                     "test",
-                    ProviderApi::OpenAIResponses,
+                    crate::ProviderApi::OpenAIResponses,
                     "model",
-                    vec![CanonicalContent::tool_call(
+                    vec![crate::CanonicalContent::tool_call(
                         "call-late",
                         "bash",
-                        json!({"command": "slow"}),
+                        serde_json::json!({"command": "slow"}),
                     )],
-                    CanonicalStopReason::ToolUse,
+                    crate::CanonicalStopReason::ToolUse,
                 ),
             },
         );
-        let next_user = SessionEntry::new(
+        let next_user = crate::SessionEntry::new(
             coordinates.clone(),
             Some(assistant.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("replacement turn"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("replacement turn"),
             },
         );
-        let late_result = SessionEntry::new(
+        let late_result = crate::SessionEntry::new(
             coordinates,
             Some(next_user.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::tool_result(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::tool_result(
                     "call-late",
                     "bash",
                     "cancelled after grace",
@@ -1822,9 +1893,9 @@ mod tests {
             },
         );
         let late_result_entry_id = late_result.entry_id.to_string();
-        let completion: ToolCallCompletedPayload = serde_json::from_value(
-            serde_json::to_value(ToolCallCompletedPayload {
-                subject: ToolCallSubject {
+        let completion: crate::ToolCallCompletedPayload = serde_json::from_value(
+            serde_json::to_value(crate::ToolCallCompletedPayload {
+                subject: crate::ToolCallSubject {
                     turn_id: "turn-first".to_string(),
                     call_id: "call-late".to_string(),
                 },
@@ -1834,12 +1905,12 @@ mod tests {
                 args_fingerprint: None,
                 duration_ms: Some(12),
                 finish_order: Some(0),
-                cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
+                cancellation: Some(crate::ToolCallCancellation::CancelledExceededGrace),
             })
             .unwrap(),
         )
         .unwrap();
-        let projection = resynced_turn_projection(
+        let projection = crate::adapters::app_server::subscriptions::resynced_turn_projection(
             &[
                 old_user,
                 old_result,
@@ -1849,15 +1920,17 @@ mod tests {
                 late_result,
             ],
             &user.entry_id.to_string(),
-            &HashMap::from([("call-late".to_string(), completion)]),
-            &HashMap::from([("call-late".to_string(), late_result_entry_id)]),
+            &std::collections::HashMap::from([("call-late".to_string(), completion)]),
+            &std::collections::HashMap::from([("call-late".to_string(), late_result_entry_id)]),
         )
         .unwrap();
         let tool = projection
             .items
             .iter()
             .find_map(|item| match item {
-                ResyncedTurnItem::DynamicTool(tool) => Some(tool),
+                crate::adapters::app_server::subscriptions::ResyncedTurnItem::DynamicTool(tool) => {
+                    Some(tool)
+                }
                 _ => None,
             })
             .unwrap();

@@ -1,23 +1,26 @@
-use serde_json::{Value, json};
-use std::io::{self, BufRead, Write};
+use std::io::BufRead as _;
+use std::io::Write as _;
 
 const TOOL_NAME: &str = "verlet_mcp_echo";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let request: Value = serde_json::from_str(&line)?;
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+        let request: serde_json::Value = serde_json::from_str(&line)?;
+        let method = request
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         match method {
             "initialize" => write_response(
                 &mut stdout,
                 request.get("id").cloned(),
-                json!({
+                serde_json::json!({
                     "protocolVersion": "2025-06-18",
                     "capabilities": { "tools": {} },
                     "serverInfo": {
@@ -30,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "tools/list" => write_response(
                 &mut stdout,
                 request.get("id").cloned(),
-                json!({
+                serde_json::json!({
                     "tools": [{
                         "name": TOOL_NAME,
                         "description": "Echo a message through a real local MCP stdio server.",
@@ -49,8 +52,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
             )?,
             "tools/call" => {
-                let params = request.get("params").cloned().unwrap_or(Value::Null);
-                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let params = request
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let name = params
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 if name != TOOL_NAME {
                     write_error(
                         &mut stdout,
@@ -63,12 +72,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let message = params
                     .get("arguments")
                     .and_then(|arguments| arguments.get("message"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
                 write_response(
                     &mut stdout,
                     request.get("id").cloned(),
-                    json!({
+                    serde_json::json!({
                         "content": [{
                             "type": "text",
                             "text": format!("VERLET_MCP_TOOL_OK message={message}")
@@ -89,16 +98,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn write_response(
-    stdout: &mut io::Stdout,
-    id: Option<Value>,
-    result: Value,
+    stdout: &mut std::io::Stdout,
+    id: Option<serde_json::Value>,
+    result: serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         stdout,
         "{}",
-        json!({
+        serde_json::json!({
             "jsonrpc": "2.0",
-            "id": id.unwrap_or(Value::Null),
+            "id": id.unwrap_or(serde_json::Value::Null),
             "result": result
         })
     )?;
@@ -107,17 +116,17 @@ fn write_response(
 }
 
 fn write_error(
-    stdout: &mut io::Stdout,
-    id: Option<Value>,
+    stdout: &mut std::io::Stdout,
+    id: Option<serde_json::Value>,
     code: i64,
     message: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         stdout,
         "{}",
-        json!({
+        serde_json::json!({
             "jsonrpc": "2.0",
-            "id": id.unwrap_or(Value::Null),
+            "id": id.unwrap_or(serde_json::Value::Null),
             "error": {
                 "code": code,
                 "message": message

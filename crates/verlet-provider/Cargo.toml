@@ -5,20 +5,21 @@ edition = "2024"
 publish = false
 
 [dependencies]
-async-trait = "0.1"
-base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
 verlet-history = { path = "../verlet-history" }
-crc32fast = "1.5"
-hex = "0.4"
-hmac = "0.13"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+crc32fast = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Not workspace-inherited: hmac 0.13 needs sha2 0.11, the rest of the tree is on 0.10.
 sha2 = "0.11"
-thiserror = "2"
-tokio = { version = "1", features = ["macros"] }
-tokio-util = "0.7"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }

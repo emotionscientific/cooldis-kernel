@@ -1,19 +1,3 @@
-use super::*;
-use crate::{
-    AgentManifestGrantExpiry, CHANNEL_EMIT_CAPABILITY, CHANNEL_EMIT_OPERATION, KERNEL_RUNTIME_KIND,
-    KernelNotifyOperationProvider, KernelOperationDispatcher, KernelOperationRegistration,
-    KernelProcessOperationProvider, NOTIFY_PREVIEW_OPERATION, OPERATION_METADATA_RUNTIME_KIND,
-    OperationRegistration, PROCESS_EXEC_OPERATION, RuntimeHost, THREAD_CANCEL_OPERATION,
-    THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION, THREAD_SUBMIT_OPERATION,
-    THREAD_WAIT_OPERATION, ThreadContext, ThreadCoordinates, ThreadTopology, TurnInput,
-    VERLET_NOTIFY_PACKAGE, VERLET_PROCESS_PACKAGE, VirtualBashRuntimeFactory, WasmRuntimeArtifact,
-    verlet_notify_kernel_package, verlet_process_kernel_package, verlet_threads_kernel_package,
-};
-use async_trait::async_trait;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-
 #[tokio::test]
 async fn router_projects_registry_operations_as_tool_definitions() {
     let router = router_with_echo_operation("echo").await;
@@ -29,7 +13,7 @@ async fn router_projects_registry_operations_as_tool_definitions() {
 async fn router_projects_kernel_tool_definitions_with_registry_operations() {
     let router = router_with_echo_operation("echo")
         .await
-        .with_kernel_tool_provider(Arc::new(FakeKernelToolProvider));
+        .with_kernel_tool_provider(std::sync::Arc::new(FakeKernelToolProvider));
 
     let definitions = router.tool_definitions().await;
     let names = definitions
@@ -48,7 +32,7 @@ async fn router_invokes_registry_operation_and_returns_tool_result() {
         .invoke_tool_call(
             "call_1",
             "echo_search",
-            json!({
+            serde_json::json!({
                 "input": "verlet"
             }),
         )
@@ -56,7 +40,7 @@ async fn router_invokes_registry_operation_and_returns_tool_result() {
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -66,16 +50,18 @@ async fn router_invokes_registry_operation_and_returns_tool_result() {
 
 #[tokio::test]
 async fn router_invokes_kernel_tool_provider() {
-    let router = AgentToolRouter::new(Arc::new(OperationRegistry::new()))
-        .with_kernel_tool_provider(Arc::new(FakeKernelToolProvider));
+    let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+        crate::OperationRegistry::new(),
+    ))
+    .with_kernel_tool_provider(std::sync::Arc::new(FakeKernelToolProvider));
 
     let result = router
-        .invoke_tool_call("call_1", "record_context", json!({}))
+        .invoke_tool_call("call_1", "record_context", serde_json::json!({}))
         .await;
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -85,17 +71,19 @@ async fn router_invokes_kernel_tool_provider() {
 
 #[tokio::test]
 async fn router_outcome_adapter_wraps_synchronous_kernel_tools_as_completed() {
-    let router = AgentToolRouter::new(Arc::new(OperationRegistry::new()))
-        .with_kernel_tool_provider(Arc::new(FakeKernelToolProvider));
+    let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+        crate::OperationRegistry::new(),
+    ))
+    .with_kernel_tool_provider(std::sync::Arc::new(FakeKernelToolProvider));
 
     let result = router
-        .invoke_tool_call_outcome("call_1", "record_context", json!({}))
+        .invoke_tool_call_outcome("call_1", "record_context", serde_json::json!({}))
         .await
         .unwrap();
 
     assert!(matches!(
         result,
-        AgentKernelToolOutcome::Completed(Some(CanonicalMessage::ToolResult {
+        crate::agent::agent_tool_router::AgentKernelToolOutcome::Completed(Some(crate::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -105,32 +93,41 @@ async fn router_outcome_adapter_wraps_synchronous_kernel_tools_as_completed() {
 
 #[tokio::test]
 async fn router_passes_turn_context_to_kernel_tool_provider() {
-    let seen = Arc::new(Mutex::new(Vec::<Option<TurnContextSnapshot>>::new()));
-    let router = AgentToolRouter::new(Arc::new(OperationRegistry::new()))
-        .with_kernel_tool_provider(Arc::new(RecordingKernelToolProvider {
-            seen: Arc::clone(&seen),
-        }));
-    let input = TurnInput::text("hello")
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+        Option<crate::TurnContextSnapshot>,
+    >::new()));
+    let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+        crate::OperationRegistry::new(),
+    ))
+    .with_kernel_tool_provider(std::sync::Arc::new(RecordingKernelToolProvider {
+        seen: std::sync::Arc::clone(&seen),
+    }));
+    let input = crate::TurnInput::text("hello")
         .with_cwd("/tmp/verlet-turn")
         .with_model("gpt-test")
         .with_provider("openai")
         .with_permission_profile("workspace-write")
         .with_metadata("source", "test");
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
-    let turn_context = TurnContext::new(
-        ThreadContext::root(coordinates.clone()),
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let turn_context = crate::TurnContext::new(
+        crate::ThreadContext::root(coordinates.clone()),
         "turn-1",
         &input,
-        CancellationToken::new(),
+        tokio_util::sync::CancellationToken::new(),
     );
 
     let result = router
-        .invoke_tool_call_for_turn(&turn_context, "call_1", "record_context", json!({}))
+        .invoke_tool_call_for_turn(
+            &turn_context,
+            "call_1",
+            "record_context",
+            serde_json::json!({}),
+        )
         .await;
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: false,
             ..
         }
@@ -157,12 +154,16 @@ async fn router_returns_error_tool_result_for_bad_input_shape() {
     let router = router_with_echo_operation("echo").await;
 
     let result = router
-        .invoke_tool_call("call_1", "echo_search", json!({"other": "verlet"}))
+        .invoke_tool_call(
+            "call_1",
+            "echo_search",
+            serde_json::json!({"other": "verlet"}),
+        )
         .await;
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: true,
             content,
             ..
@@ -175,12 +176,16 @@ async fn router_rejects_non_object_json_tool_arguments() {
     let router = router_with_operation("json-echo", "echo", "json", Vec::new()).await;
 
     let result = router
-        .invoke_tool_call("call_1", "json_echo_search", json!("not an object"))
+        .invoke_tool_call(
+            "call_1",
+            "json_echo_search",
+            serde_json::json!("not an object"),
+        )
         .await;
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: true,
             content,
             ..
@@ -199,12 +204,16 @@ async fn router_rejects_operation_when_tool_invocation_lacks_required_capability
     .await;
 
     let result = router
-        .invoke_tool_call("call_1", "secret_echo_search", json!({"input": "verlet"}))
+        .invoke_tool_call(
+            "call_1",
+            "secret_echo_search",
+            serde_json::json!({"input": "verlet"}),
+        )
         .await;
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: true,
             content,
             ..
@@ -224,12 +233,16 @@ async fn router_invokes_capability_protected_operation_when_granted() {
     .with_capability_grant("secret:EXAMPLE_API_KEY");
 
     let result = router
-        .invoke_tool_call("call_1", "secret_echo_search", json!({"input": "verlet"}))
+        .invoke_tool_call(
+            "call_1",
+            "secret_echo_search",
+            serde_json::json!({"input": "verlet"}),
+        )
         .await;
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -249,11 +262,11 @@ async fn router_checks_grant_expiry_live_at_each_tool_invocation() {
     .with_capability_grant("secret:EXAMPLE_API_KEY")
     .with_capability_grant("fs.read:/workspace")
     .with_capability_grant_expiries([
-        AgentManifestGrantExpiry {
+        crate::AgentManifestGrantExpiry {
             capability: "secret:EXAMPLE_API_KEY".to_string(),
             expires_at: "1970-01-01T00:00:01Z".to_string(),
         },
-        AgentManifestGrantExpiry {
+        crate::AgentManifestGrantExpiry {
             capability: "fs.read:/workspace".to_string(),
             expires_at: "1970-01-01T00:00:02Z".to_string(),
         },
@@ -263,7 +276,7 @@ async fn router_checks_grant_expiry_live_at_each_tool_invocation() {
         .invoke_tool_call_at(
             "call_before",
             "secret_echo_search",
-            json!({"input": "before"}),
+            serde_json::json!({"input": "before"}),
             1_000,
         )
         .await;
@@ -271,21 +284,21 @@ async fn router_checks_grant_expiry_live_at_each_tool_invocation() {
         .invoke_tool_call_at(
             "call_after",
             "secret_echo_search",
-            json!({"input": "after"}),
+            serde_json::json!({"input": "after"}),
             1_001,
         )
         .await;
 
     assert!(matches!(
         at_expiry,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: false,
             ..
         }
     ));
     assert!(matches!(
         after_expiry,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: true,
             content,
             ..
@@ -305,8 +318,8 @@ async fn router_invokes_kernel_process_operation_alias() {
     let result = router
         .invoke_tool_call(
             "call_1",
-            PROCESS_EXEC_OPERATION,
-            json!({
+            crate::PROCESS_EXEC_OPERATION,
+            serde_json::json!({
                 "command": ["/bin/pwd"],
                 "yield_time_ms": 1_000,
                 "timeout_ms": 2_000
@@ -314,7 +327,7 @@ async fn router_invokes_kernel_process_operation_alias() {
         )
         .await;
 
-    let CanonicalMessage::ToolResult {
+    let crate::CanonicalMessage::ToolResult {
         is_error: false,
         content,
         ..
@@ -322,7 +335,7 @@ async fn router_invokes_kernel_process_operation_alias() {
     else {
         panic!("expected successful tool result");
     };
-    let receipt = serde_json::from_str::<Value>(&tool_result_text(&content)).unwrap();
+    let receipt = serde_json::from_str::<serde_json::Value>(&tool_result_text(&content)).unwrap();
     assert_eq!(receipt["operation"], "cooldis.process_exec");
     assert_eq!(receipt["status"], "completed");
     assert_eq!(receipt["backend"], "host_bash");
@@ -341,8 +354,8 @@ async fn router_invokes_kernel_notify_operation_alias_without_delivery_claim() {
     let result = router
         .invoke_tool_call(
             "call_1",
-            CHANNEL_EMIT_OPERATION,
-            json!({
+            crate::CHANNEL_EMIT_OPERATION,
+            serde_json::json!({
                 "channel": "slack",
                 "message": "Ready for review",
                 "thread_id": "thread-1"
@@ -350,7 +363,7 @@ async fn router_invokes_kernel_notify_operation_alias_without_delivery_claim() {
         )
         .await;
 
-    let CanonicalMessage::ToolResult {
+    let crate::CanonicalMessage::ToolResult {
         is_error: false,
         content,
         ..
@@ -358,7 +371,7 @@ async fn router_invokes_kernel_notify_operation_alias_without_delivery_claim() {
     else {
         panic!("expected successful tool result");
     };
-    let receipt = serde_json::from_str::<Value>(&tool_result_text(&content)).unwrap();
+    let receipt = serde_json::from_str::<serde_json::Value>(&tool_result_text(&content)).unwrap();
     assert_eq!(receipt["operation"], "cooldis.channel_emit");
     assert_eq!(receipt["status"], "recorded");
     assert_eq!(receipt["delivery"], "not_sent");
@@ -369,11 +382,13 @@ async fn router_invokes_kernel_notify_operation_alias_without_delivery_claim() {
 
 #[tokio::test]
 async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() {
-    let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+        crate::VirtualBashRuntimeFactory::default(),
+    ));
     let root = host
         .start_thread(
-            ThreadCoordinates::new("tenant", "user", "session"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant", "user", "session"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -382,43 +397,43 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let spawn = router
         .invoke_tool_call(
             "spawn-call-1",
-            THREAD_SPAWN_OPERATION,
-            json!({"task_name": "worker", "message": "echo first"}),
+            crate::THREAD_SPAWN_OPERATION,
+            serde_json::json!({"task_name": "worker", "message": "echo first"}),
         )
         .await;
     let retry = router
         .invoke_tool_call(
             "spawn-call-1",
-            THREAD_SPAWN_OPERATION,
-            json!({"task_name": "worker", "message": "echo retry"}),
+            crate::THREAD_SPAWN_OPERATION,
+            serde_json::json!({"task_name": "worker", "message": "echo retry"}),
         )
         .await;
     let duplicate = router
         .invoke_tool_call(
             "spawn-call-2",
-            THREAD_SPAWN_OPERATION,
-            json!({"task_name": "worker", "message": "echo duplicate"}),
+            crate::THREAD_SPAWN_OPERATION,
+            serde_json::json!({"task_name": "worker", "message": "echo duplicate"}),
         )
         .await;
     let submit = router
         .invoke_tool_call(
             "submit-call-1",
-            THREAD_SUBMIT_OPERATION,
-            json!({"task_name": "worker", "message": "echo steered"}),
+            crate::THREAD_SUBMIT_OPERATION,
+            serde_json::json!({"task_name": "worker", "message": "echo steered"}),
         )
         .await;
     let status = router
         .invoke_tool_call(
             "status-call-1",
-            THREAD_STATUS_OPERATION,
-            json!({"task_name": "worker"}),
+            crate::THREAD_STATUS_OPERATION,
+            serde_json::json!({"task_name": "worker"}),
         )
         .await;
     let wait = router
         .invoke_tool_call(
             "wait-call-1",
-            THREAD_WAIT_OPERATION,
-            json!({"task_name": "worker", "timeout_ms": 1_000}),
+            crate::THREAD_WAIT_OPERATION,
+            serde_json::json!({"task_name": "worker", "timeout_ms": 1_000}),
         )
         .await;
 
@@ -434,7 +449,7 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
         (&wait, "cooldis.thread_wait"),
         (&status, "cooldis.thread_status"),
     ] {
-        let CanonicalMessage::ToolResult {
+        let crate::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -445,14 +460,14 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
         let text = tool_result_text(content);
         assert!(!text.contains(&child_id), "child id leaked in {text}");
         assert!(!text.contains(&parent_id), "parent id leaked in {text}");
-        let value: Value = serde_json::from_str(&text).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["operation"], operation);
         assert_eq!(value["task_name"], "worker");
         assert!(value["status"].is_string());
         assert_eq!(value.as_object().unwrap().len(), 3);
     }
 
-    let CanonicalMessage::ToolResult {
+    let crate::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -468,11 +483,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let missing = router
         .invoke_tool_call(
             "status-missing",
-            THREAD_STATUS_OPERATION,
-            json!({"task_name": "missing"}),
+            crate::THREAD_STATUS_OPERATION,
+            serde_json::json!({"task_name": "missing"}),
         )
         .await;
-    let CanonicalMessage::ToolResult {
+    let crate::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -488,11 +503,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let missing_wait = router
         .invoke_tool_call(
             "wait-missing",
-            THREAD_WAIT_OPERATION,
-            json!({"task_name": "missing", "timeout_ms": 1}),
+            crate::THREAD_WAIT_OPERATION,
+            serde_json::json!({"task_name": "missing", "timeout_ms": 1}),
         )
         .await;
-    let CanonicalMessage::ToolResult {
+    let crate::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -508,11 +523,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let rejected_raw_wait = router
         .invoke_tool_call(
             "wait-raw-id",
-            THREAD_WAIT_OPERATION,
-            json!({"target_thread_id": child_id, "timeout_ms": 1}),
+            crate::THREAD_WAIT_OPERATION,
+            serde_json::json!({"target_thread_id": child_id, "timeout_ms": 1}),
         )
         .await;
-    let CanonicalMessage::ToolResult {
+    let crate::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -528,11 +543,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let cancel = router
         .invoke_tool_call(
             "cancel-call-1",
-            THREAD_CANCEL_OPERATION,
-            json!({"task_name": "worker"}),
+            crate::THREAD_CANCEL_OPERATION,
+            serde_json::json!({"task_name": "worker"}),
         )
         .await;
-    let CanonicalMessage::ToolResult {
+    let crate::CanonicalMessage::ToolResult {
         is_error: false,
         content,
         ..
@@ -544,8 +559,8 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     assert!(!cancel_text.contains(&child_id));
     assert!(!cancel_text.contains(&parent_id));
     assert_eq!(
-        serde_json::from_str::<Value>(&cancel_text).unwrap(),
-        json!({
+        serde_json::from_str::<serde_json::Value>(&cancel_text).unwrap(),
+        serde_json::json!({
             "operation": "cooldis.thread_cancel",
             "status": "stopped",
             "task_name": "worker"
@@ -555,11 +570,11 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     let unavailable = router
         .invoke_tool_call(
             "status-call-2",
-            THREAD_STATUS_OPERATION,
-            json!({"task_name": "worker"}),
+            crate::THREAD_STATUS_OPERATION,
+            serde_json::json!({"task_name": "worker"}),
         )
         .await;
-    let CanonicalMessage::ToolResult {
+    let crate::CanonicalMessage::ToolResult {
         is_error: true,
         content,
         ..
@@ -577,7 +592,9 @@ async fn router_addresses_child_threads_by_task_name_without_exposing_raw_ids() 
     host.shutdown_all().await.unwrap();
 }
 
-async fn router_with_echo_operation(name: &str) -> AgentToolRouter {
+async fn router_with_echo_operation(
+    name: &str,
+) -> crate::agent::agent_tool_router::AgentToolRouter {
     router_with_operation(name, "echo", "bytes", Vec::new()).await
 }
 
@@ -586,120 +603,134 @@ async fn router_with_operation(
     prefix: &str,
     input: &str,
     required_capabilities: Vec<&str>,
-) -> AgentToolRouter {
-    let registry = Arc::new(OperationRegistry::new());
+) -> crate::agent::agent_tool_router::AgentToolRouter {
+    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
     let wasm = wat::parse_str(echo_operation_guest(prefix, input, &required_capabilities))
         .expect("echo operation fixture should compile");
-    let mut registration = OperationRegistration::new(name, WasmRuntimeArtifact::bytes(wasm));
+    let mut registration =
+        crate::OperationRegistration::new(name, crate::WasmRuntimeArtifact::bytes(wasm));
     for capability in required_capabilities {
         registration = registration.with_capability_grant(capability);
     }
     registry.register(registration).await.unwrap();
-    AgentToolRouter::new(registry)
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
 }
 
-async fn router_with_kernel_process_operation(cwd: PathBuf) -> AgentToolRouter {
-    let registry = Arc::new(OperationRegistry::new());
-    let package = verlet_process_kernel_package();
-    let context = ThreadContext::root(ThreadCoordinates::new("tenant", "user", "session"));
-    let store: Arc<dyn crate::RuntimeStore> = Arc::new(crate::InMemorySessionStore::new());
+async fn router_with_kernel_process_operation(
+    cwd: std::path::PathBuf,
+) -> crate::agent::agent_tool_router::AgentToolRouter {
+    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+    let package = crate::verlet_process_kernel_package();
+    let context =
+        crate::ThreadContext::root(crate::ThreadCoordinates::new("tenant", "user", "session"));
+    let store: std::sync::Arc<dyn crate::RuntimeStore> =
+        std::sync::Arc::new(crate::InMemorySessionStore::new());
     let process_dispatcher = crate::kernel::process_handle_dispatch::test_process_dispatcher(
         store,
         context.coordinates.clone(),
     );
-    let dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
-        KernelProcessOperationProvider::new(context, cwd)
+    let dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> = std::sync::Arc::new(
+        crate::KernelProcessOperationProvider::new(context, cwd)
             .with_process_dispatcher(process_dispatcher),
     );
-    let mut registration =
-        KernelOperationRegistration::new(VERLET_PROCESS_PACKAGE, package.manifest.clone())
-            .with_capability_grants(package.capability_grants.clone())
-            .with_dispatcher(dispatcher);
+    let mut registration = crate::KernelOperationRegistration::new(
+        crate::VERLET_PROCESS_PACKAGE,
+        package.manifest.clone(),
+    )
+    .with_capability_grants(package.capability_grants.clone())
+    .with_dispatcher(dispatcher);
     registration.metadata.insert(
-        OPERATION_METADATA_RUNTIME_KIND.to_string(),
-        json!(KERNEL_RUNTIME_KIND),
+        crate::OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        serde_json::json!(crate::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
-    AgentToolRouter::new(registry)
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
         .with_capability_grants(package.capability_grants)
-        .with_tool_aliases(vec![OperationToolAlias {
-            tool_name: PROCESS_EXEC_OPERATION.to_string(),
-            registered_name: VERLET_PROCESS_PACKAGE.to_string(),
-            operation_name: PROCESS_EXEC_OPERATION.to_string(),
+        .with_tool_aliases(vec![crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: crate::PROCESS_EXEC_OPERATION.to_string(),
+            registered_name: crate::VERLET_PROCESS_PACKAGE.to_string(),
+            operation_name: crate::PROCESS_EXEC_OPERATION.to_string(),
             grant_expiries: Vec::new(),
         }])
 }
 
-async fn router_with_kernel_notify_operation() -> AgentToolRouter {
-    let registry = Arc::new(OperationRegistry::new());
-    let package = verlet_notify_kernel_package();
-    let dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(KernelNotifyOperationProvider);
-    let mut registration =
-        KernelOperationRegistration::new(VERLET_NOTIFY_PACKAGE, package.manifest.clone())
-            .with_capability_grants(package.capability_grants.clone())
-            .with_dispatcher(dispatcher);
+async fn router_with_kernel_notify_operation() -> crate::agent::agent_tool_router::AgentToolRouter {
+    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+    let package = crate::verlet_notify_kernel_package();
+    let dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> =
+        std::sync::Arc::new(crate::KernelNotifyOperationProvider);
+    let mut registration = crate::KernelOperationRegistration::new(
+        crate::VERLET_NOTIFY_PACKAGE,
+        package.manifest.clone(),
+    )
+    .with_capability_grants(package.capability_grants.clone())
+    .with_dispatcher(dispatcher);
     registration.metadata.insert(
-        OPERATION_METADATA_RUNTIME_KIND.to_string(),
-        json!(KERNEL_RUNTIME_KIND),
+        crate::OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        serde_json::json!(crate::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
-    AgentToolRouter::new(registry)
-        .with_capability_grant(CHANNEL_EMIT_CAPABILITY)
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
+        .with_capability_grant(crate::CHANNEL_EMIT_CAPABILITY)
         .with_tool_aliases(vec![
-            OperationToolAlias {
-                tool_name: NOTIFY_PREVIEW_OPERATION.to_string(),
-                registered_name: VERLET_NOTIFY_PACKAGE.to_string(),
-                operation_name: NOTIFY_PREVIEW_OPERATION.to_string(),
+            crate::agent::agent_tool_router::OperationToolAlias {
+                tool_name: crate::NOTIFY_PREVIEW_OPERATION.to_string(),
+                registered_name: crate::VERLET_NOTIFY_PACKAGE.to_string(),
+                operation_name: crate::NOTIFY_PREVIEW_OPERATION.to_string(),
                 grant_expiries: Vec::new(),
             },
-            OperationToolAlias {
-                tool_name: CHANNEL_EMIT_OPERATION.to_string(),
-                registered_name: VERLET_NOTIFY_PACKAGE.to_string(),
-                operation_name: CHANNEL_EMIT_OPERATION.to_string(),
+            crate::agent::agent_tool_router::OperationToolAlias {
+                tool_name: crate::CHANNEL_EMIT_OPERATION.to_string(),
+                registered_name: crate::VERLET_NOTIFY_PACKAGE.to_string(),
+                operation_name: crate::CHANNEL_EMIT_OPERATION.to_string(),
                 grant_expiries: Vec::new(),
             },
         ])
 }
 
 async fn router_with_kernel_thread_operations(
-    host: &RuntimeHost,
-    context: ThreadContext,
-) -> AgentToolRouter {
-    let registry = Arc::new(OperationRegistry::new());
-    let package = verlet_threads_kernel_package();
-    let dispatcher: Arc<dyn KernelOperationDispatcher> = Arc::new(
+    host: &crate::RuntimeHost,
+    context: crate::ThreadContext,
+) -> crate::agent::agent_tool_router::AgentToolRouter {
+    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+    let package = crate::verlet_threads_kernel_package();
+    let dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> = std::sync::Arc::new(
         crate::KernelThreadOperationProvider::new(host.kernel_control(), context),
     );
-    let mut registration =
-        KernelOperationRegistration::new(crate::VERLET_THREADS_PACKAGE, package.manifest.clone())
-            .with_capability_grants(package.capability_grants.clone())
-            .with_dispatcher(dispatcher);
+    let mut registration = crate::KernelOperationRegistration::new(
+        crate::VERLET_THREADS_PACKAGE,
+        package.manifest.clone(),
+    )
+    .with_capability_grants(package.capability_grants.clone())
+    .with_dispatcher(dispatcher);
     registration.metadata.insert(
-        OPERATION_METADATA_RUNTIME_KIND.to_string(),
-        json!(KERNEL_RUNTIME_KIND),
+        crate::OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        serde_json::json!(crate::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
-    AgentToolRouter::new(registry)
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
         .with_capability_grants(package.capability_grants)
         .with_tool_aliases(
             [
-                THREAD_SPAWN_OPERATION,
-                THREAD_SUBMIT_OPERATION,
-                THREAD_WAIT_OPERATION,
-                THREAD_STATUS_OPERATION,
-                THREAD_CANCEL_OPERATION,
+                crate::THREAD_SPAWN_OPERATION,
+                crate::THREAD_SUBMIT_OPERATION,
+                crate::THREAD_WAIT_OPERATION,
+                crate::THREAD_STATUS_OPERATION,
+                crate::THREAD_CANCEL_OPERATION,
             ]
             .into_iter()
-            .map(|operation| OperationToolAlias {
-                tool_name: operation.to_string(),
-                registered_name: crate::VERLET_THREADS_PACKAGE.to_string(),
-                operation_name: operation.to_string(),
-                grant_expiries: Vec::new(),
-            }),
+            .map(
+                |operation| crate::agent::agent_tool_router::OperationToolAlias {
+                    tool_name: operation.to_string(),
+                    registered_name: crate::VERLET_THREADS_PACKAGE.to_string(),
+                    operation_name: operation.to_string(),
+                    grant_expiries: Vec::new(),
+                },
+            ),
         )
 }
 
-fn temp_cwd(name: &str) -> PathBuf {
+fn temp_cwd(name: &str) -> std::path::PathBuf {
     let cwd = std::env::temp_dir().join(format!(
         "verlet-agent-tool-router-{name}-{}",
         uuid::Uuid::now_v7()
@@ -817,13 +848,13 @@ fn wat_bytes(bytes: &[u8]) -> String {
 
 struct FakeKernelToolProvider;
 
-#[async_trait]
-impl AgentKernelToolProvider for FakeKernelToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::agent::agent_tool_router::AgentKernelToolProvider for FakeKernelToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "record_context",
             "Return the current Verlet thread status.",
-            json!({
+            serde_json::json!({
                 "type": "object",
                 "additionalProperties": false
             }),
@@ -832,12 +863,12 @@ impl AgentKernelToolProvider for FakeKernelToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         if call.tool_name != "record_context" {
             return Ok(None);
         }
-        Ok(Some(CanonicalMessage::tool_result(
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             r#"{"status":"idle"}"#,
@@ -847,16 +878,16 @@ impl AgentKernelToolProvider for FakeKernelToolProvider {
 }
 
 struct RecordingKernelToolProvider {
-    seen: Arc<Mutex<Vec<Option<TurnContextSnapshot>>>>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Option<crate::TurnContextSnapshot>>>>,
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for RecordingKernelToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::agent::agent_tool_router::AgentKernelToolProvider for RecordingKernelToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "record_context",
             "Record the current Verlet turn context.",
-            json!({
+            serde_json::json!({
                 "type": "object",
                 "additionalProperties": false
             }),
@@ -865,10 +896,10 @@ impl AgentKernelToolProvider for RecordingKernelToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         self.seen.lock().unwrap().push(call.turn_context.clone());
-        Ok(Some(CanonicalMessage::tool_result(
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             "recorded",

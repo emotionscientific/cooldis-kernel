@@ -1,20 +1,3 @@
-use crate::kernel::history::{
-    CanonicalContent, CanonicalMessage, CanonicalStopReason, ProviderApi,
-};
-use crate::{
-    AgentRuntime, AgentRuntimeFactory, RuntimeEventKind, RuntimeServices, RuntimeTerminalState,
-    SessionEntryKind, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal, ThreadStatus,
-    TurnSubmissionMode, VerletProcessHandle, VerletResult, emit_runtime_event,
-};
-use async_trait::async_trait;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, watch};
-use tokio_util::sync::CancellationToken;
-use verlet_abi::WasmOperationManifest;
-use verlet_process::WasmOperationOutput;
-use verlet_wasm::{WasmModuleRuntime, WasmRuntimeFactory as CoreWasmRuntimeFactory};
-
 pub use verlet_wasm::{
     DEFAULT_ENTRYPOINT, DEFAULT_FUEL, DEFAULT_FUEL_YIELD_INTERVAL, DEFAULT_MAX_INPUT_BYTES,
     DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MEMORY_LIMIT_BYTES, DEFAULT_OPERATION_NAME, WasmHttpRequest,
@@ -35,27 +18,29 @@ pub(crate) use verlet_wasm::{
 };
 
 pub struct WasmRuntimeFactory {
-    core: Arc<CoreWasmRuntimeFactory>,
+    core: std::sync::Arc<verlet_wasm::WasmRuntimeFactory>,
 }
 
 impl WasmRuntimeFactory {
-    pub fn new(config: WasmRuntimeConfig) -> VerletResult<Self> {
+    pub fn new(config: WasmRuntimeConfig) -> crate::VerletResult<Self> {
         Ok(Self {
-            core: Arc::new(CoreWasmRuntimeFactory::new(config)?),
+            core: std::sync::Arc::new(verlet_wasm::WasmRuntimeFactory::new(config)?),
         })
     }
 
-    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> VerletResult<Self> {
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> crate::VerletResult<Self> {
         Ok(Self {
-            core: Arc::new(CoreWasmRuntimeFactory::from_bytes(bytes)?),
+            core: std::sync::Arc::new(verlet_wasm::WasmRuntimeFactory::from_bytes(bytes)?),
         })
     }
 
-    pub async fn describe(&self) -> VerletResult<Option<WasmOperationManifest>> {
+    pub async fn describe(&self) -> crate::VerletResult<Option<verlet_abi::WasmOperationManifest>> {
         Ok(self.core.describe().await?)
     }
 
-    pub async fn validate_operation_artifact(&self) -> VerletResult<WasmOperationManifest> {
+    pub async fn validate_operation_artifact(
+        &self,
+    ) -> crate::VerletResult<verlet_abi::WasmOperationManifest> {
         Ok(self.core.validate_operation_artifact().await?)
     }
 
@@ -63,7 +48,7 @@ impl WasmRuntimeFactory {
         &self,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> VerletResult<WasmOperationOutput> {
+    ) -> crate::VerletResult<verlet_process::WasmOperationOutput> {
         Ok(self
             .core
             .invoke_operation_bytes(operation_name, input)
@@ -74,7 +59,7 @@ impl WasmRuntimeFactory {
         &self,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> VerletResult<VerletProcessHandle> {
+    ) -> crate::VerletResult<crate::VerletProcessHandle> {
         Ok(self
             .core
             .invoke_operation_process(operation_name, input)
@@ -82,9 +67,12 @@ impl WasmRuntimeFactory {
     }
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for WasmRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::AgentRuntimeFactory for WasmRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::ThreadContext,
+    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
         Ok(Box::new(WasmRuntime {
             runtime: self.core.build_runtime().await?,
         }))
@@ -92,43 +80,44 @@ impl AgentRuntimeFactory for WasmRuntimeFactory {
 }
 
 struct WasmRuntime {
-    runtime: WasmModuleRuntime,
+    runtime: verlet_wasm::WasmModuleRuntime,
 }
 
 impl WasmRuntime {
-    async fn execute_turn(&self, input: String) -> VerletResult<String> {
+    async fn execute_turn(&self, input: String) -> crate::VerletResult<String> {
         Ok(self.runtime.execute_turn(input).await?)
     }
 }
 
-#[async_trait]
-impl AgentRuntime for WasmRuntime {
+#[async_trait::async_trait]
+impl crate::AgentRuntime for WasmRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        context: crate::ThreadContext,
+        services: crate::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
-        emit_runtime_event(
+        crate::emit_runtime_event(
             &events,
             &coordinates,
-            RuntimeEventKind::ThreadStarted {
+            crate::RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
                 metadata: context.metadata.clone(),
             },
         );
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
-        let mut pending_submits = VecDeque::new();
+        let _ = events.send(crate::ThreadEvent::Started { context });
+        let _ = status.send(crate::ThreadStatus::Idle);
+        let mut pending_submits = std::collections::VecDeque::new();
 
         loop {
-            if let Some(ThreadCommand::Submit { turn_id, input, .. }) = pending_submits.pop_front()
+            if let Some(crate::ThreadCommand::Submit { turn_id, input, .. }) =
+                pending_submits.pop_front()
             {
                 if run_wasm_turn(
                     &self,
@@ -159,12 +148,12 @@ impl AgentRuntime for WasmRuntime {
                         break;
                     };
                     match command {
-                        ThreadCommand::Submit { turn_id, input, mode } => {
-                            if mode == TurnSubmissionMode::Steer {
-                                emit_runtime_event(
+                        crate::ThreadCommand::Submit { turn_id, input, mode } => {
+                            if mode == crate::TurnSubmissionMode::Steer {
+                                crate::emit_runtime_event(
                                     &events,
                                     &coordinates,
-                                    RuntimeEventKind::PolicyRejected {
+                                    crate::RuntimeEventKind::PolicyRejected {
                                         code: "no_active_turn".to_string(),
                                         message: "steer input requires an active Wasm turn".to_string(),
                                     },
@@ -189,55 +178,55 @@ impl AgentRuntime for WasmRuntime {
                                 break;
                             }
                         }
-                        ThreadCommand::Cancel { reason } => {
-                            let _ = status.send(ThreadStatus::Cancelling);
-                            let _ = events.send(ThreadEvent::Signal {
+                        crate::ThreadCommand::Cancel { reason } => {
+                            let _ = status.send(crate::ThreadStatus::Cancelling);
+                            let _ = events.send(crate::ThreadEvent::Signal {
                                 thread_id,
-                                signal: ThreadSignal::interrupt_cancel(&coordinates, reason.clone()),
+                                signal: crate::ThreadSignal::interrupt_cancel(&coordinates, reason.clone()),
                             });
-                            emit_runtime_event(
+                            crate::emit_runtime_event(
                                 &events,
                                 &coordinates,
-                                RuntimeEventKind::Cancelled {
+                                crate::RuntimeEventKind::Cancelled {
                                     reason: reason.clone(),
                                 },
                             );
-                            let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        ThreadCommand::CancelTurn { .. } => {}
-                        ThreadCommand::Compact { .. } => {
-                            emit_runtime_event(
+                        crate::ThreadCommand::CancelTurn { .. } => {}
+                        crate::ThreadCommand::Compact { .. } => {
+                            crate::emit_runtime_event(
                                 &events,
                                 &coordinates,
-                                RuntimeEventKind::PolicyRejected {
+                                crate::RuntimeEventKind::PolicyRejected {
                                     code: "compact_unsupported".to_string(),
                                     message: "Wasm runtime does not support Verlet compaction commands".to_string(),
                                 },
                             );
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        ThreadCommand::ResumeToolCall { .. } => {
-                            emit_runtime_event(
+                        crate::ThreadCommand::ResumeToolCall { .. } => {
+                            crate::emit_runtime_event(
                                 &events,
                                 &coordinates,
-                                RuntimeEventKind::PolicyRejected {
+                                crate::RuntimeEventKind::PolicyRejected {
                                     code: "tool_resume_unsupported".to_string(),
                                     message: "Wasm runtime does not support provider tool-call resume".to_string(),
                                 },
                             );
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        ThreadCommand::Shutdown => {
-                            let _ = events.send(ThreadEvent::Signal {
+                        crate::ThreadCommand::Shutdown => {
+                            let _ = events.send(crate::ThreadEvent::Signal {
                                 thread_id,
-                                signal: ThreadSignal::shutdown(&coordinates),
+                                signal: crate::ThreadSignal::shutdown(&coordinates),
                             });
-                            emit_runtime_event(
+                            crate::emit_runtime_event(
                                 &events,
                                 &coordinates,
-                                RuntimeEventKind::Terminal {
-                                    state: RuntimeTerminalState::Stopped,
+                                crate::RuntimeEventKind::Terminal {
+                                    state: crate::RuntimeTerminalState::Stopped,
                                 },
                             );
                             break;
@@ -247,42 +236,42 @@ impl AgentRuntime for WasmRuntime {
             }
         }
 
-        emit_runtime_event(
+        crate::emit_runtime_event(
             &events,
             &coordinates,
-            RuntimeEventKind::Terminal {
-                state: RuntimeTerminalState::Stopped,
+            crate::RuntimeEventKind::Terminal {
+                state: crate::RuntimeTerminalState::Stopped,
             },
         );
-        let _ = status.send(ThreadStatus::Stopped);
-        let _ = events.send(ThreadEvent::Stopped { thread_id });
+        let _ = status.send(crate::ThreadStatus::Stopped);
+        let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
     }
 }
 
 async fn run_wasm_turn(
     runtime: &WasmRuntime,
-    services: &RuntimeServices,
+    services: &crate::RuntimeServices,
     coordinates: &crate::ThreadCoordinates,
     thread_id: crate::ThreadId,
     turn_id: String,
     input: crate::TurnInput,
-    events: &broadcast::Sender<ThreadEvent>,
-    status: &watch::Sender<ThreadStatus>,
-    commands: &mut mpsc::Receiver<ThreadCommand>,
-    cancellation: &CancellationToken,
-    pending_submits: &mut VecDeque<ThreadCommand>,
+    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    status: &tokio::sync::watch::Sender<crate::ThreadStatus>,
+    commands: &mut tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+    cancellation: &tokio_util::sync::CancellationToken,
+    pending_submits: &mut std::collections::VecDeque<crate::ThreadCommand>,
 ) -> bool {
-    let _ = status.send(ThreadStatus::Running);
+    let _ = status.send(crate::ThreadStatus::Running);
     match services
         .append_user_turn_input(coordinates, &turn_id, &input)
         .await
     {
         Ok(entry) => {
-            let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+            let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
         }
         Err(err) => {
-            let _ = status.send(ThreadStatus::Failed);
-            let _ = events.send(ThreadEvent::Failed {
+            let _ = status.send(crate::ThreadStatus::Failed);
+            let _ = events.send(crate::ThreadEvent::Failed {
                 thread_id,
                 message: err.to_string(),
             });
@@ -304,121 +293,121 @@ async fn run_wasm_turn(
             }
             command = commands.recv() => {
                 match command {
-                    Some(ThreadCommand::Cancel { reason }) => {
-                        let _ = status.send(ThreadStatus::Cancelling);
-                        let _ = events.send(ThreadEvent::Signal {
+                    Some(crate::ThreadCommand::Cancel { reason }) => {
+                        let _ = status.send(crate::ThreadStatus::Cancelling);
+                        let _ = events.send(crate::ThreadEvent::Signal {
                             thread_id,
-                            signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
+                            signal: crate::ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
                         });
-                        emit_runtime_event(
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::Cancelled {
+                            crate::RuntimeEventKind::Cancelled {
                                 reason: reason.clone(),
                             },
                         );
                         cancelled_reason = Some(reason);
                         break None;
                     }
-                    Some(ThreadCommand::CancelTurn {
+                    Some(crate::ThreadCommand::CancelTurn {
                         watchdog_token_id,
                         reason,
                     }) => {
                         if input.turn_watchdog_id() != Some(watchdog_token_id) {
                             continue;
                         }
-                        let _ = status.send(ThreadStatus::Cancelling);
-                        let _ = events.send(ThreadEvent::Signal {
+                        let _ = status.send(crate::ThreadStatus::Cancelling);
+                        let _ = events.send(crate::ThreadEvent::Signal {
                             thread_id,
-                            signal: ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
+                            signal: crate::ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
                         });
-                        emit_runtime_event(
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::Cancelled {
+                            crate::RuntimeEventKind::Cancelled {
                                 reason: reason.clone(),
                             },
                         );
                         cancelled_reason = Some(reason);
                         break None;
                     }
-                    Some(ThreadCommand::Shutdown) => {
-                        let _ = events.send(ThreadEvent::Signal {
+                    Some(crate::ThreadCommand::Shutdown) => {
+                        let _ = events.send(crate::ThreadEvent::Signal {
                             thread_id,
-                            signal: ThreadSignal::shutdown(coordinates),
+                            signal: crate::ThreadSignal::shutdown(coordinates),
                         });
-                        emit_runtime_event(
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::Terminal {
-                                state: RuntimeTerminalState::Stopped,
+                            crate::RuntimeEventKind::Terminal {
+                                state: crate::RuntimeTerminalState::Stopped,
                             },
                         );
                         shutdown_after_turn = true;
                         break None;
                     }
-                    Some(ThreadCommand::Submit { turn_id, input, mode }) => {
+                    Some(crate::ThreadCommand::Submit { turn_id, input, mode }) => {
                         match mode {
-                            TurnSubmissionMode::Queue => {
-                                let _ = events.send(ThreadEvent::Signal {
+                            crate::TurnSubmissionMode::Queue => {
+                                let _ = events.send(crate::ThreadEvent::Signal {
                                     thread_id,
-                                    signal: ThreadSignal::user_queue(coordinates, turn_id.clone()),
+                                    signal: crate::ThreadSignal::user_queue(coordinates, turn_id.clone()),
                                 });
-                                pending_submits.push_back(ThreadCommand::Submit {
+                                pending_submits.push_back(crate::ThreadCommand::Submit {
                                     turn_id,
                                     input,
                                     mode,
                                 });
                             }
-                            TurnSubmissionMode::Steer => {
-                                emit_runtime_event(
+                            crate::TurnSubmissionMode::Steer => {
+                                crate::emit_runtime_event(
                                     events,
                                     coordinates,
-                                    RuntimeEventKind::PolicyRejected {
+                                    crate::RuntimeEventKind::PolicyRejected {
                                         code: "active_turn_not_steerable".to_string(),
                                         message: "Wasm runtime does not support same-turn steering".to_string(),
                                     },
                                 );
                             }
-                            TurnSubmissionMode::Interrupt => {
+                            crate::TurnSubmissionMode::Interrupt => {
                                 let reason = format!("interrupted by turn {turn_id}");
-                                let _ = status.send(ThreadStatus::Cancelling);
-                                let _ = events.send(ThreadEvent::Signal {
+                                let _ = status.send(crate::ThreadStatus::Cancelling);
+                                let _ = events.send(crate::ThreadEvent::Signal {
                                     thread_id,
-                                    signal: ThreadSignal::user_interrupt(coordinates, turn_id.clone()),
+                                    signal: crate::ThreadSignal::user_interrupt(coordinates, turn_id.clone()),
                                 });
-                                emit_runtime_event(
+                                crate::emit_runtime_event(
                                     events,
                                     coordinates,
-                                    RuntimeEventKind::Cancelled {
+                                    crate::RuntimeEventKind::Cancelled {
                                         reason: reason.clone(),
                                     },
                                 );
                                 cancelled_reason = Some(reason);
-                                pending_submits.push_front(ThreadCommand::Submit {
+                                pending_submits.push_front(crate::ThreadCommand::Submit {
                                     turn_id,
                                     input,
-                                    mode: TurnSubmissionMode::Queue,
+                                    mode: crate::TurnSubmissionMode::Queue,
                                 });
                                 break None;
                             }
                         }
                     }
-                    Some(ThreadCommand::Compact { .. }) => {
-                        emit_runtime_event(
+                    Some(crate::ThreadCommand::Compact { .. }) => {
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::PolicyRejected {
+                            crate::RuntimeEventKind::PolicyRejected {
                                 code: "compact_unsupported".to_string(),
                                 message: "Wasm runtime does not support Verlet compaction commands".to_string(),
                             },
                         );
                     }
-                    Some(ThreadCommand::ResumeToolCall { .. }) => {
-                        emit_runtime_event(
+                    Some(crate::ThreadCommand::ResumeToolCall { .. }) => {
+                        crate::emit_runtime_event(
                             events,
                             coordinates,
-                            RuntimeEventKind::PolicyRejected {
+                            crate::RuntimeEventKind::PolicyRejected {
                                 code: "tool_resume_unsupported".to_string(),
                                 message: "Wasm runtime does not support provider tool-call resume".to_string(),
                             },
@@ -434,15 +423,15 @@ async fn run_wasm_turn(
     };
 
     if let Some(reason) = cancelled_reason {
-        let _ = status.send(ThreadStatus::Idle);
-        emit_runtime_event(
+        let _ = status.send(crate::ThreadStatus::Idle);
+        crate::emit_runtime_event(
             events,
             coordinates,
-            RuntimeEventKind::Terminal {
-                state: RuntimeTerminalState::Cancelled,
+            crate::RuntimeEventKind::Terminal {
+                state: crate::RuntimeTerminalState::Cancelled,
             },
         );
-        let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
+        let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
         return shutdown_after_turn;
     }
 
@@ -450,42 +439,42 @@ async fn run_wasm_turn(
         match result {
             Ok(output) => {
                 if !output.is_empty() {
-                    emit_runtime_event(
+                    crate::emit_runtime_event(
                         events,
                         coordinates,
-                        RuntimeEventKind::TextDelta {
+                        crate::RuntimeEventKind::TextDelta {
                             text: output.clone(),
                         },
                     );
-                    let _ = events.send(ThreadEvent::Output {
+                    let _ = events.send(crate::ThreadEvent::Output {
                         thread_id,
                         text: output.clone(),
                     });
                     mirror_wasm_output(services, coordinates, thread_id, output, events).await;
                 }
-                emit_runtime_event(
+                crate::emit_runtime_event(
                     events,
                     coordinates,
-                    RuntimeEventKind::Terminal {
-                        state: RuntimeTerminalState::Completed,
+                    crate::RuntimeEventKind::Terminal {
+                        state: crate::RuntimeTerminalState::Completed,
                     },
                 );
             }
             Err(err) => {
-                let _ = status.send(ThreadStatus::Failed);
-                let _ = events.send(ThreadEvent::Signal {
+                let _ = status.send(crate::ThreadStatus::Failed);
+                let _ = events.send(crate::ThreadEvent::Signal {
                     thread_id,
-                    signal: ThreadSignal::failed(coordinates, err.to_string()),
+                    signal: crate::ThreadSignal::failed(coordinates, err.to_string()),
                 });
-                emit_runtime_event(
+                crate::emit_runtime_event(
                     events,
                     coordinates,
-                    RuntimeEventKind::Failed {
+                    crate::RuntimeEventKind::Failed {
                         code: "wasm_runtime".to_string(),
                         message: err.to_string(),
                     },
                 );
-                let _ = events.send(ThreadEvent::Failed {
+                let _ = events.send(crate::ThreadEvent::Failed {
                     thread_id,
                     message: err.to_string(),
                 });
@@ -497,35 +486,35 @@ async fn run_wasm_turn(
     if shutdown_after_turn {
         true
     } else {
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = status.send(crate::ThreadStatus::Idle);
         false
     }
 }
 
 async fn mirror_wasm_output(
-    services: &RuntimeServices,
+    services: &crate::RuntimeServices,
     coordinates: &crate::ThreadCoordinates,
     thread_id: crate::ThreadId,
     text: String,
-    events: &broadcast::Sender<ThreadEvent>,
+    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
 ) {
     if let Ok(entry) = services
         .append_session_entry(
             coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::assistant(
+            crate::SessionEntryKind::Message {
+                message: crate::kernel::history::CanonicalMessage::assistant(
                     "verlet",
-                    ProviderApi::Other("wasm_runner".to_string()),
+                    crate::kernel::history::ProviderApi::Other("wasm_runner".to_string()),
                     "wasmtime",
-                    vec![CanonicalContent::text(text)],
-                    CanonicalStopReason::EndTurn,
+                    vec![crate::kernel::history::CanonicalContent::text(text)],
+                    crate::kernel::history::CanonicalStopReason::EndTurn,
                 ),
             },
         )
         .await
     {
-        let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+        let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
     }
 }
 

@@ -1,42 +1,29 @@
-use crate::{
-    OperationProjectionSet, RegisteredOperation, VerletOperationsError as VerletError,
-    VerletResult, tool_package::ToolInterfaceContract,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
-use verlet_abi::WasmOperationManifest;
-use verlet_wasm::{WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory};
+use sha2::Digest as _;
+use std::io::Write as _;
 
 const RECORD_SCHEMA_VERSION: u32 = 1;
 const BINDING_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub struct OperationBlobStore {
-    root: PathBuf,
+    root: std::path::PathBuf,
 }
 
 impl OperationBlobStore {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    pub fn root(&self) -> &Path {
+    pub fn root(&self) -> &std::path::Path {
         &self.root
     }
 
-    pub fn put(&self, bytes: &[u8]) -> VerletResult<String> {
+    pub fn put(&self, bytes: &[u8]) -> crate::VerletResult<String> {
         let hash = wasm_sha256(bytes);
         let path = self.artifact_path(&hash)?;
         if path.exists() {
-            let existing = fs::read(&path).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            let existing = std::fs::read(&path).map_err(|err| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to read existing blob {}: {err}",
                     path.display()
                 ))
@@ -44,75 +31,78 @@ impl OperationBlobStore {
             if wasm_sha256(&existing) == hash {
                 return Ok(hash);
             }
-            fs::remove_file(&path).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            std::fs::remove_file(&path).map_err(|err| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to replace corrupt existing blob {}: {err}",
                     path.display()
                 ))
             })?;
         }
         let Some(parent) = path.parent() else {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "blob path {} has no parent directory",
                 path.display()
             )));
         };
-        fs::create_dir_all(parent).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        std::fs::create_dir_all(parent).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to create blob directory {}: {err}",
                 parent.display()
             ))
         })?;
-        let tmp_path = parent.join(format!(".{hash}.tmp.{}", Uuid::now_v7()));
+        let tmp_path = parent.join(format!(".{hash}.tmp.{}", uuid::Uuid::now_v7()));
         {
-            let mut file = fs::File::create(&tmp_path).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            let mut file = std::fs::File::create(&tmp_path).map_err(|err| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to create temp blob {}: {err}",
                     tmp_path.display()
                 ))
             })?;
             file.write_all(bytes).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to write temp blob {}: {err}",
                     tmp_path.display()
                 ))
             })?;
             file.sync_all().map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to sync temp blob {}: {err}",
                     tmp_path.display()
                 ))
             })?;
         }
-        match fs::rename(&tmp_path, &path) {
+        match std::fs::rename(&tmp_path, &path) {
             Ok(()) => Ok(hash),
             Err(err) if path.exists() => {
-                let _ = fs::remove_file(&tmp_path);
+                let _ = std::fs::remove_file(&tmp_path);
                 if err.kind() == std::io::ErrorKind::AlreadyExists {
                     Ok(hash)
                 } else {
                     Ok(hash)
                 }
             }
-            Err(err) => Err(VerletError::RuntimeFactory(format!(
+            Err(err) => Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to install blob {}: {err}",
                 path.display()
             ))),
         }
     }
 
-    pub fn get(&self, hash: &str) -> VerletResult<Option<Vec<u8>>> {
+    pub fn get(&self, hash: &str) -> crate::VerletResult<Option<Vec<u8>>> {
         validate_hash(hash)?;
         let path = self.artifact_path(hash)?;
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = fs::read(&path).map_err(|err| {
-            VerletError::RuntimeFactory(format!("failed to read blob {}: {err}", path.display()))
+        let bytes = std::fs::read(&path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
+                "failed to read blob {}: {err}",
+                path.display()
+            ))
         })?;
         let actual = wasm_sha256(&bytes);
         if actual != hash {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "blob {} hash mismatch: expected {hash}, got {actual}",
                 path.display()
             )));
@@ -120,7 +110,7 @@ impl OperationBlobStore {
         Ok(Some(bytes))
     }
 
-    pub fn artifact_path(&self, hash: &str) -> VerletResult<PathBuf> {
+    pub fn artifact_path(&self, hash: &str) -> crate::VerletResult<std::path::PathBuf> {
         validate_hash(hash)?;
         Ok(self.root.join(&hash[..2]).join(format!("{hash}.wasm")))
     }
@@ -128,12 +118,12 @@ impl OperationBlobStore {
 
 #[derive(Clone, Debug)]
 pub struct LocalOperationRegistry {
-    root: PathBuf,
+    root: std::path::PathBuf,
     blobs: OperationBlobStore,
 }
 
 impl LocalOperationRegistry {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
         let root = root.into();
         Self {
             blobs: OperationBlobStore::new(root.join("blobs")),
@@ -141,7 +131,7 @@ impl LocalOperationRegistry {
         }
     }
 
-    pub fn root(&self) -> &Path {
+    pub fn root(&self) -> &std::path::Path {
         &self.root
     }
 
@@ -152,23 +142,25 @@ impl LocalOperationRegistry {
     pub async fn publish_artifact(
         &self,
         request: PublishOperationRequest,
-    ) -> VerletResult<PublishedOperationRecord> {
+    ) -> crate::VerletResult<PublishedOperationRecord> {
         let name = validate_record_name(&request.name)?;
-        let bytes = fs::read(&request.artifact_path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let bytes = std::fs::read(&request.artifact_path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read operation artifact {}: {err}",
                 request.artifact_path.display()
             ))
         })?;
-        let validation_config = WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(bytes.clone()))
-            .with_capability_grants(request.capability_grants.clone());
-        let validation = WasmRuntimeFactory::new(validation_config)?
+        let validation_config = verlet_wasm::WasmRuntimeConfig::new(
+            verlet_wasm::WasmRuntimeArtifact::bytes(bytes.clone()),
+        )
+        .with_capability_grants(request.capability_grants.clone());
+        let validation = verlet_wasm::WasmRuntimeFactory::new(validation_config)?
             .validate_operation_artifact()
             .await?;
         validate_required_grants(&name, &validation, &request.capability_grants)?;
 
         let hash = self.blobs.put(&bytes)?;
-        let registered = RegisteredOperation {
+        let registered = crate::RegisteredOperation {
             name: name.clone(),
             manifest: validation.clone(),
             capability_grants: request.capability_grants.clone(),
@@ -205,18 +197,18 @@ impl LocalOperationRegistry {
     pub fn publish_interface_record(
         &self,
         request: PublishInterfaceOperationRequest,
-    ) -> VerletResult<PublishedOperationRecord> {
+    ) -> crate::VerletResult<PublishedOperationRecord> {
         let name = validate_record_name(&request.name)?;
         validate_manifest_shape(&request.manifest)?;
         validate_required_grants(&name, &request.manifest, &request.capability_grants)?;
         let interface = request.interface;
         let artifact_bytes = serde_json::to_vec(&interface).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to encode kernel operation contract for {name:?}: {err}"
             ))
         })?;
         let hash = self.blobs.put(&artifact_bytes)?;
-        let registered = RegisteredOperation {
+        let registered = crate::RegisteredOperation {
             name: name.clone(),
             manifest: request.manifest.clone(),
             capability_grants: request.capability_grants.clone(),
@@ -238,7 +230,7 @@ impl LocalOperationRegistry {
             metadata: request.metadata,
             source: request.source,
             build: PublishedOperationBuild {
-                artifact_path: PathBuf::from("<interface-contract>"),
+                artifact_path: std::path::PathBuf::from("<interface-contract>"),
                 published_at_ms: now_ms(),
             },
         };
@@ -248,24 +240,24 @@ impl LocalOperationRegistry {
         Ok(record)
     }
 
-    pub fn load_record(&self, name: &str) -> VerletResult<PublishedOperationRecord> {
+    pub fn load_record(&self, name: &str) -> crate::VerletResult<PublishedOperationRecord> {
         let name = validate_record_name(name)?;
         let path = self.record_path(&name)?;
-        let bytes = fs::read(&path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let bytes = std::fs::read(&path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read operation record {}: {err}",
                 path.display()
             ))
         })?;
         let record: PublishedOperationRecord = serde_json::from_slice(&bytes).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to decode operation record {}: {err}",
                 path.display()
             ))
         })?;
         record.validate()?;
         if record.name != name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation record {} names {:?}, expected {:?}",
                 path.display(),
                 record.name,
@@ -275,20 +267,20 @@ impl LocalOperationRegistry {
         Ok(record)
     }
 
-    pub fn list_records(&self) -> VerletResult<Vec<PublishedOperationRecord>> {
+    pub fn list_records(&self) -> crate::VerletResult<Vec<PublishedOperationRecord>> {
         let records_dir = self.root.join("records");
         if !records_dir.exists() {
             return Ok(Vec::new());
         }
         let mut names = Vec::new();
-        for entry in fs::read_dir(&records_dir).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        for entry in std::fs::read_dir(&records_dir).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read operation records directory {}: {err}",
                 records_dir.display()
             ))
         })? {
             let entry = entry.map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to read operation record entry in {}: {err}",
                     records_dir.display()
                 ))
@@ -313,25 +305,25 @@ impl LocalOperationRegistry {
         &self,
         name: &str,
         artifact_hash: &str,
-    ) -> VerletResult<PublishedOperationRecord> {
+    ) -> crate::VerletResult<PublishedOperationRecord> {
         let name = validate_record_name(name)?;
         validate_hash(artifact_hash)?;
         let path = self.version_record_path(&name, artifact_hash)?;
-        let bytes = fs::read(&path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let bytes = std::fs::read(&path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read operation version record {}: {err}",
                 path.display()
             ))
         })?;
         let record: PublishedOperationRecord = serde_json::from_slice(&bytes).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to decode operation version record {}: {err}",
                 path.display()
             ))
         })?;
         record.validate()?;
         if record.name != name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation version record {} names {:?}, expected {:?}",
                 path.display(),
                 record.name,
@@ -339,7 +331,7 @@ impl LocalOperationRegistry {
             )));
         }
         if record.active_artifact_hash != artifact_hash {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation version record {} uses artifact hash {}, expected {}",
                 path.display(),
                 record.active_artifact_hash,
@@ -354,12 +346,12 @@ impl LocalOperationRegistry {
         scope: CapsuleBindingScope,
         operation_name: impl AsRef<str>,
         artifact_hash: impl AsRef<str>,
-    ) -> VerletResult<CapsuleBindingRecord> {
+    ) -> crate::VerletResult<CapsuleBindingRecord> {
         let operation_name = validate_record_name(operation_name.as_ref())?;
         let artifact_hash = artifact_hash.as_ref();
         self.load_version_record(&operation_name, artifact_hash)
             .map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "cannot bind capsule operation {operation_name:?} to version {artifact_hash}: {err}"
                 ))
             })?;
@@ -381,7 +373,7 @@ impl LocalOperationRegistry {
         &self,
         scope: CapsuleBindingScope,
         operation_name: impl AsRef<str>,
-    ) -> VerletResult<CapsuleBindingRecord> {
+    ) -> crate::VerletResult<CapsuleBindingRecord> {
         let record = CapsuleBindingRecord {
             schema_version: BINDING_SCHEMA_VERSION,
             scope,
@@ -397,20 +389,20 @@ impl LocalOperationRegistry {
     pub fn list_capsule_bindings(
         &self,
         scope: CapsuleBindingScope,
-    ) -> VerletResult<Vec<CapsuleBindingRecord>> {
+    ) -> crate::VerletResult<Vec<CapsuleBindingRecord>> {
         let dir = self.binding_scope_dir(&scope)?;
         if !dir.exists() {
             return Ok(Vec::new());
         }
         let mut names = Vec::new();
-        for entry in fs::read_dir(&dir).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        for entry in std::fs::read_dir(&dir).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read capsule binding directory {}: {err}",
                 dir.display()
             ))
         })? {
             let entry = entry.map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to read capsule binding entry in {}: {err}",
                     dir.display()
                 ))
@@ -435,24 +427,24 @@ impl LocalOperationRegistry {
         &self,
         scope: CapsuleBindingScope,
         operation_name: &str,
-    ) -> VerletResult<CapsuleBindingRecord> {
+    ) -> crate::VerletResult<CapsuleBindingRecord> {
         let operation_name = validate_record_name(operation_name)?;
         let path = self.binding_record_path(&scope, &operation_name)?;
-        let bytes = fs::read(&path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let bytes = std::fs::read(&path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read capsule binding record {}: {err}",
                 path.display()
             ))
         })?;
         let record: CapsuleBindingRecord = serde_json::from_slice(&bytes).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to decode capsule binding record {}: {err}",
                 path.display()
             ))
         })?;
         record.validate()?;
         if record.scope != scope {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "capsule binding record {} has scope {:?}, expected {:?}",
                 path.display(),
                 record.scope,
@@ -460,7 +452,7 @@ impl LocalOperationRegistry {
             )));
         }
         if record.operation_name != operation_name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "capsule binding record {} names {:?}, expected {:?}",
                 path.display(),
                 record.operation_name,
@@ -473,8 +465,8 @@ impl LocalOperationRegistry {
     pub fn resolve_capsule_binding_snapshot(
         &self,
         request: CapsuleBindingResolutionRequest,
-    ) -> VerletResult<CapsuleBindingSnapshot> {
-        let mut resolved = BTreeMap::<String, PublishedOperationRecord>::new();
+    ) -> crate::VerletResult<CapsuleBindingSnapshot> {
+        let mut resolved = std::collections::BTreeMap::<String, PublishedOperationRecord>::new();
         let mut binding_records = Vec::new();
         let scopes = request.scopes()?;
         for scope in scopes {
@@ -517,13 +509,13 @@ impl LocalOperationRegistry {
     pub async fn load_runtime_config_for_record(
         &self,
         record: &PublishedOperationRecord,
-    ) -> VerletResult<WasmRuntimeConfig> {
+    ) -> crate::VerletResult<verlet_wasm::WasmRuntimeConfig> {
         let config = self.load_runtime_config_for_published_record(record)?;
-        let manifest = WasmRuntimeFactory::new(config.clone())?
+        let manifest = verlet_wasm::WasmRuntimeFactory::new(config.clone())?
             .validate_operation_artifact()
             .await?;
         if manifest != record.manifest {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation {:?} manifest mismatch for artifact {}",
                 record.name, record.active_artifact_hash
             )));
@@ -534,10 +526,10 @@ impl LocalOperationRegistry {
     pub fn load_runtime_config_for_published_record(
         &self,
         record: &PublishedOperationRecord,
-    ) -> VerletResult<WasmRuntimeConfig> {
+    ) -> crate::VerletResult<verlet_wasm::WasmRuntimeConfig> {
         record.validate()?;
         if matches!(record.source, PublishedOperationSource::Kernel { .. }) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation {:?} is kernel-native and can only run through the in-process kernel dispatcher",
                 record.name
             )));
@@ -546,21 +538,27 @@ impl LocalOperationRegistry {
             .blobs
             .get(&record.active_artifact_hash)?
             .ok_or_else(|| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "operation blob {} for {:?} was not found",
                     record.active_artifact_hash, record.name
                 ))
             })?;
-        Ok(WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(bytes))
-            .with_capability_grants(record.capability_grants.clone()))
+        Ok(
+            verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(bytes))
+                .with_capability_grants(record.capability_grants.clone()),
+        )
     }
 
-    pub fn record_path(&self, name: &str) -> VerletResult<PathBuf> {
+    pub fn record_path(&self, name: &str) -> crate::VerletResult<std::path::PathBuf> {
         let name = validate_record_name(name)?;
         Ok(self.root.join("records").join(format!("{name}.json")))
     }
 
-    pub fn version_record_path(&self, name: &str, artifact_hash: &str) -> VerletResult<PathBuf> {
+    pub fn version_record_path(
+        &self,
+        name: &str,
+        artifact_hash: &str,
+    ) -> crate::VerletResult<std::path::PathBuf> {
         let name = validate_record_name(name)?;
         validate_hash(artifact_hash)?;
         Ok(self
@@ -574,14 +572,17 @@ impl LocalOperationRegistry {
         &self,
         scope: &CapsuleBindingScope,
         operation_name: &str,
-    ) -> VerletResult<PathBuf> {
+    ) -> crate::VerletResult<std::path::PathBuf> {
         let operation_name = validate_record_name(operation_name)?;
         Ok(self
             .binding_scope_dir(scope)?
             .join(format!("{operation_name}.json")))
     }
 
-    fn write_record_atomically(&self, record: &PublishedOperationRecord) -> VerletResult<()> {
+    fn write_record_atomically(
+        &self,
+        record: &PublishedOperationRecord,
+    ) -> crate::VerletResult<()> {
         let path = self.record_path(&record.name)?;
         write_json_atomically(&path, format!("operation record {:?}", record.name), record)
     }
@@ -589,7 +590,7 @@ impl LocalOperationRegistry {
     fn write_version_record_atomically(
         &self,
         record: &PublishedOperationRecord,
-    ) -> VerletResult<()> {
+    ) -> crate::VerletResult<()> {
         record.validate()?;
         let path = self.version_record_path(&record.name, &record.active_artifact_hash)?;
         if path.exists() {
@@ -606,7 +607,10 @@ impl LocalOperationRegistry {
         )
     }
 
-    fn write_binding_record_atomically(&self, record: &CapsuleBindingRecord) -> VerletResult<()> {
+    fn write_binding_record_atomically(
+        &self,
+        record: &CapsuleBindingRecord,
+    ) -> crate::VerletResult<()> {
         record.validate()?;
         let path = self.binding_record_path(&record.scope, &record.operation_name)?;
         write_json_atomically(
@@ -619,7 +623,10 @@ impl LocalOperationRegistry {
         )
     }
 
-    fn binding_scope_dir(&self, scope: &CapsuleBindingScope) -> VerletResult<PathBuf> {
+    fn binding_scope_dir(
+        &self,
+        scope: &CapsuleBindingScope,
+    ) -> crate::VerletResult<std::path::PathBuf> {
         scope.validate()?;
         Ok(match scope {
             CapsuleBindingScope::Global => self.root.join("bindings").join("global"),
@@ -641,44 +648,49 @@ impl LocalOperationRegistry {
     }
 }
 
-fn write_json_atomically<T: Serialize>(path: &Path, label: String, value: &T) -> VerletResult<()> {
+fn write_json_atomically<T: serde::Serialize>(
+    path: &std::path::Path,
+    label: String,
+    value: &T,
+) -> crate::VerletResult<()> {
     let Some(parent) = path.parent() else {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "{label} path {} has no parent directory",
             path.display()
         )));
     };
-    fs::create_dir_all(parent).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    std::fs::create_dir_all(parent).map_err(|err| {
+        crate::VerletOperationsError::RuntimeFactory(format!(
             "failed to create {label} directory {}: {err}",
             parent.display()
         ))
     })?;
-    let tmp_path = parent.join(format!(".verlet.tmp.{}", Uuid::now_v7()));
-    let bytes = serde_json::to_vec_pretty(value)
-        .map_err(|err| VerletError::RuntimeFactory(format!("failed to encode {label}: {err}")))?;
+    let tmp_path = parent.join(format!(".verlet.tmp.{}", uuid::Uuid::now_v7()));
+    let bytes = serde_json::to_vec_pretty(value).map_err(|err| {
+        crate::VerletOperationsError::RuntimeFactory(format!("failed to encode {label}: {err}"))
+    })?;
     {
-        let mut file = fs::File::create(&tmp_path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let mut file = std::fs::File::create(&tmp_path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to create temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
         file.write_all(&bytes).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to write temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
         file.sync_all().map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to sync temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
     }
-    fs::rename(&tmp_path, &path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    std::fs::rename(&tmp_path, &path).map_err(|err| {
+        crate::VerletOperationsError::RuntimeFactory(format!(
             "failed to atomically install {label} {}: {err}",
             path.display()
         ))
@@ -688,35 +700,35 @@ fn write_json_atomically<T: Serialize>(path: &Path, label: String, value: &T) ->
 #[derive(Clone, Debug)]
 pub struct PublishOperationRequest {
     pub name: String,
-    pub artifact_path: PathBuf,
+    pub artifact_path: std::path::PathBuf,
     pub source: PublishedOperationSource,
-    pub interface: Option<ToolInterfaceContract>,
-    pub capability_grants: BTreeSet<String>,
-    pub metadata: BTreeMap<String, Value>,
+    pub interface: Option<crate::tool_package::ToolInterfaceContract>,
+    pub capability_grants: std::collections::BTreeSet<String>,
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]
 pub struct PublishInterfaceOperationRequest {
     pub name: String,
     pub source: PublishedOperationSource,
-    pub manifest: WasmOperationManifest,
-    pub interface: ToolInterfaceContract,
-    pub capability_grants: BTreeSet<String>,
-    pub metadata: BTreeMap<String, Value>,
+    pub manifest: verlet_abi::WasmOperationManifest,
+    pub interface: crate::tool_package::ToolInterfaceContract,
+    pub capability_grants: std::collections::BTreeSet<String>,
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PublishedOperationSource {
     Rust {
-        module_path: PathBuf,
+        module_path: std::path::PathBuf,
         release: bool,
     },
     Wasm {
-        bin_path: PathBuf,
+        bin_path: std::path::PathBuf,
     },
     Import {
-        manifest_path: PathBuf,
+        manifest_path: std::path::PathBuf,
         spec_sha256: String,
     },
     Kernel {
@@ -724,38 +736,38 @@ pub enum PublishedOperationSource {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PublishedOperationBuild {
-    pub artifact_path: PathBuf,
+    pub artifact_path: std::path::PathBuf,
     pub published_at_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PublishedOperationRecord {
     pub schema_version: u32,
     pub name: String,
     pub active_artifact_hash: String,
-    pub manifest: WasmOperationManifest,
-    pub projections: OperationProjectionSet,
+    pub manifest: verlet_abi::WasmOperationManifest,
+    pub projections: crate::OperationProjectionSet,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interface: Option<ToolInterfaceContract>,
-    pub capability_grants: BTreeSet<String>,
-    pub metadata: BTreeMap<String, Value>,
+    pub interface: Option<crate::tool_package::ToolInterfaceContract>,
+    pub capability_grants: std::collections::BTreeSet<String>,
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
     pub source: PublishedOperationSource,
     pub build: PublishedOperationBuild,
 }
 
 impl PublishedOperationRecord {
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         if self.schema_version != RECORD_SCHEMA_VERSION {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "unsupported operation record schema version {}",
                 self.schema_version
             )));
         }
         let name = validate_record_name(&self.name)?;
         if name != self.name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation record name {:?} did not normalize to itself",
                 self.name
             )));
@@ -767,7 +779,7 @@ impl PublishedOperationRecord {
         } = &self.source
         {
             if manifest_path.as_os_str().is_empty() {
-                return Err(VerletError::RuntimeFactory(
+                return Err(crate::VerletOperationsError::RuntimeFactory(
                     "operation import manifest path cannot be empty".to_string(),
                 ));
             }
@@ -775,7 +787,7 @@ impl PublishedOperationRecord {
         }
         validate_manifest_shape(&self.manifest)?;
         validate_required_grants(&self.name, &self.manifest, &self.capability_grants)?;
-        let registered = RegisteredOperation {
+        let registered = crate::RegisteredOperation {
             name: self.name.clone(),
             manifest: self.manifest.clone(),
             capability_grants: self.capability_grants.clone(),
@@ -783,7 +795,7 @@ impl PublishedOperationRecord {
         };
         let expected = registered.projections();
         if self.projections != expected {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation record {:?} projections are stale",
                 self.name
             )));
@@ -799,7 +811,7 @@ impl PublishedOperationRecord {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum CapsuleBindingScope {
     Global,
@@ -833,7 +845,7 @@ impl CapsuleBindingScope {
         }
     }
 
-    fn validate(&self) -> VerletResult<()> {
+    fn validate(&self) -> crate::VerletResult<()> {
         match self {
             Self::Global => Ok(()),
             Self::Tenant { tenant_id } => {
@@ -852,7 +864,7 @@ impl CapsuleBindingScope {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum CapsuleBindingTarget {
     Version {
@@ -862,7 +874,7 @@ pub enum CapsuleBindingTarget {
     Tombstone,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapsuleBindingRecord {
     pub schema_version: u32,
@@ -873,9 +885,9 @@ pub struct CapsuleBindingRecord {
 }
 
 impl CapsuleBindingRecord {
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         if self.schema_version != BINDING_SCHEMA_VERSION {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "unsupported capsule binding schema version {}",
                 self.schema_version
             )));
@@ -883,7 +895,7 @@ impl CapsuleBindingRecord {
         self.scope.validate()?;
         let operation_name = validate_record_name(&self.operation_name)?;
         if operation_name != self.operation_name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "capsule binding operation name {:?} did not normalize to itself",
                 self.operation_name
             )));
@@ -900,7 +912,7 @@ impl CapsuleBindingRecord {
 pub struct CapsuleBindingResolutionRequest {
     pub tenant_id: String,
     pub thread_id: Option<String>,
-    pub active_operation_names: BTreeSet<String>,
+    pub active_operation_names: std::collections::BTreeSet<String>,
     pub load_all_active_when_unbound: bool,
 }
 
@@ -909,7 +921,7 @@ impl CapsuleBindingResolutionRequest {
         Self {
             tenant_id: tenant_id.into(),
             thread_id: None,
-            active_operation_names: BTreeSet::new(),
+            active_operation_names: std::collections::BTreeSet::new(),
             load_all_active_when_unbound: false,
         }
     }
@@ -918,7 +930,7 @@ impl CapsuleBindingResolutionRequest {
         Self {
             tenant_id: tenant_id.into(),
             thread_id: Some(thread_id.into()),
-            active_operation_names: BTreeSet::new(),
+            active_operation_names: std::collections::BTreeSet::new(),
             load_all_active_when_unbound: false,
         }
     }
@@ -943,7 +955,7 @@ impl CapsuleBindingResolutionRequest {
         self
     }
 
-    fn scopes(&self) -> VerletResult<Vec<CapsuleBindingScope>> {
+    fn scopes(&self) -> crate::VerletResult<Vec<CapsuleBindingScope>> {
         validate_scope_segment("tenant_id", &self.tenant_id)?;
         let mut scopes = vec![
             CapsuleBindingScope::Global,
@@ -960,7 +972,7 @@ impl CapsuleBindingResolutionRequest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapsuleBindingSnapshot {
     pub records: Vec<PublishedOperationRecord>,
@@ -980,15 +992,15 @@ impl CapsuleBindingSnapshot {
     }
 }
 
-pub fn validate_record_name(name: &str) -> VerletResult<String> {
+pub fn validate_record_name(name: &str) -> crate::VerletResult<String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletOperationsError::RuntimeFactory(
             "operation record name cannot be empty".to_string(),
         ));
     }
     if name == "." || name == ".." || name.len() > 128 {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "operation record name {name:?} is not path-safe"
         )));
     }
@@ -996,22 +1008,22 @@ pub fn validate_record_name(name: &str) -> VerletResult<String> {
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
     {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "operation record name {name:?} must use ASCII letters, numbers, '.', '_' or '-'"
         )));
     }
     Ok(name.to_string())
 }
 
-fn validate_scope_segment(label: &str, value: &str) -> VerletResult<String> {
+fn validate_scope_segment(label: &str, value: &str) -> crate::VerletResult<String> {
     let value = value.trim();
     if value.is_empty() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "capsule binding scope {label} cannot be empty"
         )));
     }
     if value == "." || value == ".." || value.len() > 128 {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "capsule binding scope {label} {value:?} is not path-safe"
         )));
     }
@@ -1019,7 +1031,7 @@ fn validate_scope_segment(label: &str, value: &str) -> VerletResult<String> {
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
     {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "capsule binding scope {label} {value:?} must use ASCII letters, numbers, '.', '_' or '-'"
         )));
     }
@@ -1027,7 +1039,7 @@ fn validate_scope_segment(label: &str, value: &str) -> VerletResult<String> {
 }
 
 pub fn wasm_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    let digest = sha2::Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
     for byte in digest {
         out.push_str(&format!("{byte:02x}"));
@@ -1035,15 +1047,15 @@ pub fn wasm_sha256(bytes: &[u8]) -> String {
     out
 }
 
-fn validate_hash(hash: &str) -> VerletResult<()> {
+fn validate_hash(hash: &str) -> crate::VerletResult<()> {
     validate_sha256("operation artifact hash", hash)
 }
 
-fn validate_sha256(label: &str, hash: &str) -> VerletResult<()> {
+fn validate_sha256(label: &str, hash: &str) -> crate::VerletResult<()> {
     if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Ok(())
     } else {
-        Err(VerletError::RuntimeFactory(format!(
+        Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "{label} {hash:?} is not a sha256 hex digest"
         )))
     }
@@ -1051,9 +1063,9 @@ fn validate_sha256(label: &str, hash: &str) -> VerletResult<()> {
 
 fn validate_required_grants(
     name: &str,
-    manifest: &WasmOperationManifest,
-    grants: &BTreeSet<String>,
-) -> VerletResult<()> {
+    manifest: &verlet_abi::WasmOperationManifest,
+    grants: &std::collections::BTreeSet<String>,
+) -> crate::VerletResult<()> {
     let missing: Vec<_> = manifest
         .operations
         .iter()
@@ -1068,46 +1080,48 @@ fn validate_required_grants(
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(VerletError::RuntimeFactory(format!(
+        Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "operation publish {name:?} requires ungranted capabilities: {}",
             missing.join(", ")
         )))
     }
 }
 
-fn validate_manifest_shape(manifest: &WasmOperationManifest) -> VerletResult<()> {
+fn validate_manifest_shape(
+    manifest: &verlet_abi::WasmOperationManifest,
+) -> crate::VerletResult<()> {
     if manifest.abi != "cooldis.operation/0.1" {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "unsupported operation record manifest abi {:?}",
             manifest.abi
         )));
     }
     if manifest.operations.is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletOperationsError::RuntimeFactory(
             "operation record manifest has no operations".to_string(),
         ));
     }
-    let mut ids = BTreeSet::new();
-    let mut names = BTreeSet::new();
+    let mut ids = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
     for operation in &manifest.operations {
         if operation.id == 0 {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletOperationsError::RuntimeFactory(
                 "operation record manifest uses reserved operation id 0".to_string(),
             ));
         }
         if operation.name.trim().is_empty() {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletOperationsError::RuntimeFactory(
                 "operation record manifest has an empty operation name".to_string(),
             ));
         }
         if !ids.insert(operation.id) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation record manifest has duplicate operation id {}",
                 operation.id
             )));
         }
         if !names.insert(operation.name.clone()) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation record manifest has duplicate operation name {:?}",
                 operation.name
             )));
@@ -1117,8 +1131,8 @@ fn validate_manifest_shape(manifest: &WasmOperationManifest) -> VerletResult<()>
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }

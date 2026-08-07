@@ -12,12 +12,9 @@
 //! accepting manifest-declared custom holds) is v2 work; do not widen it
 //! inside an implementation ticket.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
 /// How a hold occupies its key. `Shared` holds coexist on one key;
 /// `Exclusive` admits nothing else on that key for the call's duration.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ToolHoldAccess {
     Shared,
@@ -26,7 +23,7 @@ pub(super) enum ToolHoldAccess {
 
 /// The keyed runtime resource a hold occupies. The serialized shape is part
 /// of the durable tool-call request payload; fields are additive-only.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum ToolHoldKey {
     /// The thread's shell/process substrate: one `BashkitExecutionHarness`
@@ -42,7 +39,7 @@ pub(super) enum ToolHoldKey {
 }
 
 /// One witnessed hold: a key and the access taken on it.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(super) struct ToolHold {
     pub(super) key: ToolHoldKey,
     pub(super) access: ToolHoldAccess,
@@ -86,7 +83,7 @@ impl ToolHold {
 /// global key, so the exclusive-global fail-safe is a true barrier: an
 /// invocation with underivable holds overlaps nothing, not merely no other
 /// global holder.
-pub(super) fn derive_tool_holds(tool_name: &str, arguments: &Value) -> Vec<ToolHold> {
+pub(super) fn derive_tool_holds(tool_name: &str, arguments: &serde_json::Value) -> Vec<ToolHold> {
     const SHELL_SESSION_TOOLS: [&str; 6] = [
         "bash",
         "process_exec",
@@ -108,7 +105,10 @@ pub(super) fn derive_tool_holds(tool_name: &str, arguments: &Value) -> Vec<ToolH
         return with_global_floor(vec![ToolHold::exclusive(ToolHoldKey::ShellSession)]);
     }
     if KERNEL_THREAD_TOOLS.contains(&tool_name) {
-        return match arguments.get("task_name").and_then(Value::as_str) {
+        return match arguments
+            .get("task_name")
+            .and_then(serde_json::Value::as_str)
+        {
             Some(task_name) if !task_name.is_empty() => {
                 with_global_floor(vec![ToolHold::exclusive(ToolHoldKey::KernelThread {
                     task_name: task_name.to_string(),
@@ -118,7 +118,10 @@ pub(super) fn derive_tool_holds(tool_name: &str, arguments: &Value) -> Vec<ToolH
         };
     }
     if tool_name == "tool_call" {
-        return match arguments.get("universe").and_then(Value::as_str) {
+        return match arguments
+            .get("universe")
+            .and_then(serde_json::Value::as_str)
+        {
             Some(server) if !server.is_empty() => {
                 with_global_floor(vec![ToolHold::shared(ToolHoldKey::McpServer {
                     server: server.to_string(),
@@ -184,7 +187,9 @@ pub(super) fn batch_wait_edges(holds: &[Vec<ToolHold>]) -> Vec<Vec<usize>> {
 /// order witnessed, isolates per-call failures (a failed call never cancels
 /// siblings), propagates turn cancellation to every in-flight call, and
 /// counts the whole batch as one router round.
-pub(super) fn plan_tool_call_batch(tool_calls: &[super::ProviderToolCall]) -> Vec<Vec<usize>> {
+pub(super) fn plan_tool_call_batch(
+    tool_calls: &[crate::adapters::agent_loop::ProviderToolCall],
+) -> Vec<Vec<usize>> {
     let holds = tool_calls
         .iter()
         .map(|call| derive_tool_holds(&call.name, &call.arguments))
@@ -194,17 +199,22 @@ pub(super) fn plan_tool_call_batch(tool_calls: &[super::ProviderToolCall]) -> Ve
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
 
     #[test]
     fn shell_family_takes_the_exclusive_shell_session_hold() {
         for tool in ["bash", "process_exec", "write_stdin"] {
             assert_eq!(
-                derive_tool_holds(tool, &json!({})),
+                crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+                    tool,
+                    &serde_json::json!({})
+                ),
                 vec![
-                    ToolHold::exclusive(ToolHoldKey::ShellSession),
-                    ToolHold::shared(ToolHoldKey::Global),
+                    crate::adapters::agent_loop::tool_holds::ToolHold::exclusive(
+                        crate::adapters::agent_loop::tool_holds::ToolHoldKey::ShellSession
+                    ),
+                    crate::adapters::agent_loop::tool_holds::ToolHold::shared(
+                        crate::adapters::agent_loop::tool_holds::ToolHoldKey::Global
+                    ),
                 ],
             );
         }
@@ -213,52 +223,93 @@ mod tests {
     #[test]
     fn thread_ops_key_by_task_name_and_fall_back_to_global_exclusive() {
         assert_eq!(
-            derive_tool_holds("thread_submit", &json!({"task_name": "worker-a"})),
+            crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+                "thread_submit",
+                &serde_json::json!({"task_name": "worker-a"})
+            ),
             vec![
-                ToolHold::exclusive(ToolHoldKey::KernelThread {
-                    task_name: "worker-a".to_string(),
-                }),
-                ToolHold::shared(ToolHoldKey::Global),
+                crate::adapters::agent_loop::tool_holds::ToolHold::exclusive(
+                    crate::adapters::agent_loop::tool_holds::ToolHoldKey::KernelThread {
+                        task_name: "worker-a".to_string(),
+                    }
+                ),
+                crate::adapters::agent_loop::tool_holds::ToolHold::shared(
+                    crate::adapters::agent_loop::tool_holds::ToolHoldKey::Global
+                ),
             ],
         );
         assert_eq!(
-            derive_tool_holds("thread_submit", &json!({})),
-            vec![ToolHold::exclusive(ToolHoldKey::Global)],
+            crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+                "thread_submit",
+                &serde_json::json!({})
+            ),
+            vec![
+                crate::adapters::agent_loop::tool_holds::ToolHold::exclusive(
+                    crate::adapters::agent_loop::tool_holds::ToolHoldKey::Global
+                )
+            ],
         );
     }
 
     #[test]
     fn mcp_calls_share_per_server_and_unknown_tools_fail_safe() {
         assert_eq!(
-            derive_tool_holds("tool_call", &json!({"universe": "linear"})),
+            crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+                "tool_call",
+                &serde_json::json!({"universe": "linear"})
+            ),
             vec![
-                ToolHold::shared(ToolHoldKey::McpServer {
-                    server: "linear".to_string(),
-                }),
-                ToolHold::shared(ToolHoldKey::Global),
+                crate::adapters::agent_loop::tool_holds::ToolHold::shared(
+                    crate::adapters::agent_loop::tool_holds::ToolHoldKey::McpServer {
+                        server: "linear".to_string(),
+                    }
+                ),
+                crate::adapters::agent_loop::tool_holds::ToolHold::shared(
+                    crate::adapters::agent_loop::tool_holds::ToolHoldKey::Global
+                ),
             ],
         );
         assert_eq!(
-            derive_tool_holds("tool_call", &json!({})),
-            vec![ToolHold::exclusive(ToolHoldKey::Global)],
+            crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+                "tool_call",
+                &serde_json::json!({})
+            ),
+            vec![
+                crate::adapters::agent_loop::tool_holds::ToolHold::exclusive(
+                    crate::adapters::agent_loop::tool_holds::ToolHoldKey::Global
+                )
+            ],
         );
         assert_eq!(
-            derive_tool_holds("never_heard_of_it", &json!({})),
-            vec![ToolHold::exclusive(ToolHoldKey::Global)],
+            crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+                "never_heard_of_it",
+                &serde_json::json!({})
+            ),
+            vec![
+                crate::adapters::agent_loop::tool_holds::ToolHold::exclusive(
+                    crate::adapters::agent_loop::tool_holds::ToolHoldKey::Global
+                )
+            ],
         );
     }
 
     #[test]
     fn the_global_exclusive_fail_safe_is_a_full_barrier() {
-        let fail_safe = derive_tool_holds("unknown", &json!({}));
+        let fail_safe = crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+            "unknown",
+            &serde_json::json!({}),
+        );
         for (tool, arguments) in [
-            ("bash", json!({})),
-            ("thread_wait", json!({"task_name": "a"})),
-            ("tool_call", json!({"universe": "linear"})),
-            ("tool_search", json!({})),
+            ("bash", serde_json::json!({})),
+            ("thread_wait", serde_json::json!({"task_name": "a"})),
+            ("tool_call", serde_json::json!({"universe": "linear"})),
+            ("tool_search", serde_json::json!({})),
         ] {
             assert!(
-                holds_conflict(&derive_tool_holds(tool, &arguments), &fail_safe),
+                crate::adapters::agent_loop::tool_holds::holds_conflict(
+                    &crate::adapters::agent_loop::tool_holds::derive_tool_holds(tool, &arguments),
+                    &fail_safe
+                ),
                 "{tool} must serialize against the fail-safe",
             );
         }
@@ -266,12 +317,31 @@ mod tests {
 
     #[test]
     fn wait_edges_serialize_conflicts_in_call_order_only() {
-        let bash = derive_tool_holds("bash", &json!({}));
-        let read = derive_tool_holds("tool_search", &json!({}));
-        let thread_a = derive_tool_holds("thread_wait", &json!({"task_name": "a"}));
-        let thread_b = derive_tool_holds("thread_wait", &json!({"task_name": "b"}));
+        let bash = crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+            "bash",
+            &serde_json::json!({}),
+        );
+        let read = crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+            "tool_search",
+            &serde_json::json!({}),
+        );
+        let thread_a = crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+            "thread_wait",
+            &serde_json::json!({"task_name": "a"}),
+        );
+        let thread_b = crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+            "thread_wait",
+            &serde_json::json!({"task_name": "b"}),
+        );
 
-        let edges = batch_wait_edges(&[bash.clone(), bash, read.clone(), read, thread_a, thread_b]);
+        let edges = crate::adapters::agent_loop::tool_holds::batch_wait_edges(&[
+            bash.clone(),
+            bash,
+            read.clone(),
+            read,
+            thread_a,
+            thread_b,
+        ]);
 
         assert_eq!(
             edges,
@@ -281,20 +351,33 @@ mod tests {
 
     #[test]
     fn shared_global_readers_conflict_with_the_global_exclusive_fail_safe() {
-        let reader = derive_tool_holds("tool_describe", &json!({}));
-        let fail_safe = derive_tool_holds("unknown", &json!({}));
-        assert!(holds_conflict(&reader, &fail_safe));
-        assert!(!holds_conflict(&reader, &reader.clone()));
+        let reader = crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+            "tool_describe",
+            &serde_json::json!({}),
+        );
+        let fail_safe = crate::adapters::agent_loop::tool_holds::derive_tool_holds(
+            "unknown",
+            &serde_json::json!({}),
+        );
+        assert!(crate::adapters::agent_loop::tool_holds::holds_conflict(
+            &reader, &fail_safe
+        ));
+        assert!(!crate::adapters::agent_loop::tool_holds::holds_conflict(
+            &reader,
+            &reader.clone()
+        ));
     }
 
     #[test]
     fn hold_wire_shape_is_stable() {
-        let hold = ToolHold::exclusive(ToolHoldKey::KernelThread {
-            task_name: "worker-a".to_string(),
-        });
+        let hold = crate::adapters::agent_loop::tool_holds::ToolHold::exclusive(
+            crate::adapters::agent_loop::tool_holds::ToolHoldKey::KernelThread {
+                task_name: "worker-a".to_string(),
+            },
+        );
         assert_eq!(
             serde_json::to_value(&hold).unwrap(),
-            json!({
+            serde_json::json!({
                 "key": {"kind": "kernel_thread", "task_name": "worker-a"},
                 "access": "exclusive",
             }),

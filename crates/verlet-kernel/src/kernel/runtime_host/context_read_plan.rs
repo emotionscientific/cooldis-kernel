@@ -1,18 +1,8 @@
-use super::{VerletError, VerletResult};
-use crate::agent::contracts::sha256_hex;
-use crate::kernel::history::{
-    CONTEXT_READ_PLAN_SCHEMA_V1, EventKind, EventRecord, EventRecordId, EventSequence,
-    EventStreamId, ObservationSourceRange, RuntimeStore, SessionContextSourceCut, SessionEntry,
-    SessionEntryId,
-};
-use std::collections::BTreeSet;
-use verlet_runtime_contracts::ThreadCoordinates;
-
 pub(super) fn context_compile_payload_v1(
     payload: serde_json::Value,
-    stream_id: &EventStreamId,
-    source_ranges: &[ObservationSourceRange],
-    source_streams: &[EventStreamId],
+    stream_id: &crate::kernel::history::EventStreamId,
+    source_ranges: &[crate::kernel::history::ObservationSourceRange],
+    source_streams: &[crate::kernel::history::EventStreamId],
 ) -> serde_json::Value {
     let mut object = match payload {
         serde_json::Value::Object(object) => object,
@@ -23,7 +13,9 @@ pub(super) fn context_compile_payload_v1(
         }
     };
     object.entry("schema").or_insert_with(|| {
-        serde_json::json!(EventKind::ContextCompileCompleted.payload_schema_id())
+        serde_json::json!(
+            crate::kernel::history::EventKind::ContextCompileCompleted.payload_schema_id()
+        )
     });
     object.insert(
         "read_plan".to_string(),
@@ -32,8 +24,10 @@ pub(super) fn context_compile_payload_v1(
     serde_json::Value::Object(object)
 }
 
-pub(super) fn is_recall_context_read_plan_event(event: &EventRecord) -> bool {
-    event.kind == EventKind::ContextReadPlanSet
+pub(super) fn is_recall_context_read_plan_event(
+    event: &crate::kernel::history::EventRecord,
+) -> bool {
+    event.kind == crate::kernel::history::EventKind::ContextReadPlanSet
         && event.payload.get("scope").and_then(|value| value.as_str()) == Some("thread")
         && event
             .payload
@@ -42,8 +36,10 @@ pub(super) fn is_recall_context_read_plan_event(event: &EventRecord) -> bool {
             == Some("context.memory")
 }
 
-pub(super) fn is_instruction_context_read_plan_event(event: &EventRecord) -> bool {
-    event.kind == EventKind::ContextReadPlanSet
+pub(super) fn is_instruction_context_read_plan_event(
+    event: &crate::kernel::history::EventRecord,
+) -> bool {
+    event.kind == crate::kernel::history::EventKind::ContextReadPlanSet
         && event.payload.get("scope").and_then(|value| value.as_str()) == Some("thread")
         && event
             .payload
@@ -72,9 +68,9 @@ pub(super) fn render_instruction_context(instruction_texts: &[String]) -> String
 
 fn context_read_plan_v1(
     name: &str,
-    stream_id: &EventStreamId,
-    source_ranges: &[ObservationSourceRange],
-    source_streams: &[EventStreamId],
+    stream_id: &crate::kernel::history::EventStreamId,
+    source_ranges: &[crate::kernel::history::ObservationSourceRange],
+    source_streams: &[crate::kernel::history::EventStreamId],
 ) -> serde_json::Value {
     let entries = if source_ranges.is_empty() {
         source_streams
@@ -108,7 +104,7 @@ fn context_read_plan_v1(
             .collect::<Vec<_>>()
     };
     serde_json::json!({
-        "schema": CONTEXT_READ_PLAN_SCHEMA_V1,
+        "schema": crate::kernel::history::CONTEXT_READ_PLAN_SCHEMA_V1,
         "name": name,
         "source_stream": stream_id.as_str(),
         "frontier": "compile_frontier",
@@ -116,7 +112,7 @@ fn context_read_plan_v1(
     })
 }
 
-fn read_plan_from_cursor(sequence: EventSequence) -> serde_json::Value {
+fn read_plan_from_cursor(sequence: crate::kernel::history::EventSequence) -> serde_json::Value {
     if sequence.get() <= 1 {
         serde_json::Value::String("start".to_string())
     } else {
@@ -126,34 +122,34 @@ fn read_plan_from_cursor(sequence: EventSequence) -> serde_json::Value {
 
 pub(super) fn context_summary_completed_payload_v1(
     summary: &str,
-    source_ranges: &[ObservationSourceRange],
+    source_ranges: &[crate::kernel::history::ObservationSourceRange],
 ) -> serde_json::Value {
     serde_json::json!({
-        "schema": EventKind::ContextSummaryCompleted.payload_schema_id(),
+        "schema": crate::kernel::history::EventKind::ContextSummaryCompleted.payload_schema_id(),
         "role": "summary_checkpoint",
         "text": summary,
         "covered_ranges": source_ranges_json(source_ranges),
         "content": {
-            "sha256": format!("sha256:{}", sha256_hex(summary.as_bytes())),
+            "sha256": format!("sha256:{}", crate::agent::contracts::sha256_hex(summary.as_bytes())),
         },
     })
 }
 
 pub(super) fn context_read_plan_set_payload_v1(
     name: &str,
-    stream_id: &EventStreamId,
-    summary_event_id: EventRecordId,
-    source_ranges: &[ObservationSourceRange],
+    stream_id: &crate::kernel::history::EventStreamId,
+    summary_event_id: crate::kernel::history::EventRecordId,
+    source_ranges: &[crate::kernel::history::ObservationSourceRange],
 ) -> serde_json::Value {
     serde_json::json!({
-        "schema": EventKind::ContextReadPlanSet.payload_schema_id(),
+        "schema": crate::kernel::history::EventKind::ContextReadPlanSet.payload_schema_id(),
         "scope": "thread",
         "name": name,
         "pipeline_id": "context.default",
         "source_id": stream_id.as_str(),
         "summary_event_id": summary_event_id.to_string(),
         "read_plan": {
-            "schema": CONTEXT_READ_PLAN_SCHEMA_V1,
+            "schema": crate::kernel::history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": name,
             "source_stream": stream_id.as_str(),
             "frontier": "compile_frontier",
@@ -163,8 +159,8 @@ pub(super) fn context_read_plan_set_payload_v1(
 }
 
 fn summary_checkpoint_entries(
-    summary_event_id: EventRecordId,
-    source_ranges: &[ObservationSourceRange],
+    summary_event_id: crate::kernel::history::EventRecordId,
+    source_ranges: &[crate::kernel::history::ObservationSourceRange],
 ) -> Vec<serde_json::Value> {
     if source_ranges.is_empty() {
         return vec![serde_json::json!({
@@ -192,7 +188,9 @@ fn summary_checkpoint_entries(
         .collect()
 }
 
-fn source_ranges_json(source_ranges: &[ObservationSourceRange]) -> Vec<serde_json::Value> {
+fn source_ranges_json(
+    source_ranges: &[crate::kernel::history::ObservationSourceRange],
+) -> Vec<serde_json::Value> {
     source_ranges
         .iter()
         .map(|range| {
@@ -206,9 +204,10 @@ fn source_ranges_json(source_ranges: &[ObservationSourceRange]) -> Vec<serde_jso
 }
 
 pub(super) async fn context_source_ranges(
-    store: &dyn RuntimeStore,
-    source_cuts: &[SessionContextSourceCut],
-) -> VerletResult<Vec<ObservationSourceRange>> {
+    store: &dyn crate::kernel::history::RuntimeStore,
+    source_cuts: &[crate::kernel::history::SessionContextSourceCut],
+) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::ObservationSourceRange>>
+{
     let mut ranges = Vec::new();
     for cut in source_cuts {
         if cut.entry_ids.is_empty() {
@@ -217,7 +216,7 @@ pub(super) async fn context_source_ranges(
         let events = store
             .read_events(&cut.stream_id, None)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         if let Some(range) = context_source_range(&cut.stream_id, &events, &cut.entry_ids) {
             ranges.push(range);
         }
@@ -226,17 +225,17 @@ pub(super) async fn context_source_ranges(
 }
 
 fn context_source_range(
-    stream_id: &EventStreamId,
-    events: &[EventRecord],
-    selected_entry_ids: &[SessionEntryId],
-) -> Option<ObservationSourceRange> {
+    stream_id: &crate::kernel::history::EventStreamId,
+    events: &[crate::kernel::history::EventRecord],
+    selected_entry_ids: &[crate::kernel::history::SessionEntryId],
+) -> Option<crate::kernel::history::ObservationSourceRange> {
     let selected_entry_ids = selected_entry_ids
         .iter()
         .map(|entry_id| entry_id.to_string())
-        .collect::<BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>();
     let selected_sequences = events
         .iter()
-        .filter(|event| event.kind == EventKind::SessionEntryAppended)
+        .filter(|event| event.kind == crate::kernel::history::EventKind::SessionEntryAppended)
         .filter(|event| {
             event
                 .payload
@@ -249,7 +248,7 @@ fn context_source_range(
         .collect::<Vec<_>>();
     let from_sequence = selected_sequences.first().copied()?;
     let to_sequence = selected_sequences.last().copied()?;
-    Some(ObservationSourceRange {
+    Some(crate::kernel::history::ObservationSourceRange {
         stream_id: stream_id.clone(),
         from_sequence,
         to_sequence,
@@ -257,9 +256,9 @@ fn context_source_range(
 }
 
 pub(super) fn session_context_source_cut_for_entries(
-    coordinates: &ThreadCoordinates,
-    session_entries: &[SessionEntry],
-) -> Vec<SessionContextSourceCut> {
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    session_entries: &[crate::kernel::history::SessionEntry],
+) -> Vec<crate::kernel::history::SessionContextSourceCut> {
     let entry_ids = session_entries
         .iter()
         .filter(|entry| entry.coordinates.thread_id == coordinates.thread_id)
@@ -268,18 +267,18 @@ pub(super) fn session_context_source_cut_for_entries(
     if entry_ids.is_empty() {
         return Vec::new();
     }
-    vec![SessionContextSourceCut {
+    vec![crate::kernel::history::SessionContextSourceCut {
         coordinates: coordinates.clone(),
-        stream_id: EventStreamId::for_thread(coordinates),
+        stream_id: crate::kernel::history::EventStreamId::for_thread(coordinates),
         inherited: false,
         entry_ids,
     }]
 }
 
 pub(super) fn context_source_streams(
-    source_cuts: &[SessionContextSourceCut],
-    fallback_stream_id: &EventStreamId,
-) -> Vec<EventStreamId> {
+    source_cuts: &[crate::kernel::history::SessionContextSourceCut],
+    fallback_stream_id: &crate::kernel::history::EventStreamId,
+) -> Vec<crate::kernel::history::EventStreamId> {
     let mut streams = Vec::new();
     for cut in source_cuts {
         if !streams.contains(&cut.stream_id) {
@@ -293,9 +292,9 @@ pub(super) fn context_source_streams(
 }
 
 pub(super) fn primary_context_source_range(
-    stream_id: &EventStreamId,
-    source_ranges: &[ObservationSourceRange],
-) -> Option<ObservationSourceRange> {
+    stream_id: &crate::kernel::history::EventStreamId,
+    source_ranges: &[crate::kernel::history::ObservationSourceRange],
+) -> Option<crate::kernel::history::ObservationSourceRange> {
     source_ranges
         .iter()
         .rev()

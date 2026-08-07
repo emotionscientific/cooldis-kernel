@@ -1,29 +1,22 @@
-use verlet_guest_sdk::{
-    OperationDefinition, OperationEventKind, OperationManifest, OperationMode, OperationValueKind,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_OK, Sink, Source, StatusCode, read_source,
-    write_sink,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
 const JSON_QUERY_ID: u32 = 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __verlet_describe_module__(sink: u32) -> i32 {
-    let manifest = OperationManifest::new(vec![OperationDefinition {
-        id: JSON_QUERY_ID,
-        name: "json_query".to_string(),
-        input: OperationValueKind::Json,
-        output: OperationValueKind::Json,
-        events: OperationEventKind::None,
-        mode: OperationMode::Sync,
-        required_capabilities: Vec::new(),
-    }]);
+    let manifest =
+        verlet_guest_sdk::OperationManifest::new(vec![verlet_guest_sdk::OperationDefinition {
+            id: JSON_QUERY_ID,
+            name: "json_query".to_string(),
+            input: verlet_guest_sdk::OperationValueKind::Json,
+            output: verlet_guest_sdk::OperationValueKind::Json,
+            events: verlet_guest_sdk::OperationEventKind::None,
+            mode: verlet_guest_sdk::OperationMode::Sync,
+            required_capabilities: Vec::new(),
+        }]);
     let bytes = match manifest.to_json_vec() {
         Ok(bytes) => bytes,
-        Err(_) => return STATUS_INVALID_ARGUMENT,
+        Err(_) => return verlet_guest_sdk::STATUS_INVALID_ARGUMENT,
     };
-    status(write_sink(Sink(sink), &bytes).map(|_| ()))
+    status(verlet_guest_sdk::write_sink(verlet_guest_sdk::Sink(sink), &bytes).map(|_| ()))
 }
 
 #[unsafe(no_mangle)]
@@ -35,28 +28,34 @@ pub extern "C" fn __verlet_call_operation__(
     _events: u32,
 ) -> i32 {
     match operation {
-        JSON_QUERY_ID => status(json_query(Source(source), Sink(output))),
-        _ => STATUS_NOT_FOUND,
+        JSON_QUERY_ID => status(json_query(
+            verlet_guest_sdk::Source(source),
+            verlet_guest_sdk::Sink(output),
+        )),
+        _ => verlet_guest_sdk::STATUS_NOT_FOUND,
     }
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct JsonQueryInput {
-    json: Value,
+    json: serde_json::Value,
     pointer: String,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct JsonQueryOutput {
     found: bool,
-    value: Value,
+    value: serde_json::Value,
 }
 
-fn json_query(source: Source, output: Sink) -> Result<(), StatusCode> {
+fn json_query(
+    source: verlet_guest_sdk::Source,
+    output: verlet_guest_sdk::Sink,
+) -> Result<(), verlet_guest_sdk::StatusCode> {
     let input: JsonQueryInput = serde_json::from_slice(&read_all_source(source)?)
-        .map_err(|_| StatusCode::InvalidArgument)?;
+        .map_err(|_| verlet_guest_sdk::StatusCode::InvalidArgument)?;
     if !input.pointer.is_empty() && !input.pointer.starts_with('/') {
-        return Err(StatusCode::InvalidArgument);
+        return Err(verlet_guest_sdk::StatusCode::InvalidArgument);
     }
     let output_value = match input.json.pointer(&input.pointer) {
         Some(value) => JsonQueryOutput {
@@ -65,17 +64,19 @@ fn json_query(source: Source, output: Sink) -> Result<(), StatusCode> {
         },
         None => JsonQueryOutput {
             found: false,
-            value: Value::Null,
+            value: serde_json::Value::Null,
         },
     };
     write_json(output, &output_value)
 }
 
-fn read_all_source(source: Source) -> Result<Vec<u8>, StatusCode> {
+fn read_all_source(
+    source: verlet_guest_sdk::Source,
+) -> Result<Vec<u8>, verlet_guest_sdk::StatusCode> {
     let mut output = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
-        let n = read_source(source, &mut buffer)?;
+        let n = verlet_guest_sdk::read_source(source, &mut buffer)?;
         if n == 0 {
             break;
         }
@@ -87,15 +88,19 @@ fn read_all_source(source: Source) -> Result<Vec<u8>, StatusCode> {
     Ok(output)
 }
 
-fn write_json(output: Sink, value: &impl Serialize) -> Result<(), StatusCode> {
-    let bytes = serde_json::to_vec(value).map_err(|_| StatusCode::InvalidArgument)?;
-    write_sink(output, &bytes)?;
+fn write_json(
+    output: verlet_guest_sdk::Sink,
+    value: &impl serde::Serialize,
+) -> Result<(), verlet_guest_sdk::StatusCode> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|_| verlet_guest_sdk::StatusCode::InvalidArgument)?;
+    verlet_guest_sdk::write_sink(output, &bytes)?;
     Ok(())
 }
 
-fn status(result: Result<(), StatusCode>) -> i32 {
+fn status(result: Result<(), verlet_guest_sdk::StatusCode>) -> i32 {
     match result {
-        Ok(()) => STATUS_OK,
+        Ok(()) => verlet_guest_sdk::STATUS_OK,
         Err(err) => err.as_raw(),
     }
 }

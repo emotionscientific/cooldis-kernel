@@ -1,31 +1,19 @@
-use object_store::aws::AmazonS3Builder;
-use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt};
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio::time::{Duration, timeout};
-use uuid::Uuid;
-use verlet::{
-    BashkitExecutionHarness, ObjectStoreMountConfig, S3ObjectStoreConfig, TenantRegistration,
-    TenantRuntimeContext, ThreadEvent, ThreadStartRequest, ThreadTopology, VerletSupervisor,
-    VirtualBashRuntimeConfig, VirtualBashRuntimeFactory, VirtualMount,
-};
+use object_store::ObjectStoreExt as _;
 
 #[tokio::test]
 #[ignore = "requires VERLET_S3_* credentials and mutates a unique object-store prefix"]
 async fn virtual_bash_mount_round_trips_real_s3_or_r2() {
     let live = live_s3_config("verlet-smoke");
 
-    let config = VirtualBashRuntimeConfig {
-        cwd: PathBuf::from("/s3"),
-        mounts: vec![VirtualMount::object_store(
+    let config = verlet::VirtualBashRuntimeConfig {
+        cwd: std::path::PathBuf::from("/s3"),
+        mounts: vec![verlet::VirtualMount::object_store(
             "/s3",
-            ObjectStoreMountConfig::s3(live.config.clone(), &live.prefix),
+            verlet::ObjectStoreMountConfig::s3(live.config.clone(), &live.prefix),
         )],
-        ..VirtualBashRuntimeConfig::default()
+        ..verlet::VirtualBashRuntimeConfig::default()
     };
-    let mut writer = BashkitExecutionHarness::new(config).await.unwrap();
+    let mut writer = verlet::BashkitExecutionHarness::new(config).await.unwrap();
     let output = writer
         .execute(
             "mkdir -p roundtrip && echo alpha > roundtrip/a.txt && echo beta >> roundtrip/a.txt",
@@ -34,15 +22,15 @@ async fn virtual_bash_mount_round_trips_real_s3_or_r2() {
         .unwrap();
     assert!(output.success(), "{output:?}");
 
-    let reload = VirtualBashRuntimeConfig {
-        cwd: PathBuf::from("/s3"),
-        mounts: vec![VirtualMount::object_store(
+    let reload = verlet::VirtualBashRuntimeConfig {
+        cwd: std::path::PathBuf::from("/s3"),
+        mounts: vec![verlet::VirtualMount::object_store(
             "/s3",
-            ObjectStoreMountConfig::s3(live.config, &live.prefix),
+            verlet::ObjectStoreMountConfig::s3(live.config, &live.prefix),
         )],
-        ..VirtualBashRuntimeConfig::default()
+        ..verlet::VirtualBashRuntimeConfig::default()
     };
-    let mut reader = BashkitExecutionHarness::new(reload).await.unwrap();
+    let mut reader = verlet::BashkitExecutionHarness::new(reload).await.unwrap();
     let output = reader
         .execute("cat roundtrip/a.txt && rm -r roundtrip && test ! -e roundtrip/a.txt")
         .await
@@ -58,33 +46,33 @@ async fn verlet_agent_thread_creates_file_on_real_s3_or_r2() {
     let object_key = format!("{}/agent-created.txt", live.prefix.trim_end_matches('/'));
     let verifier = live.build_object_store();
 
-    let config = VirtualBashRuntimeConfig {
-        cwd: PathBuf::from("/r2"),
-        mounts: vec![VirtualMount::object_store(
+    let config = verlet::VirtualBashRuntimeConfig {
+        cwd: std::path::PathBuf::from("/r2"),
+        mounts: vec![verlet::VirtualMount::object_store(
             "/r2",
-            ObjectStoreMountConfig::s3(live.config, &live.prefix),
+            verlet::ObjectStoreMountConfig::s3(live.config, &live.prefix),
         )],
-        ..VirtualBashRuntimeConfig::default()
+        ..verlet::VirtualBashRuntimeConfig::default()
     };
-    let supervisor = VerletSupervisor::new();
+    let supervisor = verlet::VerletSupervisor::new();
     supervisor
-        .register_tenant(TenantRegistration {
-            context: TenantRuntimeContext::local(
+        .register_tenant(verlet::TenantRegistration {
+            context: verlet::TenantRuntimeContext::local(
                 "tenant-r2-agent",
                 "/tmp/verlet-r2-agent-runtime",
                 "/tmp/verlet-r2-agent-state",
             ),
-            runtime_factory: Arc::new(VirtualBashRuntimeFactory::new(config)),
+            runtime_factory: std::sync::Arc::new(verlet::VirtualBashRuntimeFactory::new(config)),
         })
         .await
         .unwrap();
 
     let thread = supervisor
-        .start_thread(ThreadStartRequest {
+        .start_thread(verlet::ThreadStartRequest {
             tenant_id: "tenant-r2-agent".to_string(),
             user_id: "user-r2".to_string(),
             session_id: "session-r2".to_string(),
-            topology: ThreadTopology::root(),
+            topology: verlet::ThreadTopology::root(),
             metadata: Default::default(),
         })
         .await
@@ -104,7 +92,7 @@ async fn verlet_agent_thread_creates_file_on_real_s3_or_r2() {
     assert_eq!(output, "created by verlet agent\n");
 
     let bytes = verifier
-        .get(&ObjectPath::from(object_key.clone()))
+        .get(&object_store::path::Path::from(object_key.clone()))
         .await
         .unwrap()
         .bytes()
@@ -113,20 +101,20 @@ async fn verlet_agent_thread_creates_file_on_real_s3_or_r2() {
     assert_eq!(bytes.as_ref(), b"created by verlet agent\n");
 
     verifier
-        .delete(&ObjectPath::from(object_key))
+        .delete(&object_store::path::Path::from(object_key))
         .await
         .unwrap();
 }
 
 #[derive(Clone)]
 struct LiveS3Config {
-    config: S3ObjectStoreConfig,
+    config: verlet::S3ObjectStoreConfig,
     prefix: String,
 }
 
 impl LiveS3Config {
-    fn build_object_store(&self) -> impl ObjectStore {
-        let mut builder = AmazonS3Builder::new()
+    fn build_object_store(&self) -> impl object_store::ObjectStore {
+        let mut builder = object_store::aws::AmazonS3Builder::new()
             .with_bucket_name(&self.config.bucket)
             .with_region(&self.config.region)
             .with_virtual_hosted_style_request(self.config.virtual_hosted_style_request)
@@ -160,10 +148,10 @@ fn live_s3_config(default_prefix: &str) -> LiveS3Config {
         verlet_runtime_contracts::env_compat::var("VERLET_S3_SECRET_ACCESS_KEY")
             .expect("VERLET_S3_SECRET_ACCESS_KEY is required");
     let prefix = verlet_runtime_contracts::env_compat::var("VERLET_S3_PREFIX")
-        .unwrap_or_else(|_| format!("{default_prefix}/{}", Uuid::now_v7()));
+        .unwrap_or_else(|_| format!("{default_prefix}/{}", uuid::Uuid::now_v7()));
 
-    let mut config =
-        S3ObjectStoreConfig::new(bucket, region).with_credentials(access_key_id, secret_access_key);
+    let mut config = verlet::S3ObjectStoreConfig::new(bucket, region)
+        .with_credentials(access_key_id, secret_access_key);
     if let Ok(endpoint) = verlet_runtime_contracts::env_compat::var("VERLET_S3_ENDPOINT") {
         config = config.with_endpoint(endpoint);
     }
@@ -179,12 +167,12 @@ fn live_s3_config(default_prefix: &str) -> LiveS3Config {
     LiveS3Config { config, prefix }
 }
 
-async fn next_output(events: &mut broadcast::Receiver<ThreadEvent>) -> String {
-    timeout(Duration::from_secs(30), async {
+async fn next_output(events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>) -> String {
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             match events.recv().await.unwrap() {
-                ThreadEvent::Output { text, .. } => break text,
-                ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+                verlet::ThreadEvent::Output { text, .. } => break text,
+                verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
                 _ => {}
             }
         }

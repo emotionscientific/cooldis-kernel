@@ -1,26 +1,12 @@
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, VecDeque};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
-use verlet::{
-    AgentLoopConfig, AgentLoopFactory, AnthropicMessagesAdapter, CanonicalContent,
-    CanonicalMessage, CanonicalStopReason, OpenAIChatCompletionsAdapter, OpenAIReasoningSummary,
-    OpenAIResponsesAdapter, ProviderApi, ProviderAuth, ProviderEndpoint, ProviderHttpClient,
-    ProviderWireAdapter, RuntimeEventKind, RuntimeHost, SessionEntryKind, SessionStore,
-    SqliteSessionStore, TenantRegistration, TenantRuntimeContext, ThreadCoordinates, ThreadEvent,
-    ThreadStartRequest, ThreadTopology, VerletSupervisor,
-};
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
+use verlet::SessionStore as _;
 
 #[tokio::test]
 async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
     let db_path = temp_db_path("verlet-e2e-openai");
     let server = MockHttpServer::start(vec![
-        json!({
+        serde_json::json!({
             "status": "completed",
             "output": [{
                 "type": "message",
@@ -28,7 +14,7 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
             }],
             "usage": {"input_tokens": 11, "output_tokens": 2}
         }),
-        json!({
+        serde_json::json!({
             "status": "completed",
             "output": [{
                 "type": "message",
@@ -38,12 +24,12 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
         }),
     ])
     .await;
-    let mut coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let mut coordinates = verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
 
     {
         let host = openai_host(&server, &db_path).await;
         let thread = host
-            .start_thread(coordinates.clone(), ThreadTopology::root())
+            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
             .await
             .unwrap();
         coordinates = thread.context().coordinates.clone();
@@ -59,7 +45,7 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
     {
         let host = openai_host(&server, &db_path).await;
         let thread = host
-            .start_thread(coordinates.clone(), ThreadTopology::root())
+            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
             .await
             .unwrap();
         let mut events = thread.subscribe_events();
@@ -83,7 +69,7 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
             context
                 .entries
                 .iter()
-                .all(|entry| { matches!(entry.kind, SessionEntryKind::Message { .. }) })
+                .all(|entry| { matches!(entry.kind, verlet::SessionEntryKind::Message { .. }) })
         );
         host.shutdown_thread(coordinates.thread_id).await.unwrap();
     }
@@ -116,7 +102,7 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
 #[tokio::test]
 async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
     let db_path = temp_db_path("verlet-e2e-anthropic");
-    let server = MockHttpServer::start(vec![json!({
+    let server = MockHttpServer::start(vec![serde_json::json!({
         "stop_reason": "tool_use",
         "content": [{
             "type": "tool_use",
@@ -130,8 +116,8 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
     let host = anthropic_host(&server, &db_path).await;
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -142,7 +128,7 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
     let assistant = next_assistant_message(&mut events).await;
 
     match assistant {
-        CanonicalMessage::Assistant {
+        verlet::CanonicalMessage::Assistant {
             provider,
             api,
             model,
@@ -151,12 +137,12 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
             ..
         } => {
             assert_eq!(provider, "anthropic");
-            assert_eq!(api, ProviderApi::AnthropicMessages);
+            assert_eq!(api, verlet::ProviderApi::AnthropicMessages);
             assert_eq!(model, "claude-e2e");
-            assert_eq!(stop_reason, CanonicalStopReason::ToolUse);
+            assert_eq!(stop_reason, verlet::CanonicalStopReason::ToolUse);
             assert!(matches!(
                 content.first(),
-                Some(CanonicalContent::ToolCall { id, name, arguments })
+                Some(verlet::CanonicalContent::ToolCall { id, name, arguments })
                     if id == "toolu_123"
                         && name == "bash"
                         && arguments["command"] == "pwd"
@@ -196,14 +182,14 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
 async fn chat_completions_runtime_replays_same_canonical_sqlite_history() {
     let db_path = temp_db_path("verlet-e2e-chat");
     let server = MockHttpServer::start(vec![
-        json!({
+        serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
                 "message": {"content": "first chat reply"}
             }],
             "usage": {"prompt_tokens": 3, "completion_tokens": 4}
         }),
-        json!({
+        serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
                 "message": {"content": "second chat reply"}
@@ -212,12 +198,12 @@ async fn chat_completions_runtime_replays_same_canonical_sqlite_history() {
         }),
     ])
     .await;
-    let mut coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let mut coordinates = verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
 
     {
         let host = chat_host(&server, &db_path).await;
         let thread = host
-            .start_thread(coordinates.clone(), ThreadTopology::root())
+            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
             .await
             .unwrap();
         coordinates = thread.context().coordinates.clone();
@@ -233,7 +219,7 @@ async fn chat_completions_runtime_replays_same_canonical_sqlite_history() {
     {
         let host = chat_host(&server, &db_path).await;
         let thread = host
-            .start_thread(coordinates.clone(), ThreadTopology::root())
+            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
             .await
             .unwrap();
         let mut events = thread.subscribe_events();
@@ -290,11 +276,11 @@ async fn supervisor_resume_and_fork_from_checkpoint_after_restart_keep_branches_
     let checkpoint = {
         let supervisor = openai_supervisor(&server, &db_path, &runtime_root).await;
         let thread = supervisor
-            .start_thread(ThreadStartRequest {
+            .start_thread(verlet::ThreadStartRequest {
                 tenant_id: "tenant_a".to_string(),
                 user_id: "user_1".to_string(),
                 session_id: "session_1".to_string(),
-                topology: ThreadTopology::root(),
+                topology: verlet::ThreadTopology::root(),
                 metadata: Default::default(),
             })
             .await
@@ -312,7 +298,10 @@ async fn supervisor_resume_and_fork_from_checkpoint_after_restart_keep_branches_
                 &coordinates,
                 None,
                 Some("branch-point".to_string()),
-                BTreeMap::from([("opaque_product_id".to_string(), "product-ckpt".to_string())]),
+                std::collections::BTreeMap::from([(
+                    "opaque_product_id".to_string(),
+                    "product-ckpt".to_string(),
+                )]),
             )
             .await
             .unwrap();
@@ -411,20 +400,20 @@ async fn supervisor_resume_and_fork_from_checkpoint_after_restart_keep_branches_
 #[tokio::test]
 async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
     let db_path = temp_db_path("verlet-e2e-provider-switch");
-    let server = MockHttpServer::start(vec![json!({
+    let server = MockHttpServer::start(vec![serde_json::json!({
         "stop_reason": "end_turn",
         "content": [{"type": "text", "text": "done"}],
         "usage": {"input_tokens": 9, "output_tokens": 2}
     })])
     .await;
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
-    let store = SqliteSessionStore::open(&db_path).await.unwrap();
+    let coordinates = verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let store = verlet::SqliteSessionStore::open(&db_path).await.unwrap();
     store
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("spawn worker"),
+            verlet::SessionEntryKind::Message {
+                message: verlet::CanonicalMessage::user_text("spawn worker"),
             },
         )
         .await
@@ -433,17 +422,17 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::assistant(
+            verlet::SessionEntryKind::Message {
+                message: verlet::CanonicalMessage::assistant(
                     "openai",
-                    ProviderApi::OpenAIResponses,
+                    verlet::ProviderApi::OpenAIResponses,
                     "gpt-e2e",
-                    vec![CanonicalContent::tool_call(
+                    vec![verlet::CanonicalContent::tool_call(
                         "call_1|fc_1",
                         "verlet_spawn_subagent",
-                        json!({"task_name": "worker", "message": "echo historical child"}),
+                        serde_json::json!({"task_name": "worker", "message": "echo historical child"}),
                     )],
-                    CanonicalStopReason::ToolUse,
+                    verlet::CanonicalStopReason::ToolUse,
                 ),
             },
         )
@@ -453,8 +442,8 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::tool_result(
+            verlet::SessionEntryKind::Message {
+                message: verlet::CanonicalMessage::tool_result(
                     "call_1|fc_1",
                     "verlet_spawn_subagent",
                     r#"{"operation":"cooldis.spawn_subagent","thread_id":"historical-child"}"#,
@@ -467,7 +456,7 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
 
     let host = anthropic_host(&server, &db_path).await;
     let thread = host
-        .start_thread(coordinates.clone(), ThreadTopology::root())
+        .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
@@ -511,8 +500,8 @@ async fn openai_responses_http_sse_runtime_stores_canonical_stream_without_raw_p
     let host = openai_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -527,12 +516,12 @@ async fn openai_responses_http_sse_runtime_stores_canonical_stream_without_raw_p
     .unwrap();
     let (assistant, runtime_events) = next_assistant_with_runtime_events(&mut events).await;
     assert!(runtime_events.iter().any(|event| {
-        matches!(event, RuntimeEventKind::TextDelta { text } if text == "streamed")
+        matches!(event, verlet::RuntimeEventKind::TextDelta { text } if text == "streamed")
     }));
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallStarted { call_id, name, .. }
+            verlet::RuntimeEventKind::ToolCallStarted { call_id, name, .. }
                 if call_id == "call_1|fc_1" && name == "bash"
         )
     }));
@@ -557,8 +546,8 @@ async fn chat_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
     let host = chat_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -573,7 +562,7 @@ async fn chat_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
     .unwrap();
     let (assistant, runtime_events) = next_assistant_with_runtime_events(&mut events).await;
     assert!(runtime_events.iter().any(|event| {
-        matches!(event, RuntimeEventKind::TextDelta { text } if text == "chat-streamed")
+        matches!(event, verlet::RuntimeEventKind::TextDelta { text } if text == "chat-streamed")
     }));
     assert_streamed_tool_assistant(assistant, "call_1");
     assert_raw_stream_payloads_not_stored(&db_path).await;
@@ -596,8 +585,8 @@ async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads
     let host = anthropic_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -612,7 +601,7 @@ async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads
     .unwrap();
     let (assistant, runtime_events) = next_assistant_with_runtime_events(&mut events).await;
     assert!(runtime_events.iter().any(|event| {
-        matches!(event, RuntimeEventKind::TextDelta { text } if text == "anthropic-streamed")
+        matches!(event, verlet::RuntimeEventKind::TextDelta { text } if text == "anthropic-streamed")
     }));
     assert_streamed_tool_assistant(assistant, "toolu_1");
     assert_raw_stream_payloads_not_stored(&db_path).await;
@@ -630,32 +619,37 @@ async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads
     remove_sqlite_files(&db_path);
 }
 
-async fn openai_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn openai_host(server: &MockHttpServer, db_path: &std::path::Path) -> verlet::RuntimeHost {
     let factory = openai_factory(server, false);
-    RuntimeHost::with_session_store(
+    verlet::RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
-async fn openai_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn openai_streaming_host(
+    server: &MockHttpServer,
+    db_path: &std::path::Path,
+) -> verlet::RuntimeHost {
     let factory = openai_factory(server, true);
-    RuntimeHost::with_session_store(
+    verlet::RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
 async fn openai_supervisor(
     server: &MockHttpServer,
-    db_path: &Path,
-    runtime_root: &Path,
-) -> VerletSupervisor {
-    let supervisor = VerletSupervisor::new();
+    db_path: &std::path::Path,
+    runtime_root: &std::path::Path,
+) -> verlet::VerletSupervisor {
+    let supervisor = verlet::VerletSupervisor::new();
     supervisor
-        .register_tenant(TenantRegistration {
-            context: TenantRuntimeContext::local("tenant_a", runtime_root, runtime_root)
-                .with_session_store(Arc::new(SqliteSessionStore::open(db_path).await.unwrap())),
+        .register_tenant(verlet::TenantRegistration {
+            context: verlet::TenantRuntimeContext::local("tenant_a", runtime_root, runtime_root)
+                .with_session_store(std::sync::Arc::new(
+                    verlet::SqliteSessionStore::open(db_path).await.unwrap(),
+                )),
             runtime_factory: openai_factory(server, false),
         })
         .await
@@ -663,16 +657,20 @@ async fn openai_supervisor(
     supervisor
 }
 
-fn openai_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFactory> {
-    let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(OpenAIResponsesAdapter {
-        include_encrypted_reasoning: false,
-        reasoning_summary: OpenAIReasoningSummary::Auto,
-    });
-    let client = Arc::new(
-        ProviderHttpClient::new(
-            ProviderEndpoint {
+fn openai_factory(
+    server: &MockHttpServer,
+    stream: bool,
+) -> std::sync::Arc<verlet::AgentLoopFactory> {
+    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet::OpenAIResponsesAdapter {
+            include_encrypted_reasoning: false,
+            reasoning_summary: verlet::OpenAIReasoningSummary::Auto,
+        });
+    let client = std::sync::Arc::new(
+        verlet::ProviderHttpClient::new(
+            verlet::ProviderEndpoint {
                 url: format!("{}/v1/responses", server.base_url()),
-                auth: ProviderAuth::Bearer {
+                auth: verlet::ProviderAuth::Bearer {
                     token: "e2e-key".to_string(),
                 },
                 headers: Vec::new(),
@@ -681,35 +679,40 @@ fn openai_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFactory
         )
         .unwrap(),
     );
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-e2e");
+    let mut config =
+        verlet::AgentLoopConfig::new(verlet::ProviderApi::OpenAIResponses, "openai", "gpt-e2e");
     config.max_tokens = 64;
     config.stream = stream;
-    Arc::new(AgentLoopFactory::new(config, client))
+    std::sync::Arc::new(verlet::AgentLoopFactory::new(config, client))
 }
 
-async fn chat_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn chat_host(server: &MockHttpServer, db_path: &std::path::Path) -> verlet::RuntimeHost {
     let factory = chat_factory(server, false);
-    RuntimeHost::with_session_store(
+    verlet::RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
-async fn chat_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn chat_streaming_host(
+    server: &MockHttpServer,
+    db_path: &std::path::Path,
+) -> verlet::RuntimeHost {
     let factory = chat_factory(server, true);
-    RuntimeHost::with_session_store(
+    verlet::RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
-fn chat_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFactory> {
-    let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(OpenAIChatCompletionsAdapter);
-    let client = Arc::new(
-        ProviderHttpClient::new(
-            ProviderEndpoint {
+fn chat_factory(server: &MockHttpServer, stream: bool) -> std::sync::Arc<verlet::AgentLoopFactory> {
+    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet::OpenAIChatCompletionsAdapter);
+    let client = std::sync::Arc::new(
+        verlet::ProviderHttpClient::new(
+            verlet::ProviderEndpoint {
                 url: format!("{}/v1/chat/completions", server.base_url()),
-                auth: ProviderAuth::Bearer {
+                auth: verlet::ProviderAuth::Bearer {
                     token: "chat-key".to_string(),
                 },
                 headers: Vec::new(),
@@ -718,39 +721,46 @@ fn chat_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFactory> 
         )
         .unwrap(),
     );
-    let mut config = AgentLoopConfig::new(
-        ProviderApi::OpenAIChatCompletions,
+    let mut config = verlet::AgentLoopConfig::new(
+        verlet::ProviderApi::OpenAIChatCompletions,
         "openai-compatible",
         "chat-e2e",
     );
     config.max_tokens = 64;
     config.stream = stream;
-    Arc::new(AgentLoopFactory::new(config, client))
+    std::sync::Arc::new(verlet::AgentLoopFactory::new(config, client))
 }
 
-async fn anthropic_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn anthropic_host(server: &MockHttpServer, db_path: &std::path::Path) -> verlet::RuntimeHost {
     let factory = anthropic_factory(server, false);
-    RuntimeHost::with_session_store(
+    verlet::RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
-async fn anthropic_streaming_host(server: &MockHttpServer, db_path: &Path) -> RuntimeHost {
+async fn anthropic_streaming_host(
+    server: &MockHttpServer,
+    db_path: &std::path::Path,
+) -> verlet::RuntimeHost {
     let factory = anthropic_factory(server, true);
-    RuntimeHost::with_session_store(
+    verlet::RuntimeHost::with_session_store(
         factory,
-        Arc::new(SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
     )
 }
 
-fn anthropic_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFactory> {
-    let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(AnthropicMessagesAdapter);
-    let client = Arc::new(
-        ProviderHttpClient::new(
-            ProviderEndpoint {
+fn anthropic_factory(
+    server: &MockHttpServer,
+    stream: bool,
+) -> std::sync::Arc<verlet::AgentLoopFactory> {
+    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet::AnthropicMessagesAdapter);
+    let client = std::sync::Arc::new(
+        verlet::ProviderHttpClient::new(
+            verlet::ProviderEndpoint {
                 url: format!("{}/anthropic/v1/messages", server.base_url()),
-                auth: ProviderAuth::AnthropicApiKey {
+                auth: verlet::ProviderAuth::AnthropicApiKey {
                     key: "anthropic-key".to_string(),
                 },
                 headers: vec![("anthropic-version".to_string(), "2023-06-01".to_string())],
@@ -759,95 +769,98 @@ fn anthropic_factory(server: &MockHttpServer, stream: bool) -> Arc<AgentLoopFact
         )
         .unwrap(),
     );
-    let mut config =
-        AgentLoopConfig::new(ProviderApi::AnthropicMessages, "anthropic", "claude-e2e");
+    let mut config = verlet::AgentLoopConfig::new(
+        verlet::ProviderApi::AnthropicMessages,
+        "anthropic",
+        "claude-e2e",
+    );
     config.max_tokens = 64;
     config.stream = stream;
-    Arc::new(AgentLoopFactory::new(config, client))
+    std::sync::Arc::new(verlet::AgentLoopFactory::new(config, client))
 }
 
-async fn next_output(events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>) -> String {
+async fn next_output(events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>) -> String {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::Output { text, .. } => return text,
-            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            verlet::ThreadEvent::Output { text, .. } => return text,
+            verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
     }
 }
 
 async fn next_assistant_message(
-    events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
-) -> CanonicalMessage {
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
+) -> verlet::CanonicalMessage {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::CanonicalMirror { entry, .. } => {
-                if let SessionEntryKind::Message {
-                    message: CanonicalMessage::Assistant { .. },
+            verlet::ThreadEvent::CanonicalMirror { entry, .. } => {
+                if let verlet::SessionEntryKind::Message {
+                    message: verlet::CanonicalMessage::Assistant { .. },
                 } = entry.kind
                 {
-                    if let SessionEntryKind::Message { message } = entry.kind {
+                    if let verlet::SessionEntryKind::Message { message } = entry.kind {
                         return message;
                     }
                 }
             }
-            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
     }
 }
 
 async fn next_assistant_with_runtime_events(
-    events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
-) -> (CanonicalMessage, Vec<RuntimeEventKind>) {
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
+) -> (verlet::CanonicalMessage, Vec<verlet::RuntimeEventKind>) {
     let mut runtime_events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
-            ThreadEvent::CanonicalMirror { entry, .. } => {
-                if let SessionEntryKind::Message { message } = entry.kind
-                    && matches!(message, CanonicalMessage::Assistant { .. })
+            verlet::ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
+            verlet::ThreadEvent::CanonicalMirror { entry, .. } => {
+                if let verlet::SessionEntryKind::Message { message } = entry.kind
+                    && matches!(message, verlet::CanonicalMessage::Assistant { .. })
                 {
                     return (message, runtime_events);
                 }
             }
-            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
     }
 }
 
-fn assert_streamed_tool_assistant(assistant: CanonicalMessage, expected_tool_id: &str) {
+fn assert_streamed_tool_assistant(assistant: verlet::CanonicalMessage, expected_tool_id: &str) {
     match assistant {
-        CanonicalMessage::Assistant {
+        verlet::CanonicalMessage::Assistant {
             content,
             usage,
             stop_reason,
             ..
         } => {
-            assert_eq!(stop_reason, CanonicalStopReason::ToolUse);
+            assert_eq!(stop_reason, verlet::CanonicalStopReason::ToolUse);
             assert_eq!(usage.input_tokens, 5);
             assert_eq!(usage.output_tokens, 6);
             assert!(matches!(
                 &content[0],
-                CanonicalContent::Text { text, .. }
+                verlet::CanonicalContent::Text { text, .. }
                     if text.ends_with("streamed") || text == "chat-streamed"
             ));
             assert!(content.iter().any(|content| matches!(
                 content,
-                CanonicalContent::ToolCall { id, name, arguments }
+                verlet::CanonicalContent::ToolCall { id, name, arguments }
                     if id == expected_tool_id && name == "bash" && arguments["command"] == "pwd"
             )));
         }
@@ -855,7 +868,7 @@ fn assert_streamed_tool_assistant(assistant: CanonicalMessage, expected_tool_id:
     }
 }
 
-async fn assert_raw_stream_payloads_not_stored(db_path: &Path) {
+async fn assert_raw_stream_payloads_not_stored(db_path: &std::path::Path) {
     let stored_payloads = sqlite_entry_payloads(db_path).await;
     assert!(
         stored_payloads
@@ -870,16 +883,16 @@ async fn assert_raw_stream_payloads_not_stored(db_path: &Path) {
     }));
 }
 
-fn text_messages(messages: &[CanonicalMessage]) -> Vec<&str> {
+fn text_messages(messages: &[verlet::CanonicalMessage]) -> Vec<&str> {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => content
+            verlet::CanonicalMessage::User { content, .. }
+            | verlet::CanonicalMessage::Assistant { content, .. }
+            | verlet::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .find_map(|content| match content {
-                    CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                    verlet::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .unwrap_or(""),
@@ -887,17 +900,17 @@ fn text_messages(messages: &[CanonicalMessage]) -> Vec<&str> {
         .collect()
 }
 
-fn openai_input_texts(body: &Value) -> Vec<&str> {
+fn openai_input_texts(body: &serde_json::Value) -> Vec<&str> {
     body["input"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|item| item.get("content").and_then(Value::as_str))
+        .filter_map(|item| item.get("content").and_then(serde_json::Value::as_str))
         .collect()
 }
 
-fn openai_text_response(text: &str) -> Value {
-    json!({
+fn openai_text_response(text: &str) -> serde_json::Value {
+    serde_json::json!({
         "status": "completed",
         "output": [{
             "type": "message",
@@ -950,7 +963,7 @@ fn anthropic_messages_sse() -> &'static str {
     )
 }
 
-async fn sqlite_entry_payloads(path: &Path) -> Vec<String> {
+async fn sqlite_entry_payloads(path: &std::path::Path) -> Vec<String> {
     let db = verlet_sqlite::Db::open(path, verlet_sqlite::DbConfig::default())
         .await
         .unwrap();
@@ -976,22 +989,22 @@ async fn sqlite_entry_payloads(path: &Path) -> Vec<String> {
 }
 
 fn temp_db_path(prefix: &str) -> std::path::PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}.sqlite3"))
 }
 
 fn temp_dir_path(prefix: &str) -> std::path::PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}"))
 }
 
-fn remove_sqlite_files(path: &Path) {
+fn remove_sqlite_files(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
@@ -999,8 +1012,8 @@ fn remove_sqlite_files(path: &Path) {
 
 struct MockHttpServer {
     addr: std::net::SocketAddr,
-    requests: Arc<Mutex<Vec<CapturedRequest>>>,
-    handle: JoinHandle<()>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<CapturedRequest>>>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Clone)]
@@ -1010,7 +1023,7 @@ struct MockResponse {
 }
 
 impl MockResponse {
-    fn json(value: Value) -> Self {
+    fn json(value: serde_json::Value) -> Self {
         Self {
             body: value.to_string(),
             content_type: "application/json",
@@ -1029,7 +1042,7 @@ impl MockResponse {
 struct CapturedRequest {
     path: String,
     headers: Vec<(String, String)>,
-    body: Value,
+    body: serde_json::Value,
 }
 
 impl CapturedRequest {
@@ -1042,7 +1055,7 @@ impl CapturedRequest {
 }
 
 impl MockHttpServer {
-    async fn start(responses: Vec<Value>) -> Self {
+    async fn start(responses: Vec<serde_json::Value>) -> Self {
         Self::start_responses(responses.into_iter().map(MockResponse::json).collect()).await
     }
 
@@ -1051,12 +1064,14 @@ impl MockHttpServer {
     }
 
     async fn start_responses(responses: Vec<MockResponse>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured_requests = Arc::clone(&requests);
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
         let handle = tokio::spawn(async move {
-            let mut responses = responses.into_iter().collect::<VecDeque<_>>();
+            let mut responses = responses
+                .into_iter()
+                .collect::<std::collections::VecDeque<_>>();
             while let Some(response) = responses.pop_front() {
                 let (socket, _) = listener.accept().await.unwrap();
                 let request = handle_connection(socket, &response).await;
@@ -1075,13 +1090,13 @@ impl MockHttpServer {
     }
 
     async fn requests(&self, expected: usize) -> Vec<CapturedRequest> {
-        timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
             loop {
                 let requests = self.requests.lock().unwrap().clone();
                 if requests.len() >= expected {
                     return requests;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         })
         .await

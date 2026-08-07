@@ -1,13 +1,4 @@
-use crate::{
-    AgentManifestStaticContextSegment, CanonicalContent, CanonicalMessage, SessionEntry,
-    SessionEntryId, SessionEntryKind, SystemBlock, ToolDefinition, TurnContextSnapshot,
-    compaction_summary_message,
-};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentContextCompilePolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_messages: Option<usize>,
@@ -25,20 +16,20 @@ impl AgentContextCompilePolicy {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentContextAttachment {
-    pub path: PathBuf,
+    pub path: std::path::PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentContextSource {
     Environment,
@@ -49,15 +40,15 @@ pub enum AgentContextSource {
     TurnContext,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentContextDroppedEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry_id: Option<SessionEntryId>,
+    pub entry_id: Option<crate::SessionEntryId>,
     pub source: AgentContextSource,
     pub reason: String,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentContextCompilationDiagnostics {
     pub input_entry_count: usize,
     pub output_message_count: usize,
@@ -70,43 +61,43 @@ pub struct AgentContextCompilationDiagnostics {
     pub dropped_entries: Vec<AgentContextDroppedEntry>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentContextCompileInput {
-    pub system: Vec<SystemBlock>,
+    pub system: Vec<crate::SystemBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub static_system_sources: Vec<AgentManifestStaticContextSegment>,
-    pub session_entries: Vec<SessionEntry>,
+    pub static_system_sources: Vec<crate::AgentManifestStaticContextSegment>,
+    pub session_entries: Vec<crate::SessionEntry>,
     /// Persisted turn-start or thread-anchor time for synthetics without one entry source.
     pub turn_anchor_timestamp_ms: i64,
-    pub turn_context: TurnContextSnapshot,
+    pub turn_context: crate::TurnContextSnapshot,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hook_contexts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environment_contexts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AgentContextAttachment>,
-    pub tools: Vec<ToolDefinition>,
+    pub tools: Vec<crate::ToolDefinition>,
     #[serde(default)]
     pub policy: AgentContextCompilePolicy,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompiledAgentContext {
-    pub system: Vec<SystemBlock>,
-    pub messages: Vec<CanonicalMessage>,
-    pub tools: Vec<ToolDefinition>,
+    pub system: Vec<crate::SystemBlock>,
+    pub messages: Vec<crate::CanonicalMessage>,
+    pub tools: Vec<crate::ToolDefinition>,
     pub diagnostics: AgentContextCompilationDiagnostics,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct TrackedMessage {
-    message: CanonicalMessage,
+    message: crate::CanonicalMessage,
     source: AgentContextSource,
-    entry_id: Option<SessionEntryId>,
+    entry_id: Option<crate::SessionEntryId>,
 }
 
 struct CompiledSystemBlocks {
-    blocks: Vec<SystemBlock>,
+    blocks: Vec<crate::SystemBlock>,
     budgeted_text_bytes: usize,
     truncated_text_bytes: usize,
 }
@@ -137,7 +128,10 @@ impl AgentContextCompiler {
         for context in render_environment_contexts(&input.turn_context, &input.environment_contexts)
         {
             messages.push(TrackedMessage {
-                message: CanonicalMessage::user_text_at(context, input.turn_anchor_timestamp_ms),
+                message: crate::CanonicalMessage::user_text_at(
+                    context,
+                    input.turn_anchor_timestamp_ms,
+                ),
                 source: AgentContextSource::Environment,
                 entry_id: None,
             });
@@ -145,19 +139,19 @@ impl AgentContextCompiler {
 
         for entry in &input.session_entries {
             match &entry.kind {
-                SessionEntryKind::Message { message } => messages.push(TrackedMessage {
+                crate::SessionEntryKind::Message { message } => messages.push(TrackedMessage {
                     message: message.clone(),
                     source: AgentContextSource::History,
                     entry_id: Some(entry.entry_id),
                 }),
-                SessionEntryKind::CustomContextMessage { message } => {
+                crate::SessionEntryKind::CustomContextMessage { message } => {
                     messages.push(TrackedMessage {
                         message: message.clone(),
                         source: AgentContextSource::HookContext,
                         entry_id: Some(entry.entry_id),
                     })
                 }
-                SessionEntryKind::Compaction { summary } => {
+                crate::SessionEntryKind::Compaction { summary } => {
                     diagnostics
                         .dropped_entries
                         .extend(messages.iter().map(|message| AgentContextDroppedEntry {
@@ -167,14 +161,14 @@ impl AgentContextCompiler {
                         }));
                     messages.clear();
                     messages.push(TrackedMessage {
-                        message: compaction_summary_message(summary, entry.created_at_ms),
+                        message: crate::compaction_summary_message(summary, entry.created_at_ms),
                         source: AgentContextSource::CompactionSummary,
                         entry_id: Some(entry.entry_id),
                     });
                 }
-                SessionEntryKind::ModelChange { .. }
-                | SessionEntryKind::BranchSummary { .. }
-                | SessionEntryKind::Runtime { .. } => {}
+                crate::SessionEntryKind::ModelChange { .. }
+                | crate::SessionEntryKind::BranchSummary { .. }
+                | crate::SessionEntryKind::Runtime { .. } => {}
             }
         }
 
@@ -184,7 +178,10 @@ impl AgentContextCompiler {
             .filter(|context| !context.trim().is_empty())
         {
             messages.push(TrackedMessage {
-                message: CanonicalMessage::user_text_at(context, input.turn_anchor_timestamp_ms),
+                message: crate::CanonicalMessage::user_text_at(
+                    context,
+                    input.turn_anchor_timestamp_ms,
+                ),
                 source: AgentContextSource::HookContext,
                 entry_id: None,
             });
@@ -197,7 +194,7 @@ impl AgentContextCompiler {
             .filter(|context| !context.trim().is_empty())
         {
             messages.push(TrackedMessage {
-                message: CanonicalMessage::user_text_at(
+                message: crate::CanonicalMessage::user_text_at(
                     context.clone(),
                     input.turn_anchor_timestamp_ms,
                 ),
@@ -208,7 +205,7 @@ impl AgentContextCompiler {
 
         if let Some(attachment_context) = render_attachment_context(&input.attachments) {
             messages.push(TrackedMessage {
-                message: CanonicalMessage::user_text_at(
+                message: crate::CanonicalMessage::user_text_at(
                     attachment_context,
                     input.turn_anchor_timestamp_ms,
                 ),
@@ -236,8 +233,8 @@ impl AgentContextCompiler {
 }
 
 fn compile_system_blocks(
-    static_sources: Vec<AgentManifestStaticContextSegment>,
-    mut configured: Vec<SystemBlock>,
+    static_sources: Vec<crate::AgentManifestStaticContextSegment>,
+    mut configured: Vec<crate::SystemBlock>,
     max_text_bytes: Option<usize>,
 ) -> CompiledSystemBlocks {
     let mut remaining_budget = max_text_bytes;
@@ -271,7 +268,7 @@ fn compile_system_blocks(
             budgeted_text_bytes = budgeted_text_bytes.saturating_add(retained_len);
         }
         if !content.trim().is_empty() {
-            blocks.push(SystemBlock::text(content));
+            blocks.push(crate::SystemBlock::text(content));
         }
     }
     blocks.append(&mut configured);
@@ -314,7 +311,7 @@ fn prefix_text_bytes(text: &str, max_bytes: usize) -> &str {
 }
 
 fn render_environment_contexts(
-    turn_context: &TurnContextSnapshot,
+    turn_context: &crate::TurnContextSnapshot,
     explicit_contexts: &[String],
 ) -> Vec<String> {
     let mut contexts = explicit_contexts
@@ -329,7 +326,7 @@ fn render_environment_contexts(
     contexts
 }
 
-fn render_turn_environment_context(turn_context: &TurnContextSnapshot) -> Option<String> {
+fn render_turn_environment_context(turn_context: &crate::TurnContextSnapshot) -> Option<String> {
     let has_context = turn_context.cwd.is_some()
         || !turn_context.workspace_roots.is_empty()
         || !turn_context.environment.is_empty()
@@ -412,26 +409,27 @@ fn messages_text_bytes_for_tracked(messages: &[TrackedMessage]) -> usize {
         .sum()
 }
 
-fn messages_text_bytes(messages: &[CanonicalMessage]) -> usize {
+fn messages_text_bytes(messages: &[crate::CanonicalMessage]) -> usize {
     messages.iter().map(message_text_bytes).sum()
 }
 
-fn message_text_bytes(message: &CanonicalMessage) -> usize {
+fn message_text_bytes(message: &crate::CanonicalMessage) -> usize {
     match message {
-        CanonicalMessage::User { content, .. }
-        | CanonicalMessage::Assistant { content, .. }
-        | CanonicalMessage::ToolResult { content, .. } => content_text_bytes(content),
+        crate::CanonicalMessage::User { content, .. }
+        | crate::CanonicalMessage::Assistant { content, .. }
+        | crate::CanonicalMessage::ToolResult { content, .. } => content_text_bytes(content),
     }
 }
 
-fn content_text_bytes(content: &[CanonicalContent]) -> usize {
+fn content_text_bytes(content: &[crate::CanonicalContent]) -> usize {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } | CanonicalContent::Thinking { text, .. } => {
-                Some(text.len())
+            crate::CanonicalContent::Text { text, .. }
+            | crate::CanonicalContent::Thinking { text, .. } => Some(text.len()),
+            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {
+                None
             }
-            CanonicalContent::Image { .. } | CanonicalContent::ToolCall { .. } => None,
         })
         .sum()
 }
@@ -440,9 +438,9 @@ fn truncate_messages_to_recent_text_bytes(messages: &mut [TrackedMessage], max_b
     let mut remaining = max_bytes;
     for message in messages.iter_mut().rev() {
         match &mut message.message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => {
+            crate::CanonicalMessage::User { content, .. }
+            | crate::CanonicalMessage::Assistant { content, .. }
+            | crate::CanonicalMessage::ToolResult { content, .. } => {
                 truncate_content_to_recent_text_bytes(content, &mut remaining);
             }
         }
@@ -450,22 +448,22 @@ fn truncate_messages_to_recent_text_bytes(messages: &mut [TrackedMessage], max_b
 }
 
 fn truncate_content_to_recent_text_bytes(
-    content: &mut Vec<CanonicalContent>,
+    content: &mut Vec<crate::CanonicalContent>,
     remaining: &mut usize,
 ) {
     for block in content.iter_mut().rev() {
         match block {
-            CanonicalContent::Text { text, .. } | CanonicalContent::Thinking { text, .. } => {
+            crate::CanonicalContent::Text { text, .. }
+            | crate::CanonicalContent::Thinking { text, .. } => {
                 truncate_string_to_recent_bytes(text, remaining);
             }
-            CanonicalContent::Image { .. } | CanonicalContent::ToolCall { .. } => {}
+            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {}
         }
     }
     content.retain(|block| match block {
-        CanonicalContent::Text { text, .. } | CanonicalContent::Thinking { text, .. } => {
-            !text.is_empty()
-        }
-        CanonicalContent::Image { .. } | CanonicalContent::ToolCall { .. } => true,
+        crate::CanonicalContent::Text { text, .. }
+        | crate::CanonicalContent::Thinking { text, .. } => !text.is_empty(),
+        crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => true,
     });
 }
 

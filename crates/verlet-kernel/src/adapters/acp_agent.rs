@@ -1,17 +1,5 @@
-use crate::{
-    CodexTuiCompletedTurn, CodexTuiConnectConfig, CodexTuiTestClient, CodexTuiTurn, VerletError,
-    VerletResult, default_verlet_daemon_socket_path,
-};
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
-#[cfg(unix)]
-use tokio::net::UnixStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::io::AsyncBufReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 pub const ACP_PROTOCOL_VERSION: u64 = 1;
 const ACP_CONFIG_MODEL: &str = "model";
@@ -41,17 +29,17 @@ const ACP_THOUGHT_LEVELS: &[(&str, &str, &str)] = &[
 
 #[derive(Clone, Debug)]
 pub struct VerletAcpAgentConfig {
-    pub daemon_socket: PathBuf,
-    pub request_timeout: Duration,
+    pub daemon_socket: std::path::PathBuf,
+    pub request_timeout: std::time::Duration,
     pub agent_ref: Option<String>,
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 impl Default for VerletAcpAgentConfig {
     fn default() -> Self {
         Self {
-            daemon_socket: default_verlet_daemon_socket_path(),
-            request_timeout: Duration::from_secs(120),
+            daemon_socket: crate::default_verlet_daemon_socket_path(),
+            request_timeout: std::time::Duration::from_secs(120),
             agent_ref: None,
             cwd: None,
         }
@@ -62,15 +50,15 @@ pub async fn serve_acp_stdio<R, W>(
     reader: R,
     writer: W,
     config: VerletAcpAgentConfig,
-) -> VerletResult<()>
+) -> crate::VerletResult<()>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
 {
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut agent = VerletAcpAgent::new(config, outbound_tx);
-    let mut lines = BufReader::new(reader).lines();
-    let mut writer = BufWriter::new(writer);
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let mut writer = tokio::io::BufWriter::new(writer);
 
     loop {
         tokio::select! {
@@ -81,10 +69,10 @@ where
                 if line.trim().is_empty() {
                     continue;
                 }
-                let responses = match serde_json::from_str::<Value>(&line) {
+                let responses = match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(message) => agent.handle_message(message).await,
                     Err(err) => vec![error_response(
-                        Value::Null,
+                        serde_json::Value::Null,
                         -32700,
                         format!("invalid JSON-RPC message: {err}"),
                         None,
@@ -105,12 +93,15 @@ where
     Ok(())
 }
 
-async fn write_acp_response<W>(writer: &mut BufWriter<W>, response: &Value) -> VerletResult<()>
+async fn write_acp_response<W>(
+    writer: &mut tokio::io::BufWriter<W>,
+    response: &serde_json::Value,
+) -> crate::VerletResult<()>
 where
-    W: AsyncWrite + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
 {
     let payload = serde_json::to_string(response).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to encode ACP response: {err}"))
+        crate::VerletError::RuntimeFactory(format!("failed to encode ACP response: {err}"))
     })?;
     writer
         .write_all(payload.as_bytes())
@@ -124,28 +115,31 @@ where
 struct VerletAcpAgent {
     config: VerletAcpAgentConfig,
     initialize_seen: bool,
-    client_info: Option<Value>,
-    state: Arc<Mutex<AcpAgentState>>,
-    outbound: mpsc::UnboundedSender<Value>,
+    client_info: Option<serde_json::Value>,
+    state: std::sync::Arc<tokio::sync::Mutex<AcpAgentState>>,
+    outbound: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
     #[cfg(unix)]
-    daemon_client: Option<CodexTuiTestClient<UnixStream>>,
+    daemon_client: Option<crate::CodexTuiTestClient<tokio::net::UnixStream>>,
 }
 
 impl VerletAcpAgent {
-    fn new(config: VerletAcpAgentConfig, outbound: mpsc::UnboundedSender<Value>) -> Self {
+    fn new(
+        config: VerletAcpAgentConfig,
+        outbound: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+    ) -> Self {
         Self {
             config,
             initialize_seen: false,
             client_info: None,
-            state: Arc::new(Mutex::new(AcpAgentState::default())),
+            state: std::sync::Arc::new(tokio::sync::Mutex::new(AcpAgentState::default())),
             outbound,
             #[cfg(unix)]
             daemon_client: None,
         }
     }
 
-    async fn handle_message(&mut self, message: Value) -> Vec<Value> {
-        let Some(method) = message.get("method").and_then(Value::as_str) else {
+    async fn handle_message(&mut self, message: serde_json::Value) -> Vec<serde_json::Value> {
+        let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
             return request_id(&message)
                 .map(|id| {
                     vec![error_response(
@@ -158,14 +152,17 @@ impl VerletAcpAgent {
                 .unwrap_or_default();
         };
         let id = request_id(&message);
-        let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+        let params = message
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
 
         if id.is_none() {
             self.handle_notification(method, params).await;
             return Vec::new();
         }
 
-        let id = id.unwrap_or(Value::Null);
+        let id = id.unwrap_or(serde_json::Value::Null);
         if method != "initialize" && method != "ping" && !self.initialize_seen {
             return vec![error_response(
                 id,
@@ -184,7 +181,7 @@ impl VerletAcpAgent {
 
         let output = match method {
             "initialize" => self.initialize(params).await.map(AcpMethodOutput::result),
-            "ping" => Ok(AcpMethodOutput::result(json!({}))),
+            "ping" => Ok(AcpMethodOutput::result(serde_json::json!({}))),
             "session/new" => self.session_new(params).await.map(AcpMethodOutput::result),
             "session/set_config_option" => self
                 .session_set_config_option(params)
@@ -207,7 +204,7 @@ impl VerletAcpAgent {
         match output {
             Ok(output) => {
                 let mut responses = output.notifications;
-                responses.push(json!({
+                responses.push(serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": output.result,
@@ -218,7 +215,7 @@ impl VerletAcpAgent {
         }
     }
 
-    async fn handle_notification(&mut self, method: &str, params: Value) {
+    async fn handle_notification(&mut self, method: &str, params: serde_json::Value) {
         if method == "session/cancel"
             && let Err(err) = self.session_cancel(params).await
         {
@@ -229,10 +226,13 @@ impl VerletAcpAgent {
         }
     }
 
-    async fn initialize(&mut self, params: Value) -> Result<Value, AcpError> {
+    async fn initialize(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
         let requested_protocol = params
             .get("protocolVersion")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(ACP_PROTOCOL_VERSION);
         if requested_protocol != ACP_PROTOCOL_VERSION {
             return Err(AcpError::protocol(
@@ -244,7 +244,7 @@ impl VerletAcpAgent {
         }
         self.client_info = params.get("clientInfo").cloned();
         self.initialize_seen = true;
-        Ok(json!({
+        Ok(serde_json::json!({
             "protocolVersion": ACP_PROTOCOL_VERSION,
             "agentInfo": {
                 "name": "verlet-acp-agent",
@@ -264,7 +264,10 @@ impl VerletAcpAgent {
         }))
     }
 
-    async fn session_new(&mut self, params: Value) -> Result<Value, AcpError> {
+    async fn session_new(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
         let params: SessionNewParams = from_value(params)?;
         if let Some(mcp_servers) = params.mcp_servers.as_ref()
             && !mcp_servers.is_empty()
@@ -309,7 +312,7 @@ impl VerletAcpAgent {
                 .sessions
                 .insert(thread.id.clone(), session);
 
-            Ok(json!({
+            Ok(serde_json::json!({
                 "sessionId": thread.id,
                 "configOptions": config_options,
                 "verlet": {
@@ -320,7 +323,11 @@ impl VerletAcpAgent {
         }
     }
 
-    async fn session_prompt(&mut self, request_id: Value, params: Value) -> Result<(), AcpError> {
+    async fn session_prompt(
+        &mut self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> Result<(), AcpError> {
         let params: SessionPromptParams = from_value(params)?;
         let (thread_id, session_config) = {
             let state = self.state.lock().await;
@@ -404,7 +411,10 @@ impl VerletAcpAgent {
         }
     }
 
-    async fn session_set_config_option(&mut self, params: Value) -> Result<Value, AcpError> {
+    async fn session_set_config_option(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
         let params: SessionSetConfigOptionParams = from_value(params)?;
         let mut state = self.state.lock().await;
         let session = state.sessions.get_mut(&params.session_id).ok_or_else(|| {
@@ -416,12 +426,15 @@ impl VerletAcpAgent {
         session
             .config
             .set_config_value(&params.config_id, &params.value)?;
-        Ok(json!({
+        Ok(serde_json::json!({
             "configOptions": session.config.to_acp_options(),
         }))
     }
 
-    async fn session_cancel(&mut self, params: Value) -> Result<Value, AcpError> {
+    async fn session_cancel(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
         let params: SessionCancelParams = from_value(params)?;
         let (thread_id, turn_id) = {
             let state = self.state.lock().await;
@@ -434,7 +447,7 @@ impl VerletAcpAgent {
             (session.thread_id.clone(), session.active_turn_id.clone())
         };
         let Some(turn_id) = turn_id else {
-            return Ok(json!({}));
+            return Ok(serde_json::json!({}));
         };
 
         #[cfg(not(unix))]
@@ -456,11 +469,14 @@ impl VerletAcpAgent {
                         "Verlet turn/interrupt failed for ACP session/cancel: {err}"
                     ))
                 })?;
-            Ok(json!({}))
+            Ok(serde_json::json!({}))
         }
     }
 
-    async fn session_close(&mut self, params: Value) -> Result<Value, AcpError> {
+    async fn session_close(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
         let params: SessionCloseParams = from_value(params)?;
         let (thread_id, turn_id) = {
             let mut state = self.state.lock().await;
@@ -473,7 +489,7 @@ impl VerletAcpAgent {
             (session.thread_id, session.active_turn_id)
         };
         let Some(turn_id) = turn_id else {
-            return Ok(json!({}));
+            return Ok(serde_json::json!({}));
         };
 
         #[cfg(not(unix))]
@@ -495,24 +511,26 @@ impl VerletAcpAgent {
                         "Verlet turn/interrupt failed for ACP session/close: {err}"
                     ))
                 })?;
-            Ok(json!({}))
+            Ok(serde_json::json!({}))
         }
     }
 
-    fn thread_start_params(&self, params: &SessionNewParams) -> Value {
-        let mut request = Map::new();
+    fn thread_start_params(&self, params: &SessionNewParams) -> serde_json::Value {
+        let mut request = serde_json::Map::new();
         if let Some(agent_ref) = self.config.agent_ref.as_deref() {
-            request.insert("agentRef".to_string(), json!(agent_ref));
+            request.insert("agentRef".to_string(), serde_json::json!(agent_ref));
         }
         let cwd = params.cwd.as_ref().or(self.config.cwd.as_ref());
         if let Some(cwd) = cwd {
-            request.insert("cwd".to_string(), json!(cwd));
+            request.insert("cwd".to_string(), serde_json::json!(cwd));
         }
-        Value::Object(request)
+        serde_json::Value::Object(request)
     }
 
     #[cfg(unix)]
-    async fn client(&mut self) -> Result<&mut CodexTuiTestClient<UnixStream>, String> {
+    async fn client(
+        &mut self,
+    ) -> Result<&mut crate::CodexTuiTestClient<tokio::net::UnixStream>, String> {
         if self.daemon_client.is_none() {
             self.daemon_client = Some(connect_acp_client(&self.config).await?);
         }
@@ -523,12 +541,12 @@ impl VerletAcpAgent {
 #[cfg(unix)]
 async fn connect_acp_client(
     config: &VerletAcpAgentConfig,
-) -> Result<CodexTuiTestClient<UnixStream>, String> {
-    let mut client = CodexTuiTestClient::connect_unix(
+) -> Result<crate::CodexTuiTestClient<tokio::net::UnixStream>, String> {
+    let mut client = crate::CodexTuiTestClient::connect_unix(
         config.daemon_socket.clone(),
-        CodexTuiConnectConfig {
+        crate::CodexTuiConnectConfig {
             client_name: "verlet-acp-agent".to_string(),
-            ..CodexTuiConnectConfig::default()
+            ..crate::CodexTuiConnectConfig::default()
         },
     )
     .await
@@ -543,15 +561,15 @@ async fn connect_acp_client(
 }
 
 async fn turn_start_text_with_config<S>(
-    client: &mut CodexTuiTestClient<S>,
+    client: &mut crate::CodexTuiTestClient<S>,
     thread_id: &str,
     text: &str,
     config: &AcpSessionConfig,
-) -> VerletResult<CodexTuiTurn>
+) -> crate::VerletResult<crate::CodexTuiTurn>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let mut params = json!({
+    let mut params = serde_json::json!({
         "threadId": thread_id,
         "input": [{
             "type": "text",
@@ -564,19 +582,24 @@ where
         params["thinking"] = thinking;
     }
     let result = client.request("turn/start", params).await?;
-    let turn = result
-        .get("turn")
-        .cloned()
-        .ok_or_else(|| VerletError::RuntimeFactory("turn/start response missing turn".into()))?;
+    let turn = result.get("turn").cloned().ok_or_else(|| {
+        crate::VerletError::RuntimeFactory("turn/start response missing turn".into())
+    })?;
     let id = turn
         .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| VerletError::RuntimeFactory("turn/start response turn missing id".into()))?
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            crate::VerletError::RuntimeFactory("turn/start response turn missing id".into())
+        })?
         .to_string();
-    Ok(CodexTuiTurn { id, raw: turn })
+    Ok(crate::CodexTuiTurn { id, raw: turn })
 }
 
-async fn clear_active_turn(state: Arc<Mutex<AcpAgentState>>, session_id: &str, turn_id: &str) {
+async fn clear_active_turn(
+    state: std::sync::Arc<tokio::sync::Mutex<AcpAgentState>>,
+    session_id: &str,
+    turn_id: &str,
+) {
     let mut state = state.lock().await;
     if let Some(session) = state.sessions.get_mut(session_id)
         && session.active_turn_id.as_deref() == Some(turn_id)
@@ -586,11 +609,11 @@ async fn clear_active_turn(state: Arc<Mutex<AcpAgentState>>, session_id: &str, t
 }
 
 fn prompt_completed_responses(
-    request_id: Value,
+    request_id: serde_json::Value,
     session_id: &str,
-    completed: CodexTuiCompletedTurn,
-    turn: Value,
-) -> Vec<Value> {
+    completed: crate::CodexTuiCompletedTurn,
+    turn: serde_json::Value,
+) -> Vec<serde_json::Value> {
     let completed_thread_id = completed.thread_id.clone();
     let completed_turn_id = completed.turn_id.clone();
     let assistant_text = completed.assistant_text.clone();
@@ -601,7 +624,7 @@ fn prompt_completed_responses(
     let mut responses =
         acp_updates_from_notifications(session_id, &completed_turn_id, &completed.notifications);
     if !assistant_text.is_empty() {
-        responses.push(json!({
+        responses.push(serde_json::json!({
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
@@ -617,7 +640,7 @@ fn prompt_completed_responses(
             },
         }));
     }
-    responses.push(json!({
+    responses.push(serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
         "result": {
@@ -636,13 +659,13 @@ fn prompt_completed_responses(
 fn completed_turn_from_notifications(
     notifications: &[crate::JsonRpcNotification],
     turn_id: &str,
-) -> Option<Value> {
+) -> Option<serde_json::Value> {
     notifications.iter().rev().find_map(|notification| {
         if notification.method != "turn/completed" {
             return None;
         }
         let turn = notification.params.as_ref()?.get("turn")?;
-        if turn.get("id").and_then(Value::as_str) == Some(turn_id) {
+        if turn.get("id").and_then(serde_json::Value::as_str) == Some(turn_id) {
             return Some(turn.clone());
         }
         None
@@ -653,13 +676,13 @@ fn acp_updates_from_notifications(
     session_id: &str,
     turn_id: &str,
     notifications: &[crate::JsonRpcNotification],
-) -> Vec<Value> {
+) -> Vec<serde_json::Value> {
     let mut updates = Vec::new();
     for notification in notifications {
         let Some(params) = notification.params.as_ref() else {
             continue;
         };
-        if params.get("turnId").and_then(Value::as_str) != Some(turn_id) {
+        if params.get("turnId").and_then(serde_json::Value::as_str) != Some(turn_id) {
             continue;
         }
         match notification.method.as_str() {
@@ -684,8 +707,8 @@ fn acp_updates_from_notifications(
     updates
 }
 
-fn acp_session_update(session_id: &str, update: Value) -> Value {
-    json!({
+fn acp_session_update(session_id: &str, update: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
@@ -695,14 +718,17 @@ fn acp_session_update(session_id: &str, update: Value) -> Value {
     })
 }
 
-fn acp_tool_call_started(params: &Value) -> Option<Value> {
+fn acp_tool_call_started(params: &serde_json::Value) -> Option<serde_json::Value> {
     let item = params.get("item")?;
-    if item.get("type").and_then(Value::as_str) != Some("dynamicToolCall") {
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("dynamicToolCall") {
         return None;
     }
-    let tool_call_id = item.get("id").and_then(Value::as_str)?;
-    let tool = item.get("tool").and_then(Value::as_str).unwrap_or("tool");
-    let mut update = json!({
+    let tool_call_id = item.get("id").and_then(serde_json::Value::as_str)?;
+    let tool = item
+        .get("tool")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("tool");
+    let mut update = serde_json::json!({
         "sessionUpdate": "tool_call",
         "toolCallId": tool_call_id,
         "title": acp_tool_title(tool),
@@ -715,13 +741,13 @@ fn acp_tool_call_started(params: &Value) -> Option<Value> {
     Some(update)
 }
 
-fn acp_tool_call_completed(params: &Value) -> Option<Value> {
+fn acp_tool_call_completed(params: &serde_json::Value) -> Option<serde_json::Value> {
     let item = params.get("item")?;
-    if item.get("type").and_then(Value::as_str) != Some("dynamicToolCall") {
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("dynamicToolCall") {
         return None;
     }
-    let tool_call_id = item.get("id").and_then(Value::as_str)?;
-    let mut update = json!({
+    let tool_call_id = item.get("id").and_then(serde_json::Value::as_str)?;
+    let mut update = serde_json::json!({
         "sessionUpdate": "tool_call_update",
         "toolCallId": tool_call_id,
         "status": acp_tool_status(item),
@@ -730,13 +756,13 @@ fn acp_tool_call_completed(params: &Value) -> Option<Value> {
         update["content"] = content;
     }
     if let Some(output) = item.get("contentItems").filter(|value| value.is_array()) {
-        update["rawOutput"] = json!({ "contentItems": output });
+        update["rawOutput"] = serde_json::json!({ "contentItems": output });
     }
     Some(update)
 }
 
-fn acp_tool_status(item: &Value) -> &'static str {
-    match item.get("status").and_then(Value::as_str) {
+fn acp_tool_status(item: &serde_json::Value) -> &'static str {
+    match item.get("status").and_then(serde_json::Value::as_str) {
         Some("inProgress") | Some("in_progress") => "in_progress",
         Some("completed") => "completed",
         Some("failed") => "failed",
@@ -766,13 +792,13 @@ fn acp_tool_title(tool: &str) -> String {
     format!("Run {tool}")
 }
 
-fn acp_tool_content(item: &Value) -> Option<Value> {
+fn acp_tool_content(item: &serde_json::Value) -> Option<serde_json::Value> {
     let content_items = item.get("contentItems")?.as_array()?;
     let content = content_items
         .iter()
         .filter_map(|item| {
-            let text = item.get("text").and_then(Value::as_str)?;
-            Some(json!({
+            let text = item.get("text").and_then(serde_json::Value::as_str)?;
+            Some(serde_json::json!({
                 "type": "content",
                 "content": {
                     "type": "text",
@@ -781,10 +807,10 @@ fn acp_tool_content(item: &Value) -> Option<Value> {
             }))
         })
         .collect::<Vec<_>>();
-    (!content.is_empty()).then_some(Value::Array(content))
+    (!content.is_empty()).then_some(serde_json::Value::Array(content))
 }
 
-fn acp_usage_update(params: &Value) -> Option<Value> {
+fn acp_usage_update(params: &serde_json::Value) -> Option<serde_json::Value> {
     let usage = params.get("usage")?;
     let input = usage_u64(usage, "inputTokens")
         .or_else(|| usage_u64(usage, "input_tokens"))
@@ -802,7 +828,7 @@ fn acp_usage_update(params: &Value) -> Option<Value> {
         .saturating_add(output)
         .saturating_add(cache_create)
         .saturating_add(cache_read);
-    Some(json!({
+    Some(serde_json::json!({
         "sessionUpdate": "usage_update",
         "used": used,
         "size": used,
@@ -814,8 +840,8 @@ fn acp_usage_update(params: &Value) -> Option<Value> {
     }))
 }
 
-fn usage_u64(usage: &Value, field: &str) -> Option<u64> {
-    usage.get(field).and_then(Value::as_u64)
+fn usage_u64(usage: &serde_json::Value, field: &str) -> Option<u64> {
+    usage.get(field).and_then(serde_json::Value::as_u64)
 }
 
 fn acp_stop_reason(notifications: &[crate::JsonRpcNotification]) -> &'static str {
@@ -826,7 +852,7 @@ fn acp_stop_reason(notifications: &[crate::JsonRpcNotification]) -> &'static str
                 .as_ref()
                 .and_then(|params| params.get("turn"))
                 .and_then(|turn| turn.get("status"))
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 == Some("interrupted")
         {
             return "cancelled";
@@ -835,21 +861,30 @@ fn acp_stop_reason(notifications: &[crate::JsonRpcNotification]) -> &'static str
     "end_turn"
 }
 
-fn acp_prompt_text(prompt: &[Value]) -> Result<String, AcpError> {
+fn acp_prompt_text(prompt: &[serde_json::Value]) -> Result<String, AcpError> {
     let mut parts = Vec::new();
     for block in prompt {
-        match block.get("type").and_then(Value::as_str) {
+        match block.get("type").and_then(serde_json::Value::as_str) {
             Some("text") => {
-                let text = block.get("text").and_then(Value::as_str).ok_or_else(|| {
-                    AcpError::protocol(-32602, "ACP text content block missing `text`")
-                })?;
+                let text = block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        AcpError::protocol(-32602, "ACP text content block missing `text`")
+                    })?;
                 parts.push(text.to_string());
             }
             Some("resource_link") => {
-                let uri = block.get("uri").and_then(Value::as_str).ok_or_else(|| {
-                    AcpError::protocol(-32602, "ACP resource_link content block missing `uri`")
-                })?;
-                let label = block.get("name").and_then(Value::as_str).unwrap_or(uri);
+                let uri = block
+                    .get("uri")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        AcpError::protocol(-32602, "ACP resource_link content block missing `uri`")
+                    })?;
+                let label = block
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(uri);
                 parts.push(format!("[resource_link: {label}]\n{uri}"));
             }
             Some("resource") => {
@@ -888,12 +923,12 @@ fn acp_prompt_text(prompt: &[Value]) -> Result<String, AcpError> {
 }
 
 struct AcpMethodOutput {
-    notifications: Vec<Value>,
-    result: Value,
+    notifications: Vec<serde_json::Value>,
+    result: serde_json::Value,
 }
 
 impl AcpMethodOutput {
-    fn result(result: Value) -> Self {
+    fn result(result: serde_json::Value) -> Self {
         Self {
             notifications: Vec::new(),
             result,
@@ -916,14 +951,14 @@ struct AcpSessionConfig {
 }
 
 impl AcpSessionConfig {
-    fn from_model_list(model_list: &Value) -> Self {
+    fn from_model_list(model_list: &serde_json::Value) -> Self {
         let mut default_model = None;
         let mut options = Vec::new();
-        if let Some(models) = model_list.get("data").and_then(Value::as_array) {
+        if let Some(models) = model_list.get("data").and_then(serde_json::Value::as_array) {
             for model in models {
                 if model
                     .get("hidden")
-                    .and_then(Value::as_bool)
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
                     continue;
@@ -931,13 +966,13 @@ impl AcpSessionConfig {
                 let Some(value) = model
                     .get("model")
                     .or_else(|| model.get("id"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                 else {
                     continue;
                 };
                 if model
                     .get("isDefault")
-                    .and_then(Value::as_bool)
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                     && default_model.is_none()
                 {
@@ -948,12 +983,12 @@ impl AcpSessionConfig {
                     name: model
                         .get("displayName")
                         .or_else(|| model.get("name"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         .unwrap_or(value)
                         .to_string(),
                     description: model
                         .get("description")
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         .map(str::to_string),
                 });
             }
@@ -975,9 +1010,9 @@ impl AcpSessionConfig {
         }
     }
 
-    fn to_acp_options(&self) -> Vec<Value> {
+    fn to_acp_options(&self) -> Vec<serde_json::Value> {
         vec![
-            json!({
+            serde_json::json!({
                 "id": ACP_CONFIG_MODEL,
                 "name": "Model",
                 "description": "Selects the Verlet model for later turns in this ACP session",
@@ -985,17 +1020,17 @@ impl AcpSessionConfig {
                 "type": "select",
                 "currentValue": self.current_model,
                 "options": self.model_options.iter().map(|option| {
-                    let mut value = json!({
+                    let mut value = serde_json::json!({
                         "value": option.value,
                         "name": option.name,
                     });
                     if let Some(description) = &option.description {
-                        value["description"] = json!(description);
+                        value["description"] = serde_json::json!(description);
                     }
                     value
                 }).collect::<Vec<_>>(),
             }),
-            json!({
+            serde_json::json!({
                 "id": ACP_CONFIG_THOUGHT_LEVEL,
                 "name": "Thinking",
                 "description": "Applies a Verlet turn-level thinking hint when supported by the selected provider",
@@ -1003,7 +1038,7 @@ impl AcpSessionConfig {
                 "type": "select",
                 "currentValue": self.thought_level,
                 "options": ACP_THOUGHT_LEVELS.iter().map(|(value, name, description)| {
-                    json!({
+                    serde_json::json!({
                         "value": value,
                         "name": name,
                         "description": description,
@@ -1053,10 +1088,10 @@ impl AcpSessionConfig {
         }
     }
 
-    fn thinking_app_server_value(&self) -> Option<Value> {
+    fn thinking_app_server_value(&self) -> Option<serde_json::Value> {
         match self.thought_level.as_str() {
-            "none" => Some(json!({ "type": "disabled" })),
-            "low" | "medium" | "high" => Some(json!({
+            "none" => Some(serde_json::json!({ "type": "disabled" })),
+            "low" | "medium" | "high" => Some(serde_json::json!({
                 "type": "effort",
                 "effort": self.thought_level,
             })),
@@ -1067,13 +1102,13 @@ impl AcpSessionConfig {
 
 #[derive(Clone, Debug)]
 struct AcpAgentState {
-    sessions: BTreeMap<String, AcpSession>,
+    sessions: std::collections::BTreeMap<String, AcpSession>,
 }
 
 impl Default for AcpAgentState {
     fn default() -> Self {
         Self {
-            sessions: BTreeMap::new(),
+            sessions: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1085,23 +1120,23 @@ struct AcpSession {
     config: AcpSessionConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionNewParams {
     #[serde(default)]
-    cwd: Option<PathBuf>,
+    cwd: Option<std::path::PathBuf>,
     #[serde(default)]
-    mcp_servers: Option<Map<String, Value>>,
+    mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionPromptParams {
     session_id: String,
-    prompt: Vec<Value>,
+    prompt: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionSetConfigOptionParams {
     session_id: String,
@@ -1109,13 +1144,13 @@ struct SessionSetConfigOptionParams {
     value: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionCancelParams {
     session_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionCloseParams {
     session_id: String,
@@ -1125,7 +1160,7 @@ struct SessionCloseParams {
 struct AcpError {
     code: i64,
     message: String,
-    data: Option<Value>,
+    data: Option<serde_json::Value>,
 }
 
 impl AcpError {
@@ -1142,71 +1177,62 @@ impl AcpError {
     }
 }
 
-fn from_value<T>(value: Value) -> Result<T, AcpError>
+fn from_value<T>(value: serde_json::Value) -> Result<T, AcpError>
 where
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> serde::Deserialize<'de>,
 {
     serde_json::from_value(value).map_err(|err| AcpError::protocol(-32602, err.to_string()))
 }
 
-fn request_id(message: &Value) -> Option<Value> {
+fn request_id(message: &serde_json::Value) -> Option<serde_json::Value> {
     message.get("id").cloned()
 }
 
-fn error_response(id: Value, code: i64, message: impl Into<String>, data: Option<Value>) -> Value {
-    let mut error = json!({
+fn error_response(
+    id: serde_json::Value,
+    code: i64,
+    message: impl Into<String>,
+    data: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut error = serde_json::json!({
         "code": code,
         "message": message.into(),
     });
     if let Some(data) = data {
         error["data"] = data;
     }
-    json!({
+    serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
         "error": error,
     })
 }
 
-fn acp_io_error(error: std::io::Error) -> VerletError {
-    VerletError::RuntimeFactory(format!("ACP stdio I/O error: {error}"))
+fn acp_io_error(error: std::io::Error) -> crate::VerletError {
+    crate::VerletError::RuntimeFactory(format!("ACP stdio I/O error: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::adapters::app_server::runtime_factory_from_provider_parts;
-    use crate::{
-        APP_SERVER_LOCAL_MODEL, APP_SERVER_OPENAI_COMPATIBLE_MODEL,
-        APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentLoopConfig, AgentLoopFactory,
-        AppServerListenAddr, AppServerProviderConfig, CanonicalContent, CanonicalStopReason,
-        CanonicalUsage, OperationRegistry, ProviderApi, ProviderClient, ProviderRequest,
-        ProviderResponse, ProviderResult, VerletAppServer, VerletAppServerConfig,
-        live_smoke_support::{LiveSmokeResult, model_misbehavior, retry_model_misbehavior},
-    };
-    use serde_json::Value;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::sync::Notify;
-    use uuid::Uuid;
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
 
     #[tokio::test]
     async fn acp_agent_initialize_advertises_verlet_capabilities() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let config = VerletAcpAgentConfig {
-            daemon_socket: PathBuf::from("/tmp/missing-verlet-daemon.sock"),
-            request_timeout: Duration::from_secs(1),
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig {
+            daemon_socket: std::path::PathBuf::from("/tmp/missing-verlet-daemon.sock"),
+            request_timeout: std::time::Duration::from_secs(1),
             agent_ref: None,
             cwd: None,
         };
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -1214,7 +1240,10 @@ mod tests {
         .await;
 
         let init = read_json_response(&mut lines, 1).await;
-        assert_eq!(init["result"]["protocolVersion"], ACP_PROTOCOL_VERSION);
+        assert_eq!(
+            init["result"]["protocolVersion"],
+            crate::adapters::acp_agent::ACP_PROTOCOL_VERSION
+        );
         assert_eq!(init["result"]["agentInfo"]["name"], "verlet-acp-agent");
         assert_eq!(
             init["result"]["agentCapabilities"]["promptCapabilities"]["image"],
@@ -1251,13 +1280,14 @@ mod tests {
     #[tokio::test]
     async fn acp_agent_initialize_rejects_unsupported_protocol_version() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let config = VerletAcpAgentConfig::default();
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig::default();
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -1282,13 +1312,14 @@ mod tests {
     #[tokio::test]
     async fn acp_agent_initialize_accepts_missing_optional_client_capabilities() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let config = VerletAcpAgentConfig::default();
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig::default();
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
@@ -1296,7 +1327,10 @@ mod tests {
         .await;
 
         let response = read_json_response(&mut lines, 1).await;
-        assert_eq!(response["result"]["protocolVersion"], ACP_PROTOCOL_VERSION);
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            crate::adapters::acp_agent::ACP_PROTOCOL_VERSION
+        );
         assert_eq!(response["result"]["agentInfo"]["name"], "verlet-acp-agent");
 
         drop(write);
@@ -1307,13 +1341,14 @@ mod tests {
     #[tokio::test]
     async fn acp_agent_rejects_session_before_initialize() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let config = VerletAcpAgentConfig::default();
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig::default();
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}"#,
@@ -1337,29 +1372,31 @@ mod tests {
 
     #[tokio::test]
     async fn acp_agent_session_new_starts_verlet_thread() {
-        let root = PathBuf::from("/tmp").join(format!("cdis-acp-{}", Uuid::now_v7().simple()));
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("cdis-acp-{}", uuid::Uuid::now_v7().simple()));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let app = VerletAppServer::new_local(app_config).await.unwrap();
+        let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
         let (client, server) = tokio::io::duplex(256 * 1024);
-        let config = VerletAcpAgentConfig {
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig {
             daemon_socket: socket.clone(),
-            request_timeout: Duration::from_secs(10),
+            request_timeout: std::time::Duration::from_secs(10),
             agent_ref: None,
             cwd: None,
         };
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -1367,7 +1404,7 @@ mod tests {
         .await;
         let _ = read_json_response(&mut lines, 1).await;
 
-        let request = json!({
+        let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "session/new",
@@ -1396,7 +1433,7 @@ mod tests {
         let events = inspector
             .request(
                 "thread/events/list",
-                json!({
+                serde_json::json!({
                     "threadId": session_id,
                     "kinds": ["manifest.bind.completed"],
                 }),
@@ -1422,29 +1459,31 @@ mod tests {
 
     #[tokio::test]
     async fn acp_agent_session_prompt_projects_text_to_verlet_turn() {
-        let root = PathBuf::from("/tmp").join(format!("cdis-acp-{}", Uuid::now_v7().simple()));
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("cdis-acp-{}", uuid::Uuid::now_v7().simple()));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let app = VerletAppServer::new_local(app_config).await.unwrap();
+        let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
         let (client, server) = tokio::io::duplex(256 * 1024);
-        let config = VerletAcpAgentConfig {
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig {
             daemon_socket: socket.clone(),
-            request_timeout: Duration::from_secs(10),
+            request_timeout: std::time::Duration::from_secs(10),
             agent_ref: None,
             cwd: None,
         };
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -1452,7 +1491,7 @@ mod tests {
         .await;
         let _ = read_json_response(&mut lines, 1).await;
 
-        let new_session = json!({
+        let new_session = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "session/new",
@@ -1467,7 +1506,7 @@ mod tests {
             .unwrap_or_else(|| panic!("session id missing from {new_session}"))
             .to_string();
 
-        let prompt = json!({
+        let prompt = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "session/prompt",
@@ -1494,7 +1533,7 @@ mod tests {
         );
         assert_eq!(
             update["params"]["update"]["content"],
-            json!({ "type": "text", "text": "local:hello acp" })
+            serde_json::json!({ "type": "text", "text": "local:hello acp" })
         );
 
         let response = read_json_response(&mut lines, 3).await;
@@ -1532,29 +1571,31 @@ mod tests {
 
     #[tokio::test]
     async fn acp_agent_session_config_options_round_trip_and_fail_closed() {
-        let root = PathBuf::from("/tmp").join(format!("cdis-acp-{}", Uuid::now_v7().simple()));
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("cdis-acp-{}", uuid::Uuid::now_v7().simple()));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let app = VerletAppServer::new_local(app_config).await.unwrap();
+        let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
         let (client, server) = tokio::io::duplex(256 * 1024);
-        let config = VerletAcpAgentConfig {
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig {
             daemon_socket: socket.clone(),
-            request_timeout: Duration::from_secs(10),
+            request_timeout: std::time::Duration::from_secs(10),
             agent_ref: None,
             cwd: None,
         };
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -1562,7 +1603,7 @@ mod tests {
         .await;
         let _ = read_json_response(&mut lines, 1).await;
 
-        let new_session = json!({
+        let new_session = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "session/new",
@@ -1576,11 +1617,15 @@ mod tests {
             .as_str()
             .unwrap_or_else(|| panic!("session id missing from {new_session}"))
             .to_string();
-        assert_config_current(&new_session["result"], "model", APP_SERVER_LOCAL_MODEL);
+        assert_config_current(
+            &new_session["result"],
+            "model",
+            crate::APP_SERVER_LOCAL_MODEL,
+        );
         assert_config_current(&new_session["result"], "thought_level", "none");
         assert_config_values_include(&new_session["result"], "thought_level", &["low", "high"]);
 
-        let set_thinking = json!({
+        let set_thinking = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "session/set_config_option",
@@ -1594,25 +1639,29 @@ mod tests {
         let set_thinking = read_json_response(&mut lines, 3).await;
         assert!(set_thinking.get("error").is_none(), "{set_thinking}");
         assert_config_current(&set_thinking["result"], "thought_level", "low");
-        assert_config_current(&set_thinking["result"], "model", APP_SERVER_LOCAL_MODEL);
+        assert_config_current(
+            &set_thinking["result"],
+            "model",
+            crate::APP_SERVER_LOCAL_MODEL,
+        );
 
-        let set_model = json!({
+        let set_model = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 4,
             "method": "session/set_config_option",
             "params": {
                 "sessionId": session_id,
                 "configId": "model",
-                "value": APP_SERVER_LOCAL_MODEL,
+                "value": crate::APP_SERVER_LOCAL_MODEL,
             },
         });
         send(&mut write, &set_model.to_string()).await;
         let set_model = read_json_response(&mut lines, 4).await;
         assert!(set_model.get("error").is_none(), "{set_model}");
-        assert_config_current(&set_model["result"], "model", APP_SERVER_LOCAL_MODEL);
+        assert_config_current(&set_model["result"], "model", crate::APP_SERVER_LOCAL_MODEL);
         assert_config_current(&set_model["result"], "thought_level", "low");
 
-        let bad_value = json!({
+        let bad_value = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 5,
             "method": "session/set_config_option",
@@ -1633,7 +1682,7 @@ mod tests {
             "{bad_value}"
         );
 
-        let bad_config = json!({
+        let bad_config = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 6,
             "method": "session/set_config_option",
@@ -1664,41 +1713,43 @@ mod tests {
 
     #[tokio::test]
     async fn acp_agent_prompt_projects_tool_status_and_usage_updates() {
-        let root = PathBuf::from("/tmp").join(format!("cdis-acp-{}", Uuid::now_v7().simple()));
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("cdis-acp-{}", uuid::Uuid::now_v7().simple()));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let provider = Arc::new(ScriptedProviderClient::new(vec![
-            provider_tool_call("call_1|fc_1", "missing_tool", json!({})),
+        let provider = std::sync::Arc::new(ScriptedProviderClient::new(vec![
+            provider_tool_call("call_1|fc_1", "missing_tool", serde_json::json!({})),
             provider_text("handled missing tool", 5, 6),
         ]));
         let runtime_config =
-            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-        let runtime_factory = Arc::new(
-            AgentLoopFactory::new(runtime_config, provider.clone())
-                .with_operation_registry(Arc::new(OperationRegistry::new())),
+            crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        let runtime_factory = std::sync::Arc::new(
+            crate::AgentLoopFactory::new(runtime_config, provider.clone())
+                .with_operation_registry(std::sync::Arc::new(crate::OperationRegistry::new())),
         );
-        let app = VerletAppServer::with_runtime_factory(app_config, runtime_factory)
+        let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
             .await
             .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
         let (client, server) = tokio::io::duplex(512 * 1024);
-        let config = VerletAcpAgentConfig {
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig {
             daemon_socket: socket.clone(),
-            request_timeout: Duration::from_secs(10),
+            request_timeout: std::time::Duration::from_secs(10),
             agent_ref: None,
             cwd: None,
         };
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -1706,7 +1757,7 @@ mod tests {
         .await;
         let _ = read_json_response(&mut lines, 1).await;
 
-        let new_session = json!({
+        let new_session = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "session/new",
@@ -1721,7 +1772,7 @@ mod tests {
             .expect("session id")
             .to_string();
 
-        let prompt = json!({
+        let prompt = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "session/prompt",
@@ -1737,7 +1788,7 @@ mod tests {
         let mut updates = Vec::new();
         let response = loop {
             let message = read_json_message(&mut lines).await;
-            if message.get("id").and_then(Value::as_u64) == Some(3) {
+            if message.get("id").and_then(serde_json::Value::as_u64) == Some(3) {
                 break message;
             }
             updates.push(message);
@@ -1783,40 +1834,42 @@ mod tests {
 
     #[tokio::test]
     async fn acp_agent_session_cancel_interrupts_in_flight_prompt() {
-        let root = PathBuf::from("/tmp").join(format!("cdis-acp-{}", Uuid::now_v7().simple()));
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("cdis-acp-{}", uuid::Uuid::now_v7().simple()));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let provider = Arc::new(PendingProviderClient::default());
+        let provider = std::sync::Arc::new(PendingProviderClient::default());
         let runtime_config =
-            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-        let runtime_factory = runtime_factory_from_provider_parts(
+            crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
             runtime_config,
             provider.clone(),
             // lexicon-allow: capsule - existing app-server config type used by test runtime factory
             app_config.capsule_bindings.clone(),
         );
-        let app = VerletAppServer::with_runtime_factory(app_config, runtime_factory)
+        let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
             .await
             .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
         let (client, server) = tokio::io::duplex(256 * 1024);
-        let config = VerletAcpAgentConfig {
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig {
             daemon_socket: socket.clone(),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: std::time::Duration::from_secs(30),
             agent_ref: None,
             cwd: None,
         };
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -1824,7 +1877,7 @@ mod tests {
         .await;
         let _ = read_json_response(&mut lines, 1).await;
 
-        let new_session = json!({
+        let new_session = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "session/new",
@@ -1839,7 +1892,7 @@ mod tests {
             .unwrap_or_else(|| panic!("session id missing from {new_session}"))
             .to_string();
 
-        let prompt = json!({
+        let prompt = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "session/prompt",
@@ -1854,7 +1907,7 @@ mod tests {
         provider.wait_for_request().await;
         send(
             &mut write,
-            &json!({
+            &serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "session/cancel",
                 "params": { "sessionId": session_id },
@@ -1878,40 +1931,42 @@ mod tests {
 
     #[tokio::test]
     async fn acp_agent_session_close_cancels_and_removes_active_session() {
-        let root = PathBuf::from("/tmp").join(format!("cdis-acp-{}", Uuid::now_v7().simple()));
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("cdis-acp-{}", uuid::Uuid::now_v7().simple()));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
-        let listen = AppServerListenAddr::Unix(socket.clone());
+        let listen = crate::AppServerListenAddr::Unix(socket.clone());
         let app_config = isolated_app_config(listen.clone(), &root);
-        let provider = Arc::new(PendingProviderClient::default());
+        let provider = std::sync::Arc::new(PendingProviderClient::default());
         let runtime_config =
-            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-        let runtime_factory = runtime_factory_from_provider_parts(
+            crate::AgentLoopConfig::new(crate::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+        let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
             runtime_config,
             provider.clone(),
             // lexicon-allow: capsule - existing app-server config type used by test runtime factory
             app_config.capsule_bindings.clone(),
         );
-        let app = VerletAppServer::with_runtime_factory(app_config, runtime_factory)
+        let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
             .await
             .unwrap();
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
         let (client, server) = tokio::io::duplex(256 * 1024);
-        let config = VerletAcpAgentConfig {
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig {
             daemon_socket: socket.clone(),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: std::time::Duration::from_secs(30),
             agent_ref: None,
             cwd: None,
         };
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(
             &mut write,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -1923,7 +1978,7 @@ mod tests {
             "{init}"
         );
 
-        let new_session = json!({
+        let new_session = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "session/new",
@@ -1938,7 +1993,7 @@ mod tests {
             .unwrap_or_else(|| panic!("session id missing from {new_session}"))
             .to_string();
 
-        let prompt = json!({
+        let prompt = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "session/prompt",
@@ -1952,7 +2007,7 @@ mod tests {
         send(&mut write, &prompt.to_string()).await;
         provider.wait_for_request().await;
 
-        let close = json!({
+        let close = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 4,
             "method": "session/close",
@@ -1960,14 +2015,18 @@ mod tests {
         });
         send(&mut write, &close.to_string()).await;
         let close_response = read_json_response(&mut lines, 4).await;
-        assert_eq!(close_response["result"], json!({}), "{close_response}");
+        assert_eq!(
+            close_response["result"],
+            serde_json::json!({}),
+            "{close_response}"
+        );
         let prompt_response = read_json_response(&mut lines, 3).await;
         assert_eq!(
             prompt_response["result"]["stopReason"], "cancelled",
             "{prompt_response}"
         );
 
-        let prompt_after_close = json!({
+        let prompt_after_close = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 5,
             "method": "session/prompt",
@@ -2002,9 +2061,10 @@ mod tests {
     async fn acp_agent_session_prompt_uses_openai_compatible_live_provider() {
         let live_config =
             OpenAICompatibleLiveConfig::load().expect("OpenAI Compatible/MODEL live config");
-        retry_model_misbehavior("acp-agent-openai-compatible-live", |attempt| {
-            run_openai_compatible_acp_prompt_attempt(live_config.clone(), attempt)
-        })
+        crate::live_smoke_support::retry_model_misbehavior(
+            "acp-agent-openai-compatible-live",
+            |attempt| run_openai_compatible_acp_prompt_attempt(live_config.clone(), attempt),
+        )
         .await
         .unwrap();
     }
@@ -2012,46 +2072,47 @@ mod tests {
     async fn run_openai_compatible_acp_prompt_attempt(
         live_config: OpenAICompatibleLiveConfig,
         attempt: usize,
-    ) -> LiveSmokeResult<()> {
-        let root = PathBuf::from("scratch/live").join(format!(
+    ) -> crate::live_smoke_support::LiveSmokeResult<()> {
+        let root = std::path::PathBuf::from("scratch/live").join(format!(
             "acp-openai-compatible-{attempt}-{}",
-            Uuid::now_v7()
+            uuid::Uuid::now_v7()
         ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace)?;
-        let socket =
-            PathBuf::from("/tmp").join(format!("cdis-acp-{}.sock", Uuid::now_v7().simple()));
-        let listen = AppServerListenAddr::Unix(socket.clone());
+        let socket = std::path::PathBuf::from("/tmp")
+            .join(format!("cdis-acp-{}.sock", uuid::Uuid::now_v7().simple()));
+        let listen = crate::AppServerListenAddr::Unix(socket.clone());
         let mut app_config = isolated_app_config(listen.clone(), &root)
             .with_openai_chat_completions(
-                APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+                crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
                 live_config.base_url.clone(),
                 live_config.api_key.clone(),
                 live_config.model.clone(),
             );
-        if let AppServerProviderConfig::OpenAIChatCompletions { headers, .. } =
+        if let crate::AppServerProviderConfig::OpenAIChatCompletions { headers, .. } =
             &mut app_config.provider
         {
             headers.push(("X-Example-Provider".to_string(), "required".to_string()));
         }
-        let app = VerletAppServer::new_local(app_config).await?;
+        let app = crate::VerletAppServer::new_local(app_config).await?;
         let serve_task = tokio::spawn(async move { app.serve(listen).await });
         wait_for_socket(&socket).await;
 
         let (client, server) = tokio::io::duplex(512 * 1024);
-        let config = VerletAcpAgentConfig {
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig {
             daemon_socket: socket.clone(),
-            request_timeout: Duration::from_secs(180),
+            request_timeout: std::time::Duration::from_secs(180),
             agent_ref: None,
             cwd: None,
         };
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
-        let live_result: LiveSmokeResult<()> = async {
+        let live_result: crate::live_smoke_support::LiveSmokeResult<()> = async {
             let (read, mut write) = tokio::io::split(client);
-            let mut lines = BufReader::new(read).lines();
+            let mut lines = tokio::io::BufReader::new(read).lines();
             send(
                 &mut write,
                 r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -2062,7 +2123,7 @@ mod tests {
                 return Err(format!("ACP initialize failed: {init}").into());
             }
 
-            let new_session = json!({
+            let new_session = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "session/new",
@@ -2079,8 +2140,8 @@ mod tests {
                 .as_str()
                 .ok_or("ACP session/new missing sessionId")?
                 .to_string();
-            let marker = format!("VERLET_ACP_LIVE_OK_{}", Uuid::now_v7().simple());
-            let prompt = json!({
+            let marker = format!("VERLET_ACP_LIVE_OK_{}", uuid::Uuid::now_v7().simple());
+            let prompt = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "session/prompt",
@@ -2100,7 +2161,7 @@ mod tests {
 
             let update = loop {
                 let message = read_json_message(&mut lines).await;
-                if message.get("id").and_then(Value::as_u64) == Some(3) {
+                if message.get("id").and_then(serde_json::Value::as_u64) == Some(3) {
                     return Err(format!(
                         "ACP prompt response arrived before text update: {message}"
                     )
@@ -2124,10 +2185,10 @@ mod tests {
                 .as_str()
                 .unwrap_or_default();
             if assistant_text.trim().is_empty() {
-                return Err(model_misbehavior("MODEL ACP response was empty"));
+                return Err(crate::live_smoke_support::model_misbehavior("MODEL ACP response was empty"));
             }
             if !assistant_text.contains(&marker) {
-                return Err(model_misbehavior(format!(
+                return Err(crate::live_smoke_support::model_misbehavior(format!(
                     "MODEL ACP response did not contain marker {marker}: {}",
                     compact_for_assertion(assistant_text)
                 )));
@@ -2168,13 +2229,14 @@ mod tests {
     #[tokio::test]
     async fn acp_agent_invalid_json_returns_parse_error() {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        let config = VerletAcpAgentConfig::default();
+        let config = crate::adapters::acp_agent::VerletAcpAgentConfig::default();
         let (server_read, server_write) = tokio::io::split(server);
-        let server_task =
-            tokio::spawn(async move { serve_acp_stdio(server_read, server_write, config).await });
+        let server_task = tokio::spawn(async move {
+            crate::adapters::acp_agent::serve_acp_stdio(server_read, server_write, config).await
+        });
 
         let (read, mut write) = tokio::io::split(client);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = tokio::io::BufReader::new(read).lines();
         send(&mut write, "not-json").await;
 
         let response = lines
@@ -2182,8 +2244,8 @@ mod tests {
             .await
             .unwrap()
             .expect("parse error response");
-        let response: Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(response["id"], Value::Null);
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], serde_json::Value::Null);
         assert_eq!(response["error"]["code"], -32700);
         assert!(
             response["error"]["message"]
@@ -2207,11 +2269,13 @@ mod tests {
         writer.flush().await.unwrap();
     }
 
-    async fn read_json_message<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> Value
+    async fn read_json_message<R>(
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<R>>,
+    ) -> serde_json::Value
     where
         R: tokio::io::AsyncRead + Unpin,
     {
-        let deadline = tokio::time::sleep(Duration::from_secs(30));
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
         tokio::pin!(deadline);
         tokio::select! {
             _ = &mut deadline => panic!("timed out waiting for JSON-RPC message"),
@@ -2222,19 +2286,22 @@ mod tests {
         }
     }
 
-    async fn read_json_response<R>(lines: &mut tokio::io::Lines<BufReader<R>>, id: u64) -> Value
+    async fn read_json_response<R>(
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<R>>,
+        id: u64,
+    ) -> serde_json::Value
     where
         R: tokio::io::AsyncRead + Unpin,
     {
-        let deadline = tokio::time::sleep(Duration::from_secs(30));
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
         tokio::pin!(deadline);
         loop {
             tokio::select! {
                 _ = &mut deadline => panic!("timed out waiting for JSON-RPC response id {id}"),
                 line = lines.next_line() => {
                     let line = line.unwrap().expect("server closed before response");
-                    let value: Value = serde_json::from_str(&line).unwrap();
-                    if value.get("id").and_then(Value::as_u64) == Some(id) {
+                    let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
                         return value;
                     }
                 }
@@ -2242,7 +2309,7 @@ mod tests {
         }
     }
 
-    fn assert_config_current(result: &Value, config_id: &str, expected: &str) {
+    fn assert_config_current(result: &serde_json::Value, config_id: &str, expected: &str) {
         let option = config_option(result, config_id);
         assert_eq!(
             option["currentValue"], expected,
@@ -2250,7 +2317,11 @@ mod tests {
         );
     }
 
-    fn assert_config_values_include(result: &Value, config_id: &str, expected: &[&str]) {
+    fn assert_config_values_include(
+        result: &serde_json::Value,
+        config_id: &str,
+        expected: &[&str],
+    ) {
         let option = config_option(result, config_id);
         let values = option["options"]
             .as_array()
@@ -2266,7 +2337,7 @@ mod tests {
         }
     }
 
-    fn config_option<'a>(result: &'a Value, config_id: &str) -> &'a Value {
+    fn config_option<'a>(result: &'a serde_json::Value, config_id: &str) -> &'a serde_json::Value {
         result["configOptions"]
             .as_array()
             .expect("config options")
@@ -2275,18 +2346,22 @@ mod tests {
             .unwrap_or_else(|| panic!("missing ACP config option {config_id}: {result}"))
     }
 
-    async fn wait_for_socket(path: &Path) {
+    async fn wait_for_socket(path: &std::path::Path) {
         for _ in 0..1_500 {
             if path.exists() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("timed out waiting for {}", path.display());
     }
 
-    fn isolated_app_config(listen: AppServerListenAddr, root: &Path) -> VerletAppServerConfig {
-        let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+    fn isolated_app_config(
+        listen: crate::AppServerListenAddr,
+        root: &std::path::Path,
+    ) -> crate::VerletAppServerConfig {
+        let mut config =
+            crate::VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
         config.user_state_home = root.join("user-state");
@@ -2300,13 +2375,13 @@ mod tests {
 
     #[derive(Default)]
     struct PendingProviderClient {
-        requests: Mutex<Vec<ProviderRequest>>,
-        request_started: Notify,
+        requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+        request_started: tokio::sync::Notify,
     }
 
     impl PendingProviderClient {
         async fn wait_for_request(&self) {
-            let deadline = tokio::time::sleep(Duration::from_secs(30));
+            let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
             tokio::pin!(deadline);
             tokio::select! {
                 _ = &mut deadline => panic!("timed out waiting for pending provider request"),
@@ -2320,8 +2395,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl ProviderClient for PendingProviderClient {
-        async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+    impl crate::ProviderClient for PendingProviderClient {
+        async fn complete(
+            &self,
+            request: &crate::ProviderRequest,
+        ) -> crate::ProviderResult<crate::ProviderResponse> {
             self.requests.lock().unwrap().push(request.clone());
             self.request_started.notify_waiters();
             std::future::pending().await
@@ -2329,15 +2407,15 @@ mod tests {
     }
 
     struct ScriptedProviderClient {
-        requests: Mutex<Vec<ProviderRequest>>,
-        responses: Mutex<Vec<ProviderResponse>>,
+        requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+        responses: std::sync::Mutex<Vec<crate::ProviderResponse>>,
     }
 
     impl ScriptedProviderClient {
-        fn new(responses: Vec<ProviderResponse>) -> Self {
+        fn new(responses: Vec<crate::ProviderResponse>) -> Self {
             Self {
-                requests: Mutex::new(Vec::new()),
-                responses: Mutex::new(responses.into_iter().rev().collect()),
+                requests: std::sync::Mutex::new(Vec::new()),
+                responses: std::sync::Mutex::new(responses.into_iter().rev().collect()),
             }
         }
 
@@ -2347,8 +2425,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl ProviderClient for ScriptedProviderClient {
-        async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+    impl crate::ProviderClient for ScriptedProviderClient {
+        async fn complete(
+            &self,
+            request: &crate::ProviderRequest,
+        ) -> crate::ProviderResult<crate::ProviderResponse> {
             self.requests.lock().unwrap().push(request.clone());
             Ok(self
                 .responses
@@ -2359,24 +2440,28 @@ mod tests {
         }
     }
 
-    fn provider_text(text: &str, input_tokens: u64, output_tokens: u64) -> ProviderResponse {
-        ProviderResponse {
-            content: vec![CanonicalContent::text(text)],
-            usage: CanonicalUsage {
+    fn provider_text(text: &str, input_tokens: u64, output_tokens: u64) -> crate::ProviderResponse {
+        crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::text(text)],
+            usage: crate::CanonicalUsage {
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
-            stop_reason: CanonicalStopReason::EndTurn,
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         }
     }
 
-    fn provider_tool_call(call_id: &str, name: &str, arguments: Value) -> ProviderResponse {
-        ProviderResponse {
-            content: vec![CanonicalContent::tool_call(call_id, name, arguments)],
-            usage: CanonicalUsage::default(),
-            stop_reason: CanonicalStopReason::ToolUse,
+    fn provider_tool_call(
+        call_id: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> crate::ProviderResponse {
+        crate::ProviderResponse {
+            content: vec![crate::CanonicalContent::tool_call(call_id, name, arguments)],
+            usage: crate::CanonicalUsage::default(),
+            stop_reason: crate::CanonicalStopReason::ToolUse,
         }
     }
 
@@ -2405,7 +2490,7 @@ mod tests {
             let model = crate::env_compat::var("VERLET_OPENAI_COMPATIBLE_MODEL")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string());
+                .unwrap_or_else(|| crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string());
             Ok(Self {
                 base_url,
                 api_key,

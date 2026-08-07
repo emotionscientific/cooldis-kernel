@@ -1,4 +1,3 @@
-use super::*;
 #[test]
 fn parse_publish_args_collects_cli_only_fields_without_runtime() {
     let args = vec![
@@ -14,12 +13,12 @@ fn parse_publish_args_collects_cli_only_fields_without_runtime() {
         "provider=\"fixture\"",
     ]
     .into_iter()
-    .map(OsString::from)
+    .map(std::ffi::OsString::from)
     .collect();
 
-    let parsed = parse_publish_args(args).unwrap();
+    let parsed = crate::cli::tool::parse_publish_args(args).unwrap();
 
-    assert_eq!(parsed.module_path, Some(PathBuf::from("tool")));
+    assert_eq!(parsed.module_path, Some(std::path::PathBuf::from("tool")));
     assert_eq!(parsed.name.as_deref(), Some("tailcat"));
     assert!(
         parsed
@@ -28,7 +27,7 @@ fn parse_publish_args_collects_cli_only_fields_without_runtime() {
     );
     assert_eq!(
         parsed.metadata["provider"],
-        Value::String("fixture".to_string())
+        serde_json::Value::String("fixture".to_string())
     );
 }
 
@@ -36,9 +35,9 @@ fn parse_publish_args_collects_cli_only_fields_without_runtime() {
 fn parse_run_args_distinguishes_registry_run_from_source_run() {
     let registry_args = vec!["tailcat", "tail", "--input", "/workspace/tail.txt"]
         .into_iter()
-        .map(OsString::from)
+        .map(std::ffi::OsString::from)
         .collect();
-    let registry = parse_run_args(registry_args).unwrap();
+    let registry = crate::cli::tool::parse_run_args(registry_args).unwrap();
     assert_eq!(registry.registered_name.as_deref(), Some("tailcat"));
     assert_eq!(registry.operation, "tail");
 
@@ -50,11 +49,11 @@ fn parse_run_args_distinguishes_registry_run_from_source_run() {
         "/workspace/tail.txt",
     ]
     .into_iter()
-    .map(OsString::from)
+    .map(std::ffi::OsString::from)
     .collect();
-    let source = parse_run_args(source_args).unwrap();
+    let source = crate::cli::tool::parse_run_args(source_args).unwrap();
     assert_eq!(source.registered_name, None);
-    assert_eq!(source.module_path, Some(PathBuf::from("tool")));
+    assert_eq!(source.module_path, Some(std::path::PathBuf::from("tool")));
     assert_eq!(source.operation, "tail");
 }
 
@@ -82,34 +81,40 @@ fn parse_tool_source_add_accepts_remote_mcp_contract_fields() {
         "/tmp/verlet-state",
     ]
     .into_iter()
-    .map(OsString::from)
+    .map(std::ffi::OsString::from)
     .collect();
 
-    let parsed = parse_tool_source_add_args(args).unwrap();
+    let parsed = crate::cli::tool::parse_tool_source_add_args(args).unwrap();
 
     assert_eq!(parsed.name.as_deref(), Some("arcade"));
-    assert_eq!(parsed.kind, Some(McpRemoteTransport::StreamableHttp));
+    assert_eq!(parsed.kind, Some(crate::McpRemoteTransport::StreamableHttp));
     assert_eq!(parsed.url.as_deref(), Some("https://example.com/mcp"));
     assert_eq!(parsed.bearer_secret.as_deref(), Some("arcade.api_key"));
     assert_eq!(
         parsed.include_tools,
-        BTreeSet::from(["gmail_search".to_string(), "gmail_send".to_string()])
+        std::collections::BTreeSet::from(["gmail_search".to_string(), "gmail_send".to_string()])
     );
     assert_eq!(parsed.timeout_ms, Some(5000));
     assert_eq!(parsed.max_output_bytes, Some(32768));
-    assert_eq!(parsed.state_home, Some(PathBuf::from("/tmp/verlet-state")));
+    assert_eq!(
+        parsed.state_home,
+        Some(std::path::PathBuf::from("/tmp/verlet-state"))
+    );
 }
 
 #[test]
 fn parse_tool_source_show_accepts_json_and_state_home() {
     let args = vec!["arcade", "--json", "--state-home", "/tmp/verlet-state"]
         .into_iter()
-        .map(OsString::from)
+        .map(std::ffi::OsString::from)
         .collect();
 
-    let parsed = parse_tool_source_show_args(args).unwrap();
+    let parsed = crate::cli::tool::parse_tool_source_show_args(args).unwrap();
 
     assert_eq!(parsed.name.as_deref(), Some("arcade"));
     assert!(parsed.json);
-    assert_eq!(parsed.state_home, Some(PathBuf::from("/tmp/verlet-state")));
+    assert_eq!(
+        parsed.state_home,
+        Some(std::path::PathBuf::from("/tmp/verlet-state"))
+    );
 }

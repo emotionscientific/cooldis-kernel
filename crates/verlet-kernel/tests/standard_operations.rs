@@ -1,14 +1,6 @@
-use bashkit::{FileSystem, InMemoryFs};
-use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use verlet::{
-    RustWasmBuildOptions, VerletVfs, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
-    build_rust_wasm_module,
-};
+use bashkit::FileSystem as _;
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 #[tokio::test]
 async fn json_query_reads_nested_value() {
@@ -16,7 +8,7 @@ async fn json_query_reads_nested_value() {
     let output = factory
         .invoke_operation_bytes(
             "json_query",
-            serde_json::to_vec(&json!({
+            serde_json::to_vec(&serde_json::json!({
                 "json": {"items": [{"name": "Ada"}, {"name": "Linus"}]},
                 "pointer": "/items/1/name"
             }))
@@ -25,8 +17,8 @@ async fn json_query_reads_nested_value() {
         .await
         .unwrap();
 
-    let value: Value = serde_json::from_slice(&output.output).unwrap();
-    assert_eq!(value, json!({"found": true, "value": "Linus"}));
+    let value: serde_json::Value = serde_json::from_slice(&output.output).unwrap();
+    assert_eq!(value, serde_json::json!({"found": true, "value": "Linus"}));
 }
 
 #[tokio::test]
@@ -35,7 +27,8 @@ async fn json_query_invalid_pointer_is_invalid_argument() {
     let err = factory
         .invoke_operation_bytes(
             "json_query",
-            serde_json::to_vec(&json!({"json": {"name": "Ada"}, "pointer": "name"})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"json": {"name": "Ada"}, "pointer": "name"}))
+                .unwrap(),
         )
         .await
         .unwrap_err()
@@ -47,26 +40,26 @@ async fn json_query_invalid_pointer_is_invalid_argument() {
 #[tokio::test]
 async fn json_query_empty_pointer_returns_whole_document() {
     let factory = standard_operation_factory(json_query_wasm());
-    let document = json!({"name": "Ada", "scores": [10, 11]});
+    let document = serde_json::json!({"name": "Ada", "scores": [10, 11]});
     let output = factory
         .invoke_operation_bytes(
             "json_query",
-            serde_json::to_vec(&json!({"json": document, "pointer": ""})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"json": document, "pointer": ""})).unwrap(),
         )
         .await
         .unwrap();
 
-    let value: Value = serde_json::from_slice(&output.output).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.output).unwrap();
     assert_eq!(
         value,
-        json!({"found": true, "value": {"name": "Ada", "scores": [10, 11]}})
+        serde_json::json!({"found": true, "value": {"name": "Ada", "scores": [10, 11]}})
     );
 }
 
 #[tokio::test]
 async fn file_read_reads_from_vfs() {
-    let factory = WasmRuntimeFactory::new(
-        WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(file_read_wasm()))
+    let factory = verlet::WasmRuntimeFactory::new(
+        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(file_read_wasm()))
             .with_vfs(read_test_vfs().await),
     )
     .unwrap();
@@ -75,24 +68,24 @@ async fn file_read_reads_from_vfs() {
         .invoke_operation_bytes(
             "file_read",
             serde_json::to_vec(
-                &json!({"path": "/workspace/input.txt", "offsetBytes": 6, "maxBytes": 4}),
+                &serde_json::json!({"path": "/workspace/input.txt", "offsetBytes": 6, "maxBytes": 4}),
             )
             .unwrap(),
         )
         .await
         .unwrap();
 
-    let value: Value = serde_json::from_slice(&output.output).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.output).unwrap();
     assert_eq!(
         value,
-        json!({"content": "beta", "bytesRead": 4, "eof": false})
+        serde_json::json!({"content": "beta", "bytesRead": 4, "eof": false})
     );
 }
 
 #[tokio::test]
 async fn file_read_missing_file_returns_structured_error() {
-    let factory = WasmRuntimeFactory::new(
-        WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(file_read_wasm()))
+    let factory = verlet::WasmRuntimeFactory::new(
+        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(file_read_wasm()))
             .with_vfs(read_test_vfs().await),
     )
     .unwrap();
@@ -100,12 +93,12 @@ async fn file_read_missing_file_returns_structured_error() {
     let output = factory
         .invoke_operation_bytes(
             "file_read",
-            serde_json::to_vec(&json!({"path": "/workspace/missing.txt"})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"path": "/workspace/missing.txt"})).unwrap(),
         )
         .await
         .unwrap();
 
-    let value: Value = serde_json::from_slice(&output.output).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.output).unwrap();
     assert_eq!(value["content"], "");
     assert_eq!(value["bytesRead"], 0);
     assert_eq!(value["eof"], true);
@@ -114,8 +107,8 @@ async fn file_read_missing_file_returns_structured_error() {
 
 #[tokio::test]
 async fn file_read_handles_zero_max_and_offset_past_eof() {
-    let factory = WasmRuntimeFactory::new(
-        WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(file_read_wasm()))
+    let factory = verlet::WasmRuntimeFactory::new(
+        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(file_read_wasm()))
             .with_vfs(read_test_vfs().await),
     )
     .unwrap();
@@ -124,27 +117,32 @@ async fn file_read_handles_zero_max_and_offset_past_eof() {
         .invoke_operation_bytes(
             "file_read",
             serde_json::to_vec(
-                &json!({"path": "/workspace/input.txt", "offsetBytes": 0, "maxBytes": 0}),
+                &serde_json::json!({"path": "/workspace/input.txt", "offsetBytes": 0, "maxBytes": 0}),
             )
             .unwrap(),
         )
         .await
         .unwrap();
-    let zero: Value = serde_json::from_slice(&zero.output).unwrap();
-    assert_eq!(zero, json!({"content": "", "bytesRead": 0, "eof": false}));
+    let zero: serde_json::Value = serde_json::from_slice(&zero.output).unwrap();
+    assert_eq!(
+        zero,
+        serde_json::json!({"content": "", "bytesRead": 0, "eof": false})
+    );
 
     let past_eof = factory
         .invoke_operation_bytes(
             "file_read",
-            serde_json::to_vec(&json!({"path": "/workspace/input.txt", "offsetBytes": 999}))
-                .unwrap(),
+            serde_json::to_vec(
+                &serde_json::json!({"path": "/workspace/input.txt", "offsetBytes": 999}),
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
-    let past_eof: Value = serde_json::from_slice(&past_eof.output).unwrap();
+    let past_eof: serde_json::Value = serde_json::from_slice(&past_eof.output).unwrap();
     assert_eq!(
         past_eof,
-        json!({"content": "", "bytesRead": 0, "eof": true})
+        serde_json::json!({"content": "", "bytesRead": 0, "eof": true})
     );
 }
 
@@ -157,8 +155,8 @@ async fn http_fetch_reads_from_local_server() {
     .await;
     let url = format!("{base_url}/fetch");
     let grant = format!("net.http.private:GET:{base_url}");
-    let factory = WasmRuntimeFactory::new(
-        WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(http_fetch_wasm()))
+    let factory = verlet::WasmRuntimeFactory::new(
+        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(http_fetch_wasm()))
             .with_capability_grant(grant),
     )
     .unwrap();
@@ -166,7 +164,7 @@ async fn http_fetch_reads_from_local_server() {
     let output = factory
         .invoke_operation_bytes(
             "http_fetch",
-            serde_json::to_vec(&json!({
+            serde_json::to_vec(&serde_json::json!({
                 "url": url,
                 "headers": {"x-test": "standard-op"},
                 "maxResponseBytes": 1024
@@ -176,7 +174,7 @@ async fn http_fetch_reads_from_local_server() {
         .await
         .unwrap();
 
-    let value: Value = serde_json::from_slice(&output.output).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.output).unwrap();
     assert_eq!(value["status"], 200);
     assert_eq!(value["bodyText"], "hello from standard operations");
     assert_eq!(value["truncated"], false);
@@ -189,8 +187,8 @@ async fn http_fetch_reads_from_local_server() {
 async fn http_fetch_reports_cap_edge_truncation() {
     let (zero_base_url, zero_server) = spawn_http_server("abc", vec![]).await;
     let zero_grant = format!("net.http.private:GET:{zero_base_url}");
-    let zero_factory = WasmRuntimeFactory::new(
-        WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(http_fetch_wasm()))
+    let zero_factory = verlet::WasmRuntimeFactory::new(
+        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(http_fetch_wasm()))
             .with_capability_grant(zero_grant),
     )
     .unwrap();
@@ -198,21 +196,21 @@ async fn http_fetch_reports_cap_edge_truncation() {
         .invoke_operation_bytes(
             "http_fetch",
             serde_json::to_vec(
-                &json!({"url": format!("{zero_base_url}/fetch"), "maxResponseBytes": 0}),
+                &serde_json::json!({"url": format!("{zero_base_url}/fetch"), "maxResponseBytes": 0}),
             )
             .unwrap(),
         )
         .await
         .unwrap();
-    let zero: Value = serde_json::from_slice(&zero.output).unwrap();
+    let zero: serde_json::Value = serde_json::from_slice(&zero.output).unwrap();
     assert_eq!(zero["bodyText"], "");
     assert_eq!(zero["truncated"], true);
     zero_server.await.unwrap();
 
     let (exact_base_url, exact_server) = spawn_http_server("abcd", vec![]).await;
     let exact_grant = format!("net.http.private:GET:{exact_base_url}");
-    let exact_factory = WasmRuntimeFactory::new(
-        WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(http_fetch_wasm()))
+    let exact_factory = verlet::WasmRuntimeFactory::new(
+        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::bytes(http_fetch_wasm()))
             .with_capability_grant(exact_grant),
     )
     .unwrap();
@@ -220,13 +218,13 @@ async fn http_fetch_reports_cap_edge_truncation() {
         .invoke_operation_bytes(
             "http_fetch",
             serde_json::to_vec(
-                &json!({"url": format!("{exact_base_url}/fetch"), "maxResponseBytes": 4}),
+                &serde_json::json!({"url": format!("{exact_base_url}/fetch"), "maxResponseBytes": 4}),
             )
             .unwrap(),
         )
         .await
         .unwrap();
-    let exact: Value = serde_json::from_slice(&exact.output).unwrap();
+    let exact: serde_json::Value = serde_json::from_slice(&exact.output).unwrap();
     assert_eq!(exact["bodyText"], "abcd");
     assert_eq!(exact["truncated"], false);
     exact_server.await.unwrap();
@@ -238,58 +236,65 @@ async fn http_fetch_denied_origin_fails_closed() {
     let output = factory
         .invoke_operation_bytes(
             "http_fetch",
-            serde_json::to_vec(&json!({"url": "http://127.0.0.1:9/fetch"})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"url": "http://127.0.0.1:9/fetch"})).unwrap(),
         )
         .await
         .unwrap();
 
-    let value: Value = serde_json::from_slice(&output.output).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.output).unwrap();
     assert_eq!(value["status"], 0);
     assert_eq!(value["error"]["code"], "capability_denied");
 }
 
-fn standard_operation_factory(wasm: Vec<u8>) -> WasmRuntimeFactory {
-    WasmRuntimeFactory::new(WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(wasm))).unwrap()
+fn standard_operation_factory(wasm: Vec<u8>) -> verlet::WasmRuntimeFactory {
+    verlet::WasmRuntimeFactory::new(verlet::WasmRuntimeConfig::new(
+        verlet::WasmRuntimeArtifact::bytes(wasm),
+    ))
+    .unwrap()
 }
 
 fn http_fetch_wasm() -> Vec<u8> {
-    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    static WASM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     WASM.get_or_init(|| build_tool_wasm("http-fetch")).clone()
 }
 
 fn file_read_wasm() -> Vec<u8> {
-    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    static WASM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     WASM.get_or_init(|| build_tool_wasm("file-read")).clone()
 }
 
 fn json_query_wasm() -> Vec<u8> {
-    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    static WASM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     WASM.get_or_init(|| build_tool_wasm("json-query")).clone()
 }
 
 fn build_tool_wasm(name: &str) -> Vec<u8> {
     let root = workspace_root();
-    let build = build_rust_wasm_module(RustWasmBuildOptions::new(root.join("tools").join(name)))
-        .unwrap_or_else(|err| panic!("failed to build {name} tool wasm: {err}"));
+    let build = verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(
+        root.join("tools").join(name),
+    ))
+    .unwrap_or_else(|err| panic!("failed to build {name} tool wasm: {err}"));
     std::fs::read(build.artifact_path)
         .unwrap_or_else(|err| panic!("failed to read {name} tool wasm artifact: {err}"))
 }
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(Path::parent)
+        .and_then(std::path::Path::parent)
         .expect("kernel crate should live under crates/verlet-kernel")
         .to_path_buf()
 }
 
-async fn read_test_vfs() -> Arc<VerletVfs> {
-    let workspace = Arc::new(InMemoryFs::new());
+async fn read_test_vfs() -> std::sync::Arc<verlet::VerletVfs> {
+    let workspace = std::sync::Arc::new(bashkit::InMemoryFs::new());
     workspace
-        .write_file(Path::new("/input.txt"), b"alpha beta gamma")
+        .write_file(std::path::Path::new("/input.txt"), b"alpha beta gamma")
         .await
         .unwrap();
-    let vfs = Arc::new(VerletVfs::new(Arc::new(InMemoryFs::new())));
+    let vfs = std::sync::Arc::new(verlet::VerletVfs::new(std::sync::Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
     vfs.mount("/workspace", workspace).unwrap();
     vfs
 }
@@ -297,8 +302,8 @@ async fn read_test_vfs() -> Arc<VerletVfs> {
 async fn spawn_http_server(
     response_body: &'static str,
     request_contains: Vec<&'static str>,
-) -> (String, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
     let handle = tokio::spawn(async move {

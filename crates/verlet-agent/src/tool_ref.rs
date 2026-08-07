@@ -1,9 +1,6 @@
-use crate::{VerletAgentError as VerletError, VerletResult};
-use serde::{Deserialize, Serialize};
-
 /// A pin: `mcptool://<server>/<tool>@sha256:<hash>` — the acceptance of a
 /// witnessed protocol-tool contract as a content-addressed record.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedToolRef {
     /// Source record name (the `<server>` in `mcp://<server>`).
@@ -16,12 +13,14 @@ pub struct PinnedToolRef {
 impl PinnedToolRef {
     /// Parse `mcptool://<server>/<tool>@sha256:<hash>`, fail closed on any
     /// missing or malformed segment.
-    pub fn parse(reference: &str) -> VerletResult<Self> {
+    pub fn parse(reference: &str) -> crate::VerletResult<Self> {
         let body = reference.strip_prefix("mcptool://").ok_or_else(|| {
-            VerletError::RuntimeFactory(format!("pin {reference:?} must start with mcptool://"))
+            crate::VerletAgentError::RuntimeFactory(format!(
+                "pin {reference:?} must start with mcptool://"
+            ))
         })?;
         let (path, hash) = body.split_once("@sha256:").ok_or_else(|| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletAgentError::RuntimeFactory(format!(
                 "pin {reference:?} must be content-addressed with @sha256:<hash>"
             ))
         })?;
@@ -30,17 +29,17 @@ impl PinnedToolRef {
                 .bytes()
                 .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "pin {reference:?} has an invalid sha256 schema hash"
             )));
         }
         let (server, tool_name) = path.split_once('/').ok_or_else(|| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletAgentError::RuntimeFactory(format!(
                 "pin {reference:?} must name a server and a tool as <server>/<tool>"
             ))
         })?;
         if server.is_empty() || tool_name.is_empty() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "pin {reference:?} must name a server and a tool as <server>/<tool>"
             )));
         }

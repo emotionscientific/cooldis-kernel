@@ -1,15 +1,3 @@
-use crate::agent::manifest_bind::canonical_json_hash;
-use crate::kernel::history::{
-    AdmissionDecidedPayload, AdmissionDecision, EventKind, EventProvenance, EventRecord,
-    EventRecordId, EventStreamId, NewEventRecord,
-};
-use crate::kernel::runtime_host::ReservedTurnSubmission;
-use crate::{
-    RuntimeHost, RuntimeThreadHandle, ThreadId, TurnInput, TurnSubmissionMode, VerletError,
-    VerletResult,
-};
-use serde_json::{Value, json};
-
 macro_rules! turn_entry_surfaces {
     ($($constant:ident => $name:literal),+ $(,)?) => {
         $(pub(crate) const $constant: &str = $name;)+
@@ -58,9 +46,9 @@ const ADMISSION_ROUTE_FUNCTION: &str = "admission_route/v1";
 pub(crate) struct AdmissionGateContext {
     pub(crate) route_id: String,
     pub(crate) policy_hash: String,
-    pub(crate) decision: AdmissionDecision,
-    pub(crate) admissible: Option<Vec<AdmissionDecision>>,
-    pub(crate) source_ingress_event_ids: Vec<EventRecordId>,
+    pub(crate) decision: crate::kernel::history::AdmissionDecision,
+    pub(crate) admissible: Option<Vec<crate::kernel::history::AdmissionDecision>>,
+    pub(crate) source_ingress_event_ids: Vec<crate::kernel::history::EventRecordId>,
     pub(crate) discharged_by: String,
     pub(crate) function: String,
 }
@@ -69,9 +57,9 @@ impl AdmissionGateContext {
     pub(crate) fn route_policy(
         route_id: String,
         policy_hash: String,
-        decision: AdmissionDecision,
-        admissible: Vec<AdmissionDecision>,
-        source_ingress_event_ids: Vec<EventRecordId>,
+        decision: crate::kernel::history::AdmissionDecision,
+        admissible: Vec<crate::kernel::history::AdmissionDecision>,
+        source_ingress_event_ids: Vec<crate::kernel::history::EventRecordId>,
     ) -> Self {
         Self {
             discharged_by: format!("policy:admission_route:{route_id}"),
@@ -86,15 +74,16 @@ impl AdmissionGateContext {
 
     pub(crate) fn surface_default(
         surface_name: &str,
-        source_ingress_event_ids: Vec<EventRecordId>,
-    ) -> VerletResult<Self> {
+        source_ingress_event_ids: Vec<crate::kernel::history::EventRecordId>,
+    ) -> crate::VerletResult<Self> {
         let route_id = format!("surface:{surface_name}");
-        let policy_hash = canonical_json_hash(&surface_default_policy(&route_id))?;
+        let policy_hash =
+            crate::agent::manifest_bind::canonical_json_hash(&surface_default_policy(&route_id))?;
         Ok(Self {
             route_id,
             policy_hash,
-            decision: AdmissionDecision::Queue,
-            admissible: Some(vec![AdmissionDecision::Queue]),
+            decision: crate::kernel::history::AdmissionDecision::Queue,
+            admissible: Some(vec![crate::kernel::history::AdmissionDecision::Queue]),
             source_ingress_event_ids,
             discharged_by: format!("policy:admission_surface:{surface_name}"),
             function: SURFACE_ADMISSION_FUNCTION.to_string(),
@@ -109,48 +98,50 @@ impl AdmissionGateContext {
 /// scheduling so no turn runs without an admission decision on the control
 /// stream.
 pub(crate) async fn append_admission_decided(
-    handle: &RuntimeThreadHandle,
+    handle: &crate::RuntimeThreadHandle,
     context: AdmissionGateContext,
-) -> VerletResult<EventRecord> {
+) -> crate::VerletResult<crate::kernel::history::EventRecord> {
     let record = admission_decided_record(handle.context().coordinates.clone(), context)?;
     handle.append_control_event(record).await
 }
 
 pub(crate) async fn submit_turn(
-    host: &RuntimeHost,
-    thread_id: ThreadId,
+    host: &crate::RuntimeHost,
+    thread_id: crate::ThreadId,
     turn_id: impl Into<String>,
-    input: TurnInput,
-    mode: TurnSubmissionMode,
+    input: crate::TurnInput,
+    mode: crate::TurnSubmissionMode,
     admission: Option<AdmissionGateContext>,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     let reserved = reserve_turn(host, thread_id, turn_id, input, mode, admission).await?;
     submit_reserved(reserved).await;
     Ok(())
 }
 
 pub(crate) async fn reserve_turn(
-    host: &RuntimeHost,
-    thread_id: ThreadId,
+    host: &crate::RuntimeHost,
+    thread_id: crate::ThreadId,
     turn_id: impl Into<String>,
-    input: TurnInput,
-    mode: TurnSubmissionMode,
+    input: crate::TurnInput,
+    mode: crate::TurnSubmissionMode,
     admission: Option<AdmissionGateContext>,
-) -> VerletResult<ReservedTurnSubmission> {
+) -> crate::VerletResult<crate::kernel::runtime_host::ReservedTurnSubmission> {
     host.reserve_turn_submission_at_choke_point(thread_id, turn_id, input, mode, admission)
         .await
 }
 
-pub(crate) async fn submit_reserved(reserved: ReservedTurnSubmission) -> bool {
+pub(crate) async fn submit_reserved(
+    reserved: crate::kernel::runtime_host::ReservedTurnSubmission,
+) -> bool {
     reserved.submit_unchecked().await
 }
 
 pub(crate) fn admission_decided_record(
     coordinates: crate::ThreadCoordinates,
     context: AdmissionGateContext,
-) -> VerletResult<NewEventRecord> {
-    let kind = EventKind::AdmissionDecided;
-    let payload = AdmissionDecidedPayload {
+) -> crate::VerletResult<crate::kernel::history::NewEventRecord> {
+    let kind = crate::kernel::history::EventKind::AdmissionDecided;
+    let payload = crate::kernel::history::AdmissionDecidedPayload {
         route_id: context.route_id.clone(),
         policy_hash: context.policy_hash.clone(),
         decision: context.decision,
@@ -158,17 +149,20 @@ pub(crate) fn admission_decided_record(
         source_ingress_event_ids: context.source_ingress_event_ids.clone(),
     };
     let mut value = serde_json::to_value(payload).map_err(|err| {
-        VerletError::History(format!("admission.decided payload codec failed: {err}"))
+        crate::VerletError::History(format!("admission.decided payload codec failed: {err}"))
     })?;
     if let Some(object) = value.as_object_mut() {
-        object.insert("schema".to_string(), json!(kind.payload_schema_id()));
+        object.insert(
+            "schema".to_string(),
+            serde_json::json!(kind.payload_schema_id()),
+        );
     }
-    Ok(NewEventRecord::discharged(
+    Ok(crate::kernel::history::NewEventRecord::discharged(
         coordinates.clone(),
         kind,
         value,
-        EventProvenance {
-            source_streams: vec![EventStreamId::new(format!(
+        crate::kernel::history::EventProvenance {
+            source_streams: vec![crate::kernel::history::EventStreamId::new(format!(
                 "control:{}",
                 coordinates.thread_id
             ))],
@@ -176,13 +170,13 @@ pub(crate) fn admission_decided_record(
             discharged_by: Some(context.discharged_by),
             function: Some(context.function),
             config_hash: Some(context.policy_hash),
-            ..EventProvenance::default()
+            ..crate::kernel::history::EventProvenance::default()
         },
     ))
 }
 
-fn surface_default_policy(route_id: &str) -> Value {
-    json!({
+fn surface_default_policy(route_id: &str) -> serde_json::Value {
+    serde_json::json!({
         "schema": "cooldis.admission.surface_policy/1",
         "route_id": route_id,
         "decision": "queue",
@@ -192,9 +186,9 @@ fn surface_default_policy(route_id: &str) -> Value {
 
 #[cfg(test)]
 pub(crate) fn assert_admission_precedes_turn_records<'a>(
-    control_events: &'a [EventRecord],
-    thread_events: &[EventRecord],
-) -> &'a EventRecord {
+    control_events: &'a [crate::kernel::history::EventRecord],
+    thread_events: &[crate::kernel::history::EventRecord],
+) -> &'a crate::kernel::history::EventRecord {
     let admission = control_events
         .iter()
         .find(|event| event.kind.as_str() == "admission.decided")
@@ -203,7 +197,10 @@ pub(crate) fn assert_admission_precedes_turn_records<'a>(
         .iter()
         .filter(|event| {
             event.kind.as_str() == "session.entry.appended"
-                && event.payload.get("runtime_kind").and_then(Value::as_str)
+                && event
+                    .payload
+                    .get("runtime_kind")
+                    .and_then(serde_json::Value::as_str)
                     != Some("thread_started")
         })
         .collect::<Vec<_>>();
@@ -228,26 +225,28 @@ pub(crate) fn assert_admission_precedes_turn_records<'a>(
 
 #[cfg(test)]
 pub(crate) fn assert_admission_precedes_turn_values<'a>(
-    control_events: &'a [Value],
-    thread_events: &[Value],
-) -> &'a Value {
+    control_events: &'a [serde_json::Value],
+    thread_events: &[serde_json::Value],
+) -> &'a serde_json::Value {
     let admission = control_events
         .iter()
-        .find(|event| event.get("kind").and_then(Value::as_str) == Some("admission.decided"))
+        .find(|event| {
+            event.get("kind").and_then(serde_json::Value::as_str) == Some("admission.decided")
+        })
         .expect("control stream missing admission.decided");
     let admission_ms = admission
         .get("atMs")
-        .and_then(Value::as_i64)
+        .and_then(serde_json::Value::as_i64)
         .expect("admission.decided missing atMs");
     let admission_key = value_order_key(admission);
     let turn_events = thread_events
         .iter()
         .filter(|event| {
-            event.get("kind").and_then(Value::as_str) == Some("session.entry.appended")
+            event.get("kind").and_then(serde_json::Value::as_str) == Some("session.entry.appended")
                 && event
                     .get("payload")
                     .and_then(|payload| payload.get("runtime_kind"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     != Some("thread_started")
         })
         .collect::<Vec<_>>();
@@ -258,7 +257,7 @@ pub(crate) fn assert_admission_precedes_turn_values<'a>(
     for event in turn_events {
         let event_ms = event
             .get("atMs")
-            .and_then(Value::as_i64)
+            .and_then(serde_json::Value::as_i64)
             .expect("turn event missing atMs");
         let event_key = value_order_key(event);
         assert!(
@@ -270,7 +269,7 @@ pub(crate) fn assert_admission_precedes_turn_values<'a>(
 }
 
 #[cfg(test)]
-fn event_order_key(event: &EventRecord) -> (i64, String, i64, String) {
+fn event_order_key(event: &crate::kernel::history::EventRecord) -> (i64, String, i64, String) {
     (
         event.created_at_ms,
         event.stream_id.to_string(),
@@ -280,23 +279,23 @@ fn event_order_key(event: &EventRecord) -> (i64, String, i64, String) {
 }
 
 #[cfg(test)]
-fn value_order_key(event: &Value) -> (i64, String, i64, String) {
+fn value_order_key(event: &serde_json::Value) -> (i64, String, i64, String) {
     let at_ms = event
         .get("atMs")
-        .and_then(Value::as_i64)
+        .and_then(serde_json::Value::as_i64)
         .expect("event missing atMs");
     let stream_id = event
         .get("stream_id")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .expect("event missing stream_id")
         .to_string();
     let sequence = event
         .get("sequence")
-        .and_then(Value::as_i64)
+        .and_then(serde_json::Value::as_i64)
         .expect("event missing sequence");
     let event_id = event
         .get("eventId")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .expect("event missing eventId")
         .to_string();
     (at_ms, stream_id, sequence, event_id)
@@ -304,57 +303,54 @@ fn value_order_key(event: &Value) -> (i64, String, i64, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::path::{Path, PathBuf};
-    use uuid::Uuid;
 
     const COVERED_SURFACE_FIXTURES: &[(&str, &str)] = &[
         (
-            HOST_SUBMIT_SURFACE,
+            crate::kernel::admission::HOST_SUBMIT_SURFACE,
             "runtime_host_submit_records_surface_admission_before_turn_execution",
         ),
         (
-            APP_SERVER_RPC_SURFACE,
+            crate::kernel::admission::APP_SERVER_RPC_SURFACE,
             "app_server_turn_start_records_surface_admission_before_execution",
         ),
         (
-            APP_SERVER_ENVELOPE_INGRESS_SURFACE,
+            crate::kernel::admission::APP_SERVER_ENVELOPE_INGRESS_SURFACE,
             "app_server_envelope_ingress_records_surface_admission_before_execution",
         ),
         (
-            MCP_ADAPTER_SURFACE,
+            crate::kernel::admission::MCP_ADAPTER_SURFACE,
             "mcp_server_runs_prompt_and_command_through_daemon",
         ),
         (
-            ACP_ADAPTER_SURFACE,
+            crate::kernel::admission::ACP_ADAPTER_SURFACE,
             "acp_agent_process_smoke_runs_binary_over_stdio",
         ),
         (
-            DEBUG_RPC_SURFACE,
+            crate::kernel::admission::DEBUG_RPC_SURFACE,
             "debug_rpc_cli_calls_and_streams_turns_over_websocket",
         ),
         (
-            TELEGRAM_WEBHOOK_SURFACE,
+            crate::kernel::admission::TELEGRAM_WEBHOOK_SURFACE,
             "telegram_webhook_accepts_update_and_uses_sink",
         ),
         (
-            PGQRS_QUEUE_SURFACE,
+            crate::kernel::admission::PGQRS_QUEUE_SURFACE,
             "queue_worker_processes_envelope_after_queue_and_bridge_restart",
         ),
         (
-            REMOTE_SYNC_INGRESS_SURFACE,
+            crate::kernel::admission::REMOTE_SYNC_INGRESS_SURFACE,
             "remote_queue_redelivery_enters_child_ingress_once",
         ),
         (
-            KERNEL_THREAD_SUBMIT_SURFACE,
+            crate::kernel::admission::KERNEL_THREAD_SUBMIT_SURFACE,
             "cross_thread_prompt_and_result_events_do_not_rewrite_lineage",
         ),
     ];
 
     #[test]
     fn admission_order_key_matches_replay_merge_tie_breaks() {
-        let first = EventRecordId::from_uuid(Uuid::now_v7());
-        let second = EventRecordId::from_uuid(Uuid::now_v7());
+        let first = crate::kernel::history::EventRecordId::from_uuid(uuid::Uuid::now_v7());
+        let second = crate::kernel::history::EventRecordId::from_uuid(uuid::Uuid::now_v7());
 
         // UUIDv7's canonical hyphenated representation preserves UUID byte
         // order, and `Uuid::now_v7` is process-monotonic within a millisecond.
@@ -433,7 +429,7 @@ async fn fixture() {
             .iter()
             .map(|(surface, _)| *surface)
             .collect::<std::collections::BTreeSet<_>>();
-        let missing = TURN_ENTRY_SURFACES
+        let missing = crate::kernel::admission::TURN_ENTRY_SURFACES
             .iter()
             .copied()
             .filter(|surface| !covered.contains(surface))
@@ -450,7 +446,7 @@ async fn fixture() {
             "admission coverage manifest contains duplicate surface entries"
         );
 
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut test_sources = Vec::new();
         collect_rust_sources(&manifest_dir, &mut |path| {
             let source = std::fs::read_to_string(path)
@@ -481,36 +477,39 @@ async fn fixture() {
 
     #[test]
     fn app_server_adapter_clients_resolve_to_registered_surfaces() {
-        assert_eq!(app_server_surface(None), APP_SERVER_RPC_SURFACE);
         assert_eq!(
-            app_server_surface(Some("verlet-mcp-server")),
-            MCP_ADAPTER_SURFACE
+            crate::kernel::admission::app_server_surface(None),
+            crate::kernel::admission::APP_SERVER_RPC_SURFACE
         );
         assert_eq!(
-            app_server_surface(Some("verlet-acp-agent")),
-            ACP_ADAPTER_SURFACE
+            crate::kernel::admission::app_server_surface(Some("verlet-mcp-server")),
+            crate::kernel::admission::MCP_ADAPTER_SURFACE
         );
         assert_eq!(
-            app_server_surface(Some("verlet-debug-rpc")),
-            DEBUG_RPC_SURFACE
+            crate::kernel::admission::app_server_surface(Some("verlet-acp-agent")),
+            crate::kernel::admission::ACP_ADAPTER_SURFACE
         );
         assert_eq!(
-            app_server_surface(Some(concat!("cool", "dis-mcp-server"))),
-            MCP_ADAPTER_SURFACE
+            crate::kernel::admission::app_server_surface(Some("verlet-debug-rpc")),
+            crate::kernel::admission::DEBUG_RPC_SURFACE
         );
         assert_eq!(
-            app_server_surface(Some(concat!("cool", "dis-acp-agent"))),
-            ACP_ADAPTER_SURFACE
+            crate::kernel::admission::app_server_surface(Some(concat!("cool", "dis-mcp-server"))),
+            crate::kernel::admission::MCP_ADAPTER_SURFACE
         );
         assert_eq!(
-            app_server_surface(Some(concat!("cool", "dis-debug-rpc"))),
-            DEBUG_RPC_SURFACE
+            crate::kernel::admission::app_server_surface(Some(concat!("cool", "dis-acp-agent"))),
+            crate::kernel::admission::ACP_ADAPTER_SURFACE
+        );
+        assert_eq!(
+            crate::kernel::admission::app_server_surface(Some(concat!("cool", "dis-debug-rpc"))),
+            crate::kernel::admission::DEBUG_RPC_SURFACE
         );
     }
 
     #[test]
     fn raw_turn_submit_choke_point_has_no_callers_outside_admission() {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let source_root = manifest_dir.join("src");
         let admission_path = source_root.join("kernel/admission.rs");
         let runtime_host_path = source_root.join("kernel/runtime_host.rs");
@@ -656,7 +655,7 @@ async fn fixture() {
         Ok(())
     }
 
-    fn collect_rust_sources(root: &Path, visit: &mut impl FnMut(&Path)) {
+    fn collect_rust_sources(root: &std::path::Path, visit: &mut impl FnMut(&std::path::Path)) {
         let entries = std::fs::read_dir(root)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()));
         for entry in entries {

@@ -1,21 +1,17 @@
-use verlet_guest_sdk::{
-    OperationDefinition, OperationEventKind, OperationManifest, OperationMode, OperationValueKind,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_OK, Sink, Source, StatusCode, close_file,
-    open_file_read, read_file, read_source, write_sink,
-};
-
 const CAT_ID: u32 = 1;
 const TAIL_ID: u32 = 2;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __verlet_describe_module__(sink: u32) -> i32 {
-    let manifest =
-        OperationManifest::new(vec![operation(CAT_ID, "cat"), operation(TAIL_ID, "tail")]);
+    let manifest = verlet_guest_sdk::OperationManifest::new(vec![
+        operation(CAT_ID, "cat"),
+        operation(TAIL_ID, "tail"),
+    ]);
     let bytes = match manifest.to_json_vec() {
         Ok(bytes) => bytes,
-        Err(_) => return STATUS_INVALID_ARGUMENT,
+        Err(_) => return verlet_guest_sdk::STATUS_INVALID_ARGUMENT,
     };
-    status(write_sink(Sink(sink), &bytes).map(|_| ()))
+    status(verlet_guest_sdk::write_sink(verlet_guest_sdk::Sink(sink), &bytes).map(|_| ()))
 }
 
 #[unsafe(no_mangle)]
@@ -27,63 +23,75 @@ pub extern "C" fn __verlet_call_operation__(
     _events: u32,
 ) -> i32 {
     match operation {
-        CAT_ID => status(cat(Source(source), Sink(output))),
-        TAIL_ID => status(tail(Source(source), Sink(output))),
-        _ => STATUS_NOT_FOUND,
+        CAT_ID => status(cat(
+            verlet_guest_sdk::Source(source),
+            verlet_guest_sdk::Sink(output),
+        )),
+        TAIL_ID => status(tail(
+            verlet_guest_sdk::Source(source),
+            verlet_guest_sdk::Sink(output),
+        )),
+        _ => verlet_guest_sdk::STATUS_NOT_FOUND,
     }
 }
 
-fn operation(id: u32, name: &str) -> OperationDefinition {
-    OperationDefinition {
+fn operation(id: u32, name: &str) -> verlet_guest_sdk::OperationDefinition {
+    verlet_guest_sdk::OperationDefinition {
         id,
         name: name.to_string(),
-        input: OperationValueKind::Text,
-        output: OperationValueKind::Bytes,
-        events: OperationEventKind::None,
-        mode: OperationMode::Sync,
+        input: verlet_guest_sdk::OperationValueKind::Text,
+        output: verlet_guest_sdk::OperationValueKind::Bytes,
+        events: verlet_guest_sdk::OperationEventKind::None,
+        mode: verlet_guest_sdk::OperationMode::Sync,
         required_capabilities: Vec::new(),
     }
 }
 
-fn cat(source: Source, output: Sink) -> Result<(), StatusCode> {
+fn cat(
+    source: verlet_guest_sdk::Source,
+    output: verlet_guest_sdk::Sink,
+) -> Result<(), verlet_guest_sdk::StatusCode> {
     let path = read_path(source)?;
-    let handle = open_file_read(&path)?;
+    let handle = verlet_guest_sdk::open_file_read(&path)?;
     let mut buffer = [0u8; 64];
     loop {
-        let n = read_file(handle, &mut buffer)?;
+        let n = verlet_guest_sdk::read_file(handle, &mut buffer)?;
         if n == 0 {
             break;
         }
-        write_sink(output, &buffer[..n])?;
+        verlet_guest_sdk::write_sink(output, &buffer[..n])?;
     }
-    close_file(handle)
+    verlet_guest_sdk::close_file(handle)
 }
 
-fn tail(source: Source, output: Sink) -> Result<(), StatusCode> {
+fn tail(
+    source: verlet_guest_sdk::Source,
+    output: verlet_guest_sdk::Sink,
+) -> Result<(), verlet_guest_sdk::StatusCode> {
     let path = read_path(source)?;
-    let handle = open_file_read(&path)?;
+    let handle = verlet_guest_sdk::open_file_read(&path)?;
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 64];
     loop {
-        let n = read_file(handle, &mut buffer)?;
+        let n = verlet_guest_sdk::read_file(handle, &mut buffer)?;
         if n == 0 {
             break;
         }
         bytes.extend_from_slice(&buffer[..n]);
     }
-    close_file(handle)?;
+    verlet_guest_sdk::close_file(handle)?;
 
     let start = last_two_lines_start(&bytes);
-    write_sink(output, &bytes[start..])?;
+    verlet_guest_sdk::write_sink(output, &bytes[start..])?;
     Ok(())
 }
 
-fn read_path(source: Source) -> Result<String, StatusCode> {
+fn read_path(source: verlet_guest_sdk::Source) -> Result<String, verlet_guest_sdk::StatusCode> {
     let mut buffer = [0u8; 512];
-    let n = read_source(source, &mut buffer)?;
+    let n = verlet_guest_sdk::read_source(source, &mut buffer)?;
     core::str::from_utf8(&buffer[..n])
         .map(str::to_string)
-        .map_err(|_| StatusCode::InvalidArgument)
+        .map_err(|_| verlet_guest_sdk::StatusCode::InvalidArgument)
 }
 
 fn last_two_lines_start(bytes: &[u8]) -> usize {
@@ -105,9 +113,9 @@ fn last_two_lines_start(bytes: &[u8]) -> usize {
     0
 }
 
-fn status(result: Result<(), StatusCode>) -> i32 {
+fn status(result: Result<(), verlet_guest_sdk::StatusCode>) -> i32 {
     match result {
-        Ok(()) => STATUS_OK,
+        Ok(()) => verlet_guest_sdk::STATUS_OK,
         Err(err) => err.as_raw(),
     }
 }

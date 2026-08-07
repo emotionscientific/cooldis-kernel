@@ -1,10 +1,6 @@
-use std::error::Error;
-use std::fmt;
-use std::future::Future;
-
 pub const LIVE_SMOKE_MAX_ATTEMPTS: usize = 3;
 
-pub type LiveSmokeResult<T> = Result<T, Box<dyn Error>>;
+pub type LiveSmokeResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveSmokeModelMisbehavior {
@@ -23,19 +19,19 @@ impl LiveSmokeModelMisbehavior {
     }
 }
 
-impl fmt::Display for LiveSmokeModelMisbehavior {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for LiveSmokeModelMisbehavior {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
     }
 }
 
-impl Error for LiveSmokeModelMisbehavior {}
+impl std::error::Error for LiveSmokeModelMisbehavior {}
 
-pub fn model_misbehavior(message: impl Into<String>) -> Box<dyn Error> {
+pub fn model_misbehavior(message: impl Into<String>) -> Box<dyn std::error::Error> {
     Box::new(LiveSmokeModelMisbehavior::new(message))
 }
 
-pub fn is_model_misbehavior(error: &(dyn Error + 'static)) -> bool {
+pub fn is_model_misbehavior(error: &(dyn std::error::Error + 'static)) -> bool {
     error.downcast_ref::<LiveSmokeModelMisbehavior>().is_some()
 }
 
@@ -55,7 +51,7 @@ pub async fn retry_model_misbehavior<F, Fut, T>(
 ) -> LiveSmokeResult<T>
 where
     F: FnMut(usize) -> Fut,
-    Fut: Future<Output = LiveSmokeResult<T>>,
+    Fut: std::future::Future<Output = LiveSmokeResult<T>>,
 {
     for attempt_number in 1..=LIVE_SMOKE_MAX_ATTEMPTS {
         match attempt(attempt_number).await {

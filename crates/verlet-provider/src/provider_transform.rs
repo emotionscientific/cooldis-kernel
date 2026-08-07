@@ -28,15 +28,10 @@
 //! not content, and are stripped (and counted) everywhere the target lacks
 //! cache support, including the latest user message.
 
-use crate::ProviderCapabilityRecord;
-use serde::Serialize;
-use std::collections::{HashMap, HashSet};
-use verlet_history::{CanonicalContent, CanonicalMessage, CanonicalStopReason, ProviderApi};
-
 /// Accounting for one [`normalize_history_for_target`] run. All counts are
 /// zero when the history is already representable on the target; the
 /// caller embeds the counts in the compiled-context receipt.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct ReplayTransformCounts {
     pub thinking_converted: usize,
     pub thinking_dropped: usize,
@@ -68,7 +63,7 @@ impl ReplayTransformCounts {
 /// The normalized history plus the accounting of what changed.
 #[derive(Clone, Debug)]
 pub struct ReplayTransform {
-    pub messages: Vec<CanonicalMessage>,
+    pub messages: Vec<verlet_history::CanonicalMessage>,
     pub counts: ReplayTransformCounts,
 }
 
@@ -89,53 +84,56 @@ pub struct ReplayTransform {
 /// - cache controls are stripped when the target lacks cache support;
 /// - messages left without content are dropped.
 pub fn normalize_history_for_target(
-    messages: Vec<CanonicalMessage>,
-    target_api: &ProviderApi,
+    messages: Vec<verlet_history::CanonicalMessage>,
+    target_api: &verlet_history::ProviderApi,
     target_provider: &str,
 ) -> ReplayTransform {
-    let capabilities = ProviderCapabilityRecord::for_api(target_api.clone());
+    let capabilities = crate::ProviderCapabilityRecord::for_api(target_api.clone());
     let mut counts = ReplayTransformCounts::default();
 
     let mut errored = vec![false; messages.len()];
-    let mut issuer_by_call_id: HashMap<String, usize> = HashMap::new();
-    let mut duplicate_call_ids: HashSet<String> = HashSet::new();
-    let mut result_call_ids: HashSet<String> = HashSet::new();
+    let mut issuer_by_call_id: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut duplicate_call_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut result_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (index, message) in messages.iter().enumerate() {
         match message {
-            CanonicalMessage::Assistant {
+            verlet_history::CanonicalMessage::Assistant {
                 content,
                 stop_reason,
                 ..
             } => {
                 if matches!(
                     stop_reason,
-                    CanonicalStopReason::Error | CanonicalStopReason::Cancelled
+                    verlet_history::CanonicalStopReason::Error
+                        | verlet_history::CanonicalStopReason::Cancelled
                 ) {
                     errored[index] = true;
                 }
                 for block in content {
-                    if let CanonicalContent::ToolCall { id, .. } = block
+                    if let verlet_history::CanonicalContent::ToolCall { id, .. } = block
                         && issuer_by_call_id.insert(id.clone(), index).is_some()
                     {
                         duplicate_call_ids.insert(id.clone());
                     }
                 }
             }
-            CanonicalMessage::ToolResult { tool_call_id, .. } => {
+            verlet_history::CanonicalMessage::ToolResult { tool_call_id, .. } => {
                 result_call_ids.insert(tool_call_id.clone());
             }
-            CanonicalMessage::User { .. } => {}
+            verlet_history::CanonicalMessage::User { .. } => {}
         }
     }
     let latest_user_index = match messages.last() {
-        Some(CanonicalMessage::User { .. }) => Some(messages.len() - 1),
+        Some(verlet_history::CanonicalMessage::User { .. }) => Some(messages.len() - 1),
         _ => None,
     };
 
     let mut output = Vec::with_capacity(messages.len());
     for (index, message) in messages.into_iter().enumerate() {
         match message {
-            CanonicalMessage::User {
+            verlet_history::CanonicalMessage::User {
                 content,
                 timestamp_ms,
             } => {
@@ -143,7 +141,7 @@ pub fn normalize_history_for_target(
                 let mut kept = Vec::with_capacity(content.len());
                 for block in content {
                     match block {
-                        CanonicalContent::Image { .. }
+                        verlet_history::CanonicalContent::Image { .. }
                             if !capabilities.supports_images && !is_latest_user =>
                         {
                             counts.images_dropped += 1;
@@ -156,12 +154,12 @@ pub fn normalize_history_for_target(
                 if kept.is_empty() && !is_latest_user {
                     continue;
                 }
-                output.push(CanonicalMessage::User {
+                output.push(verlet_history::CanonicalMessage::User {
                     content: kept,
                     timestamp_ms,
                 });
             }
-            CanonicalMessage::Assistant {
+            verlet_history::CanonicalMessage::Assistant {
                 content,
                 api,
                 provider,
@@ -179,28 +177,30 @@ pub fn normalize_history_for_target(
                 let mut kept = Vec::with_capacity(content.len());
                 for block in content {
                     match block {
-                        CanonicalContent::Thinking { .. } if native => kept.push(block),
-                        CanonicalContent::Thinking { text, .. } => {
+                        verlet_history::CanonicalContent::Thinking { .. } if native => {
+                            kept.push(block)
+                        }
+                        verlet_history::CanonicalContent::Thinking { text, .. } => {
                             if text.trim().is_empty() {
                                 counts.thinking_dropped += 1;
                             } else {
                                 counts.thinking_converted += 1;
-                                kept.push(CanonicalContent::Text {
+                                kept.push(verlet_history::CanonicalContent::Text {
                                     text: format!("<thinking>\n{text}\n</thinking>"),
                                     cache_control: None,
                                 });
                             }
                         }
-                        CanonicalContent::Image { .. } => {
+                        verlet_history::CanonicalContent::Image { .. } => {
                             counts.images_dropped += 1;
                         }
-                        CanonicalContent::ToolCall {
+                        verlet_history::CanonicalContent::ToolCall {
                             id,
                             name,
                             arguments,
                         } => {
                             if !duplicate_call_ids.contains(&id) && result_call_ids.contains(&id) {
-                                kept.push(CanonicalContent::ToolCall {
+                                kept.push(verlet_history::CanonicalContent::ToolCall {
                                     id,
                                     name,
                                     arguments,
@@ -218,7 +218,7 @@ pub fn normalize_history_for_target(
                     counts.empty_assistants_dropped += 1;
                     continue;
                 }
-                output.push(CanonicalMessage::Assistant {
+                output.push(verlet_history::CanonicalMessage::Assistant {
                     content: kept,
                     api,
                     provider,
@@ -229,7 +229,7 @@ pub fn normalize_history_for_target(
                     timestamp_ms,
                 });
             }
-            CanonicalMessage::ToolResult {
+            verlet_history::CanonicalMessage::ToolResult {
                 tool_call_id,
                 tool_name,
                 content,
@@ -256,7 +256,7 @@ pub fn normalize_history_for_target(
                     .into_iter()
                     .map(|block| strip_text_cache_control(block, &capabilities, &mut counts))
                     .collect();
-                output.push(CanonicalMessage::ToolResult {
+                output.push(verlet_history::CanonicalMessage::ToolResult {
                     tool_call_id,
                     tool_name,
                     content: kept,
@@ -275,17 +275,17 @@ pub fn normalize_history_for_target(
 }
 
 fn strip_text_cache_control(
-    block: CanonicalContent,
-    capabilities: &ProviderCapabilityRecord,
+    block: verlet_history::CanonicalContent,
+    capabilities: &crate::ProviderCapabilityRecord,
     counts: &mut ReplayTransformCounts,
-) -> CanonicalContent {
+) -> verlet_history::CanonicalContent {
     match block {
-        CanonicalContent::Text {
+        verlet_history::CanonicalContent::Text {
             text,
             cache_control: Some(_),
         } if !capabilities.supports_cache_control => {
             counts.cache_controls_stripped += 1;
-            CanonicalContent::Text {
+            verlet_history::CanonicalContent::Text {
                 text,
                 cache_control: None,
             }

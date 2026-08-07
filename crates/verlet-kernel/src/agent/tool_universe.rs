@@ -23,26 +23,7 @@
 //! discovery and call is witnessed on the thread's event stream
 //! (`tool.universe.discovery.completed`, `tool.universe.call.completed`).
 
-use crate::agent::agent_tool_router::{
-    AgentKernelToolCall, AgentKernelToolOutcome, AgentKernelToolProvider,
-};
-use crate::agent::contracts::sha256_hex;
-use crate::{
-    AgentManifestGrantExpiry, CanonicalMessage, EffectClass, EventKind, EventStreamId,
-    NewEventRecord, RuntimeStore, ToolDefinition, ToolInvocationCancellation, VerletError,
-    VerletResult,
-};
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 pub use verlet_agent::PinnedToolRef;
-#[cfg(test)]
-use verlet_runtime_contracts::MAX_JSON_SCHEMA_SUBSET_DEPTH;
-use verlet_runtime_contracts::{
-    JsonSchemaValidationError, validate_json_schema_subset, validate_json_value_against_schema,
-};
 
 /// Model-facing surface names for the reserved meta-operations. These are
 /// the provider-charset projections of the lexicon's `tool.search` /
@@ -56,7 +37,7 @@ pub const TOOL_CALL_TOOL: &str = "tool_call";
 /// `binder:manifest` on bind receipts.
 pub const TOOL_UNIVERSE_SURFACE_DISCHARGED_BY: &str = "surface:tool-universe";
 #[cfg(test)]
-const MAX_SCHEMA_VALIDATION_DEPTH: usize = MAX_JSON_SCHEMA_SUBSET_DEPTH;
+const MAX_SCHEMA_VALIDATION_DEPTH: usize = verlet_runtime_contracts::MAX_JSON_SCHEMA_SUBSET_DEPTH;
 
 /// One tool contract as witnessed from a live universe at discovery time.
 ///
@@ -64,13 +45,13 @@ const MAX_SCHEMA_VALIDATION_DEPTH: usize = MAX_JSON_SCHEMA_SUBSET_DEPTH;
 /// canonical JSON encoding of the input schema (serde_json object keys are
 /// BTreeMap-ordered in this workspace — `preserve_order` must stay off, or
 /// every schema hash in every receipt changes meaning).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WitnessedToolContract {
     /// Tool name as the universe reports it (e.g. `GoogleSearch.search`).
     pub tool_name: String,
     pub description: String,
-    pub input_schema: Value,
+    pub input_schema: serde_json::Value,
     /// `sha256:<hex>` over the canonical JSON encoding of `input_schema`.
     pub schema_hash: String,
 }
@@ -78,7 +59,7 @@ pub struct WitnessedToolContract {
 impl WitnessedToolContract {
     /// Witness one tool definition from a live universe, stamping its
     /// schema hash.
-    pub fn witness(definition: &ToolDefinition) -> VerletResult<Self> {
+    pub fn witness(definition: &crate::ToolDefinition) -> crate::VerletResult<Self> {
         let schema_hash = schema_hash_of(&definition.input_schema)?;
         Ok(Self {
             tool_name: definition.name.clone(),
@@ -96,29 +77,37 @@ impl WitnessedToolContract {
 }
 
 /// Canonical content address of a JSON schema value.
-pub fn schema_hash_of(schema: &Value) -> VerletResult<String> {
+pub fn schema_hash_of(schema: &serde_json::Value) -> crate::VerletResult<String> {
     let bytes = serde_json::to_vec(schema).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to encode tool schema for hashing: {err}"))
+        crate::VerletError::RuntimeFactory(format!(
+            "failed to encode tool schema for hashing: {err}"
+        ))
     })?;
-    Ok(sha256_hex(&bytes))
+    Ok(crate::agent::contracts::sha256_hex(&bytes))
 }
 
-pub(crate) fn args_fingerprint(tool_name: &str, arguments: &Value) -> VerletResult<String> {
-    let invocation = BTreeMap::from([
+pub(crate) fn args_fingerprint(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> crate::VerletResult<String> {
+    let invocation = std::collections::BTreeMap::from([
         ("arguments", arguments.clone()),
-        ("tool_name", Value::String(tool_name.to_string())),
+        (
+            "tool_name",
+            serde_json::Value::String(tool_name.to_string()),
+        ),
     ]);
     let bytes = serde_json::to_vec(&invocation).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to encode tool invocation arguments for hashing: {err}"
         ))
     })?;
-    Ok(sha256_hex(&bytes))
+    Ok(crate::agent::contracts::sha256_hex(&bytes))
 }
 
 /// One witnessed discovery of a universe's tool contracts. This is the
 /// snapshot a turn's search/describe/call resolve against.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolUniverseDiscovery {
     /// `mcp://<source-name>` reference of the configured source record.
@@ -137,16 +126,16 @@ impl ToolUniverseDiscovery {
         server_ref: impl Into<String>,
         tools: Vec<WitnessedToolContract>,
         discovered_at_ms: i64,
-    ) -> VerletResult<Self> {
+    ) -> crate::VerletResult<Self> {
         let encoded = serde_json::to_vec(&tools).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to encode tool universe discovery for hashing: {err}"
             ))
         })?;
         Ok(Self {
             server_ref: server_ref.into(),
             tools,
-            discovery_hash: sha256_hex(&encoded),
+            discovery_hash: crate::agent::contracts::sha256_hex(&encoded),
             discovered_at_ms,
         })
     }
@@ -154,7 +143,10 @@ impl ToolUniverseDiscovery {
     /// The discovery restricted to a manifest-level `include_tools` filter
     /// (intersection; the source record's own filter has already applied at
     /// the client). Re-stamps the discovery hash for the filtered set.
-    pub fn filtered(&self, include_tools: &BTreeSet<String>) -> VerletResult<Self> {
+    pub fn filtered(
+        &self,
+        include_tools: &std::collections::BTreeSet<String>,
+    ) -> crate::VerletResult<Self> {
         let tools = self
             .tools
             .iter()
@@ -174,28 +166,28 @@ impl ToolUniverseDiscovery {
 /// exposes a direct row. Serialized into thread metadata
 /// (`cooldis.agent.tool_universes`) so the runtime factory can remount the
 /// search surface on restore, exactly like operation bindings.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolUniverseBinding {
     /// Manifest tool id of the `protocol_tool_import`.
     pub import_id: String,
     pub server_ref: String,
-    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
-    pub effect_class: EffectClass,
+    #[serde(default, skip_serializing_if = "crate::EffectClass::is_at_most_once")]
+    pub effect_class: crate::EffectClass,
     /// Manifest-level filter, already applied to `discovery`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_tools: Option<BTreeSet<String>>,
+    pub include_tools: Option<std::collections::BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<PinnedToolRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
+    pub grant_expiries: Vec<crate::AgentManifestGrantExpiry>,
     pub discovery: ToolUniverseDiscovery,
 }
 
 impl ToolUniverseBinding {
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         if self.discovery.server_ref != self.server_ref {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "tool universe binding {:?} discovery returned server_ref {:?}, expected {:?}; fail closed",
                 self.import_id, self.discovery.server_ref, self.server_ref
             )));
@@ -206,7 +198,7 @@ impl ToolUniverseBinding {
                 .map(|contract| contract.schema_hash.as_str())
                 .unwrap_or("<missing>");
             if !witnessed.is_some_and(|contract| contract.matches_pin(pin)) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "tool universe binding {:?} pin drift for {:?}: expected schema hash {}, witnessed {}; fail closed",
                     self.import_id, pin.tool_name, pin.schema_hash, witnessed_hash
                 )));
@@ -219,7 +211,7 @@ impl ToolUniverseBinding {
 /// Bind-receipt entry for one universe: what an audit needs to answer
 /// "which mutable surface could this thread reach, under which witnessed
 /// contracts, and which contracts were pinned to rows".
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolUniverseBindReceipt {
     pub import_id: String,
@@ -231,16 +223,16 @@ pub struct ToolUniverseBindReceipt {
     /// search-surface only.
     pub pinned: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
+    pub grant_expiries: Vec<crate::AgentManifestGrantExpiry>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolUniverseToolReceipt {
     pub tool_name: String,
     pub schema_hash: String,
-    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
-    pub effect_class: EffectClass,
+    #[serde(default, skip_serializing_if = "crate::EffectClass::is_at_most_once")]
+    pub effect_class: crate::EffectClass,
 }
 
 impl ToolUniverseBindReceipt {
@@ -283,7 +275,7 @@ impl ToolUniverseBindReceipt {
 /// discovery happened, addressed by content. Full schemas live in the
 /// thread's binding snapshot and arrive in context through `tool.describe`;
 /// the event carries names and hashes only.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolUniverseDiscoveryReceipt {
     pub server_ref: String,
@@ -302,7 +294,7 @@ impl ToolUniverseDiscoveryReceipt {
                 .map(|tool| ToolUniverseToolReceipt {
                     tool_name: tool.tool_name.clone(),
                     schema_hash: tool.schema_hash.clone(),
-                    effect_class: EffectClass::AtMostOnce,
+                    effect_class: crate::EffectClass::AtMostOnce,
                 })
                 .collect(),
         }
@@ -312,7 +304,7 @@ impl ToolUniverseDiscoveryReceipt {
 /// Payload of the witnessed `tool.universe.call.completed` event: one
 /// `tool.call` against a live universe, with the contract it validated
 /// against and the content address of what came back.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolUniverseCallReceipt {
     pub server_ref: String,
@@ -335,33 +327,33 @@ pub struct ToolUniverseCallOutput {
 /// app server over the MCP client machinery (`McpRemoteToolProvider` /
 /// `SqliteMcpSourceRegistry`); the bind layer depends only on this trait so
 /// the dependency direction stays agent ← adapters.
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ToolUniverseDiscoverer: Send + Sync {
     /// Connect to the configured source behind `server_ref`, list its
     /// tools (the source record's own `include_tools` filter applies at the
     /// client), and witness the result. Fails closed on any transport or
     /// protocol error: a thread does not start against a universe it could
     /// not witness.
-    async fn discover(&self, server_ref: &str) -> VerletResult<ToolUniverseDiscovery>;
+    async fn discover(&self, server_ref: &str) -> crate::VerletResult<ToolUniverseDiscovery>;
 }
 
 /// Invokes one tool on a live universe at turn time. Implemented over the
 /// same MCP client a discovery used, so a turn's calls land on the universe
 /// its snapshot witnessed.
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ToolUniverseCaller: Send + Sync {
     async fn call_tool(
         &self,
         tool_name: &str,
-        arguments: Value,
-    ) -> VerletResult<ToolUniverseCallOutput>;
+        arguments: serde_json::Value,
+    ) -> crate::VerletResult<ToolUniverseCallOutput>;
 }
 
 /// One universe mounted on a thread's search surface: the bound snapshot
 /// plus a live caller for `tool.call`.
 pub struct MountedToolUniverse {
     pub binding: ToolUniverseBinding,
-    pub caller: Arc<dyn ToolUniverseCaller>,
+    pub caller: std::sync::Arc<dyn ToolUniverseCaller>,
 }
 
 /// The search surface: an `AgentKernelToolProvider` exposing the three
@@ -383,8 +375,8 @@ pub struct MountedToolUniverse {
 ///   candidates, never a silent pick.
 pub struct ToolUniverseSearchSurface {
     universes: Vec<MountedToolUniverse>,
-    event_store: Option<Arc<dyn RuntimeStore>>,
-    live_discoverer: Option<Arc<dyn ToolUniverseDiscoverer>>,
+    event_store: Option<std::sync::Arc<dyn crate::RuntimeStore>>,
+    live_discoverer: Option<std::sync::Arc<dyn ToolUniverseDiscoverer>>,
 }
 
 impl ToolUniverseSearchSurface {
@@ -398,8 +390,8 @@ impl ToolUniverseSearchSurface {
 
     pub fn new_with_runtime(
         universes: Vec<MountedToolUniverse>,
-        event_store: Arc<dyn RuntimeStore>,
-        live_discoverer: Arc<dyn ToolUniverseDiscoverer>,
+        event_store: std::sync::Arc<dyn crate::RuntimeStore>,
+        live_discoverer: std::sync::Arc<dyn ToolUniverseDiscoverer>,
     ) -> Self {
         Self {
             universes,
@@ -416,7 +408,7 @@ impl ToolUniverseSearchSurface {
         &self,
         mounted: &MountedToolUniverse,
         now_ms: i64,
-    ) -> VerletResult<()> {
+    ) -> crate::VerletResult<()> {
         crate::agent::manifest_bind::ensure_grant_expiries_live(
             &mounted.binding.grant_expiries,
             now_ms,
@@ -427,7 +419,7 @@ impl ToolUniverseSearchSurface {
         &'a self,
         tool_name: &str,
         universe: Option<&str>,
-    ) -> VerletResult<ResolvedUniverseTool<'a>> {
+    ) -> crate::VerletResult<ResolvedUniverseTool<'a>> {
         let matches = self
             .universes
             .iter()
@@ -451,11 +443,11 @@ impl ToolUniverseSearchSurface {
             }),
             [] => {
                 if let Some(universe) = universe {
-                    Err(VerletError::RuntimeExecution(format!(
+                    Err(crate::VerletError::RuntimeExecution(format!(
                         "tool universe {universe:?} does not expose tool {tool_name:?}"
                     )))
                 } else {
-                    Err(VerletError::RuntimeExecution(format!(
+                    Err(crate::VerletError::RuntimeExecution(format!(
                         "tool {tool_name:?} is not mounted on this thread"
                     )))
                 }
@@ -471,7 +463,7 @@ impl ToolUniverseSearchSurface {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                Err(VerletError::RuntimeExecution(format!(
+                Err(crate::VerletError::RuntimeExecution(format!(
                     "tool {tool_name:?} is ambiguous; qualify with universe. candidates: {candidates}"
                 )))
             }
@@ -481,7 +473,7 @@ impl ToolUniverseSearchSurface {
     fn resolve_pinned_contract<'a>(
         &'a self,
         tool_name: &str,
-    ) -> VerletResult<Option<ResolvedUniverseTool<'a>>> {
+    ) -> crate::VerletResult<Option<ResolvedUniverseTool<'a>>> {
         let mut matches = Vec::new();
         let mut drift_errors = Vec::new();
         for mounted in &self.universes {
@@ -510,7 +502,7 @@ impl ToolUniverseSearchSurface {
             }
         }
         if !drift_errors.is_empty() {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletError::RuntimeExecution(format!(
                 "pinned tool row {tool_name:?} binding drift: {}; fail closed",
                 drift_errors.join("; ")
             )));
@@ -532,7 +524,7 @@ impl ToolUniverseSearchSurface {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                Err(VerletError::RuntimeExecution(format!(
+                Err(crate::VerletError::RuntimeExecution(format!(
                     "pinned tool row {tool_name:?} is ambiguous; candidates: {candidates}"
                 )))
             }
@@ -541,32 +533,32 @@ impl ToolUniverseSearchSurface {
 
     async fn record_call_receipt(
         &self,
-        call: &AgentKernelToolCall,
+        call: &crate::agent::agent_tool_router::AgentKernelToolCall,
         receipt: ToolUniverseCallReceipt,
-    ) -> VerletResult<()> {
+    ) -> crate::VerletResult<()> {
         let (Some(event_store), Some(turn_context)) = (&self.event_store, &call.turn_context)
         else {
             return Ok(());
         };
-        let stream_id = EventStreamId::for_thread(&turn_context.coordinates);
+        let stream_id = crate::EventStreamId::for_thread(&turn_context.coordinates);
         let payload = serde_json::to_value(&receipt).map_err(|err| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "failed to encode tool universe call receipt: {err}"
             ))
         })?;
         let appended = event_store
             .append_events(
                 &stream_id,
-                vec![NewEventRecord::witnessed(
+                vec![crate::NewEventRecord::witnessed(
                     turn_context.coordinates.clone(),
-                    EventKind::ToolUniverseCallCompleted,
+                    crate::EventKind::ToolUniverseCallCompleted,
                     payload,
                 )],
             )
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::VerletError::History(err.to_string()))?;
         if appended.len() != 1 {
-            return Err(VerletError::History(format!(
+            return Err(crate::VerletError::History(format!(
                 "tool universe call receipt append returned {} record(s)",
                 appended.len()
             )));
@@ -576,10 +568,10 @@ impl ToolUniverseSearchSurface {
 
     async fn finish_universe_call(
         &self,
-        call: AgentKernelToolCall,
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
         resolved: ResolvedUniverseTool<'_>,
         output: ToolUniverseCallOutput,
-    ) -> VerletResult<CanonicalMessage> {
+    ) -> crate::VerletResult<crate::CanonicalMessage> {
         let schema_hash = resolved.contract.schema_hash.clone();
         self.finish_universe_call_with_schema_hash(call, resolved, schema_hash, output)
             .await
@@ -587,23 +579,23 @@ impl ToolUniverseSearchSurface {
 
     async fn finish_universe_call_with_schema_hash(
         &self,
-        call: AgentKernelToolCall,
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
         resolved: ResolvedUniverseTool<'_>,
         schema_hash: String,
         output: ToolUniverseCallOutput,
-    ) -> VerletResult<CanonicalMessage> {
+    ) -> crate::VerletResult<crate::CanonicalMessage> {
         self.record_call_receipt(
             &call,
             ToolUniverseCallReceipt {
                 server_ref: resolved.mounted.binding.server_ref.clone(),
                 tool_name: resolved.contract.tool_name.clone(),
                 schema_hash,
-                output_hash: sha256_hex(output.content.as_bytes()),
+                output_hash: crate::agent::contracts::sha256_hex(output.content.as_bytes()),
                 is_error: output.is_error,
             },
         )
         .await?;
-        Ok(CanonicalMessage::tool_result(
+        Ok(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             output.content,
@@ -613,10 +605,10 @@ impl ToolUniverseSearchSurface {
 
     async fn finish_pinned_error(
         &self,
-        call: AgentKernelToolCall,
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
         resolved: ResolvedUniverseTool<'_>,
         content: String,
-    ) -> VerletResult<CanonicalMessage> {
+    ) -> crate::VerletResult<crate::CanonicalMessage> {
         let schema_hash = resolved
             .mounted
             .binding
@@ -638,10 +630,10 @@ impl ToolUniverseSearchSurface {
 
     async fn invoke_universe_call(
         &self,
-        call: AgentKernelToolCall,
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
         resolved: ResolvedUniverseTool<'_>,
-        arguments: Value,
-    ) -> VerletResult<CanonicalMessage> {
+        arguments: serde_json::Value,
+    ) -> crate::VerletResult<crate::CanonicalMessage> {
         if let Err(err) = validate_tool_arguments(resolved.contract, &arguments) {
             return self
                 .finish_universe_call(
@@ -671,16 +663,16 @@ impl ToolUniverseSearchSurface {
 
     async fn invoke_pinned_direct_call(
         &self,
-        call: AgentKernelToolCall,
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
         now_ms: i64,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         let resolved = match self.resolve_pinned_contract(&call.tool_name)? {
             Some(resolved) => resolved,
             None => return Ok(None),
         };
         self.ensure_mounted_grants_live(resolved.mounted, now_ms)?;
         let pin = resolved.mounted.binding.pin.as_ref().ok_or_else(|| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "pinned tool row {:?} is missing its pin",
                 call.tool_name
             ))
@@ -736,14 +728,14 @@ struct ResolvedUniverseTool<'a> {
     contract: &'a WitnessedToolContract,
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for ToolUniverseSearchSurface {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+#[async_trait::async_trait]
+impl crate::agent::agent_tool_router::AgentKernelToolProvider for ToolUniverseSearchSurface {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
         if self.universes.is_empty() {
             return Vec::new();
         }
         let mut definitions = vec![
-            ToolDefinition::new(
+            crate::ToolDefinition::new(
                 TOOL_SEARCH_TOOL,
                 "Search the tool universes mounted on this thread. Returns matching tool names \
                  with one-line descriptions; use tool_describe for the full contract.",
@@ -762,7 +754,7 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                     "additionalProperties": false
                 }),
             ),
-            ToolDefinition::new(
+            crate::ToolDefinition::new(
                 TOOL_DESCRIBE_TOOL,
                 "Show the witnessed contract of one tool (description, input schema, schema \
                  hash) as reference content — the man page for a universe tool.",
@@ -782,7 +774,7 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                     "additionalProperties": false
                 }),
             ),
-            ToolDefinition::new(
+            crate::ToolDefinition::new(
                 TOOL_CALL_TOOL,
                 "Invoke one universe tool. Arguments are validated against the witnessed \
                  schema before the call; mismatches fail closed without touching the universe.",
@@ -816,7 +808,7 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                 if !contract.matches_pin(pin) {
                     continue;
                 }
-                definitions.push(ToolDefinition::new(
+                definitions.push(crate::ToolDefinition::new(
                     contract.tool_name.clone(),
                     contract.description.clone(),
                     contract.input_schema.clone(),
@@ -828,17 +820,17 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         self.invoke_tool_call_at(call, crate::kernel::history::now_ms())
             .await
     }
 
     async fn invoke_tool_call_at(
         &self,
-        call: AgentKernelToolCall,
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
         now_ms: i64,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         match call.tool_name.as_str() {
             TOOL_SEARCH_TOOL => {
                 let query = optional_string_arg(&call.arguments, "query")?;
@@ -889,11 +881,11 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                     "tools": tools
                 }))
                 .map_err(|err| {
-                    VerletError::RuntimeExecution(format!(
+                    crate::VerletError::RuntimeExecution(format!(
                         "failed to encode tool_search result: {err}"
                     ))
                 })?;
-                Ok(Some(CanonicalMessage::tool_result(
+                Ok(Some(crate::CanonicalMessage::tool_result(
                     call.call_id,
                     call.tool_name,
                     content,
@@ -907,7 +899,7 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                 self.ensure_mounted_grants_live(resolved.mounted, now_ms)?;
                 let schema = serde_json::to_string_pretty(&resolved.contract.input_schema)
                     .map_err(|err| {
-                        VerletError::RuntimeExecution(format!(
+                        crate::VerletError::RuntimeExecution(format!(
                             "failed to encode tool schema: {err}"
                         ))
                     })?;
@@ -918,7 +910,7 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                     hash = resolved.contract.schema_hash,
                     description = resolved.contract.description,
                 );
-                Ok(Some(CanonicalMessage::tool_result(
+                Ok(Some(crate::CanonicalMessage::tool_result(
                     call.call_id,
                     call.tool_name,
                     content,
@@ -929,7 +921,7 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
                 let tool_name = required_string_arg(&call.arguments, "tool")?;
                 let universe = optional_string_arg(&call.arguments, "universe")?;
                 let arguments = call.arguments.get("arguments").cloned().ok_or_else(|| {
-                    VerletError::RuntimeExecution(
+                    crate::VerletError::RuntimeExecution(
                         "tool_call requires an arguments object".to_string(),
                     )
                 })?;
@@ -945,13 +937,13 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
 
     async fn invoke_tool_call_cancellable_at(
         &self,
-        call: AgentKernelToolCall,
-        _cancellation: ToolInvocationCancellation,
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
+        _cancellation: crate::ToolInvocationCancellation,
         now_ms: i64,
-    ) -> VerletResult<AgentKernelToolOutcome> {
+    ) -> crate::VerletResult<crate::agent::agent_tool_router::AgentKernelToolOutcome> {
         self.invoke_tool_call_at(call, now_ms)
             .await
-            .map(AgentKernelToolOutcome::Completed)
+            .map(crate::agent::agent_tool_router::AgentKernelToolOutcome::Completed)
     }
 }
 
@@ -964,35 +956,49 @@ impl AgentKernelToolProvider for ToolUniverseSearchSurface {
 /// recursing through objects and arrays.
 pub fn validate_tool_arguments(
     contract: &WitnessedToolContract,
-    arguments: &Value,
-) -> VerletResult<()> {
-    validate_json_schema_subset(&contract.input_schema, &contract.tool_name)
-        .map_err(|err| validation_error(&contract.tool_name, err))?;
-    validate_json_value_against_schema(&contract.input_schema, arguments, &contract.tool_name)
-        .map_err(|err| validation_error(&contract.tool_name, err))
+    arguments: &serde_json::Value,
+) -> crate::VerletResult<()> {
+    verlet_runtime_contracts::validate_json_schema_subset(
+        &contract.input_schema,
+        &contract.tool_name,
+    )
+    .map_err(|err| validation_error(&contract.tool_name, err))?;
+    verlet_runtime_contracts::validate_json_value_against_schema(
+        &contract.input_schema,
+        arguments,
+        &contract.tool_name,
+    )
+    .map_err(|err| validation_error(&contract.tool_name, err))
 }
 
-fn optional_string_arg(arguments: &Value, key: &str) -> VerletResult<Option<String>> {
+fn optional_string_arg(
+    arguments: &serde_json::Value,
+    key: &str,
+) -> crate::VerletResult<Option<String>> {
     match arguments.get(key) {
-        Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(VerletError::RuntimeExecution(format!(
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(crate::VerletError::RuntimeExecution(format!(
             "{key:?} must be a string"
         ))),
         None => Ok(None),
     }
 }
 
-fn required_string_arg(arguments: &Value, key: &str) -> VerletResult<String> {
-    optional_string_arg(arguments, key)?
-        .ok_or_else(|| VerletError::RuntimeExecution(format!("tool surface call requires {key:?}")))
+fn required_string_arg(arguments: &serde_json::Value, key: &str) -> crate::VerletResult<String> {
+    optional_string_arg(arguments, key)?.ok_or_else(|| {
+        crate::VerletError::RuntimeExecution(format!("tool surface call requires {key:?}"))
+    })
 }
 
 fn first_line(value: &str) -> &str {
     value.lines().next().unwrap_or(value)
 }
 
-fn validation_error(tool_name: &str, err: JsonSchemaValidationError) -> VerletError {
-    VerletError::RuntimeExecution(format!(
+fn validation_error(
+    tool_name: &str,
+    err: verlet_runtime_contracts::JsonSchemaValidationError,
+) -> crate::VerletError {
+    crate::VerletError::RuntimeExecution(format!(
         "tool {tool_name:?} arguments failed schema validation at {}: {}",
         err.path(),
         err.message()

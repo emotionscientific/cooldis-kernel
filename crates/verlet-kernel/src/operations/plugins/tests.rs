@@ -1,24 +1,19 @@
-use super::*;
-use crate::{
-    PublishOperationRequest, PublishedOperationBuild, PublishedOperationSource, ResolvedSecret,
-    SecretStoreResult,
-};
 use bashkit::FileSystemExt as _;
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use uuid::Uuid;
 
 struct EmptySecretResolver;
 
 #[async_trait::async_trait]
-impl SecretResolver for EmptySecretResolver {
-    async fn resolve_secret(&self, _name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
+impl crate::SecretResolver for EmptySecretResolver {
+    async fn resolve_secret(
+        &self,
+        _name: &str,
+    ) -> crate::SecretStoreResult<Option<crate::ResolvedSecret>> {
         Ok(None)
     }
 }
 
 struct StaticSecretResolver {
-    secrets: BTreeMap<String, String>,
+    secrets: std::collections::BTreeMap<String, String>,
 }
 
 impl StaticSecretResolver {
@@ -33,9 +28,12 @@ impl StaticSecretResolver {
 }
 
 #[async_trait::async_trait]
-impl SecretResolver for StaticSecretResolver {
-    async fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
-        Ok(self.secrets.get(name).map(|value| ResolvedSecret {
+impl crate::SecretResolver for StaticSecretResolver {
+    async fn resolve_secret(
+        &self,
+        name: &str,
+    ) -> crate::SecretStoreResult<Option<crate::ResolvedSecret>> {
+        Ok(self.secrets.get(name).map(|value| crate::ResolvedSecret {
             name: name.to_string(),
             value: value.clone(),
             source_kind: crate::SecretSourceKind::Local,
@@ -48,8 +46,6 @@ impl SecretResolver for StaticSecretResolver {
 #[cfg(unix)]
 #[test]
 fn pinned_host_mount_rejects_repointing_after_bind_resolution() {
-    use std::os::unix::fs::symlink;
-
     let root = temp_dir("plugin-pinned-host-root");
     let selected = root.join("selected");
     let original = root.join("original");
@@ -58,12 +54,12 @@ fn pinned_host_mount_rejects_repointing_after_bind_resolution() {
     std::fs::create_dir_all(&outside).unwrap();
     let witnessed = std::fs::canonicalize(&selected).unwrap();
     std::fs::rename(&selected, &original).unwrap();
-    symlink(&outside, &selected).unwrap();
-    let vfs = VerletVfs::new(Arc::new(InMemoryFs::new()));
+    std::os::unix::fs::symlink(&outside, &selected).unwrap();
+    let vfs = crate::VerletVfs::new(std::sync::Arc::new(bashkit::InMemoryFs::new()));
 
-    let error = mount_plugin_filesystems(
+    let error = crate::operations::plugins::mount_plugin_filesystems(
         &vfs,
-        vec![PluginMount::pinned_host_read_write("/work", witnessed)],
+        vec![crate::operations::plugins::PluginMount::pinned_host_read_write("/work", witnessed)],
     )
     .unwrap_err();
 
@@ -77,10 +73,14 @@ fn plugin_mount_assembly_rejects_spill_and_descendants() {
     std::fs::create_dir_all(&root).unwrap();
 
     for guest_path in ["/spill", "/spill/nested"] {
-        let vfs = VerletVfs::new(Arc::new(InMemoryFs::new()));
-        let error =
-            mount_plugin_filesystems(&vfs, vec![PluginMount::host_read_write(guest_path, &root)])
-                .unwrap_err();
+        let vfs = crate::VerletVfs::new(std::sync::Arc::new(bashkit::InMemoryFs::new()));
+        let error = crate::operations::plugins::mount_plugin_filesystems(
+            &vfs,
+            vec![crate::operations::plugins::PluginMount::host_read_write(
+                guest_path, &root,
+            )],
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("reserved"), "{error}");
     }
 
@@ -90,9 +90,13 @@ fn plugin_mount_assembly_rejects_spill_and_descendants() {
 #[tokio::test]
 async fn catalog_vfs_allows_two_retention_sized_spill_files() {
     let root = temp_dir("plugin-spill-retention-limit");
-    let catalog = LocalPluginCatalog::load_records(root.clone(), Vec::new(), Vec::new())
-        .await
-        .unwrap();
+    let catalog = crate::operations::plugins::LocalPluginCatalog::load_records(
+        root.clone(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
     assert!(
         catalog.vfs().limits().max_file_size
@@ -119,17 +123,20 @@ async fn selected_records_resolve_secrets_from_filtered_manifest() {
     )
     .await;
 
-    let catalog = LocalPluginCatalog::load_selected_records_with_secret_resolver(
-        root.clone(),
-        vec![LocalPluginCatalogRecord::selected_operations(
-            record,
-            ["profile".to_string()],
-        )],
-        Vec::new(),
-        Arc::new(StaticSecretResolver::new([("VISIBLE", "fixture-secret")])),
-    )
-    .await
-    .unwrap();
+    let catalog =
+        crate::operations::plugins::LocalPluginCatalog::load_selected_records_with_secret_resolver(
+            root.clone(),
+            vec![
+                crate::operations::plugins::LocalPluginCatalogRecord::selected_operations(
+                    record,
+                    ["profile".to_string()],
+                ),
+            ],
+            Vec::new(),
+            std::sync::Arc::new(StaticSecretResolver::new([("VISIBLE", "fixture-secret")])),
+        )
+        .await
+        .unwrap();
 
     let operations = catalog.operations();
     assert_eq!(operations.len(), 1);
@@ -148,11 +155,11 @@ async fn catalog_load_fails_closed_when_selected_secret_is_missing() {
     )
     .await;
 
-    let result = LocalPluginCatalog::load_records_with_secret_resolver(
+    let result = crate::operations::plugins::LocalPluginCatalog::load_records_with_secret_resolver(
         root.clone(),
         vec![record],
         Vec::new(),
-        Arc::new(EmptySecretResolver),
+        std::sync::Arc::new(EmptySecretResolver),
     )
     .await;
     let err = match result {
@@ -170,7 +177,7 @@ async fn catalog_load_fails_closed_when_selected_secret_is_missing() {
 #[tokio::test]
 async fn catalog_loads_published_manifest_without_describing_wasm_blob() {
     let root = temp_dir("plugin-published-manifest-no-describe");
-    let registry = LocalOperationRegistry::new(&root);
+    let registry = crate::LocalOperationRegistry::new(&root);
     let artifact_hash = registry.blobs().put(b"not valid wasm").unwrap();
     let manifest: crate::WasmOperationManifest = serde_json::from_value(serde_json::json!({
         "abi": "cooldis.operation/0.1",
@@ -185,34 +192,38 @@ async fn catalog_loads_published_manifest_without_describing_wasm_blob() {
         }]
     }))
     .unwrap();
-    let registered = RegisteredOperation {
+    let registered = crate::RegisteredOperation {
         name: "invalid".to_string(),
         manifest: manifest.clone(),
-        capability_grants: BTreeSet::new(),
+        capability_grants: std::collections::BTreeSet::new(),
         metadata: Default::default(),
     };
-    let record = PublishedOperationRecord {
+    let record = crate::PublishedOperationRecord {
         schema_version: 1,
         name: registered.name.clone(),
         active_artifact_hash: artifact_hash,
         manifest: manifest.clone(),
         projections: registered.projections(),
         interface: None,
-        capability_grants: BTreeSet::new(),
+        capability_grants: std::collections::BTreeSet::new(),
         metadata: Default::default(),
-        source: PublishedOperationSource::Wasm {
+        source: crate::PublishedOperationSource::Wasm {
             bin_path: root.join("invalid.wasm"),
         },
-        build: PublishedOperationBuild {
+        build: crate::PublishedOperationBuild {
             artifact_path: root.join("invalid.wasm"),
             published_at_ms: 0,
         },
     };
     record.validate().unwrap();
 
-    let catalog = LocalPluginCatalog::load_records(root.clone(), vec![record], Vec::new())
-        .await
-        .unwrap();
+    let catalog = crate::operations::plugins::LocalPluginCatalog::load_records(
+        root.clone(),
+        vec![record],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(catalog.operations().len(), 1);
     assert_eq!(catalog.operations()[0].manifest, manifest);
@@ -220,10 +231,10 @@ async fn catalog_loads_published_manifest_without_describing_wasm_blob() {
 }
 
 async fn publish_multi_operation_record(
-    root: &Path,
+    root: &std::path::Path,
     record_name: &str,
     operations: &[(&str, Vec<&str>)],
-) -> PublishedOperationRecord {
+) -> crate::PublishedOperationRecord {
     let wasm =
         wat::parse_str(multi_operation_guest_with_required_capabilities(operations)).unwrap();
     let artifact = root.join(format!("{record_name}.wasm"));
@@ -236,11 +247,11 @@ async fn publish_multi_operation_record(
                 .map(|capability| (*capability).to_string())
         })
         .collect();
-    LocalOperationRegistry::new(root)
-        .publish_artifact(PublishOperationRequest {
+    crate::LocalOperationRegistry::new(root)
+        .publish_artifact(crate::PublishOperationRequest {
             name: record_name.to_string(),
             artifact_path: artifact.clone(),
-            source: PublishedOperationSource::Wasm { bin_path: artifact },
+            source: crate::PublishedOperationSource::Wasm { bin_path: artifact },
             interface: None,
             capability_grants,
             metadata: Default::default(),
@@ -301,8 +312,8 @@ fn multi_operation_guest_with_required_capabilities(operations: &[(&str, Vec<&st
     )
 }
 
-fn temp_dir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("verlet-{label}-{}", Uuid::now_v7()));
+fn temp_dir(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("verlet-{label}-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&path).unwrap();
     path
 }

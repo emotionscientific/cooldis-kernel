@@ -1,5 +1,3 @@
-use super::*;
-
 #[test]
 fn parse_chat_args_collects_prompt_and_homes() {
     let args = vec![
@@ -19,16 +17,22 @@ fn parse_chat_args_collects_prompt_and_homes() {
         "agent",
     ]
     .into_iter()
-    .map(OsString::from)
+    .map(std::ffi::OsString::from)
     .collect();
-    let parsed = parse_chat_args(args).unwrap();
-    assert_eq!(parsed.cwd, PathBuf::from("/tmp/work"));
+    let parsed = crate::cli::console::parse_chat_args(args).unwrap();
+    assert_eq!(parsed.cwd, std::path::PathBuf::from("/tmp/work"));
     assert_eq!(
         parsed.config_path,
-        Some(PathBuf::from("/tmp/verlet-chat.json"))
+        Some(std::path::PathBuf::from("/tmp/verlet-chat.json"))
     );
-    assert_eq!(parsed.runtime_home, Some(PathBuf::from("/tmp/runtime")));
-    assert_eq!(parsed.state_home, Some(PathBuf::from("/tmp/state")));
+    assert_eq!(
+        parsed.runtime_home,
+        Some(std::path::PathBuf::from("/tmp/runtime"))
+    );
+    assert_eq!(
+        parsed.state_home,
+        Some(std::path::PathBuf::from("/tmp/state"))
+    );
     assert_eq!(parsed.provider.as_deref(), Some("bifrost_openai"));
     assert_eq!(parsed.model.as_deref(), Some("openai/gpt-5.5"));
     assert_eq!(parsed.attach, None);
@@ -39,10 +43,10 @@ fn parse_chat_args_collects_prompt_and_homes() {
 fn parse_chat_args_collects_attach_endpoint() {
     let args = vec!["--attach", "unix:///tmp/verlet.sock", "hello"]
         .into_iter()
-        .map(OsString::from)
+        .map(std::ffi::OsString::from)
         .collect();
 
-    let parsed = parse_chat_args(args).unwrap();
+    let parsed = crate::cli::console::parse_chat_args(args).unwrap();
 
     assert_eq!(parsed.attach.as_deref(), Some("unix:///tmp/verlet.sock"));
     assert_eq!(parsed.prompt.as_deref(), Some("hello"));
@@ -50,7 +54,7 @@ fn parse_chat_args_collects_attach_endpoint() {
 
 #[test]
 fn parse_console_args_defaults_to_loopback_and_open() {
-    let parsed = parse_console_args(Vec::new()).unwrap();
+    let parsed = crate::cli::console::parse_console_args(Vec::new()).unwrap();
 
     assert_eq!(
         parsed.listen.ip(),
@@ -74,21 +78,24 @@ fn parse_console_args_collects_browser_and_runtime_options() {
         "4321",
     ]
     .into_iter()
-    .map(OsString::from)
+    .map(std::ffi::OsString::from)
     .collect();
 
-    let parsed = parse_console_args(args).unwrap();
+    let parsed = crate::cli::console::parse_console_args(args).unwrap();
 
     assert_eq!(parsed.listen, "127.0.0.1:4321".parse().unwrap());
     assert!(!parsed.open);
-    assert_eq!(parsed.cwd, PathBuf::from("/tmp/work"));
+    assert_eq!(parsed.cwd, std::path::PathBuf::from("/tmp/work"));
     assert!(parsed.cwd_explicit);
-    assert_eq!(parsed.config_path, Some(PathBuf::from("/tmp/verlet.toml")));
+    assert_eq!(
+        parsed.config_path,
+        Some(std::path::PathBuf::from("/tmp/verlet.toml"))
+    );
 }
 
 #[test]
 fn console_app_server_config_from_toml_preserves_config_cwd_unless_overridden() {
-    let root = std::env::temp_dir().join(format!("verlet-console-config-{}", Uuid::now_v7()));
+    let root = std::env::temp_dir().join(format!("verlet-console-config-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
     let config_path = root.join("verlet.toml");
     std::fs::write(
@@ -102,20 +109,20 @@ listen = "unix:///tmp/ignored-console-config.sock"
 "#,
     )
     .unwrap();
-    let listen = AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
+    let listen = crate::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
 
-    let parsed = parse_console_args(
+    let parsed = crate::cli::console::parse_console_args(
         vec!["--config", config_path.to_str().unwrap()]
             .into_iter()
-            .map(OsString::from)
+            .map(std::ffi::OsString::from)
             .collect(),
     )
     .unwrap();
-    let config = console_app_server_config(&parsed, listen.clone()).unwrap();
+    let config = crate::cli::console::console_app_server_config(&parsed, listen.clone()).unwrap();
     assert_eq!(config.listen, listen);
     assert_eq!(config.cwd, root.join("configured-work"));
 
-    let parsed = parse_console_args(
+    let parsed = crate::cli::console::parse_console_args(
         vec![
             "--config",
             config_path.to_str().unwrap(),
@@ -123,31 +130,32 @@ listen = "unix:///tmp/ignored-console-config.sock"
             "/tmp/override-work",
         ]
         .into_iter()
-        .map(OsString::from)
+        .map(std::ffi::OsString::from)
         .collect(),
     )
     .unwrap();
-    let config = console_app_server_config(&parsed, listen).unwrap();
-    assert_eq!(config.cwd, PathBuf::from("/tmp/override-work"));
+    let config = crate::cli::console::console_app_server_config(&parsed, listen).unwrap();
+    assert_eq!(config.cwd, std::path::PathBuf::from("/tmp/override-work"));
 
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn console_app_server_config_defaults_to_project_local_roots_and_user_state() {
-    let root = std::env::temp_dir().join(format!("verlet-console-project-{}", Uuid::now_v7()));
+    let root =
+        std::env::temp_dir().join(format!("verlet-console-project-{}", uuid::Uuid::now_v7()));
     let nested = root.join("work/nested");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::create_dir_all(root.join("work/.verlet")).unwrap();
-    let parsed = parse_console_args(
+    let parsed = crate::cli::console::parse_console_args(
         vec!["--cwd", nested.to_str().unwrap()]
             .into_iter()
-            .map(OsString::from)
+            .map(std::ffi::OsString::from)
             .collect(),
     )
     .unwrap();
-    let listen = AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
-    let config = console_app_server_config(&parsed, listen).unwrap();
+    let listen = crate::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
+    let config = crate::cli::console::console_app_server_config(&parsed, listen).unwrap();
 
     let project = root.join("work");
     assert_eq!(config.runtime_home, project.join(".verlet/runtime"));
@@ -159,7 +167,7 @@ fn console_app_server_config_defaults_to_project_local_roots_and_user_state() {
     );
     assert_eq!(
         config.user_metadata_store_path(),
-        default_user_verlet_home()
+        crate::cli::console::default_user_verlet_home()
             .unwrap()
             .join("state/metadata.sqlite3")
     );
@@ -169,16 +177,16 @@ fn console_app_server_config_defaults_to_project_local_roots_and_user_state() {
 
 #[test]
 fn console_project_storage_root_does_not_reuse_user_home() {
-    let root = std::env::temp_dir().join(format!("verlet-console-home-{}", Uuid::now_v7()));
+    let root = std::env::temp_dir().join(format!("verlet-console-home-{}", uuid::Uuid::now_v7()));
     let project_root = root.join("home");
     let user_home = project_root.join(".verlet");
 
     assert_eq!(
-        console_project_storage_root(&project_root, &user_home),
+        crate::cli::console::console_project_storage_root(&project_root, &user_home),
         user_home.join("projects/home")
     );
     assert_eq!(
-        console_project_storage_root(&root.join("work"), &user_home),
+        crate::cli::console::console_project_storage_root(&root.join("work"), &user_home),
         root.join("work/.verlet")
     );
 
@@ -187,14 +195,14 @@ fn console_project_storage_root_does_not_reuse_user_home() {
 
 #[test]
 fn console_project_storage_reuses_existing_legacy_state_directory() {
-    let root = std::env::temp_dir().join(format!("verlet-console-state-{}", Uuid::now_v7()));
+    let root = std::env::temp_dir().join(format!("verlet-console-state-{}", uuid::Uuid::now_v7()));
     let project_root = root.join("project");
     let user_home = root.join("user");
     let legacy = project_root.join(concat!(".", "cool", "dis"));
     std::fs::create_dir_all(&legacy).unwrap();
 
     assert_eq!(
-        console_project_storage_root(&project_root, &user_home),
+        crate::cli::console::console_project_storage_root(&project_root, &user_home),
         legacy
     );
 
@@ -203,7 +211,7 @@ fn console_project_storage_reuses_existing_legacy_state_directory() {
 
 #[test]
 fn console_project_storage_prefers_new_state_directory() {
-    let root = std::env::temp_dir().join(format!("verlet-console-state-{}", Uuid::now_v7()));
+    let root = std::env::temp_dir().join(format!("verlet-console-state-{}", uuid::Uuid::now_v7()));
     let project_root = root.join("project");
     let user_home = root.join("user");
     let canonical = project_root.join(".verlet");
@@ -212,7 +220,7 @@ fn console_project_storage_prefers_new_state_directory() {
     std::fs::create_dir_all(&canonical).unwrap();
 
     assert_eq!(
-        console_project_storage_root(&project_root, &user_home),
+        crate::cli::console::console_project_storage_root(&project_root, &user_home),
         canonical
     );
 
@@ -221,10 +229,10 @@ fn console_project_storage_prefers_new_state_directory() {
 
 #[test]
 fn prepare_console_project_storage_creates_operation_registry_root() {
-    let root = std::env::temp_dir().join(format!("verlet-console-roots-{}", Uuid::now_v7()));
+    let root = std::env::temp_dir().join(format!("verlet-console-roots-{}", uuid::Uuid::now_v7()));
     let workspace = root.join("workspace");
-    let mut config = VerletAppServerConfig::local(
-        AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
+    let mut config = crate::VerletAppServerConfig::local(
+        crate::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
         &workspace,
     );
     config.runtime_home = root.join("runtime");
@@ -233,7 +241,7 @@ fn prepare_console_project_storage_creates_operation_registry_root() {
     config.agent_registry_root = root.join("agents");
     config.capsule_bindings.registry_root = Some(root.join("operations"));
 
-    prepare_console_project_storage(&config).unwrap();
+    crate::cli::console::prepare_console_project_storage(&config).unwrap();
 
     assert!(config.runtime_home.is_dir());
     assert!(config.state_home.is_dir());
@@ -252,10 +260,10 @@ fn prepare_console_project_storage_creates_operation_registry_root() {
 
 #[test]
 fn load_chat_provider_config_reads_bifrost_json() {
-    let dir = std::env::temp_dir().join(format!("verlet-chat-config-{}", Uuid::now_v7()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = std::env::temp_dir().join(format!("verlet-chat-config-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("verlet.json");
-    fs::write(
+    std::fs::write(
         &config_path,
         serde_json::to_vec(&serde_json::json!({
             "chat": {
@@ -270,15 +278,15 @@ fn load_chat_provider_config_reads_bifrost_json() {
         .unwrap(),
     )
     .unwrap();
-    let args = parse_chat_args(
+    let args = crate::cli::console::parse_chat_args(
         vec!["--config", config_path.to_str().unwrap()]
             .into_iter()
-            .map(OsString::from)
+            .map(std::ffi::OsString::from)
             .collect(),
     )
     .unwrap();
-    match load_chat_provider_config(&args).unwrap() {
-        ChatProviderConfig::BifrostOpenAI {
+    match crate::cli::console::load_chat_provider_config(&args).unwrap() {
+        crate::cli::console::ChatProviderConfig::BifrostOpenAI {
             base_url,
             api_key,
             model,
@@ -291,29 +299,30 @@ fn load_chat_provider_config_reads_bifrost_json() {
             assert_eq!(max_tokens, 2048);
             assert!(!stream);
         }
-        ChatProviderConfig::Local => panic!("expected bifrost config"),
-        ChatProviderConfig::OpenAIChatCompletions { .. } => {
+        crate::cli::console::ChatProviderConfig::Local => panic!("expected bifrost config"),
+        crate::cli::console::ChatProviderConfig::OpenAIChatCompletions { .. } => {
             panic!("expected bifrost responses config")
         }
-        ChatProviderConfig::AnthropicMessages { .. } => {
+        crate::cli::console::ChatProviderConfig::AnthropicMessages { .. } => {
             panic!("expected bifrost responses config")
         }
-        ChatProviderConfig::AnthropicBedrock { .. } => {
+        crate::cli::console::ChatProviderConfig::AnthropicBedrock { .. } => {
             panic!("expected bifrost responses config")
         }
-        ChatProviderConfig::CatalogOpenAIChatCompletions { .. } => {
+        crate::cli::console::ChatProviderConfig::CatalogOpenAIChatCompletions { .. } => {
             panic!("expected bifrost responses config")
         }
     }
-    let _ = fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn load_chat_provider_config_reads_anthropic_json() {
-    let dir = std::env::temp_dir().join(format!("verlet-anthropic-config-{}", Uuid::now_v7()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir =
+        std::env::temp_dir().join(format!("verlet-anthropic-config-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("verlet.json");
-    fs::write(
+    std::fs::write(
         &config_path,
         serde_json::to_vec(&serde_json::json!({
             "chat": {
@@ -328,15 +337,15 @@ fn load_chat_provider_config_reads_anthropic_json() {
         .unwrap(),
     )
     .unwrap();
-    let args = parse_chat_args(
+    let args = crate::cli::console::parse_chat_args(
         vec!["--config", config_path.to_str().unwrap()]
             .into_iter()
-            .map(OsString::from)
+            .map(std::ffi::OsString::from)
             .collect(),
     )
     .unwrap();
-    match load_chat_provider_config(&args).unwrap() {
-        ChatProviderConfig::AnthropicMessages {
+    match crate::cli::console::load_chat_provider_config(&args).unwrap() {
+        crate::cli::console::ChatProviderConfig::AnthropicMessages {
             base_url,
             api_key,
             model,
@@ -351,16 +360,16 @@ fn load_chat_provider_config_reads_anthropic_json() {
         }
         _ => panic!("expected Anthropic Messages config"),
     }
-    let _ = fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn load_chat_provider_config_reads_anthropic_bedrock_env_file() {
-    let dir = std::env::temp_dir().join(format!("verlet-bedrock-config-{}", Uuid::now_v7()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = std::env::temp_dir().join(format!("verlet-bedrock-config-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("verlet.json");
     let env_path = dir.join("bedrock.env");
-    fs::write(
+    std::fs::write(
         &env_path,
         "\
 AWS_ACCESS_KEY_ID=AKIA_TEST
@@ -371,7 +380,7 @@ VERLET_ANTHROPIC_BEDROCK_MODEL=us.anthropic.claude-sonnet-4-5-20250929-v1:0
 ",
     )
     .unwrap();
-    fs::write(
+    std::fs::write(
         &config_path,
         serde_json::to_vec(&serde_json::json!({
             "chat": {
@@ -385,15 +394,15 @@ VERLET_ANTHROPIC_BEDROCK_MODEL=us.anthropic.claude-sonnet-4-5-20250929-v1:0
         .unwrap(),
     )
     .unwrap();
-    let args = parse_chat_args(
+    let args = crate::cli::console::parse_chat_args(
         vec!["--config", config_path.to_str().unwrap()]
             .into_iter()
-            .map(OsString::from)
+            .map(std::ffi::OsString::from)
             .collect(),
     )
     .unwrap();
-    match load_chat_provider_config(&args).unwrap() {
-        ChatProviderConfig::AnthropicBedrock {
+    match crate::cli::console::load_chat_provider_config(&args).unwrap() {
+        crate::cli::console::ChatProviderConfig::AnthropicBedrock {
             region,
             base_url,
             access_key_id,
@@ -417,18 +426,18 @@ VERLET_ANTHROPIC_BEDROCK_MODEL=us.anthropic.claude-sonnet-4-5-20250929-v1:0
         }
         _ => panic!("expected Anthropic Bedrock config"),
     }
-    let _ = fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn load_chat_provider_config_reads_openai_compatible_json() {
     let dir = std::env::temp_dir().join(format!(
         "verlet-openai_compatible-config-{}",
-        Uuid::now_v7()
+        uuid::Uuid::now_v7()
     ));
-    fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("verlet.json");
-    fs::write(
+    std::fs::write(
         &config_path,
         serde_json::to_vec(&serde_json::json!({
             "chat": {
@@ -440,15 +449,15 @@ fn load_chat_provider_config_reads_openai_compatible_json() {
         .unwrap(),
     )
     .unwrap();
-    let args = parse_chat_args(
+    let args = crate::cli::console::parse_chat_args(
         vec!["--config", config_path.to_str().unwrap()]
             .into_iter()
-            .map(OsString::from)
+            .map(std::ffi::OsString::from)
             .collect(),
     )
     .unwrap();
-    match load_chat_provider_config(&args).unwrap() {
-        ChatProviderConfig::OpenAIChatCompletions {
+    match crate::cli::console::load_chat_provider_config(&args).unwrap() {
+        crate::cli::console::ChatProviderConfig::OpenAIChatCompletions {
             provider,
             base_url,
             api_key,
@@ -460,7 +469,7 @@ fn load_chat_provider_config_reads_openai_compatible_json() {
             assert_eq!(provider, "openai_compatible");
             assert_eq!(base_url, "https://api.example.invalid/v1");
             assert_eq!(api_key, "test-openai_compatible-key");
-            assert_eq!(model, APP_SERVER_OPENAI_COMPATIBLE_MODEL);
+            assert_eq!(model, crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL);
             assert_eq!(max_tokens, 4096);
             assert!(!stream);
             assert_eq!(
@@ -468,30 +477,30 @@ fn load_chat_provider_config_reads_openai_compatible_json() {
                 vec![("X-Example-Provider".to_string(), "required".to_string())]
             );
         }
-        ChatProviderConfig::Local
-        | ChatProviderConfig::BifrostOpenAI { .. }
-        | ChatProviderConfig::AnthropicMessages { .. }
-        | ChatProviderConfig::AnthropicBedrock { .. } => {
+        crate::cli::console::ChatProviderConfig::Local
+        | crate::cli::console::ChatProviderConfig::BifrostOpenAI { .. }
+        | crate::cli::console::ChatProviderConfig::AnthropicMessages { .. }
+        | crate::cli::console::ChatProviderConfig::AnthropicBedrock { .. } => {
             panic!("expected openai_compatible chat completions config")
         }
-        ChatProviderConfig::CatalogOpenAIChatCompletions { .. } => {
+        crate::cli::console::ChatProviderConfig::CatalogOpenAIChatCompletions { .. } => {
             panic!("expected direct openai_compatible chat completions config")
         }
     }
-    let _ = fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn load_chat_provider_config_uses_catalog_for_plain_openai_compatible_without_key() {
     let dir = std::env::temp_dir().join(format!(
         "verlet-openai_compatible-catalog-{}",
-        Uuid::now_v7()
+        uuid::Uuid::now_v7()
     ));
-    fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("verlet.json");
     let env_path = dir.join("empty.env");
-    fs::write(&env_path, "").unwrap();
-    fs::write(
+    std::fs::write(&env_path, "").unwrap();
+    std::fs::write(
         &config_path,
         serde_json::to_vec(&serde_json::json!({
             "chat": {
@@ -504,15 +513,15 @@ fn load_chat_provider_config_uses_catalog_for_plain_openai_compatible_without_ke
         .unwrap(),
     )
     .unwrap();
-    let args = parse_chat_args(
+    let args = crate::cli::console::parse_chat_args(
         vec!["--config", config_path.to_str().unwrap()]
             .into_iter()
-            .map(OsString::from)
+            .map(std::ffi::OsString::from)
             .collect(),
     )
     .unwrap();
-    match load_chat_provider_config(&args).unwrap() {
-        ChatProviderConfig::CatalogOpenAIChatCompletions {
+    match crate::cli::console::load_chat_provider_config(&args).unwrap() {
+        crate::cli::console::ChatProviderConfig::CatalogOpenAIChatCompletions {
             provider_id,
             model,
             max_tokens,
@@ -525,28 +534,28 @@ fn load_chat_provider_config_uses_catalog_for_plain_openai_compatible_without_ke
         }
         _ => panic!("expected catalog-backed openai_compatible config"),
     }
-    let _ = fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn load_daemon_provider_config_uses_catalog_for_plain_openai_compatible_without_key() {
     let dir = std::env::temp_dir().join(format!(
         "verlet-openai_compatible-daemon-catalog-{}",
-        Uuid::now_v7()
+        uuid::Uuid::now_v7()
     ));
-    fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
     let env_path = dir.join("empty.env");
-    fs::write(&env_path, "").unwrap();
-    let config = VerletProviderConfig {
+    std::fs::write(&env_path, "").unwrap();
+    let config = crate::VerletProviderConfig {
         provider: Some("openai_compatible".to_string()),
         model: Some("example-chat-model-large".to_string()),
         stream: Some(false),
         env_file: Some(env_path),
-        ..VerletProviderConfig::default()
+        ..crate::VerletProviderConfig::default()
     };
 
-    match load_daemon_provider_config(&config).unwrap() {
-        ChatProviderConfig::CatalogOpenAIChatCompletions {
+    match crate::cli::daemon::load_daemon_provider_config(&config).unwrap() {
+        crate::cli::console::ChatProviderConfig::CatalogOpenAIChatCompletions {
             provider_id,
             model,
             max_tokens,
@@ -559,15 +568,18 @@ fn load_daemon_provider_config_uses_catalog_for_plain_openai_compatible_without_
         }
         _ => panic!("expected catalog-backed openai_compatible daemon config"),
     }
-    let _ = fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn load_daemon_provider_config_reads_anthropic_bedrock_env_file() {
-    let dir = std::env::temp_dir().join(format!("verlet-bedrock-daemon-config-{}", Uuid::now_v7()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "verlet-bedrock-daemon-config-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
     let env_path = dir.join("bedrock.env");
-    fs::write(
+    std::fs::write(
         &env_path,
         "\
 AWS_ACCESS_KEY_ID=AKIA_DAEMON_TEST
@@ -577,15 +589,15 @@ AWS_BEDROCK_MODEL=anthropic.claude-sonnet-4-5-20250929-v1:0
 ",
     )
     .unwrap();
-    let config = VerletProviderConfig {
+    let config = crate::VerletProviderConfig {
         provider: Some("anthropic_bedrock".to_string()),
         env_file: Some(env_path),
         stream: Some(false),
-        ..VerletProviderConfig::default()
+        ..crate::VerletProviderConfig::default()
     };
 
-    match load_daemon_provider_config(&config).unwrap() {
-        ChatProviderConfig::AnthropicBedrock {
+    match crate::cli::daemon::load_daemon_provider_config(&config).unwrap() {
+        crate::cli::console::ChatProviderConfig::AnthropicBedrock {
             region,
             base_url,
             access_key_id,
@@ -606,15 +618,16 @@ AWS_BEDROCK_MODEL=anthropic.claude-sonnet-4-5-20250929-v1:0
         }
         _ => panic!("expected Anthropic Bedrock daemon config"),
     }
-    let _ = fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn load_chat_operation_bindings_config_resolves_registry_root() {
-    let dir = std::env::temp_dir().join(format!("verlet-operation-config-{}", Uuid::now_v7()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir =
+        std::env::temp_dir().join(format!("verlet-operation-config-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("verlet.json");
-    fs::write(
+    std::fs::write(
         &config_path,
         serde_json::to_vec(&serde_json::json!({
             "chat": {
@@ -629,17 +642,17 @@ fn load_chat_operation_bindings_config_resolves_registry_root() {
         .unwrap(),
     )
     .unwrap();
-    let args = parse_chat_args(
+    let args = crate::cli::console::parse_chat_args(
         vec!["--config", config_path.to_str().unwrap()]
             .into_iter()
-            .map(OsString::from)
+            .map(std::ffi::OsString::from)
             .collect(),
     )
     .unwrap();
     // lexicon-allow: capsule - existing chat config function name
-    let bindings = load_chat_capsule_bindings_config(&args).unwrap();
+    let bindings = crate::cli::console::load_chat_capsule_bindings_config(&args).unwrap();
     assert_eq!(bindings.registry_root, Some(dir.join("operations")));
     assert_eq!(bindings.global_operation_names, vec!["search"]);
     assert!(bindings.load_all_active_when_unbound);
-    let _ = fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir);
 }

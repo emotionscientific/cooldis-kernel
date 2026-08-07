@@ -1,29 +1,22 @@
-use verlet_guest_sdk::{
-    EventSink, HttpRequest, HttpResponse, HttpResponseSources, Invocation, OperationDefinition,
-    OperationEventKind, OperationManifest, OperationMode, OperationValueKind,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_OK, Sink, Source, StatusCode, http_request,
-    read_source, write_sink,
-};
-use serde::{Deserialize, Serialize};
-
 const LOOKUP_ID: u32 = 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __verlet_describe_module__(sink: u32) -> i32 {
-    let manifest = OperationManifest::new(vec![OperationDefinition {
-        id: LOOKUP_ID,
-        name: "lookup".to_string(),
-        input: OperationValueKind::Json,
-        output: OperationValueKind::Json,
-        events: OperationEventKind::Jsonl,
-        mode: OperationMode::Sync,
-        required_capabilities: vec!["net.http.private".to_string()],
-    }]);
+    let manifest =
+        verlet_guest_sdk::OperationManifest::new(vec![verlet_guest_sdk::OperationDefinition {
+            id: LOOKUP_ID,
+            name: "lookup".to_string(),
+            input: verlet_guest_sdk::OperationValueKind::Json,
+            output: verlet_guest_sdk::OperationValueKind::Json,
+            events: verlet_guest_sdk::OperationEventKind::Jsonl,
+            mode: verlet_guest_sdk::OperationMode::Sync,
+            required_capabilities: vec!["net.http.private".to_string()],
+        }]);
     let bytes = match manifest.to_json_vec() {
         Ok(bytes) => bytes,
-        Err(_) => return STATUS_INVALID_ARGUMENT,
+        Err(_) => return verlet_guest_sdk::STATUS_INVALID_ARGUMENT,
     };
-    status(write_sink(Sink(sink), &bytes).map(|_| ()))
+    status(verlet_guest_sdk::write_sink(verlet_guest_sdk::Sink(sink), &bytes).map(|_| ()))
 }
 
 #[unsafe(no_mangle)]
@@ -36,29 +29,29 @@ pub extern "C" fn __verlet_call_operation__(
 ) -> i32 {
     match operation {
         LOOKUP_ID => status(lookup_employee(
-            Invocation(invocation),
-            Source(source),
-            Sink(output),
-            EventSink(events),
+            verlet_guest_sdk::Invocation(invocation),
+            verlet_guest_sdk::Source(source),
+            verlet_guest_sdk::Sink(output),
+            verlet_guest_sdk::EventSink(events),
         )),
-        _ => STATUS_NOT_FOUND,
+        _ => verlet_guest_sdk::STATUS_NOT_FOUND,
     }
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct EmployeeLookupInput {
     base_url: String,
     employee_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct EmployeeServiceRecord {
     employee_id: String,
     name: String,
     department: String,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct EmployeeLookupOutput {
     employee_id: String,
     name: String,
@@ -67,15 +60,15 @@ struct EmployeeLookupOutput {
 }
 
 fn lookup_employee(
-    invocation: Invocation,
-    source: Source,
-    output: Sink,
-    events: EventSink,
-) -> Result<(), StatusCode> {
-    let input: EmployeeLookupInput =
-        serde_json::from_slice(&read_all_source(source)?).map_err(|_| StatusCode::InvalidArgument)?;
+    invocation: verlet_guest_sdk::Invocation,
+    source: verlet_guest_sdk::Source,
+    output: verlet_guest_sdk::Sink,
+    events: verlet_guest_sdk::EventSink,
+) -> Result<(), verlet_guest_sdk::StatusCode> {
+    let input: EmployeeLookupInput = serde_json::from_slice(&read_all_source(source)?)
+        .map_err(|_| verlet_guest_sdk::StatusCode::InvalidArgument)?;
     if input.base_url.trim().is_empty() || input.employee_id.trim().is_empty() {
-        return Err(StatusCode::InvalidArgument);
+        return Err(verlet_guest_sdk::StatusCode::InvalidArgument);
     }
 
     let url = format!(
@@ -83,21 +76,22 @@ fn lookup_employee(
         input.base_url.trim_end_matches('/'),
         input.employee_id
     );
-    let request = HttpRequest::new("GET", url)
+    let request = verlet_guest_sdk::HttpRequest::new("GET", url)
         .header("accept", "application/json")
         .timeout_ms(1000)
         .max_response_bytes(4096)
         .to_json_vec()
-        .map_err(|_| StatusCode::InvalidArgument)?;
-    let HttpResponseSources { metadata, body } =
-        http_request(invocation, &request, &[], events)?;
-    let response: HttpResponse = serde_json::from_slice(&read_all_source(metadata)?)
-        .map_err(|_| StatusCode::TransportError)?;
+        .map_err(|_| verlet_guest_sdk::StatusCode::InvalidArgument)?;
+    let verlet_guest_sdk::HttpResponseSources { metadata, body } =
+        verlet_guest_sdk::http_request(invocation, &request, &[], events)?;
+    let response: verlet_guest_sdk::HttpResponse =
+        serde_json::from_slice(&read_all_source(metadata)?)
+            .map_err(|_| verlet_guest_sdk::StatusCode::TransportError)?;
     if response.status != 200 {
-        return Err(StatusCode::TransportError);
+        return Err(verlet_guest_sdk::StatusCode::TransportError);
     }
     let record: EmployeeServiceRecord = serde_json::from_slice(&read_all_source(body)?)
-        .map_err(|_| StatusCode::TransportError)?;
+        .map_err(|_| verlet_guest_sdk::StatusCode::TransportError)?;
     let output_value = EmployeeLookupOutput {
         employee_id: record.employee_id,
         name: record.name,
@@ -107,11 +101,13 @@ fn lookup_employee(
     write_json(output, &output_value)
 }
 
-fn read_all_source(source: Source) -> Result<Vec<u8>, StatusCode> {
+fn read_all_source(
+    source: verlet_guest_sdk::Source,
+) -> Result<Vec<u8>, verlet_guest_sdk::StatusCode> {
     let mut output = Vec::new();
     let mut buffer = [0u8; 1024];
     loop {
-        let n = read_source(source, &mut buffer)?;
+        let n = verlet_guest_sdk::read_source(source, &mut buffer)?;
         if n == 0 {
             break;
         }
@@ -123,15 +119,19 @@ fn read_all_source(source: Source) -> Result<Vec<u8>, StatusCode> {
     Ok(output)
 }
 
-fn write_json(output: Sink, value: &impl Serialize) -> Result<(), StatusCode> {
-    let bytes = serde_json::to_vec(value).map_err(|_| StatusCode::InvalidArgument)?;
-    write_sink(output, &bytes)?;
+fn write_json(
+    output: verlet_guest_sdk::Sink,
+    value: &impl serde::Serialize,
+) -> Result<(), verlet_guest_sdk::StatusCode> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|_| verlet_guest_sdk::StatusCode::InvalidArgument)?;
+    verlet_guest_sdk::write_sink(output, &bytes)?;
     Ok(())
 }
 
-fn status(result: Result<(), StatusCode>) -> i32 {
+fn status(result: Result<(), verlet_guest_sdk::StatusCode>) -> i32 {
     match result {
-        Ok(()) => STATUS_OK,
+        Ok(()) => verlet_guest_sdk::STATUS_OK,
         Err(err) => err.as_raw(),
     }
 }

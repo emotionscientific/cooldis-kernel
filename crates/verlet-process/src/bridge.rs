@@ -1,14 +1,3 @@
-use crate::VerletProcessResult;
-use async_trait::async_trait;
-use futures_util::stream::{self, BoxStream};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{Display, Formatter};
-use std::path::PathBuf;
-use uuid::Uuid;
-use verlet_runtime_contracts::{ThreadCoordinates, ThreadId};
-
 pub const UNIX_NAMESPACE: &str = "unix";
 pub const UNIX_EXEC_OPERATION: &str = "exec";
 pub const FS_NAMESPACE: &str = "fs";
@@ -17,12 +6,12 @@ pub const BROWSER_NAMESPACE: &str = "browser";
 pub const PROCEDURE_NAMESPACE: &str = "procedure";
 pub const REDUCER_NAMESPACE: &str = "reducer";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct BridgeSessionId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BridgeSessionId(uuid::Uuid);
 
 impl BridgeSessionId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 }
 
@@ -32,21 +21,21 @@ impl Default for BridgeSessionId {
     }
 }
 
-impl Display for BridgeSessionId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl std::fmt::Display for BridgeSessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct OperationId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct OperationId(uuid::Uuid);
 
 impl OperationId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
 }
@@ -57,18 +46,18 @@ impl Default for OperationId {
     }
 }
 
-impl Display for OperationId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl std::fmt::Display for OperationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BridgeScope {
     pub tenant_id: String,
     pub user_id: String,
     pub session_id: String,
-    pub thread_id: Option<ThreadId>,
+    pub thread_id: Option<verlet_runtime_contracts::ThreadId>,
 }
 
 impl BridgeScope {
@@ -76,7 +65,7 @@ impl BridgeScope {
         tenant_id: impl Into<String>,
         user_id: impl Into<String>,
         session_id: impl Into<String>,
-        thread_id: Option<ThreadId>,
+        thread_id: Option<verlet_runtime_contracts::ThreadId>,
     ) -> Self {
         Self {
             tenant_id: tenant_id.into(),
@@ -86,7 +75,7 @@ impl BridgeScope {
         }
     }
 
-    pub fn from_thread(coordinates: &ThreadCoordinates) -> Self {
+    pub fn from_thread(coordinates: &verlet_runtime_contracts::ThreadCoordinates) -> Self {
         Self {
             tenant_id: coordinates.tenant_id.clone(),
             user_id: coordinates.user_id.clone(),
@@ -96,7 +85,7 @@ impl BridgeScope {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BridgeBackendKind {
     InProcess,
@@ -105,7 +94,7 @@ pub enum BridgeBackendKind {
     SandboxFleet,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnixExecutionMode {
     VirtualOnly,
@@ -113,10 +102,10 @@ pub enum UnixExecutionMode {
     Hybrid,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CapabilityDescriptor {
     pub namespace: String,
-    pub operations: BTreeSet<String>,
+    pub operations: std::collections::BTreeSet<String>,
     pub backend_kind: BridgeBackendKind,
     pub description: Option<String>,
 }
@@ -132,7 +121,7 @@ impl CapabilityDescriptor {
             operations: operations
                 .into_iter()
                 .map(Into::into)
-                .collect::<BTreeSet<_>>(),
+                .collect::<std::collections::BTreeSet<_>>(),
             backend_kind,
             description: None,
         }
@@ -148,7 +137,7 @@ impl CapabilityDescriptor {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BridgeCapabilities {
     pub backend_id: String,
     pub backend_kind: BridgeBackendKind,
@@ -176,10 +165,10 @@ impl BridgeCapabilities {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CapabilityGrant {
     pub namespace: String,
-    pub operations: BTreeSet<String>,
+    pub operations: std::collections::BTreeSet<String>,
 }
 
 impl CapabilityGrant {
@@ -192,7 +181,7 @@ impl CapabilityGrant {
             operations: operations
                 .into_iter()
                 .map(Into::into)
-                .collect::<BTreeSet<_>>(),
+                .collect::<std::collections::BTreeSet<_>>(),
         }
     }
 
@@ -201,30 +190,30 @@ impl CapabilityGrant {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OpenBridgeSessionRequest {
     pub scope: BridgeScope,
     pub requested_capabilities: Vec<CapabilityGrant>,
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BridgeSession {
     pub session_id: BridgeSessionId,
     pub scope: BridgeScope,
     pub granted_capabilities: Vec<CapabilityGrant>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationRequest {
     pub operation_id: OperationId,
     pub bridge_session_id: BridgeSessionId,
     pub scope: BridgeScope,
     pub namespace: String,
     pub operation: String,
-    pub payload: Value,
+    pub payload: serde_json::Value,
     pub timeout_ms: Option<u64>,
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl OperationRequest {
@@ -233,7 +222,7 @@ impl OperationRequest {
         scope: BridgeScope,
         namespace: impl Into<String>,
         operation: impl Into<String>,
-        payload: Value,
+        payload: serde_json::Value,
     ) -> Self {
         Self {
             operation_id: OperationId::new(),
@@ -243,7 +232,7 @@ impl OperationRequest {
             operation: operation.into(),
             payload,
             timeout_ms: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -267,21 +256,21 @@ impl OperationRequest {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnixExecPayload {
     pub command: String,
-    pub cwd: PathBuf,
-    pub env: BTreeMap<String, String>,
+    pub cwd: std::path::PathBuf,
+    pub env: std::collections::BTreeMap<String, String>,
     pub stdin: Option<Vec<u8>>,
     pub mode: UnixExecutionMode,
 }
 
 impl UnixExecPayload {
-    pub fn new(command: impl Into<String>, cwd: impl Into<PathBuf>) -> Self {
+    pub fn new(command: impl Into<String>, cwd: impl Into<std::path::PathBuf>) -> Self {
         Self {
             command: command.into(),
             cwd: cwd.into(),
-            env: BTreeMap::new(),
+            env: std::collections::BTreeMap::new(),
             stdin: None,
             mode: UnixExecutionMode::Hybrid,
         }
@@ -303,7 +292,7 @@ impl UnixExecPayload {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OperationEvent {
     Started {
@@ -325,14 +314,14 @@ pub enum OperationEvent {
     Artifact {
         operation_id: OperationId,
         artifact_id: String,
-        path: Option<PathBuf>,
+        path: Option<std::path::PathBuf>,
         mime_type: Option<String>,
     },
     FileDelta {
         operation_id: OperationId,
         kind: FileDeltaKind,
-        path: PathBuf,
-        target: Option<PathBuf>,
+        path: std::path::PathBuf,
+        target: Option<std::path::PathBuf>,
     },
     Frame {
         operation_id: OperationId,
@@ -380,7 +369,7 @@ impl OperationEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationLogLevel {
     Trace,
@@ -390,7 +379,7 @@ pub enum OperationLogLevel {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileDeltaKind {
     Write,
@@ -402,7 +391,7 @@ pub enum FileDeltaKind {
     Chmod,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationExitStatus {
     pub code: Option<i32>,
     pub success: bool,
@@ -424,22 +413,29 @@ impl OperationExitStatus {
     }
 }
 
-pub type OperationEventStream = BoxStream<'static, VerletProcessResult<OperationEvent>>;
+pub type OperationEventStream =
+    futures_util::stream::BoxStream<'static, crate::VerletProcessResult<OperationEvent>>;
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait CapabilityBridge: Send + Sync + 'static {
-    async fn capabilities(&self) -> VerletProcessResult<BridgeCapabilities>;
+    async fn capabilities(&self) -> crate::VerletProcessResult<BridgeCapabilities>;
 
     async fn open_session(
         &self,
         request: OpenBridgeSessionRequest,
-    ) -> VerletProcessResult<BridgeSession>;
+    ) -> crate::VerletProcessResult<BridgeSession>;
 
-    async fn invoke(&self, request: OperationRequest) -> VerletProcessResult<OperationEventStream>;
+    async fn invoke(
+        &self,
+        request: OperationRequest,
+    ) -> crate::VerletProcessResult<OperationEventStream>;
 
-    async fn cancel(&self, operation_id: OperationId) -> VerletProcessResult<()>;
+    async fn cancel(&self, operation_id: OperationId) -> crate::VerletProcessResult<()>;
 
-    async fn close_session(&self, bridge_session_id: BridgeSessionId) -> VerletProcessResult<()>;
+    async fn close_session(
+        &self,
+        bridge_session_id: BridgeSessionId,
+    ) -> crate::VerletProcessResult<()>;
 }
 
 #[derive(Clone, Debug)]
@@ -453,16 +449,16 @@ impl RejectingCapabilityBridge {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl CapabilityBridge for RejectingCapabilityBridge {
-    async fn capabilities(&self) -> VerletProcessResult<BridgeCapabilities> {
+    async fn capabilities(&self) -> crate::VerletProcessResult<BridgeCapabilities> {
         Ok(self.capabilities.clone())
     }
 
     async fn open_session(
         &self,
         request: OpenBridgeSessionRequest,
-    ) -> VerletProcessResult<BridgeSession> {
+    ) -> crate::VerletProcessResult<BridgeSession> {
         Ok(BridgeSession {
             session_id: BridgeSessionId::new(),
             scope: request.scope,
@@ -470,7 +466,10 @@ impl CapabilityBridge for RejectingCapabilityBridge {
         })
     }
 
-    async fn invoke(&self, request: OperationRequest) -> VerletProcessResult<OperationEventStream> {
+    async fn invoke(
+        &self,
+        request: OperationRequest,
+    ) -> crate::VerletProcessResult<OperationEventStream> {
         let event = OperationEvent::Failed {
             operation_id: request.operation_id,
             code: "capability_unavailable".to_string(),
@@ -479,14 +478,19 @@ impl CapabilityBridge for RejectingCapabilityBridge {
                 request.namespace, request.operation
             ),
         };
-        Ok(Box::pin(stream::once(async move { Ok(event) })))
+        Ok(Box::pin(futures_util::stream::once(
+            async move { Ok(event) },
+        )))
     }
 
-    async fn cancel(&self, _operation_id: OperationId) -> VerletProcessResult<()> {
+    async fn cancel(&self, _operation_id: OperationId) -> crate::VerletProcessResult<()> {
         Ok(())
     }
 
-    async fn close_session(&self, _bridge_session_id: BridgeSessionId) -> VerletProcessResult<()> {
+    async fn close_session(
+        &self,
+        _bridge_session_id: BridgeSessionId,
+    ) -> crate::VerletProcessResult<()> {
         Ok(())
     }
 }

@@ -1,32 +1,27 @@
-use crate::{OperationImportPlan, VerletError, VerletResult};
-use serde_json::json;
-use verlet_abi::{
-    WasmOperationDefinition, WasmOperationEventKind, WasmOperationManifest, WasmOperationMode,
-    WasmOperationValueKind,
-};
-
 const INPUT_CAPACITY: u32 = 1024 * 1024;
 const OUTPUT_CAPACITY: u32 = 512 * 1024;
 
-pub fn render_openapi_import_artifact(plan: &OperationImportPlan) -> VerletResult<Vec<u8>> {
-    let manifest = WasmOperationManifest {
+pub fn render_openapi_import_artifact(
+    plan: &crate::OperationImportPlan,
+) -> crate::VerletResult<Vec<u8>> {
+    let manifest = verlet_abi::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
         operations: plan
             .operations
             .iter()
-            .map(|operation| WasmOperationDefinition {
+            .map(|operation| verlet_abi::WasmOperationDefinition {
                 id: operation.id,
                 name: operation.name.clone(),
-                input: WasmOperationValueKind::Json,
-                output: WasmOperationValueKind::Json,
-                events: WasmOperationEventKind::Jsonl,
-                mode: WasmOperationMode::Sync,
+                input: verlet_abi::WasmOperationValueKind::Json,
+                output: verlet_abi::WasmOperationValueKind::Json,
+                events: verlet_abi::WasmOperationEventKind::Jsonl,
+                mode: verlet_abi::WasmOperationMode::Sync,
                 required_capabilities: operation.required_capabilities.iter().cloned().collect(),
             })
             .collect(),
     };
     let manifest = serde_json::to_vec(&manifest).map_err(|error| {
-        VerletError::RuntimeFactory(format!("failed to encode import manifest: {error}"))
+        crate::VerletError::RuntimeFactory(format!("failed to encode import manifest: {error}"))
     })?;
     let mut requests = Vec::with_capacity(plan.operations.len());
     for operation in &plan.operations {
@@ -35,7 +30,7 @@ pub fn render_openapi_import_artifact(plan: &OperationImportPlan) -> VerletResul
             operation.server_url.trim_end_matches('/'),
             operation.path_template.trim_start_matches('/')
         );
-        let request = json!({
+        let request = serde_json::json!({
             "abi": "cooldis.net.http/0.1",
             "method": operation.method,
             "url": url,
@@ -60,7 +55,9 @@ pub fn render_openapi_import_artifact(plan: &OperationImportPlan) -> VerletResul
             "max_response_bytes": 262144
         });
         requests.push(serde_json::to_vec(&request).map_err(|error| {
-            VerletError::RuntimeFactory(format!("failed to encode import request plan: {error}"))
+            crate::VerletError::RuntimeFactory(format!(
+                "failed to encode import request plan: {error}"
+            ))
         })?);
     }
     encode_module(&manifest, &requests, plan)
@@ -69,8 +66,8 @@ pub fn render_openapi_import_artifact(plan: &OperationImportPlan) -> VerletResul
 fn encode_module(
     manifest: &[u8],
     requests: &[Vec<u8>],
-    plan: &OperationImportPlan,
-) -> VerletResult<Vec<u8>> {
+    plan: &crate::OperationImportPlan,
+) -> crate::VerletResult<Vec<u8>> {
     let manifest_offset = 1024_u32;
     let manifest_len = artifact_u32("manifest length", manifest.len())?;
     let mut next_offset = checked_align(
@@ -93,12 +90,12 @@ fn encode_module(
     let memory_pages = memory_bytes.div_ceil(65536);
     let max_memory_pages =
         u32::try_from(verlet_wasm::DEFAULT_MEMORY_LIMIT_BYTES / 65536).map_err(|_| {
-            VerletError::RuntimeFactory(
+            crate::VerletError::RuntimeFactory(
                 "configured Wasm memory limit does not fit the artifact encoder".to_string(),
             )
         })?;
     if memory_pages > max_memory_pages {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "OpenAPI import artifact requires {memory_pages} Wasm memory pages, exceeding the runtime limit of {max_memory_pages}"
         )));
     }
@@ -152,7 +149,7 @@ fn encode_module(
         .len()
         .checked_add(1)
         .ok_or_else(|| {
-            VerletError::RuntimeFactory(
+            crate::VerletError::RuntimeFactory(
                 "OpenAPI import artifact data segment count overflowed".to_string(),
             )
         })
@@ -182,7 +179,7 @@ fn describe_body(manifest_offset: u32, manifest_len: u32) -> Vec<u8> {
 }
 
 fn call_body(
-    plan: &OperationImportPlan,
+    plan: &crate::OperationImportPlan,
     requests: &[(u32, &Vec<u8>)],
     input_offset: u32,
     output_offset: u32,
@@ -349,25 +346,25 @@ fn call(index: u32, bytes: &mut Vec<u8>) {
     encode_u32(index, bytes);
 }
 
-fn artifact_u32(label: &str, value: usize) -> VerletResult<u32> {
+fn artifact_u32(label: &str, value: usize) -> crate::VerletResult<u32> {
     u32::try_from(value).map_err(|_| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "OpenAPI import artifact {label} {value} exceeds the Wasm32 address space"
         ))
     })
 }
 
-fn artifact_add(label: &str, left: u32, right: u32) -> VerletResult<u32> {
+fn artifact_add(label: &str, left: u32, right: u32) -> crate::VerletResult<u32> {
     left.checked_add(right).ok_or_else(|| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "OpenAPI import artifact {label} overflowed the Wasm32 address space"
         ))
     })
 }
 
-fn checked_align(value: u32, alignment: u32) -> VerletResult<u32> {
+fn checked_align(value: u32, alignment: u32) -> crate::VerletResult<u32> {
     if alignment == 0 || !alignment.is_power_of_two() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "OpenAPI import artifact alignment {alignment} is invalid"
         )));
     }
@@ -375,7 +372,7 @@ fn checked_align(value: u32, alignment: u32) -> VerletResult<u32> {
         .checked_add(alignment - 1)
         .map(|value| value & !(alignment - 1))
         .ok_or_else(|| {
-            VerletError::RuntimeFactory(
+            crate::VerletError::RuntimeFactory(
                 "OpenAPI import artifact alignment overflowed the Wasm32 address space".to_string(),
             )
         })
@@ -383,12 +380,10 @@ fn checked_align(value: u32, alignment: u32) -> VerletResult<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn artifact_layout_arithmetic_rejects_overflow_without_panicking() {
-        assert!(checked_align(u32::MAX, 8).is_err());
-        assert!(artifact_add("test", u32::MAX, 1).is_err());
-        assert!(checked_align(1, 0).is_err());
+        assert!(crate::operations::openapi_import::checked_align(u32::MAX, 8).is_err());
+        assert!(crate::operations::openapi_import::artifact_add("test", u32::MAX, 1).is_err());
+        assert!(crate::operations::openapi_import::checked_align(1, 0).is_err());
     }
 }

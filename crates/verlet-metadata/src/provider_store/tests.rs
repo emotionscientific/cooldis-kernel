@@ -1,9 +1,7 @@
-use super::*;
-use crate::SecretResolver;
-use uuid::Uuid;
-use verlet_runtime_contracts::{
-    ThreadContext, ThreadCoordinates, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadTopology,
-};
+use crate::SecretResolver as _;
+use crate::provider_store::LlmProviderAuthStore as _;
+use crate::provider_store::LlmProviderCatalogStore as _;
+use crate::provider_store::ThreadMetadataStore as _;
 
 const RUSQLITE_METADATA_V1: &[u8] =
     include_bytes!("../../tests/fixtures/rusqlite-metadata-v1.sqlite3");
@@ -26,22 +24,28 @@ async fn cancelling_schema_task_finishes_and_releases_the_write_lock() {
     let (finish_transaction_tx, finish_transaction_rx) = tokio::sync::oneshot::channel();
     let task_db = db.clone();
     let schema_task = tokio::spawn(async move {
-        provider_cancellation_safe(async move {
-            let mut connection = task_db.connect().await.map_err(storage_error)?;
+        crate::provider_store::provider_cancellation_safe(async move {
+            let mut connection = task_db
+                .connect()
+                .await
+                .map_err(crate::provider_store::storage_error)?;
             let transaction = connection
                 .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
-                .map_err(storage_error)?;
+                .map_err(crate::provider_store::storage_error)?;
             transaction
                 .execute(
                     "INSERT INTO cancellation_probe (value) VALUES ('committed')",
                     (),
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(crate::provider_store::storage_error)?;
             transaction_started_tx.send(()).unwrap();
             finish_transaction_rx.await.unwrap();
-            transaction.commit().await.map_err(storage_error)?;
+            transaction
+                .commit()
+                .await
+                .map_err(crate::provider_store::storage_error)?;
             Ok(())
         })
         .await
@@ -100,11 +104,13 @@ async fn cancelling_schema_task_finishes_and_releases_the_write_lock() {
 
 #[tokio::test]
 async fn async_store_boundary_runs_inside_an_executor() {
-    let store = SqliteLlmProviderStore::in_memory().await.unwrap();
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
     store
-        .upsert_provider(LlmProviderRecord::new(
+        .upsert_provider(crate::provider_store::LlmProviderRecord::new(
             "nested-executor",
-            ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
             "https://nested.example.invalid/v1",
         ))
         .await
@@ -123,19 +129,28 @@ async fn upserts_restore_record_json_created_at_from_the_atomic_column() {
     let db_path = temp_db_path("verlet-created-at-atomicity");
     remove_sqlite_files(&db_path);
 
-    let store = SqliteMetadataStore::open(&db_path).await.unwrap();
-    let mut provider = LlmProviderRecord::new(
+    let store = crate::provider_store::SqliteMetadataStore::open(&db_path)
+        .await
+        .unwrap();
+    let mut provider = crate::provider_store::LlmProviderRecord::new(
         "atomic-provider",
-        ProviderApi::OpenAIChatCompletions,
+        verlet_history::ProviderApi::OpenAIChatCompletions,
         "https://atomic.example.invalid/v1",
     );
     provider.created_at_ms = 1_700_000_000_100;
     store.upsert_provider(provider.clone()).await.unwrap();
 
-    let coordinates = ThreadCoordinates::new("tenant-atomic", "user-atomic", "session-atomic");
-    let context = ThreadContext::root(coordinates.clone());
-    let mut lifecycle =
-        ThreadLifecycleRecord::new(&context, ThreadLifecycleStatus::Idle, BTreeMap::new());
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
+        "tenant-atomic",
+        "user-atomic",
+        "session-atomic",
+    );
+    let context = verlet_runtime_contracts::ThreadContext::root(coordinates.clone());
+    let mut lifecycle = verlet_runtime_contracts::ThreadLifecycleRecord::new(
+        &context,
+        verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
+        std::collections::BTreeMap::new(),
+    );
     lifecycle.created_at_ms = 1_700_000_000_200;
     store
         .upsert_thread_lifecycle(lifecycle.clone())
@@ -168,7 +183,9 @@ async fn upserts_restore_record_json_created_at_from_the_atomic_column() {
 
     provider.created_at_ms = 1_700_000_000_300;
     lifecycle.created_at_ms = 1_700_000_000_400;
-    let store = SqliteMetadataStore::open(&db_path).await.unwrap();
+    let store = crate::provider_store::SqliteMetadataStore::open(&db_path)
+        .await
+        .unwrap();
     store.upsert_provider(provider).await.unwrap();
     store.upsert_thread_lifecycle(lifecycle).await.unwrap();
     drop(store);
@@ -224,7 +241,9 @@ async fn turso_decodes_rusqlite_created_metadata_v1_fixture() {
     remove_sqlite_files(&db_path);
     std::fs::write(&db_path, RUSQLITE_METADATA_V1).unwrap();
 
-    let provider_store = SqliteLlmProviderStore::open(&db_path).await.unwrap();
+    let provider_store = crate::provider_store::SqliteLlmProviderStore::open(&db_path)
+        .await
+        .unwrap();
     let provider = provider_store
         .get_provider("legacy-provider")
         .await
@@ -236,7 +255,7 @@ async fn turso_decodes_rusqlite_created_metadata_v1_fixture() {
             .get_credential("legacy-provider")
             .await
             .unwrap(),
-        Some(LlmProviderCredential::ApiKey {
+        Some(crate::provider_store::LlmProviderCredential::ApiKey {
             key: "legacy-provider-key".to_string(),
         })
     );
@@ -260,26 +279,28 @@ async fn provider_catalog_and_auth_persist_across_reopen() {
     let db_path = temp_db_path("verlet-provider-store");
     remove_sqlite_files(&db_path);
 
-    let store = SqliteLlmProviderStore::open(&db_path).await.unwrap();
-    let provider = LlmProviderRecord::new(
+    let store = crate::provider_store::SqliteLlmProviderStore::open(&db_path)
+        .await
+        .unwrap();
+    let provider = crate::provider_store::LlmProviderRecord::new(
         "openai_compatible",
-        ProviderApi::OpenAIChatCompletions,
+        verlet_history::ProviderApi::OpenAIChatCompletions,
         "https://api.example.invalid/v1",
     )
     .with_display_name("OpenAI Compatible")
     .with_auth_header(true)
     .with_model(
-        LlmProviderModelRecord::new("example-chat-model-large")
+        crate::provider_store::LlmProviderModelRecord::new("example-chat-model-large")
             .with_display_name("Example Chat Model Large")
             .with_context_window_tokens(128_000)
             .with_max_output_tokens(8192)
-            .with_input_modality(LlmProviderInputModality::Text),
+            .with_input_modality(crate::provider_store::LlmProviderInputModality::Text),
     );
     store.upsert_provider(provider).await.unwrap();
     store
         .set_credential(
             "openai_compatible",
-            LlmProviderCredential::ApiKey {
+            crate::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-openai_compatible-key".to_string(),
             },
         )
@@ -287,7 +308,9 @@ async fn provider_catalog_and_auth_persist_across_reopen() {
         .unwrap();
     drop(store);
 
-    let reopened = SqliteLlmProviderStore::open(&db_path).await.unwrap();
+    let reopened = crate::provider_store::SqliteLlmProviderStore::open(&db_path)
+        .await
+        .unwrap();
     let provider = reopened
         .get_provider("openai_compatible")
         .await
@@ -296,12 +319,19 @@ async fn provider_catalog_and_auth_persist_across_reopen() {
     assert_eq!(provider.provider_id, "openai_compatible");
     assert_eq!(provider.models[0].model_id, "example-chat-model-large");
 
-    let resolved = resolve_llm_provider_auth(&reopened, &provider, &LlmProviderAuthContext::new())
-        .await
-        .unwrap()
-        .unwrap();
+    let resolved = crate::provider_store::resolve_llm_provider_auth(
+        &reopened,
+        &provider,
+        &crate::provider_store::LlmProviderAuthContext::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(resolved.api_key, "stored-openai_compatible-key");
-    assert_eq!(resolved.source, LlmProviderAuthSourceKind::Stored);
+    assert_eq!(
+        resolved.source,
+        crate::provider_store::LlmProviderAuthSourceKind::Stored
+    );
 
     remove_sqlite_files(&db_path);
 }
@@ -311,52 +341,69 @@ async fn metadata_store_persists_provider_auth_and_thread_topology_in_one_db() {
     let db_path = temp_db_path("verlet-metadata-store");
     remove_sqlite_files(&db_path);
 
-    let store = SqliteMetadataStore::open(&db_path).await.unwrap();
-    seed_default_llm_providers(&store).await.unwrap();
+    let store = crate::provider_store::SqliteMetadataStore::open(&db_path)
+        .await
+        .unwrap();
+    crate::provider_store::seed_default_llm_providers(&store)
+        .await
+        .unwrap();
     store
         .set_credential(
-            OPENAI_COMPATIBLE_PROVIDER_ID,
-            LlmProviderCredential::ApiKey {
+            crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID,
+            crate::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-openai_compatible-key".to_string(),
             },
         )
         .await
         .unwrap();
 
-    let parent_coordinates = ThreadCoordinates::new("tenant-a", "user-1", "session-1");
-    let child_coordinates = ThreadCoordinates::new("tenant-a", "user-1", "session-1");
-    let child_context = ThreadContext::with_topology(
+    let parent_coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant-a", "user-1", "session-1");
+    let child_coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant-a", "user-1", "session-1");
+    let child_context = verlet_runtime_contracts::ThreadContext::with_topology(
         child_coordinates.clone(),
-        ThreadTopology::spawned_from(parent_coordinates.thread_id),
+        verlet_runtime_contracts::ThreadTopology::spawned_from(parent_coordinates.thread_id),
     );
-    let mut metadata = BTreeMap::new();
+    let mut metadata = std::collections::BTreeMap::new();
     metadata.insert("purpose".to_string(), "topology-smoke".to_string());
-    let child_record =
-        ThreadLifecycleRecord::new(&child_context, ThreadLifecycleStatus::Idle, metadata);
+    let child_record = verlet_runtime_contracts::ThreadLifecycleRecord::new(
+        &child_context,
+        verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
+        metadata,
+    );
     store
         .upsert_thread_lifecycle(child_record.clone())
         .await
         .unwrap();
-    let sibling_coordinates = ThreadCoordinates::new("tenant-a", "user-1", "session-2");
-    let sibling_context = ThreadContext::root(sibling_coordinates.clone());
-    let sibling_record = ThreadLifecycleRecord::new(
+    let sibling_coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant-a", "user-1", "session-2");
+    let sibling_context =
+        verlet_runtime_contracts::ThreadContext::root(sibling_coordinates.clone());
+    let sibling_record = verlet_runtime_contracts::ThreadLifecycleRecord::new(
         &sibling_context,
-        ThreadLifecycleStatus::Idle,
-        BTreeMap::new(),
+        verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
+        std::collections::BTreeMap::new(),
     );
     store.upsert_thread_lifecycle(sibling_record).await.unwrap();
     drop(store);
 
-    let reopened = SqliteMetadataStore::open(&db_path).await.unwrap();
+    let reopened = crate::provider_store::SqliteMetadataStore::open(&db_path)
+        .await
+        .unwrap();
     let provider = reopened
-        .get_provider(OPENAI_COMPATIBLE_PROVIDER_ID)
+        .get_provider(crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
         .await
         .unwrap()
         .expect("provider catalog should share the metadata db");
-    let resolved = resolve_llm_provider_auth(&reopened, &provider, &LlmProviderAuthContext::new())
-        .await
-        .unwrap()
-        .unwrap();
+    let resolved = crate::provider_store::resolve_llm_provider_auth(
+        &reopened,
+        &provider,
+        &crate::provider_store::LlmProviderAuthContext::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(resolved.api_key, "stored-openai_compatible-key");
 
     let stored_child = reopened
@@ -392,18 +439,34 @@ async fn metadata_store_persists_provider_auth_and_thread_topology_in_one_db() {
 
 #[test]
 fn default_openai_compatible_provider_record_matches_runtime_connection_shape() {
-    let provider = default_openai_compatible_llm_provider_record();
+    let provider = crate::provider_store::default_openai_compatible_llm_provider_record();
 
-    assert_eq!(provider.provider_id, OPENAI_COMPATIBLE_PROVIDER_ID);
-    assert_eq!(provider.api, ProviderApi::OpenAIChatCompletions);
-    assert_eq!(provider.base_url, OPENAI_COMPATIBLE_BASE_URL);
+    assert_eq!(
+        provider.provider_id,
+        crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID
+    );
+    assert_eq!(
+        provider.api,
+        verlet_history::ProviderApi::OpenAIChatCompletions
+    );
+    assert_eq!(
+        provider.base_url,
+        crate::provider_store::OPENAI_COMPATIBLE_BASE_URL
+    );
     assert!(provider.auth_header);
     assert_eq!(
-        provider.headers.get(OPENAI_COMPATIBLE_EXAMPLE_HEADER),
-        Some(&LlmProviderConfigValue::literal("required"))
+        provider
+            .headers
+            .get(crate::provider_store::OPENAI_COMPATIBLE_EXAMPLE_HEADER),
+        Some(&crate::provider_store::LlmProviderConfigValue::literal(
+            "required"
+        ))
     );
     assert_eq!(provider.models.len(), 2);
-    assert_eq!(provider.models[0].model_id, OPENAI_COMPATIBLE_DEFAULT_MODEL);
+    assert_eq!(
+        provider.models[0].model_id,
+        crate::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL
+    );
     assert_eq!(
         provider.models[0]
             .metadata
@@ -413,45 +476,52 @@ fn default_openai_compatible_provider_record_matches_runtime_connection_shape() 
     );
     assert_eq!(
         provider.models[0].input_modalities,
-        vec![LlmProviderInputModality::Text]
+        vec![crate::provider_store::LlmProviderInputModality::Text]
     );
-    assert_eq!(provider.models[1].model_id, OPENAI_COMPATIBLE_ALT_MODEL);
+    assert_eq!(
+        provider.models[1].model_id,
+        crate::provider_store::OPENAI_COMPATIBLE_ALT_MODEL
+    );
     assert_eq!(
         provider.models[1].input_modalities,
-        vec![LlmProviderInputModality::Text]
+        vec![crate::provider_store::LlmProviderInputModality::Text]
     );
 }
 
 #[tokio::test]
 async fn seeding_openai_compatible_prepopulates_catalog_and_resolves_environment_auth() {
-    let store = SqliteLlmProviderStore::in_memory().await.unwrap();
-    seed_openai_compatible_llm_provider(&store).await.unwrap();
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    crate::provider_store::seed_openai_compatible_llm_provider(&store)
+        .await
+        .unwrap();
 
     let provider = store
-        .get_provider(OPENAI_COMPATIBLE_PROVIDER_ID)
+        .get_provider(crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
         .await
         .unwrap()
         .unwrap();
-    let status = llm_provider_auth_status(
+    let status = crate::provider_store::llm_provider_auth_status(
         &store,
         &provider,
-        &LlmProviderAuthContext::new()
+        &crate::provider_store::LlmProviderAuthContext::new()
             .with_env("OPENAI_COMPATIBLE_API_KEY", "env-openai_compatible-key"),
     )
     .await
     .unwrap();
     assert_eq!(
         status,
-        LlmProviderAuthStatus::configured(
-            LlmProviderAuthSourceKind::Environment,
+        crate::provider_store::LlmProviderAuthStatus::configured(
+            crate::provider_store::LlmProviderAuthSourceKind::Environment,
             "OPENAI_COMPATIBLE_API_KEY",
         )
     );
 
-    let resolved = resolve_llm_provider_auth(
+    let resolved = crate::provider_store::resolve_llm_provider_auth(
         &store,
         &provider,
-        &LlmProviderAuthContext::new().with_env(
+        &crate::provider_store::LlmProviderAuthContext::new().with_env(
             "VERLET_OPENAI_COMPATIBLE_API_KEY",
             "verlet-openai_compatible-key",
         ),
@@ -460,32 +530,39 @@ async fn seeding_openai_compatible_prepopulates_catalog_and_resolves_environment
     .unwrap()
     .unwrap();
     assert_eq!(resolved.api_key, "verlet-openai_compatible-key");
-    assert_eq!(resolved.source, LlmProviderAuthSourceKind::Environment);
+    assert_eq!(
+        resolved.source,
+        crate::provider_store::LlmProviderAuthSourceKind::Environment
+    );
 }
 
 #[tokio::test]
 async fn seeding_default_providers_does_not_touch_stored_openai_compatible_credential() {
-    let store = SqliteLlmProviderStore::in_memory().await.unwrap();
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
     store
         .set_credential(
-            OPENAI_COMPATIBLE_PROVIDER_ID,
-            LlmProviderCredential::ApiKey {
+            crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID,
+            crate::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-openai_compatible-key".to_string(),
             },
         )
         .await
         .unwrap();
 
-    seed_default_llm_providers(&store).await.unwrap();
+    crate::provider_store::seed_default_llm_providers(&store)
+        .await
+        .unwrap();
     let provider = store
-        .get_provider(OPENAI_COMPATIBLE_PROVIDER_ID)
+        .get_provider(crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
         .await
         .unwrap()
         .unwrap();
-    let resolved = resolve_llm_provider_auth(
+    let resolved = crate::provider_store::resolve_llm_provider_auth(
         &store,
         &provider,
-        &LlmProviderAuthContext::new()
+        &crate::provider_store::LlmProviderAuthContext::new()
             .with_env("OPENAI_COMPATIBLE_API_KEY", "env-openai_compatible-key"),
     )
     .await
@@ -493,107 +570,136 @@ async fn seeding_default_providers_does_not_touch_stored_openai_compatible_crede
     .unwrap();
 
     assert_eq!(resolved.api_key, "stored-openai_compatible-key");
-    assert_eq!(resolved.source, LlmProviderAuthSourceKind::Stored);
+    assert_eq!(
+        resolved.source,
+        crate::provider_store::LlmProviderAuthSourceKind::Stored
+    );
 }
 
 #[tokio::test]
 async fn runtime_override_wins_without_being_persisted() {
-    let store = SqliteLlmProviderStore::in_memory().await.unwrap();
-    let provider = LlmProviderRecord::new(
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    let provider = crate::provider_store::LlmProviderRecord::new(
         "openai",
-        ProviderApi::OpenAIResponses,
+        verlet_history::ProviderApi::OpenAIResponses,
         "https://api.openai.com/v1",
     );
     store.upsert_provider(provider.clone()).await.unwrap();
     store
         .set_credential(
             "openai",
-            LlmProviderCredential::ApiKey {
+            crate::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-key".to_string(),
             },
         )
         .await
         .unwrap();
 
-    let resolved = resolve_llm_provider_auth(
+    let resolved = crate::provider_store::resolve_llm_provider_auth(
         &store,
         &provider,
-        &LlmProviderAuthContext::new().with_runtime_api_key("openai", "runtime-key"),
+        &crate::provider_store::LlmProviderAuthContext::new()
+            .with_runtime_api_key("openai", "runtime-key"),
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(resolved.api_key, "runtime-key");
-    assert_eq!(resolved.source, LlmProviderAuthSourceKind::Runtime);
+    assert_eq!(
+        resolved.source,
+        crate::provider_store::LlmProviderAuthSourceKind::Runtime
+    );
 
-    let resolved = resolve_llm_provider_auth(&store, &provider, &LlmProviderAuthContext::new())
-        .await
-        .unwrap()
-        .unwrap();
+    let resolved = crate::provider_store::resolve_llm_provider_auth(
+        &store,
+        &provider,
+        &crate::provider_store::LlmProviderAuthContext::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(resolved.api_key, "stored-key");
-    assert_eq!(resolved.source, LlmProviderAuthSourceKind::Stored);
+    assert_eq!(
+        resolved.source,
+        crate::provider_store::LlmProviderAuthSourceKind::Stored
+    );
 }
 
 #[tokio::test]
 async fn environment_and_catalog_auth_are_fallbacks_after_stored_auth() {
-    let store = SqliteLlmProviderStore::in_memory().await.unwrap();
-    let provider = LlmProviderRecord::new(
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    let provider = crate::provider_store::LlmProviderRecord::new(
         "custom-proxy",
-        ProviderApi::OpenAIChatCompletions,
+        verlet_history::ProviderApi::OpenAIChatCompletions,
         "https://proxy.example/v1",
     )
-    .with_auth(LlmProviderAuthConfig::Env {
+    .with_auth(crate::provider_store::LlmProviderAuthConfig::Env {
         name: "CUSTOM_PROXY_KEY".to_string(),
     });
 
-    let resolved = resolve_llm_provider_auth(
+    let resolved = crate::provider_store::resolve_llm_provider_auth(
         &store,
         &provider,
-        &LlmProviderAuthContext::new().with_env("CUSTOM_PROXY_KEY", "env-key"),
+        &crate::provider_store::LlmProviderAuthContext::new()
+            .with_env("CUSTOM_PROXY_KEY", "env-key"),
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(resolved.api_key, "env-key");
-    assert_eq!(resolved.source, LlmProviderAuthSourceKind::Environment);
+    assert_eq!(
+        resolved.source,
+        crate::provider_store::LlmProviderAuthSourceKind::Environment
+    );
 
     store
         .set_credential(
             "custom-proxy",
-            LlmProviderCredential::ApiKey {
+            crate::provider_store::LlmProviderCredential::ApiKey {
                 key: "stored-key".to_string(),
             },
         )
         .await
         .unwrap();
-    let resolved = resolve_llm_provider_auth(
+    let resolved = crate::provider_store::resolve_llm_provider_auth(
         &store,
         &provider,
-        &LlmProviderAuthContext::new().with_env("CUSTOM_PROXY_KEY", "env-key"),
+        &crate::provider_store::LlmProviderAuthContext::new()
+            .with_env("CUSTOM_PROXY_KEY", "env-key"),
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(resolved.api_key, "stored-key");
-    assert_eq!(resolved.source, LlmProviderAuthSourceKind::Stored);
+    assert_eq!(
+        resolved.source,
+        crate::provider_store::LlmProviderAuthSourceKind::Stored
+    );
 }
 
 #[tokio::test]
 async fn auth_status_redacts_values() {
-    let store = SqliteLlmProviderStore::in_memory().await.unwrap();
-    let provider = LlmProviderRecord::new(
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    let provider = crate::provider_store::LlmProviderRecord::new(
         "anthropic",
-        ProviderApi::AnthropicMessages,
+        verlet_history::ProviderApi::AnthropicMessages,
         "https://api.anthropic.com/v1",
     );
-    let context = LlmProviderAuthContext::new().with_env("ANTHROPIC_API_KEY", "secret");
-    let status = llm_provider_auth_status(&store, &provider, &context)
+    let context = crate::provider_store::LlmProviderAuthContext::new()
+        .with_env("ANTHROPIC_API_KEY", "secret");
+    let status = crate::provider_store::llm_provider_auth_status(&store, &provider, &context)
         .await
         .unwrap();
     assert_eq!(
         status,
-        LlmProviderAuthStatus::configured(
-            LlmProviderAuthSourceKind::Environment,
+        crate::provider_store::LlmProviderAuthStatus::configured(
+            crate::provider_store::LlmProviderAuthSourceKind::Environment,
             "ANTHROPIC_API_KEY",
         )
     );
@@ -603,33 +709,47 @@ async fn auth_status_redacts_values() {
 
 #[tokio::test]
 async fn command_auth_is_visible_but_not_executed_by_default() {
-    let store = SqliteLlmProviderStore::in_memory().await.unwrap();
-    let provider = LlmProviderRecord::new(
-        "onepassword-backed",
-        ProviderApi::OpenAIChatCompletions,
-        "https://proxy.example/v1",
-    )
-    .with_auth(LlmProviderAuthConfig::Command {
-        command: "op read op://vault/item/key".to_string(),
-    });
-    let status = llm_provider_auth_status(&store, &provider, &LlmProviderAuthContext::new())
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
         .await
         .unwrap();
+    let provider = crate::provider_store::LlmProviderRecord::new(
+        "onepassword-backed",
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        "https://proxy.example/v1",
+    )
+    .with_auth(crate::provider_store::LlmProviderAuthConfig::Command {
+        command: "op read op://vault/item/key".to_string(),
+    });
+    let status = crate::provider_store::llm_provider_auth_status(
+        &store,
+        &provider,
+        &crate::provider_store::LlmProviderAuthContext::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         status.source,
-        Some(LlmProviderAuthSourceKind::CatalogCommand)
+        Some(crate::provider_store::LlmProviderAuthSourceKind::CatalogCommand)
     );
     assert!(matches!(
-        resolve_llm_provider_auth(&store, &provider, &LlmProviderAuthContext::new()).await,
-        Err(LlmProviderStoreError::CommandAuthUnsupported { .. })
+        crate::provider_store::resolve_llm_provider_auth(
+            &store,
+            &provider,
+            &crate::provider_store::LlmProviderAuthContext::new()
+        )
+        .await,
+        Err(crate::provider_store::LlmProviderStoreError::CommandAuthUnsupported { .. })
     ));
 }
 
 fn temp_db_path(prefix: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("{prefix}-{}.sqlite3", Uuid::now_v7().simple()))
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}.sqlite3",
+        uuid::Uuid::now_v7().simple()
+    ))
 }
 
-fn remove_sqlite_files(path: &Path) {
+fn remove_sqlite_files(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));

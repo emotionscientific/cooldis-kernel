@@ -1,62 +1,47 @@
-use chrono::{TimeZone, Utc};
-use std::path::PathBuf;
-use std::sync::Arc;
-use uuid::Uuid;
-use verlet::daemon::remote_store::endpoint::{
-    SqliteSyncEndpoint, SyncPullSource, VerletDaemonSyncConfig,
-};
-use verlet::daemon::remote_store::lease::{
-    SqliteStreamLeaseAuthority, StreamLeaseAuthority, StreamLeaseLineage, StreamPrefixScope,
-    SyncCredentialAuthority,
-};
-use verlet::daemon::remote_store::queue::{
-    RemoteEnqueueDisposition, RemoteIngressQueue, RemoteIngressQueueEntryV1,
-    SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1, SqliteRemoteIngressQueue, remote_ingress_queue_stream_id,
-    remote_ingress_queue_target,
-};
-use verlet::daemon::remote_store::tail::{
-    RemoteStreamTail, RemoteStreamTailCursor, SqliteRemoteStreamTail,
-};
-use verlet::{
-    DaemonClock, EventKind, EventRecordId, EventSequence, EventStore, EventStreamId,
-    NewEventRecord, SqliteSessionStore, ThreadCoordinates, VerletError,
-};
-use verlet_io_core::{
-    ConversationKind, IngressContent, IngressEnvelope, IoConversation, IoDedupeKey, IoDelivery,
-    IoPrincipal, IoSource,
-};
-use verlet_runtime_contracts::{DispatchId, ThreadId};
-use verlet_sqlite::{TransactionBehavior, params};
+use chrono::TimeZone as _;
+use verlet::EventStore as _;
+use verlet::daemon::remote_store::endpoint::SyncPullSource as _;
+use verlet::daemon::remote_store::lease::StreamLeaseAuthority as _;
+use verlet::daemon::remote_store::lease::SyncCredentialAuthority as _;
+use verlet::daemon::remote_store::queue::RemoteIngressQueue as _;
+use verlet::daemon::remote_store::tail::RemoteStreamTail as _;
 
 const QUEUE_CRASH_WINDOW_DST_SEED: u64 = 0x4300_0000_0000_0001;
 
 #[derive(Clone)]
 struct FixedClock(i64);
 
-impl DaemonClock for FixedClock {
-    fn now(&self) -> chrono::DateTime<Utc> {
-        Utc.timestamp_millis_opt(self.0).single().unwrap()
+impl verlet::DaemonClock for FixedClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.timestamp_millis_opt(self.0).single().unwrap()
     }
 }
 
-fn entry(thread_id: ThreadId, dispatch: &str, text: &str) -> RemoteIngressQueueEntryV1 {
-    let dispatch_id = DispatchId::new(dispatch);
-    RemoteIngressQueueEntryV1 {
-        schema: SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1.to_string(),
+fn entry(
+    thread_id: verlet_runtime_contracts::ThreadId,
+    dispatch: &str,
+    text: &str,
+) -> verlet::daemon::remote_store::queue::RemoteIngressQueueEntryV1 {
+    let dispatch_id = verlet_runtime_contracts::DispatchId::new(dispatch);
+    verlet::daemon::remote_store::queue::RemoteIngressQueueEntryV1 {
+        schema: verlet::daemon::remote_store::queue::SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1.to_string(),
         dispatch_id: dispatch_id.clone(),
         target_thread_id: thread_id,
-        envelope: IngressEnvelope::new(
-            IoSource::new("cooldis.remote", "parent"),
-            IoConversation::new(format!("thread:{thread_id}"), ConversationKind::System),
-            IngressContent::text(text),
+        envelope: verlet_io_core::IngressEnvelope::new(
+            verlet_io_core::IoSource::new("cooldis.remote", "parent"),
+            verlet_io_core::IoConversation::new(
+                format!("thread:{thread_id}"),
+                verlet_io_core::ConversationKind::System,
+            ),
+            verlet_io_core::IngressContent::text(text),
             1_700_000_000_000,
         )
-        .with_dedupe_key(IoDedupeKey::new(
+        .with_dedupe_key(verlet_io_core::IoDedupeKey::new(
             "cooldis.remote.dispatch",
             dispatch_id.to_string(),
         ))
-        .with_delivery(IoDelivery::new(dispatch_id.to_string()))
-        .with_principal(IoPrincipal::new(
+        .with_delivery(verlet_io_core::IoDelivery::new(dispatch_id.to_string()))
+        .with_principal(verlet_io_core::IoPrincipal::new(
             "remote-tenant",
             "remote-user",
             format!("remote:{dispatch_id}"),
@@ -67,18 +52,20 @@ fn entry(thread_id: ThreadId, dispatch: &str, text: &str) -> RemoteIngressQueueE
 
 #[tokio::test]
 async fn concurrent_same_dispatch_folds_atomically_and_conflict_never_replaces() {
-    let queue = Arc::new(
-        SqliteRemoteIngressQueue::new(SqliteSessionStore::in_memory().await.unwrap())
-            .await
-            .unwrap(),
+    let queue = std::sync::Arc::new(
+        verlet::daemon::remote_store::queue::SqliteRemoteIngressQueue::new(
+            verlet::SqliteSessionStore::in_memory().await.unwrap(),
+        )
+        .await
+        .unwrap(),
     );
-    let thread_id = ThreadId::new();
+    let thread_id = verlet_runtime_contracts::ThreadId::new();
     let expected = entry(thread_id, "dispatch-race", "one payload");
-    let barrier = Arc::new(tokio::sync::Barrier::new(16));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
     let mut tasks = Vec::new();
     for _ in 0..16 {
-        let queue = Arc::clone(&queue);
-        let barrier = Arc::clone(&barrier);
+        let queue = std::sync::Arc::clone(&queue);
+        let barrier = std::sync::Arc::clone(&barrier);
         let expected = expected.clone();
         tasks.push(tokio::spawn(async move {
             barrier.wait().await;
@@ -89,21 +76,27 @@ async fn concurrent_same_dispatch_folds_atomically_and_conflict_never_replaces()
     let mut folded = 0;
     for task in tasks {
         match task.await.unwrap().disposition {
-            RemoteEnqueueDisposition::Enqueued => enqueued += 1,
-            RemoteEnqueueDisposition::FoldedToExisting => folded += 1,
+            verlet::daemon::remote_store::queue::RemoteEnqueueDisposition::Enqueued => {
+                enqueued += 1
+            }
+            verlet::daemon::remote_store::queue::RemoteEnqueueDisposition::FoldedToExisting => {
+                folded += 1
+            }
         }
     }
     assert_eq!((enqueued, folded), (1, 15));
 
     let page = queue.tail_pending(thread_id, None).await.unwrap();
     assert_eq!(page.entries, vec![expected.clone()]);
-    assert_eq!(page.next, Some(EventSequence::new(1)));
+    assert_eq!(page.next, Some(verlet::EventSequence::new(1)));
 
     let err = queue
         .enqueue(entry(thread_id, "dispatch-race", "different payload"))
         .await
         .unwrap_err();
-    assert!(matches!(err, VerletError::History(message) if message.contains("different payload")));
+    assert!(
+        matches!(err, verlet::VerletError::History(message) if message.contains("different payload"))
+    );
     assert_eq!(
         queue.tail_pending(thread_id, None).await.unwrap().entries,
         vec![expected]
@@ -112,10 +105,12 @@ async fn concurrent_same_dispatch_folds_atomically_and_conflict_never_replaces()
 
 #[tokio::test]
 async fn queue_rejects_missing_or_mismatched_dispatch_dedupe_before_mutation() {
-    let queue = SqliteRemoteIngressQueue::new(SqliteSessionStore::in_memory().await.unwrap())
-        .await
-        .unwrap();
-    let thread_id = ThreadId::new();
+    let queue = verlet::daemon::remote_store::queue::SqliteRemoteIngressQueue::new(
+        verlet::SqliteSessionStore::in_memory().await.unwrap(),
+    )
+    .await
+    .unwrap();
+    let thread_id = verlet_runtime_contracts::ThreadId::new();
     let mut missing = entry(thread_id, "dispatch-key", "payload");
     missing.envelope.dedupe_key = None;
     assert!(queue.enqueue(missing).await.is_err());
@@ -126,7 +121,7 @@ async fn queue_rejects_missing_or_mismatched_dispatch_dedupe_before_mutation() {
     unstable_timestamp.enqueued_at_ms = 1_700_000_000_000;
     let err = queue.enqueue(unstable_timestamp).await.unwrap_err();
     assert!(
-        matches!(err, VerletError::History(message) if message.contains("enqueued_at_ms must be zero"))
+        matches!(err, verlet::VerletError::History(message) if message.contains("enqueued_at_ms must be zero"))
     );
     assert!(
         queue
@@ -140,10 +135,12 @@ async fn queue_rejects_missing_or_mismatched_dispatch_dedupe_before_mutation() {
 
 #[tokio::test]
 async fn acknowledge_is_noop_safe_and_lost_ack_redelivery_keeps_dispatch_identity() {
-    let queue = SqliteRemoteIngressQueue::new(SqliteSessionStore::in_memory().await.unwrap())
-        .await
-        .unwrap();
-    let thread_id = ThreadId::new();
+    let queue = verlet::daemon::remote_store::queue::SqliteRemoteIngressQueue::new(
+        verlet::SqliteSessionStore::in_memory().await.unwrap(),
+    )
+    .await
+    .unwrap();
+    let thread_id = verlet_runtime_contracts::ThreadId::new();
     let first = entry(thread_id, "dispatch-one", "one");
     let second = entry(thread_id, "dispatch-two", "two");
     queue.enqueue(first.clone()).await.unwrap();
@@ -163,15 +160,24 @@ async fn acknowledge_is_noop_safe_and_lost_ack_redelivery_keeps_dispatch_identit
     );
 
     queue
-        .acknowledge(thread_id, &DispatchId::new("dispatch-one"))
+        .acknowledge(
+            thread_id,
+            &verlet_runtime_contracts::DispatchId::new("dispatch-one"),
+        )
         .await
         .unwrap();
     queue
-        .acknowledge(thread_id, &DispatchId::new("dispatch-one"))
+        .acknowledge(
+            thread_id,
+            &verlet_runtime_contracts::DispatchId::new("dispatch-one"),
+        )
         .await
         .unwrap();
     queue
-        .acknowledge(thread_id, &DispatchId::new("unknown"))
+        .acknowledge(
+            thread_id,
+            &verlet_runtime_contracts::DispatchId::new("unknown"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -182,10 +188,12 @@ async fn acknowledge_is_noop_safe_and_lost_ack_redelivery_keeps_dispatch_identit
 
 #[tokio::test]
 async fn queue_pull_credential_is_confined_to_its_child_prefix() {
-    let store = SqliteSessionStore::in_memory().await.unwrap();
-    let queue = SqliteRemoteIngressQueue::new(store.clone()).await.unwrap();
-    let own = ThreadId::new();
-    let other = ThreadId::new();
+    let store = verlet::SqliteSessionStore::in_memory().await.unwrap();
+    let queue = verlet::daemon::remote_store::queue::SqliteRemoteIngressQueue::new(store.clone())
+        .await
+        .unwrap();
+    let own = verlet_runtime_contracts::ThreadId::new();
+    let other = verlet_runtime_contracts::ThreadId::new();
     queue
         .enqueue(entry(own, "own-dispatch", "own"))
         .await
@@ -194,39 +202,48 @@ async fn queue_pull_credential_is_confined_to_its_child_prefix() {
         .enqueue(entry(other, "other-dispatch", "other"))
         .await
         .unwrap();
-    let config = VerletDaemonSyncConfig {
+    let config = verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
         lease_ttl_secs: 300,
-        ..VerletDaemonSyncConfig::default()
+        ..verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default()
     };
-    let clock: Arc<dyn DaemonClock> = Arc::new(FixedClock(1_700_000_000_000));
-    let authority = Arc::new(
-        SqliteStreamLeaseAuthority::new(store.clone(), config, Arc::clone(&clock))
-            .await
-            .unwrap(),
+    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
+        std::sync::Arc::new(FixedClock(1_700_000_000_000));
+    let authority = std::sync::Arc::new(
+        verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
+            store.clone(),
+            config,
+            std::sync::Arc::clone(&clock),
+        )
+        .await
+        .unwrap(),
     );
-    let own_stream = remote_ingress_queue_stream_id(own);
+    let own_stream = verlet::daemon::remote_store::queue::remote_ingress_queue_stream_id(own);
     let grant = authority
         .grant_lease(
-            &StreamPrefixScope::new(own_stream.as_str()),
-            &DispatchId::new("queue-reader"),
-            StreamLeaseLineage::default(),
+            &verlet::daemon::remote_store::lease::StreamPrefixScope::new(own_stream.as_str()),
+            &verlet_runtime_contracts::DispatchId::new("queue-reader"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
     let (_, token) = authority.mint_credential(&grant).await.unwrap();
-    let ordinary_stream = EventStreamId::new(format!("thread:{own}"));
+    let ordinary_stream = verlet::EventStreamId::new(format!("thread:{own}"));
     let ordinary_grant = authority
         .grant_lease(
-            &StreamPrefixScope::new(ordinary_stream.as_str()),
-            &DispatchId::new("ordinary-stream-reader"),
-            StreamLeaseLineage::default(),
+            &verlet::daemon::remote_store::lease::StreamPrefixScope::new(ordinary_stream.as_str()),
+            &verlet_runtime_contracts::DispatchId::new("ordinary-stream-reader"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
     let (_, ordinary_token) = authority.mint_credential(&ordinary_grant).await.unwrap();
-    let endpoint = SqliteSyncEndpoint::new(store.clone(), authority, clock)
-        .await
-        .unwrap();
+    let endpoint = verlet::daemon::remote_store::endpoint::SqliteSyncEndpoint::new(
+        store.clone(),
+        authority,
+        clock,
+    )
+    .await
+    .unwrap();
 
     let records = endpoint
         .pull_after(&token, &own_stream, None)
@@ -235,23 +252,31 @@ async fn queue_pull_credential_is_confined_to_its_child_prefix() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].payload["dispatch_id"], "own-dispatch");
     let err = endpoint
-        .pull_after(&token, &remote_ingress_queue_stream_id(other), None)
+        .pull_after(
+            &token,
+            &verlet::daemon::remote_store::queue::remote_ingress_queue_stream_id(other),
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(matches!(err, VerletError::History(message) if message == "sync pull not authorized"));
+    assert!(
+        matches!(err, verlet::VerletError::History(message) if message == "sync pull not authorized")
+    );
     let err = endpoint
         .pull_after(&ordinary_token, &own_stream, None)
         .await
         .unwrap_err();
-    assert!(matches!(err, VerletError::History(message) if message == "sync pull not authorized"));
+    assert!(
+        matches!(err, verlet::VerletError::History(message) if message == "sync pull not authorized")
+    );
 
-    let colon_descendant = EventStreamId::new(format!("{own_stream}:ordinary"));
+    let colon_descendant = verlet::EventStreamId::new(format!("{own_stream}:ordinary"));
     store
         .append_events(
             &colon_descendant,
-            vec![NewEventRecord::witnessed(
-                ThreadCoordinates::new("tenant", "user", "session"),
-                EventKind::TurnSubmitted,
+            vec![verlet::NewEventRecord::witnessed(
+                verlet::ThreadCoordinates::new("tenant", "user", "session"),
+                verlet::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id":"must-stay-hidden"}),
             )],
         )
@@ -262,16 +287,23 @@ async fn queue_pull_credential_is_confined_to_its_child_prefix() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, VerletError::History(message) if message == "invalid remote ingress queue stream")
+        matches!(err, verlet::VerletError::History(message) if message == "invalid remote ingress queue stream")
     );
 
-    assert_eq!(remote_ingress_queue_target(&own_stream), Some(own));
     assert_eq!(
-        remote_ingress_queue_target(&EventStreamId::new(format!("{own_stream}:suffix"))),
+        verlet::daemon::remote_store::queue::remote_ingress_queue_target(&own_stream),
+        Some(own)
+    );
+    assert_eq!(
+        verlet::daemon::remote_store::queue::remote_ingress_queue_target(
+            &verlet::EventStreamId::new(format!("{own_stream}:suffix"))
+        ),
         None
     );
     assert_eq!(
-        remote_ingress_queue_target(&EventStreamId::new(format!("sync-ingressx:{own}"))),
+        verlet::daemon::remote_store::queue::remote_ingress_queue_target(
+            &verlet::EventStreamId::new(format!("sync-ingressx:{own}"))
+        ),
         None
     );
 }
@@ -279,11 +311,11 @@ async fn queue_pull_credential_is_confined_to_its_child_prefix() {
 #[tokio::test]
 async fn parent_tail_refreshes_snapshot_and_cursor_replay_is_verified() {
     let path = temp_db_path("tail-refresh");
-    let store = SqliteSessionStore::open(&path).await.unwrap();
-    let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let tail = SqliteRemoteStreamTail::new(store.clone());
-    let start = RemoteStreamTailCursor {
+    let store = verlet::SqliteSessionStore::open(&path).await.unwrap();
+    let coordinates = verlet::ThreadCoordinates::new("tenant", "user", "session");
+    let stream_id = verlet::EventStreamId::for_thread(&coordinates);
+    let tail = verlet::daemon::remote_store::tail::SqliteRemoteStreamTail::new(store.clone());
+    let start = verlet::daemon::remote_store::tail::RemoteStreamTailCursor {
         stream_id: stream_id.clone(),
         cursor: None,
     };
@@ -294,13 +326,13 @@ async fn parent_tail_refreshes_snapshot_and_cursor_replay_is_verified() {
     let database = store.sqlite_database();
     let mut held_connection = database.connect().await.unwrap();
     let held_snapshot = held_connection
-        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Deferred)
         .await
         .unwrap();
     let mut before_rows = held_snapshot
         .query(
             "SELECT COUNT(*) FROM event_records WHERE stream_id = ?1",
-            params![stream_id.as_str()],
+            verlet_sqlite::params![stream_id.as_str()],
         )
         .await
         .unwrap();
@@ -319,9 +351,9 @@ async fn parent_tail_refreshes_snapshot_and_cursor_replay_is_verified() {
     store
         .append_events(
             &stream_id,
-            vec![NewEventRecord::witnessed(
+            vec![verlet::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::TurnSubmitted,
+                verlet::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id":"one"}),
             )],
         )
@@ -330,7 +362,7 @@ async fn parent_tail_refreshes_snapshot_and_cursor_replay_is_verified() {
     let mut stale_rows = held_snapshot
         .query(
             "SELECT COUNT(*) FROM event_records WHERE stream_id = ?1",
-            params![stream_id.as_str()],
+            verlet_sqlite::params![stream_id.as_str()],
         )
         .await
         .unwrap();
@@ -357,9 +389,9 @@ async fn parent_tail_refreshes_snapshot_and_cursor_replay_is_verified() {
     store
         .append_events(
             &stream_id,
-            vec![NewEventRecord::witnessed(
+            vec![verlet::NewEventRecord::witnessed(
                 coordinates,
-                EventKind::TurnSubmitted,
+                verlet::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id":"two"}),
             )],
         )
@@ -367,13 +399,14 @@ async fn parent_tail_refreshes_snapshot_and_cursor_replay_is_verified() {
         .unwrap();
     let second = tail.poll(&first.next).await.unwrap();
     assert_eq!(second.records.len(), 1);
-    assert_eq!(second.records[0].sequence, EventSequence::new(2));
+    assert_eq!(second.records[0].sequence, verlet::EventSequence::new(2));
 
     let mut poisoned = first.next;
-    poisoned.cursor.as_mut().unwrap().event_id = EventRecordId::from_uuid(Uuid::now_v7());
+    poisoned.cursor.as_mut().unwrap().event_id =
+        verlet::EventRecordId::from_uuid(uuid::Uuid::now_v7());
     assert!(tail.poll(&poisoned).await.is_err());
-    let healthy_other = RemoteStreamTailCursor {
-        stream_id: EventStreamId::new("thread:healthy-other"),
+    let healthy_other = verlet::daemon::remote_store::tail::RemoteStreamTailCursor {
+        stream_id: verlet::EventStreamId::new("thread:healthy-other"),
         cursor: None,
     };
     assert!(tail.poll(&healthy_other).await.unwrap().records.is_empty());
@@ -382,9 +415,9 @@ async fn parent_tail_refreshes_snapshot_and_cursor_replay_is_verified() {
 
 #[test]
 fn raw_queue_entry_fixture_is_forward_decodable_and_canonically_reencodes() {
-    let thread_id = ThreadId::new();
+    let thread_id = verlet_runtime_contracts::ThreadId::new();
     let raw = serde_json::json!({
-        "schema": SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1,
+        "schema": verlet::daemon::remote_store::queue::SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1,
         "dispatch_id": "fixture-dispatch",
         "target_thread_id": thread_id,
         "envelope": {
@@ -399,14 +432,24 @@ fn raw_queue_entry_fixture_is_forward_decodable_and_canonically_reencodes() {
         "enqueued_at_ms": 0,
         "future_entry": true
     });
-    let decoded: RemoteIngressQueueEntryV1 = serde_json::from_value(raw).unwrap();
-    assert_eq!(decoded.schema, SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1);
-    assert_eq!(decoded.dispatch_id, DispatchId::new("fixture-dispatch"));
+    let decoded: verlet::daemon::remote_store::queue::RemoteIngressQueueEntryV1 =
+        serde_json::from_value(raw).unwrap();
+    assert_eq!(
+        decoded.schema,
+        verlet::daemon::remote_store::queue::SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1
+    );
+    assert_eq!(
+        decoded.dispatch_id,
+        verlet_runtime_contracts::DispatchId::new("fixture-dispatch")
+    );
     assert_eq!(decoded.target_thread_id, thread_id);
     let canonical = serde_json::to_value(&decoded).unwrap();
     assert!(canonical.get("future_entry").is_none());
     assert_eq!(
-        serde_json::from_value::<RemoteIngressQueueEntryV1>(canonical).unwrap(),
+        serde_json::from_value::<verlet::daemon::remote_store::queue::RemoteIngressQueueEntryV1>(
+            canonical
+        )
+        .unwrap(),
         decoded
     );
 }
@@ -418,6 +461,9 @@ fn seeded_bool(seed: u64) -> bool {
     (value ^ (value >> 31)) & 1 == 1
 }
 
-fn temp_db_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("verlet-emo430-{name}-{}.sqlite3", Uuid::now_v7()))
+fn temp_db_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "verlet-emo430-{name}-{}.sqlite3",
+        uuid::Uuid::now_v7()
+    ))
 }

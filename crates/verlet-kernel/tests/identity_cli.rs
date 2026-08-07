@@ -1,9 +1,4 @@
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::Arc;
-use uuid::Uuid;
-use verlet::daemon::identity::{IdentityAuthority, PrincipalId, SqliteIdentityAuthority};
-use verlet::{DaemonClock, SqliteSessionStore, SystemDaemonClock};
+use verlet::daemon::identity::IdentityAuthority as _;
 
 #[tokio::test]
 async fn bootstrap_prints_one_secret_and_refuses_a_second_root() {
@@ -35,16 +30,17 @@ async fn bootstrap_prints_one_secret_and_refuses_a_second_root() {
     assert!(first_stderr.contains("shown once"));
 
     let store_path = state_home.join("session_history.sqlite3");
-    let store = SqliteSessionStore::open(&store_path).await.unwrap();
-    let clock: Arc<dyn DaemonClock> = Arc::new(SystemDaemonClock);
-    let authority = SqliteIdentityAuthority::new(store, clock, None)
+    let store = verlet::SqliteSessionStore::open(&store_path).await.unwrap();
+    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
+        std::sync::Arc::new(verlet::SystemDaemonClock);
+    let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
         .await
         .unwrap();
     let principals = authority.list_principals().await.unwrap();
     assert_eq!(principals.len(), 1);
     assert_eq!(
         principals[0].principal_id,
-        PrincipalId::new("operator:root")
+        verlet::daemon::identity::PrincipalId::new("operator:root")
     );
     assert!(authority.verify_token(token).await.unwrap().is_some());
     drop(authority);
@@ -198,11 +194,12 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         stderr(&revoke_principal)
     );
 
-    let store = SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+    let store = verlet::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
         .await
         .unwrap();
-    let clock: Arc<dyn DaemonClock> = Arc::new(SystemDaemonClock);
-    let authority = SqliteIdentityAuthority::new(store, clock, None)
+    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
+        std::sync::Arc::new(verlet::SystemDaemonClock);
+    let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
         .await
         .unwrap();
     assert!(authority.verify_token(token).await.unwrap().is_none());
@@ -246,11 +243,12 @@ async fn locked_store_tells_the_user_to_stop_the_daemon() {
     let state_home = temp_state_home();
     std::fs::create_dir_all(&state_home).unwrap();
     let state_home_arg = state_home.to_string_lossy().to_string();
-    let store = SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+    let store = verlet::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
         .await
         .unwrap();
-    let clock: Arc<dyn DaemonClock> = Arc::new(SystemDaemonClock);
-    let authority = SqliteIdentityAuthority::new(store, clock, None)
+    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
+        std::sync::Arc::new(verlet::SystemDaemonClock);
+    let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
         .await
         .unwrap();
 
@@ -263,28 +261,28 @@ async fn locked_store_tells_the_user_to_stop_the_daemon() {
     remove_sqlite_state(&state_home);
 }
 
-fn run_identity<const N: usize>(args: [&str; N]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_verlet"))
+fn run_identity<const N: usize>(args: [&str; N]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .args(args)
         .output()
         .expect("failed to run verlet identity command")
 }
 
-fn stdout(output: &Output) -> String {
+fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
-fn stderr(output: &Output) -> String {
+fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
 }
 
-fn temp_state_home() -> PathBuf {
-    std::env::temp_dir().join(format!("verlet-identity-cli-{}", Uuid::now_v7()))
+fn temp_state_home() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("verlet-identity-cli-{}", uuid::Uuid::now_v7()))
 }
 
-fn remove_sqlite_state(state_home: &Path) {
+fn remove_sqlite_state(state_home: &std::path::Path) {
     for suffix in ["", "-wal", "-shm"] {
-        let path = PathBuf::from(format!(
+        let path = std::path::PathBuf::from(format!(
             "{}{}",
             state_home.join("session_history.sqlite3").display(),
             suffix

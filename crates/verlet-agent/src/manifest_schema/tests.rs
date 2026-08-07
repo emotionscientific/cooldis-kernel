@@ -1,8 +1,6 @@
-use super::*;
-
-fn parse(source: &str) -> VerletResult<AgentManifestSchema> {
+fn parse(source: &str) -> crate::VerletResult<crate::manifest_schema::AgentManifestSchema> {
     let value = toml::from_str(source).unwrap();
-    AgentManifestSchema::from_toml_value(&value)
+    crate::manifest_schema::AgentManifestSchema::from_toml_value(&value)
 }
 
 fn valid_manifest() -> String {
@@ -105,7 +103,10 @@ auto_at_text_bytes = 1024
 
 [runtime.overrides]
 allow = ["default_cwd", "streaming", "compaction.auto_at_text_bytes"]
-"#
+"#,
+        KERNEL_ASSEMBLER_STATIC = crate::manifest_schema::KERNEL_ASSEMBLER_STATIC,
+        KERNEL_ASSEMBLER_RECORD_SELECT = crate::manifest_schema::KERNEL_ASSEMBLER_RECORD_SELECT,
+        KERNEL_ASSEMBLER_ANCHORED_WINDOW = crate::manifest_schema::KERNEL_ASSEMBLER_ANCHORED_WINDOW,
     )
 }
 
@@ -157,10 +158,12 @@ fn full_fixture_manifest_parses_and_validates() {
     assert!(manifest.couplings.is_empty());
     assert_eq!(manifest.effective_context_pipeline().sources.len(), 3);
     assert!(manifest.tools.iter().all(|tool| match tool {
-        AgentManifestTool::Bash(tool) => tool.effect_class == EffectClass::AtMostOnce,
-        AgentManifestTool::Direct(tool) => tool.effect_class == EffectClass::AtMostOnce,
-        AgentManifestTool::ProtocolImport(tool) => {
-            tool.effect_class == EffectClass::AtMostOnce
+        crate::manifest_schema::AgentManifestTool::Bash(tool) =>
+            tool.effect_class == crate::manifest_schema::EffectClass::AtMostOnce,
+        crate::manifest_schema::AgentManifestTool::Direct(tool) =>
+            tool.effect_class == crate::manifest_schema::EffectClass::AtMostOnce,
+        crate::manifest_schema::AgentManifestTool::ProtocolImport(tool) => {
+            tool.effect_class == crate::manifest_schema::EffectClass::AtMostOnce
         }
     }));
     assert!(
@@ -187,15 +190,15 @@ fn tool_rows_accept_effect_classes_and_reject_unknown_values_by_row() {
     let manifest = parse(&source).unwrap();
     assert!(matches!(
         &manifest.tools[0],
-        AgentManifestTool::Bash(tool) if tool.effect_class == EffectClass::Pure
+        crate::manifest_schema::AgentManifestTool::Bash(tool) if tool.effect_class == crate::manifest_schema::EffectClass::Pure
     ));
     assert!(matches!(
         &manifest.tools[1],
-        AgentManifestTool::Direct(tool) if tool.effect_class == EffectClass::Idempotent
+        crate::manifest_schema::AgentManifestTool::Direct(tool) if tool.effect_class == crate::manifest_schema::EffectClass::Idempotent
     ));
     assert!(matches!(
         &manifest.tools[2],
-        AgentManifestTool::ProtocolImport(tool) if tool.effect_class == EffectClass::AtMostOnce
+        crate::manifest_schema::AgentManifestTool::ProtocolImport(tool) if tool.effect_class == crate::manifest_schema::EffectClass::AtMostOnce
     ));
 
     let err = parse(&valid_manifest().replace(
@@ -257,19 +260,22 @@ fn grants_accept_legacy_strings_and_expiring_objects_everywhere() {
         expires_at
     );
 
-    let decoded: AgentManifestSchema = serde_json::from_value(encoded.clone()).unwrap();
+    let decoded: crate::manifest_schema::AgentManifestSchema =
+        serde_json::from_value(encoded.clone()).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
 
     #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
     struct GrantEnvelope {
-        grants: Vec<AgentManifestGrant>,
+        grants: Vec<crate::manifest_schema::AgentManifestGrant>,
     }
 
     let grant_wire = GrantEnvelope {
-        grants: vec![AgentManifestGrant::Expiring(AgentManifestGrantExpiry {
-            capability: "fs.write:/workspace".to_string(),
-            expires_at: expires_at.to_string(),
-        })],
+        grants: vec![crate::manifest_schema::AgentManifestGrant::Expiring(
+            crate::manifest_schema::AgentManifestGrantExpiry {
+                capability: "fs.write:/workspace".to_string(),
+                expires_at: expires_at.to_string(),
+            },
+        )],
     };
     let first_encoding = toml::to_string(&grant_wire).unwrap();
     let decoded: GrantEnvelope = toml::from_str(&first_encoding).unwrap();
@@ -342,7 +348,10 @@ min_mode = "rw"
     let workspace = manifest.workspace.expect("workspace requirement");
 
     assert_eq!(workspace.guest_path, "/workspace");
-    assert_eq!(workspace.min_mode, AgentManifestWorkspaceMode::ReadWrite);
+    assert_eq!(
+        workspace.min_mode,
+        crate::manifest_schema::AgentManifestWorkspaceMode::ReadWrite
+    );
     assert!(
         !serde_json::to_value(workspace)
             .unwrap()
@@ -499,8 +508,8 @@ fn missing_context_synthesizes_default_pipeline() {
     assert_eq!(pipeline.sources[1].id, "history");
     assert_eq!(
         pipeline.sources[1].budget_share,
-        Some(AgentManifestBudgetShare::Rest(
-            AgentManifestBudgetRest::Rest
+        Some(crate::manifest_schema::AgentManifestBudgetShare::Rest(
+            crate::manifest_schema::AgentManifestBudgetRest::Rest
         ))
     );
 }
@@ -605,33 +614,33 @@ fn reserved_and_deferred_resource_kinds_are_named() {
 
 #[test]
 fn resolved_ref_validation_uses_the_declared_skill_ref_authority() {
-    let malformed = AgentManifestResolvedRef {
+    let malformed = crate::manifest_schema::AgentManifestResolvedRef {
         declared: "skill://karl-skills@sha256:garbage".to_string(),
         resolved: None,
         content_hash: None,
-        status: AgentManifestRefStatus::UnresolvedOffline,
+        status: crate::manifest_schema::AgentManifestRefStatus::UnresolvedOffline,
     };
 
     let err = malformed.validate().unwrap_err().to_string();
     assert!(err.contains("skill package artifact hash"), "{err}");
     assert!(err.contains("sha256 hex digest"), "{err}");
 
-    let floating = AgentManifestResolvedRef {
+    let floating = crate::manifest_schema::AgentManifestResolvedRef {
         declared: "skill://karl-skills".to_string(),
         resolved: None,
         content_hash: None,
-        status: AgentManifestRefStatus::UnresolvedOffline,
+        status: crate::manifest_schema::AgentManifestRefStatus::UnresolvedOffline,
     };
     let err = floating.validate().unwrap_err().to_string();
     assert!(err.contains("bind time"), "{err}");
     assert!(err.contains("resolved_refs"), "{err}");
 
     let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let resolved_to_floating = AgentManifestResolvedRef {
+    let resolved_to_floating = crate::manifest_schema::AgentManifestResolvedRef {
         declared: format!("resource://system-prompt@sha256:{hash}"),
         resolved: Some("skill://karl-skills".to_string()),
         content_hash: Some(format!("sha256:{hash}")),
-        status: AgentManifestRefStatus::Resolved,
+        status: crate::manifest_schema::AgentManifestRefStatus::Resolved,
     };
     let err = resolved_to_floating.validate().unwrap_err().to_string();
     assert!(err.contains("bind time"), "{err}");
@@ -647,7 +656,10 @@ fn context_budget_and_assembler_rules_are_enforced() {
             "pipeline id must be \"default\"",
         ),
         (
-            &format!("assembler = \"{KERNEL_ASSEMBLER_STATIC}\"\ninput = \"system_prompt\""),
+            &format!(
+                "assembler = \"{KERNEL_ASSEMBLER_STATIC}\"\ninput = \"system_prompt\"",
+                KERNEL_ASSEMBLER_STATIC = crate::manifest_schema::KERNEL_ASSEMBLER_STATIC
+            ),
             "assembler = \"kernel://assembler/other\"\ninput = \"system_prompt\"",
             "not a V1 kernel assembler",
         ),
@@ -735,7 +747,9 @@ fn runtime_tool_round_budget_supports_finite_unlimited_and_absent() {
     let finite = parse(&valid_manifest()).unwrap();
     assert_eq!(
         finite.runtime.max_tool_rounds,
-        Some(AgentManifestMaxToolRounds::Limited(64))
+        Some(crate::manifest_schema::AgentManifestMaxToolRounds::Limited(
+            64
+        ))
     );
 
     let unlimited =
@@ -743,7 +757,7 @@ fn runtime_tool_round_budget_supports_finite_unlimited_and_absent() {
             .unwrap();
     assert_eq!(
         unlimited.runtime.max_tool_rounds,
-        Some(AgentManifestMaxToolRounds::Unlimited)
+        Some(crate::manifest_schema::AgentManifestMaxToolRounds::Unlimited)
     );
 
     let absent = parse(&valid_manifest().replace("max_tool_rounds = 64\n", "")).unwrap();

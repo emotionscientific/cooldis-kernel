@@ -23,11 +23,6 @@
 //! intentionally has no daemon route-store handle and the runner lands in
 //! EMO-403.
 
-use super::{InvariantViolation, ScenarioInvariant, ScenarioWorld};
-use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::BTreeMap;
-
 pub const INV7_ONE_CHILD_PER_FORK_CLAIM: &str = "inv7-one-child-per-fork-claim";
 pub const INV8_RESERVED_BEFORE_CREATED: &str = "inv8-reserved-before-created";
 
@@ -37,23 +32,26 @@ pub struct OneChildPerForkClaimInvariant;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ReservedBeforeCreatedInvariant;
 
-pub fn fork_invariants_v1() -> Vec<Box<dyn ScenarioInvariant>> {
+pub fn fork_invariants_v1() -> Vec<Box<dyn crate::support::scenario::ScenarioInvariant>> {
     vec![
         Box::new(OneChildPerForkClaimInvariant),
         Box::new(ReservedBeforeCreatedInvariant),
     ]
 }
 
-#[async_trait]
-impl ScenarioInvariant for OneChildPerForkClaimInvariant {
+#[async_trait::async_trait]
+impl crate::support::scenario::ScenarioInvariant for OneChildPerForkClaimInvariant {
     fn name(&self) -> &'static str {
         INV7_ONE_CHILD_PER_FORK_CLAIM
     }
 
-    async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+    async fn check(
+        &self,
+        world: &crate::support::scenario::ScenarioWorld<'_>,
+    ) -> Vec<crate::support::scenario::InvariantViolation> {
         inv7_violations(&world.transcript.items)
             .into_iter()
-            .map(|detail| InvariantViolation {
+            .map(|detail| crate::support::scenario::InvariantViolation {
                 invariant: self.name(),
                 detail,
             })
@@ -61,16 +59,19 @@ impl ScenarioInvariant for OneChildPerForkClaimInvariant {
     }
 }
 
-#[async_trait]
-impl ScenarioInvariant for ReservedBeforeCreatedInvariant {
+#[async_trait::async_trait]
+impl crate::support::scenario::ScenarioInvariant for ReservedBeforeCreatedInvariant {
     fn name(&self) -> &'static str {
         INV8_RESERVED_BEFORE_CREATED
     }
 
-    async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+    async fn check(
+        &self,
+        world: &crate::support::scenario::ScenarioWorld<'_>,
+    ) -> Vec<crate::support::scenario::InvariantViolation> {
         inv8_violations(&world.transcript.items)
             .into_iter()
-            .map(|detail| InvariantViolation {
+            .map(|detail| crate::support::scenario::InvariantViolation {
                 invariant: self.name(),
                 detail,
             })
@@ -78,15 +79,15 @@ impl ScenarioInvariant for ReservedBeforeCreatedInvariant {
     }
 }
 
-fn event_kind(item: &super::transcript::NormalizedTranscriptItem) -> Option<&str> {
+fn event_kind(item: &crate::support::transcript::NormalizedTranscriptItem) -> Option<&str> {
     (item.kind == "event")
-        .then(|| item.value.get("kind").and_then(Value::as_str))
+        .then(|| item.value.get("kind").and_then(serde_json::Value::as_str))
         .flatten()
 }
 
-fn inv7_violations(items: &[super::transcript::NormalizedTranscriptItem]) -> Vec<String> {
-    let mut reservations = BTreeMap::<String, String>::new();
-    let mut spawned_children = BTreeMap::<String, Vec<String>>::new();
+fn inv7_violations(items: &[crate::support::transcript::NormalizedTranscriptItem]) -> Vec<String> {
+    let mut reservations = std::collections::BTreeMap::<String, String>::new();
+    let mut spawned_children = std::collections::BTreeMap::<String, Vec<String>>::new();
     let mut violations = Vec::new();
 
     for item in items {
@@ -95,16 +96,17 @@ fn inv7_violations(items: &[super::transcript::NormalizedTranscriptItem]) -> Vec
                 if item
                     .value
                     .pointer("/payload/intent/outcome")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     == Some("fork") =>
             {
-                let Some(claim_id) = item.value.get("id").and_then(Value::as_str) else {
+                let Some(claim_id) = item.value.get("id").and_then(serde_json::Value::as_str)
+                else {
                     continue;
                 };
                 let Some(child_thread_id) = item
                     .value
                     .pointer("/payload/intent/child_thread_id")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                 else {
                     violations.push(format!(
                         "fork claim {claim_id} does not reserve a child thread id"
@@ -124,14 +126,14 @@ fn inv7_violations(items: &[super::transcript::NormalizedTranscriptItem]) -> Vec
                 let Some(claim_id) = item
                     .value
                     .pointer("/payload/fork/claim_event_id")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                 else {
                     continue;
                 };
                 let Some(child_thread_id) = item
                     .value
                     .pointer("/payload/child_thread_id")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                 else {
                     continue;
                 };
@@ -166,29 +168,33 @@ fn inv7_violations(items: &[super::transcript::NormalizedTranscriptItem]) -> Vec
     violations
 }
 
-fn inv8_violations(items: &[super::transcript::NormalizedTranscriptItem]) -> Vec<String> {
-    let mut reservation_index = BTreeMap::<String, usize>::new();
-    let mut first_record_index = BTreeMap::<String, usize>::new();
+fn inv8_violations(items: &[crate::support::transcript::NormalizedTranscriptItem]) -> Vec<String> {
+    let mut reservation_index = std::collections::BTreeMap::<String, usize>::new();
+    let mut first_record_index = std::collections::BTreeMap::<String, usize>::new();
 
     for (index, item) in items.iter().enumerate() {
         if event_kind(item) == Some("io.ingress.claimed")
             && item
                 .value
                 .pointer("/payload/intent/outcome")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 == Some("fork")
             && let Some(thread_id) = item
                 .value
                 .pointer("/payload/intent/child_thread_id")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
         {
             reservation_index
                 .entry(thread_id.to_string())
                 .or_insert(index);
         }
         if item.kind == "receipt"
-            && item.value.get("kind").and_then(Value::as_str) == Some("thread.reservation")
-            && let Some(thread_id) = item.value.get("thread_id").and_then(Value::as_str)
+            && item.value.get("kind").and_then(serde_json::Value::as_str)
+                == Some("thread.reservation")
+            && let Some(thread_id) = item
+                .value
+                .get("thread_id")
+                .and_then(serde_json::Value::as_str)
         {
             reservation_index
                 .entry(thread_id.to_string())
@@ -198,7 +204,7 @@ fn inv8_violations(items: &[super::transcript::NormalizedTranscriptItem]) -> Vec
             && let Some(thread_id) = item
                 .value
                 .pointer("/coordinates/thread_id")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
         {
             first_record_index
                 .entry(thread_id.to_string())
@@ -222,20 +228,17 @@ fn inv8_violations(items: &[super::transcript::NormalizedTranscriptItem]) -> Vec
 
 #[cfg(test)]
 mod tests {
-    use super::super::transcript::NormalizedTranscriptItem;
-    use super::*;
-    use serde_json::json;
 
-    fn event(value: Value) -> NormalizedTranscriptItem {
-        NormalizedTranscriptItem {
+    fn event(value: serde_json::Value) -> crate::support::transcript::NormalizedTranscriptItem {
+        crate::support::transcript::NormalizedTranscriptItem {
             kind: "event".to_string(),
             label: "durable".to_string(),
             value,
         }
     }
 
-    fn receipt(value: Value) -> NormalizedTranscriptItem {
-        NormalizedTranscriptItem {
+    fn receipt(value: serde_json::Value) -> crate::support::transcript::NormalizedTranscriptItem {
+        crate::support::transcript::NormalizedTranscriptItem {
             kind: "receipt".to_string(),
             label: "thread.reservation".to_string(),
             value,
@@ -245,7 +248,7 @@ mod tests {
     #[test]
     fn inv7_rejects_a_spawn_that_does_not_match_the_claim_reservation() {
         let items = vec![
-            event(json!({
+            event(serde_json::json!({
                 "id": "$claim-1",
                 "kind": "io.ingress.claimed",
                 "payload": {"intent": {
@@ -253,7 +256,7 @@ mod tests {
                     "child_thread_id": "$thread-1"
                 }}
             })),
-            event(json!({
+            event(serde_json::json!({
                 "kind": "thread.spawned",
                 "payload": {
                     "child_thread_id": "$thread-2",
@@ -263,7 +266,7 @@ mod tests {
         ];
 
         assert_eq!(
-            inv7_violations(&items),
+            crate::support::invariant_forks::inv7_violations(&items),
             vec!["fork claim $claim-1 reserved $thread-1, but spawned $thread-2"]
         );
     }
@@ -271,12 +274,12 @@ mod tests {
     #[test]
     fn inv8_accepts_fork_and_root_records_only_after_their_reservations() {
         let items = vec![
-            receipt(json!({
+            receipt(serde_json::json!({
                 "kind": "thread.reservation",
                 "thread_id": "$parent",
                 "reservation_kind": "initial_route"
             })),
-            event(json!({
+            event(serde_json::json!({
                 "id": "$claim-1",
                 "kind": "io.ingress.claimed",
                 "coordinates": {"thread_id": "$parent"},
@@ -285,35 +288,35 @@ mod tests {
                     "child_thread_id": "$child"
                 }}
             })),
-            event(json!({
+            event(serde_json::json!({
                 "kind": "session.entry.appended",
                 "coordinates": {"thread_id": "$child"},
                 "payload": {}
             })),
-            receipt(json!({
+            receipt(serde_json::json!({
                 "kind": "thread.reservation",
                 "thread_id": "$root",
                 "reservation_kind": "initial_route"
             })),
-            event(json!({
+            event(serde_json::json!({
                 "kind": "session.entry.appended",
                 "coordinates": {"thread_id": "$root"},
                 "payload": {}
             })),
         ];
 
-        assert!(inv8_violations(&items).is_empty());
+        assert!(crate::support::invariant_forks::inv8_violations(&items).is_empty());
     }
 
     #[test]
     fn inv8_rejects_creation_before_reservation() {
         let items = vec![
-            event(json!({
+            event(serde_json::json!({
                 "kind": "session.entry.appended",
                 "coordinates": {"thread_id": "$root"},
                 "payload": {}
             })),
-            receipt(json!({
+            receipt(serde_json::json!({
                 "kind": "thread.reservation",
                 "thread_id": "$root",
                 "reservation_kind": "initial_route"
@@ -321,7 +324,7 @@ mod tests {
         ];
 
         assert_eq!(
-            inv8_violations(&items),
+            crate::support::invariant_forks::inv8_violations(&items),
             vec![
                 "thread $root first record at transcript item 0 does not follow its reservation at item 1"
             ]

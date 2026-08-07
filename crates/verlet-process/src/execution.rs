@@ -1,12 +1,5 @@
-use crate::VerletProcessResult;
-use crate::process_error;
-use async_trait::async_trait;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, SystemTime};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
-use tokio_util::sync::CancellationToken;
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VirtualCommandOutput {
@@ -60,14 +53,14 @@ impl ExternalCommandInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionDeadline {
-    pub started_at: SystemTime,
-    pub deadline_at: SystemTime,
-    pub timeout: Duration,
+    pub started_at: std::time::SystemTime,
+    pub deadline_at: std::time::SystemTime,
+    pub timeout: std::time::Duration,
 }
 
 impl ExecutionDeadline {
-    pub fn from_now(timeout: Duration) -> Self {
-        let started_at = SystemTime::now();
+    pub fn from_now(timeout: std::time::Duration) -> Self {
+        let started_at = std::time::SystemTime::now();
         let deadline_at = started_at.checked_add(timeout).unwrap_or(started_at);
         Self {
             started_at,
@@ -76,9 +69,9 @@ impl ExecutionDeadline {
         }
     }
 
-    pub fn remaining(&self) -> Duration {
+    pub fn remaining(&self) -> std::time::Duration {
         self.deadline_at
-            .duration_since(SystemTime::now())
+            .duration_since(std::time::SystemTime::now())
             .unwrap_or_default()
     }
 
@@ -91,7 +84,7 @@ impl ExecutionDeadline {
 pub struct ExternalCommandRequest {
     pub invocation: ExternalCommandInvocation,
     pub executor: ExternalExecutorKind,
-    pub cwd: PathBuf,
+    pub cwd: std::path::PathBuf,
     pub stdin: Option<String>,
     pub deadline: ExecutionDeadline,
     pub max_output_bytes: usize,
@@ -103,18 +96,18 @@ impl ExternalCommandRequest {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ExternalCommandExecutor: Send + Sync + 'static {
     async fn exec(
         &self,
         request: ExternalCommandRequest,
-    ) -> VerletProcessResult<ExternalCommandResult>;
+    ) -> crate::VerletProcessResult<ExternalCommandResult>;
 
     async fn exec_cancellable(
         &self,
         request: ExternalCommandRequest,
-        cancellation: CancellationToken,
-    ) -> VerletProcessResult<ExternalCommandResult> {
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> crate::VerletProcessResult<ExternalCommandResult> {
         let _ = cancellation;
         self.exec(request).await
     }
@@ -122,12 +115,12 @@ pub trait ExternalCommandExecutor: Send + Sync + 'static {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalFileWrite {
-    pub path: PathBuf,
+    pub path: std::path::PathBuf,
     pub content: Vec<u8>,
 }
 
 impl ExternalFileWrite {
-    pub fn new(path: impl Into<PathBuf>, content: impl Into<Vec<u8>>) -> Self {
+    pub fn new(path: impl Into<std::path::PathBuf>, content: impl Into<Vec<u8>>) -> Self {
         Self {
             path: path.into(),
             content: content.into(),
@@ -158,12 +151,12 @@ impl ExternalCommandResult {
 #[derive(Clone, Debug, Default)]
 pub struct RejectingExternalCommandExecutor;
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ExternalCommandExecutor for RejectingExternalCommandExecutor {
     async fn exec(
         &self,
         request: ExternalCommandRequest,
-    ) -> VerletProcessResult<ExternalCommandResult> {
+    ) -> crate::VerletProcessResult<ExternalCommandResult> {
         Ok(ExternalCommandResult::new(VirtualCommandOutput {
             stdout: String::new(),
             stderr: format!(
@@ -179,19 +172,19 @@ impl ExternalCommandExecutor for RejectingExternalCommandExecutor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostBashExecutorConfig {
-    pub shell: PathBuf,
-    pub workspace_root: PathBuf,
+    pub shell: std::path::PathBuf,
+    pub workspace_root: std::path::PathBuf,
 }
 
 impl HostBashExecutorConfig {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+    pub fn new(workspace_root: impl Into<std::path::PathBuf>) -> Self {
         Self {
-            shell: PathBuf::from("/bin/bash"),
+            shell: std::path::PathBuf::from("/bin/bash"),
             workspace_root: workspace_root.into(),
         }
     }
 
-    pub fn with_shell(mut self, shell: impl Into<PathBuf>) -> Self {
+    pub fn with_shell(mut self, shell: impl Into<std::path::PathBuf>) -> Self {
         self.shell = shell.into();
         self
     }
@@ -203,7 +196,7 @@ pub struct HostBashExecutor {
 }
 
 impl HostBashExecutor {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+    pub fn new(workspace_root: impl Into<std::path::PathBuf>) -> Self {
         Self {
             config: HostBashExecutorConfig::new(workspace_root),
         }
@@ -213,8 +206,8 @@ impl HostBashExecutor {
         Self { config }
     }
 
-    fn host_cwd(&self, cwd: &Path) -> PathBuf {
-        let workspace = Path::new("/workspace");
+    fn host_cwd(&self, cwd: &std::path::Path) -> std::path::PathBuf {
+        let workspace = std::path::Path::new("/workspace");
         if cwd == workspace {
             return self.config.workspace_root.clone();
         }
@@ -230,8 +223,8 @@ impl HostBashExecutor {
     async fn exec_with_cancellation(
         &self,
         request: ExternalCommandRequest,
-        cancellation: Option<CancellationToken>,
-    ) -> VerletProcessResult<ExternalCommandResult> {
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> crate::VerletProcessResult<ExternalCommandResult> {
         if request.executor != ExternalExecutorKind::HostBash {
             return Ok(ExternalCommandResult::new(VirtualCommandOutput {
                 stdout: String::new(),
@@ -251,12 +244,12 @@ impl HostBashExecutor {
 
         let mut command = match &request.invocation {
             ExternalCommandInvocation::Script(script) => {
-                let mut command = Command::new(&self.config.shell);
+                let mut command = tokio::process::Command::new(&self.config.shell);
                 command.arg("-lc").arg(script);
                 command
             }
             ExternalCommandInvocation::Argv { command, args } => {
-                let mut process = Command::new(command);
+                let mut process = tokio::process::Command::new(command);
                 process.args(args);
                 process
             }
@@ -264,12 +257,12 @@ impl HostBashExecutor {
         command
             .current_dir(self.host_cwd(&request.cwd))
             .stdin(if request.stdin.is_some() {
-                Stdio::piped()
+                std::process::Stdio::piped()
             } else {
-                Stdio::null()
+                std::process::Stdio::null()
             })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
         unsafe {
@@ -281,18 +274,18 @@ impl HostBashExecutor {
             });
         }
 
-        let mut child = command.spawn().map_err(process_error)?;
+        let mut child = command.spawn().map_err(crate::process_error)?;
         let child_id = child.id();
         #[cfg(unix)]
         let mut process_group_guard = ProcessGroupKillGuard::new(child_id);
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| process_error("host bash stdout pipe was not available"))?;
+            .ok_or_else(|| crate::process_error("host bash stdout pipe was not available"))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| process_error("host bash stderr pipe was not available"))?;
+            .ok_or_else(|| crate::process_error("host bash stderr pipe was not available"))?;
         let stdout_task = tokio::spawn(read_capped_output(stdout, request.max_output_bytes));
         let stderr_task = tokio::spawn(read_capped_output(stderr, request.max_output_bytes));
         if let Some(stdin) = request.stdin
@@ -301,7 +294,7 @@ impl HostBashExecutor {
             child_stdin
                 .write_all(stdin.as_bytes())
                 .await
-                .map_err(process_error)?;
+                .map_err(crate::process_error)?;
         }
 
         enum HostExit {
@@ -316,7 +309,7 @@ impl HostBashExecutor {
             }
         };
         let mut exit = tokio::select! {
-            status = child.wait() => HostExit::Exited(status.map_err(process_error)?),
+            status = child.wait() => HostExit::Exited(status.map_err(crate::process_error)?),
             _ = tokio::time::sleep(request.deadline.remaining()) => {
                 terminate_external_child(&mut child, child_id).await;
                 HostExit::TimedOut
@@ -335,8 +328,8 @@ impl HostBashExecutor {
         let mut drained_output = None;
         if matches!(&exit, HostExit::Exited(_)) {
             let output_drain = async {
-                let stdout = (&mut stdout_task).await.map_err(process_error)?;
-                let stderr = (&mut stderr_task).await.map_err(process_error)?;
+                let stdout = (&mut stdout_task).await.map_err(crate::process_error)?;
+                let stderr = (&mut stderr_task).await.map_err(crate::process_error)?;
                 Ok::<_, crate::VerletProcessError>((stdout, stderr))
             };
             tokio::pin!(output_drain);
@@ -363,8 +356,8 @@ impl HostBashExecutor {
         let (stdout, stderr) = match drained_output {
             Some(output) => output,
             None => (
-                stdout_task.await.map_err(process_error)?,
-                stderr_task.await.map_err(process_error)?,
+                stdout_task.await.map_err(crate::process_error)?,
+                stderr_task.await.map_err(crate::process_error)?,
             ),
         };
         let (stdout, stdout_truncated) = stdout?;
@@ -393,20 +386,20 @@ impl HostBashExecutor {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ExternalCommandExecutor for HostBashExecutor {
     async fn exec(
         &self,
         request: ExternalCommandRequest,
-    ) -> VerletProcessResult<ExternalCommandResult> {
+    ) -> crate::VerletProcessResult<ExternalCommandResult> {
         self.exec_with_cancellation(request, None).await
     }
 
     async fn exec_cancellable(
         &self,
         request: ExternalCommandRequest,
-        cancellation: CancellationToken,
-    ) -> VerletProcessResult<ExternalCommandResult> {
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> crate::VerletProcessResult<ExternalCommandResult> {
         self.exec_with_cancellation(request, Some(cancellation))
             .await
     }
@@ -418,7 +411,7 @@ async fn terminate_external_child(child: &mut tokio::process::Child, child_id: O
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGTERM);
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGKILL);
         }
@@ -436,7 +429,7 @@ async fn terminate_reaped_external_group(child_id: Option<u32>) {
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGTERM);
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGKILL);
         }
@@ -462,7 +455,7 @@ async fn reap_adopted_process_group(process_group: libc::pid_t) {
         if unsafe { libc::killpg(process_group, 0) } == -1 {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -523,9 +516,9 @@ fn external_timeout_result(message: impl Into<String>) -> ExternalCommandResult 
 async fn read_capped_output<R>(
     mut reader: R,
     max_output_bytes: usize,
-) -> VerletProcessResult<(String, bool)>
+) -> crate::VerletProcessResult<(String, bool)>
 where
-    R: AsyncRead + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
 {
     let mut retained = String::with_capacity(max_output_bytes.min(8192));
     let mut truncated = false;
@@ -535,7 +528,7 @@ where
         let read = reader
             .read(&mut buffer[pending..pending + 8192])
             .await
-            .map_err(process_error)?;
+            .map_err(crate::process_error)?;
         if read == 0 {
             if pending > 0
                 && !truncated
@@ -636,8 +629,8 @@ fn append_replacement(output: &mut String, max_output_bytes: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tokio::io::AsyncWriteExt;
+    use crate::execution::ExternalCommandExecutor as _;
+    use tokio::io::AsyncWriteExt as _;
 
     #[tokio::test]
     async fn capped_reader_drains_but_never_retains_more_than_its_limit() {
@@ -646,7 +639,9 @@ mod tests {
             writer.write_all(&vec![b'x'; 1025]).await.unwrap();
         });
 
-        let (retained, truncated) = read_capped_output(reader, 1024).await.unwrap();
+        let (retained, truncated) = crate::execution::read_capped_output(reader, 1024)
+            .await
+            .unwrap();
         write.await.unwrap();
 
         assert_eq!(retained.len(), 1024);
@@ -656,12 +651,16 @@ mod tests {
     #[tokio::test]
     async fn lossy_conversion_is_bounded_and_keeps_small_legacy_output() {
         let legacy = b"before\xffafter";
-        let (text, truncated) = read_capped_output(&legacy[..], 64).await.unwrap();
+        let (text, truncated) = crate::execution::read_capped_output(&legacy[..], 64)
+            .await
+            .unwrap();
         assert_eq!(text, String::from_utf8_lossy(legacy));
         assert!(!truncated);
 
         let invalid = vec![0xff; 1024];
-        let (text, truncated) = read_capped_output(&invalid[..], 1024).await.unwrap();
+        let (text, truncated) = crate::execution::read_capped_output(&invalid[..], 1024)
+            .await
+            .unwrap();
         assert!(text.len() <= 1024);
         assert!(truncated);
     }
@@ -671,7 +670,9 @@ mod tests {
         let mut input = vec![b'a'; 8191];
         input.extend_from_slice("💥tail".as_bytes());
 
-        let (text, truncated) = read_capped_output(&input[..], input.len()).await.unwrap();
+        let (text, truncated) = crate::execution::read_capped_output(&input[..], input.len())
+            .await
+            .unwrap();
 
         assert_eq!(text.as_bytes(), input);
         assert!(!truncated);
@@ -680,7 +681,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn process_group_guard_disarms_after_reaping_an_empty_group() {
-        let mut command = Command::new("/bin/sh");
+        let mut command = tokio::process::Command::new("/bin/sh");
         command.arg("-c").arg("exit 0");
         unsafe {
             command.pre_exec(|| {
@@ -691,7 +692,7 @@ mod tests {
             });
         }
         let mut child = command.spawn().unwrap();
-        let mut guard = ProcessGroupKillGuard::new(child.id());
+        let mut guard = crate::execution::ProcessGroupKillGuard::new(child.id());
         child.wait().await.unwrap();
 
         guard.disarm_if_group_gone();
@@ -708,23 +709,23 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let ready_path = root.join("ready");
-        let executor = HostBashExecutor::new(&root);
-        let cancellation = CancellationToken::new();
-        let request = ExternalCommandRequest {
-            invocation: ExternalCommandInvocation::Script(
+        let executor = crate::execution::HostBashExecutor::new(&root);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let request = crate::execution::ExternalCommandRequest {
+            invocation: crate::execution::ExternalCommandInvocation::Script(
                 "echo ready; trap '' TERM; (trap '' TERM; while :; do sleep 1; done) & echo child=$!; printf ready > ready; wait".to_string(),
             ),
-            executor: ExternalExecutorKind::HostBash,
-            cwd: PathBuf::from("/workspace"),
+            executor: crate::execution::ExternalExecutorKind::HostBash,
+            cwd: std::path::PathBuf::from("/workspace"),
             stdin: None,
-            deadline: ExecutionDeadline::from_now(Duration::from_secs(10)),
+            deadline: crate::execution::ExecutionDeadline::from_now(std::time::Duration::from_secs(10)),
             max_output_bytes: 4096,
         };
         let run = tokio::spawn({
             let cancellation = cancellation.clone();
             async move { executor.exec_cancellable(request, cancellation).await }
         });
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while !ready_path.exists() {
                 tokio::task::yield_now().await;
             }
@@ -733,7 +734,7 @@ mod tests {
         .expect("host bash did not signal readiness before cancellation");
         cancellation.cancel();
 
-        let result = tokio::time::timeout(Duration::from_secs(30), run)
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), run)
             .await
             .expect("host bash cancellation should return promptly")
             .unwrap()
@@ -766,24 +767,24 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let leader_path = root.join("leader.pid");
         let child_path = root.join("child.pid");
-        let executor = HostBashExecutor::new(&root);
-        let cancellation = CancellationToken::new();
-        let request = ExternalCommandRequest {
-            invocation: ExternalCommandInvocation::Script(
+        let executor = crate::execution::HostBashExecutor::new(&root);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let request = crate::execution::ExternalCommandRequest {
+            invocation: crate::execution::ExternalCommandInvocation::Script(
                 "echo $$ > leader.pid; (trap '' HUP TERM; while :; do sleep 1; done) & echo $! > child.pid; exit 0"
                     .to_string(),
             ),
-            executor: ExternalExecutorKind::HostBash,
-            cwd: PathBuf::from("/workspace"),
+            executor: crate::execution::ExternalExecutorKind::HostBash,
+            cwd: std::path::PathBuf::from("/workspace"),
             stdin: None,
-            deadline: ExecutionDeadline::from_now(Duration::from_secs(10)),
+            deadline: crate::execution::ExecutionDeadline::from_now(std::time::Duration::from_secs(10)),
             max_output_bytes: 4096,
         };
         let mut run = tokio::spawn({
             let cancellation = cancellation.clone();
             async move { executor.exec_cancellable(request, cancellation).await }
         });
-        let (leader, child) = tokio::time::timeout(Duration::from_secs(30), async {
+        let (leader, child) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 let leader = std::fs::read_to_string(&leader_path)
                     .ok()
@@ -804,7 +805,8 @@ mod tests {
         .expect("host bash leader was not reaped before cancellation");
 
         cancellation.cancel();
-        let result = match tokio::time::timeout(Duration::from_secs(30), &mut run).await {
+        let result = match tokio::time::timeout(std::time::Duration::from_secs(30), &mut run).await
+        {
             Ok(joined) => joined.unwrap().unwrap(),
             Err(_) => {
                 run.abort();
@@ -836,19 +838,21 @@ mod tests {
         let root = std::env::temp_dir().join(format!("verlet-host-drop-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         let pid_path = root.join("child.pid");
-        let executor = HostBashExecutor::new(&root);
-        let request = ExternalCommandRequest {
-            invocation: ExternalCommandInvocation::Script(
+        let executor = crate::execution::HostBashExecutor::new(&root);
+        let request = crate::execution::ExternalCommandRequest {
+            invocation: crate::execution::ExternalCommandInvocation::Script(
                 "(trap '' TERM; while :; do sleep 1; done) & echo $! > child.pid; wait".to_string(),
             ),
-            executor: ExternalExecutorKind::HostBash,
-            cwd: PathBuf::from("/workspace"),
+            executor: crate::execution::ExternalExecutorKind::HostBash,
+            cwd: std::path::PathBuf::from("/workspace"),
             stdin: None,
-            deadline: ExecutionDeadline::from_now(Duration::from_secs(10)),
+            deadline: crate::execution::ExecutionDeadline::from_now(
+                std::time::Duration::from_secs(10),
+            ),
             max_output_bytes: 4096,
         };
         let run = tokio::spawn(async move { executor.exec(request).await });
-        let child = tokio::time::timeout(Duration::from_secs(30), async {
+        let child = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if let Ok(pid) = std::fs::read_to_string(&pid_path)
                     && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
@@ -863,7 +867,7 @@ mod tests {
 
         run.abort();
         let _ = run.await;
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if unsafe { libc::kill(child, 0) } == -1
                     && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)

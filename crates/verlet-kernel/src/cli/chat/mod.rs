@@ -1,34 +1,6 @@
-use super::{
-    ChatArgs, PrivateAppServer, notification_delta, notification_error_message,
-    notification_matches_thread_turn, notification_thread_id, notification_turn_error_message,
-    notification_turn_id, parse_chat_args, print_chat_help, usage_error,
-};
-use crate::{
-    CodexTuiConnectConfig, CodexTuiEvent, CodexTuiThread, JsonRpcNotification,
-    VerletOperatorClient, VerletResult,
-};
-use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use futures_util::StreamExt;
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Position};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use serde_json::{Value, json};
-use std::ffi::OsString;
-use std::path::PathBuf;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
-
+use futures_util::StreamExt as _;
 #[derive(Clone, Copy, Debug)]
+
 pub(super) enum ChatInvocation {
     Chat,
 }
@@ -36,7 +8,7 @@ pub(super) enum ChatInvocation {
 impl ChatInvocation {
     fn print_help(self) {
         match self {
-            ChatInvocation::Chat => print_chat_help(),
+            ChatInvocation::Chat => crate::cli::console::print_chat_help(),
         }
     }
 
@@ -55,12 +27,15 @@ impl ChatInvocation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ChatAttachTarget {
-    Unix(PathBuf),
+    Unix(std::path::PathBuf),
     WebSocket(String),
 }
 
-pub(super) async fn run(args: Vec<OsString>, invocation: ChatInvocation) -> VerletResult<()> {
-    let options = parse_chat_args(args)?;
+pub(super) async fn run(
+    args: Vec<std::ffi::OsString>,
+    invocation: ChatInvocation,
+) -> crate::VerletResult<()> {
+    let options = crate::cli::console::parse_chat_args(args)?;
     if options.help {
         invocation.print_help();
         return Ok(());
@@ -68,20 +43,25 @@ pub(super) async fn run(args: Vec<OsString>, invocation: ChatInvocation) -> Verl
     run_chat_console(options, invocation).await
 }
 
-async fn run_chat_console(options: ChatArgs, invocation: ChatInvocation) -> VerletResult<()> {
+async fn run_chat_console(
+    options: crate::cli::console::ChatArgs,
+    invocation: ChatInvocation,
+) -> crate::VerletResult<()> {
     if let Some(raw_attach) = options.attach.clone() {
         let target = parse_attach_target(&raw_attach)?;
         return run_attached_chat(options, invocation, target).await;
     }
 
-    let launched = PrivateAppServer::start(&options).await?;
+    let launched = crate::cli::console::PrivateAppServer::start(&options).await?;
     let socket_path = launched.socket_path().to_path_buf();
     let result = async {
         #[cfg(unix)]
         {
-            let client =
-                VerletOperatorClient::connect_unix(socket_path, chat_connect_config(invocation))
-                    .await?;
+            let client = crate::VerletOperatorClient::connect_unix(
+                socket_path,
+                chat_connect_config(invocation),
+            )
+            .await?;
             run_chat_client(
                 client,
                 options.prompt,
@@ -92,7 +72,7 @@ async fn run_chat_console(options: ChatArgs, invocation: ChatInvocation) -> Verl
         #[cfg(not(unix))]
         {
             let _ = socket_path;
-            Err(usage_error(
+            Err(crate::cli::usage_error(
                 "private chat app-server sockets require a Unix platform",
             ))
         }
@@ -103,29 +83,33 @@ async fn run_chat_console(options: ChatArgs, invocation: ChatInvocation) -> Verl
 }
 
 async fn run_attached_chat(
-    options: ChatArgs,
+    options: crate::cli::console::ChatArgs,
     invocation: ChatInvocation,
     target: ChatAttachTarget,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     match target {
         ChatAttachTarget::Unix(path) => {
             #[cfg(unix)]
             {
                 let label = format!("attach unix://{}", path.display());
-                let client =
-                    VerletOperatorClient::connect_unix(path, chat_connect_config(invocation))
-                        .await?;
+                let client = crate::VerletOperatorClient::connect_unix(
+                    path,
+                    chat_connect_config(invocation),
+                )
+                .await?;
                 run_chat_client(client, options.prompt, label).await
             }
             #[cfg(not(unix))]
             {
                 let _ = path;
-                Err(usage_error("--attach unix://... requires a Unix platform"))
+                Err(crate::cli::usage_error(
+                    "--attach unix://... requires a Unix platform",
+                ))
             }
         }
         ChatAttachTarget::WebSocket(url) => {
             let label = format!("attach {url}");
-            let client = VerletOperatorClient::<TcpStream>::connect_websocket(
+            let client = crate::VerletOperatorClient::<tokio::net::TcpStream>::connect_websocket(
                 &url,
                 chat_connect_config(invocation),
             )
@@ -135,23 +119,23 @@ async fn run_attached_chat(
     }
 }
 
-fn chat_connect_config(invocation: ChatInvocation) -> CodexTuiConnectConfig {
-    CodexTuiConnectConfig {
+fn chat_connect_config(invocation: ChatInvocation) -> crate::CodexTuiConnectConfig {
+    crate::CodexTuiConnectConfig {
         client_name: invocation.client_name().to_string(),
-        ..CodexTuiConnectConfig::default()
+        ..crate::CodexTuiConnectConfig::default()
     }
 }
 
 async fn run_chat_client<S>(
-    mut client: VerletOperatorClient<S>,
+    mut client: crate::VerletOperatorClient<S>,
     initial_prompt: Option<String>,
     connection_label: String,
-) -> VerletResult<()>
+) -> crate::VerletResult<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let session = bootstrap_chat_client(&mut client, connection_label).await?;
-    let thread = client.thread_start(json!({})).await?;
+    let thread = client.thread_start(serde_json::json!({})).await?;
     let mut state = ChatTuiState::new(thread, session);
     let run_result = run_chat_tui(&mut client, &mut state, initial_prompt).await;
     let close_result = client.close().await;
@@ -160,34 +144,34 @@ where
 }
 
 async fn bootstrap_chat_client<S>(
-    client: &mut VerletOperatorClient<S>,
+    client: &mut crate::VerletOperatorClient<S>,
     connection_label: String,
-) -> VerletResult<ChatSessionInfo>
+) -> crate::VerletResult<ChatSessionInfo>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     client.account_read().await?;
     let config = client.config_read(false).await?;
     let models = client.model_list().await?;
     let model_labels = model_labels(&models);
     if model_labels.is_empty() {
-        return Err(usage_error("app-server returned no models"));
+        return Err(crate::cli::usage_error("app-server returned no models"));
     }
     let cwd = config
         .get("config")
         .and_then(|config| config.get("cwd"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("?")
         .to_string();
     let provider = config
         .get("config")
         .and_then(|config| config.get("model_provider"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("provider");
     let model = config
         .get("config")
         .and_then(|config| config.get("model"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("model");
     Ok(ChatSessionInfo {
         connection_label,
@@ -197,17 +181,19 @@ where
     })
 }
 
-pub(super) fn parse_attach_target(raw: &str) -> VerletResult<ChatAttachTarget> {
+pub(super) fn parse_attach_target(raw: &str) -> crate::VerletResult<ChatAttachTarget> {
     if let Some(path) = raw.strip_prefix("unix://") {
         if path.is_empty() {
-            return Err(usage_error("--attach unix:// requires a socket path"));
+            return Err(crate::cli::usage_error(
+                "--attach unix:// requires a socket path",
+            ));
         }
-        return Ok(ChatAttachTarget::Unix(PathBuf::from(path)));
+        return Ok(ChatAttachTarget::Unix(std::path::PathBuf::from(path)));
     }
     if raw.starts_with("ws://") {
         return Ok(ChatAttachTarget::WebSocket(raw.to_string()));
     }
-    Err(usage_error(
+    Err(crate::cli::usage_error(
         "--attach must be unix://path or ws://host:port[/rpc]",
     ))
 }
@@ -269,7 +255,7 @@ struct ChatTuiState {
 }
 
 impl ChatTuiState {
-    fn new(thread: CodexTuiThread, session: ChatSessionInfo) -> Self {
+    fn new(thread: crate::CodexTuiThread, session: ChatSessionInfo) -> Self {
         let mut state = Self {
             thread_id: thread.id.clone(),
             thread_name: thread_name(&thread.raw),
@@ -362,7 +348,7 @@ impl ChatTuiState {
         self.turn_state = "idle".to_string();
     }
 
-    fn switch_thread(&mut self, thread: CodexTuiThread, reason: &str) {
+    fn switch_thread(&mut self, thread: crate::CodexTuiThread, reason: &str) {
         self.thread_id = thread.id;
         self.thread_name = thread_name(&thread.raw);
         if let Some(cwd) = thread_cwd(&thread.raw) {
@@ -531,52 +517,56 @@ pub(super) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, S
 }
 
 struct ChatTerminal {
-    terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
+    terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 }
 
 impl ChatTerminal {
-    fn enter() -> VerletResult<Self> {
-        enable_raw_mode()
-            .map_err(|err| usage_error(format!("failed to enable raw mode: {err}")))?;
+    fn enter() -> crate::VerletResult<Self> {
+        crossterm::terminal::enable_raw_mode()
+            .map_err(|err| crate::cli::usage_error(format!("failed to enable raw mode: {err}")))?;
         let mut stdout = std::io::stdout();
-        if let Err(err) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
-            let _ = disable_raw_mode();
-            return Err(usage_error(format!(
+        if let Err(err) = crossterm::execute!(
+            stdout,
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::event::EnableBracketedPaste
+        ) {
+            let _ = crossterm::terminal::disable_raw_mode();
+            return Err(crate::cli::usage_error(format!(
                 "failed to enter alternate screen: {err}"
             )));
         }
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)
-            .map_err(|err| usage_error(format!("failed to open terminal: {err}")))?;
+        let backend = ratatui::backend::CrosstermBackend::new(stdout);
+        let mut terminal = ratatui::Terminal::new(backend)
+            .map_err(|err| crate::cli::usage_error(format!("failed to open terminal: {err}")))?;
         terminal
             .clear()
-            .map_err(|err| usage_error(format!("failed to clear terminal: {err}")))?;
+            .map_err(|err| crate::cli::usage_error(format!("failed to clear terminal: {err}")))?;
         Ok(Self { terminal })
     }
 }
 
 impl Drop for ChatTerminal {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
             self.terminal.backend_mut(),
-            DisableBracketedPaste,
-            LeaveAlternateScreen
+            crossterm::event::DisableBracketedPaste,
+            crossterm::terminal::LeaveAlternateScreen
         );
         let _ = self.terminal.show_cursor();
     }
 }
 
 async fn run_chat_tui<S>(
-    client: &mut VerletOperatorClient<S>,
+    client: &mut crate::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     initial_prompt: Option<String>,
-) -> VerletResult<()>
+) -> crate::VerletResult<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut terminal = ChatTerminal::enter()?;
-    let mut events = EventStream::new();
+    let mut events = crossterm::event::EventStream::new();
 
     if let Some(prompt) = initial_prompt {
         submit_chat_input(client, state, prompt).await?;
@@ -587,18 +577,18 @@ where
         tokio::select! {
             maybe_event = events.next() => {
                 match maybe_event {
-                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                    Some(Ok(crossterm::event::Event::Key(key))) if key.kind == crossterm::event::KeyEventKind::Press => {
                         if handle_chat_key(client, state, key).await? {
                             break;
                         }
                     }
-                    Some(Ok(Event::Paste(text))) => {
+                    Some(Ok(crossterm::event::Event::Paste(text))) => {
                         state.insert_text(&text);
                     }
-                    Some(Ok(Event::Resize(_, _))) => {}
+                    Some(Ok(crossterm::event::Event::Resize(_, _))) => {}
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
-                        return Err(usage_error(format!("terminal event failed: {err}")));
+                        return Err(crate::cli::usage_error(format!("terminal event failed: {err}")));
                     }
                     None => break,
                 }
@@ -613,20 +603,20 @@ where
 }
 
 fn draw_chat_tui(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     state: &ChatTuiState,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     terminal
         .draw(|frame| {
             let area = frame.area();
             let composer_lines = state.input.lines().count().max(1) as u16;
             let composer_height = composer_lines.saturating_add(2).clamp(3, 8);
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
+            let chunks = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
                 .constraints([
-                    Constraint::Min(5),
-                    Constraint::Length(composer_height),
-                    Constraint::Length(1),
+                    ratatui::layout::Constraint::Min(5),
+                    ratatui::layout::Constraint::Length(composer_height),
+                    ratatui::layout::Constraint::Length(1),
                 ])
                 .split(area);
 
@@ -641,42 +631,54 @@ fn draw_chat_tui(
             } else {
                 "Verlet chat".to_string()
             };
-            let history_block = Paragraph::new(history)
-                .block(Block::default().title(title).borders(Borders::ALL))
-                .wrap(Wrap { trim: false });
+            let history_block = ratatui::widgets::Paragraph::new(history)
+                .block(
+                    ratatui::widgets::Block::default()
+                        .title(title)
+                        .borders(ratatui::widgets::Borders::ALL),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false });
             frame.render_widget(history_block, chunks[0]);
 
-            let input = Paragraph::new(state.input.as_str())
-                .block(Block::default().title("message").borders(Borders::ALL))
-                .wrap(Wrap { trim: false });
+            let input = ratatui::widgets::Paragraph::new(state.input.as_str())
+                .block(
+                    ratatui::widgets::Block::default()
+                        .title("message")
+                        .borders(ratatui::widgets::Borders::ALL),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false });
             frame.render_widget(input, chunks[1]);
 
-            let status = Line::from(vec![
-                Span::styled("status ", muted_style(state.no_color)),
-                Span::raw(state.status_line()),
+            let status = ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled("status ", muted_style(state.no_color)),
+                ratatui::text::Span::raw(state.status_line()),
             ]);
-            frame.render_widget(Paragraph::new(status), chunks[2]);
+            frame.render_widget(ratatui::widgets::Paragraph::new(status), chunks[2]);
 
             let inner_width = chunks[1].width.saturating_sub(2).max(1);
             let inner_height = chunks[1].height.saturating_sub(2).max(1);
             let (cursor_line, cursor_col) = state.cursor_line_col();
             let cursor_x = chunks[1].x + 1 + cursor_col.min(inner_width.saturating_sub(1));
             let cursor_y = chunks[1].y + 1 + cursor_line.min(inner_height.saturating_sub(1));
-            frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+            frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, cursor_y));
         })
         .map(|_| ())
-        .map_err(|err| usage_error(format!("failed to draw terminal: {err}")))
+        .map_err(|err| crate::cli::usage_error(format!("failed to draw terminal: {err}")))
 }
 
 async fn handle_chat_key<S>(
-    client: &mut VerletOperatorClient<S>,
+    client: &mut crate::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
-    key: KeyEvent,
-) -> VerletResult<bool>
+    key: crossterm::event::KeyEvent,
+) -> crate::VerletResult<bool>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    if key
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL)
+        && key.code == crossterm::event::KeyCode::Char('c')
+    {
         if interrupt_active_turn(client, state).await? {
             return Ok(false);
         }
@@ -684,77 +686,86 @@ where
     }
 
     match key.code {
-        KeyCode::Esc => {
+        crossterm::event::KeyCode::Esc => {
             if interrupt_active_turn(client, state).await? {
                 Ok(false)
             } else {
                 Ok(true)
             }
         }
-        KeyCode::Enter
-            if key
-                .modifiers
-                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+        crossterm::event::KeyCode::Enter
+            if key.modifiers.intersects(
+                crossterm::event::KeyModifiers::SHIFT
+                    | crossterm::event::KeyModifiers::ALT
+                    | crossterm::event::KeyModifiers::CONTROL,
+            ) =>
         {
             state.insert_newline();
             Ok(false)
         }
-        KeyCode::Enter => {
+        crossterm::event::KeyCode::Enter => {
             let input = state.clear_input();
             if input.is_empty() {
                 return Ok(false);
             }
             submit_or_handle_slash(client, state, input).await
         }
-        KeyCode::Backspace => {
+        crossterm::event::KeyCode::Backspace => {
             state.backspace();
             Ok(false)
         }
-        KeyCode::Delete => {
+        crossterm::event::KeyCode::Delete => {
             state.delete_forward();
             Ok(false)
         }
-        KeyCode::Left => {
+        crossterm::event::KeyCode::Left => {
             state.move_left();
             Ok(false)
         }
-        KeyCode::Right => {
+        crossterm::event::KeyCode::Right => {
             state.move_right();
             Ok(false)
         }
-        KeyCode::Up => {
+        crossterm::event::KeyCode::Up => {
             state.move_up();
             Ok(false)
         }
-        KeyCode::Down => {
+        crossterm::event::KeyCode::Down => {
             state.move_down();
             Ok(false)
         }
-        KeyCode::Home => {
+        crossterm::event::KeyCode::Home => {
             state.move_home();
             Ok(false)
         }
-        KeyCode::End => {
+        crossterm::event::KeyCode::End => {
             state.move_end();
             Ok(false)
         }
-        KeyCode::PageUp => {
+        crossterm::event::KeyCode::PageUp => {
             state.scrollback = state.scrollback.saturating_add(8);
             Ok(false)
         }
-        KeyCode::PageDown => {
+        crossterm::event::KeyCode::PageDown => {
             state.scrollback = state.scrollback.saturating_sub(8);
             Ok(false)
         }
-        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        crossterm::event::KeyCode::Char('j')
+            if key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
             state.insert_newline();
             Ok(false)
         }
-        KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+        crossterm::event::KeyCode::Char(ch)
+            if key.modifiers.is_empty()
+                || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+        {
             state.insert_char(ch);
             Ok(false)
         }
-        KeyCode::Tab => {
+        crossterm::event::KeyCode::Tab => {
             state.insert_text("  ");
             Ok(false)
         }
@@ -763,12 +774,12 @@ where
 }
 
 async fn submit_or_handle_slash<S>(
-    client: &mut VerletOperatorClient<S>,
+    client: &mut crate::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     input: String,
-) -> VerletResult<bool>
+) -> crate::VerletResult<bool>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     match parse_slash_command(&input) {
         Ok(Some(command)) => handle_slash_command(client, state, command).await,
@@ -784,12 +795,12 @@ where
 }
 
 async fn handle_slash_command<S>(
-    client: &mut VerletOperatorClient<S>,
+    client: &mut crate::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     command: SlashCommand,
-) -> VerletResult<bool>
+) -> crate::VerletResult<bool>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     match command {
         SlashCommand::Help => {
@@ -812,7 +823,7 @@ where
             if !ensure_idle(state, "/new") {
                 return Ok(false);
             }
-            let thread = client.thread_start(json!({})).await?;
+            let thread = client.thread_start(serde_json::json!({})).await?;
             state.switch_thread(thread, "started thread");
         }
         SlashCommand::Sessions => {
@@ -856,12 +867,12 @@ where
 }
 
 async fn submit_chat_input<S>(
-    client: &mut VerletOperatorClient<S>,
+    client: &mut crate::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
     input: String,
-) -> VerletResult<()>
+) -> crate::VerletResult<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     state.push_user(input.clone());
     if let Some(turn_id) = state.active_turn_id.clone() {
@@ -880,11 +891,11 @@ where
 }
 
 async fn interrupt_active_turn<S>(
-    client: &mut VerletOperatorClient<S>,
+    client: &mut crate::VerletOperatorClient<S>,
     state: &mut ChatTuiState,
-) -> VerletResult<bool>
+) -> crate::VerletResult<bool>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let Some(turn_id) = state.active_turn_id.clone() else {
         return Ok(false);
@@ -895,52 +906,59 @@ where
     Ok(true)
 }
 
-async fn handle_chat_app_event(state: &mut ChatTuiState, event: CodexTuiEvent) -> VerletResult<()> {
+async fn handle_chat_app_event(
+    state: &mut ChatTuiState,
+    event: crate::CodexTuiEvent,
+) -> crate::VerletResult<()> {
     match event {
-        CodexTuiEvent::Notification(notification) => {
+        crate::CodexTuiEvent::Notification(notification) => {
             handle_chat_notification(state, notification);
         }
-        CodexTuiEvent::Error(error) => {
+        crate::CodexTuiEvent::Error(error) => {
             state.push_error(format!(
                 "JSON-RPC error {}: {}",
                 error.error.code, error.error.message
             ));
             state.finish_turn();
         }
-        CodexTuiEvent::Request(_) | CodexTuiEvent::Response(_) => {}
+        crate::CodexTuiEvent::Request(_) | crate::CodexTuiEvent::Response(_) => {}
     }
     Ok(())
 }
 
-fn handle_chat_notification(state: &mut ChatTuiState, notification: JsonRpcNotification) {
+fn handle_chat_notification(state: &mut ChatTuiState, notification: crate::JsonRpcNotification) {
     let active_matches = state.active_turn_id.as_deref().is_some_and(|turn_id| {
-        notification_matches_thread_turn(&notification, &state.thread_id, turn_id)
+        crate::cli::console::notification_matches_thread_turn(
+            &notification,
+            &state.thread_id,
+            turn_id,
+        )
     });
     match notification.method.as_str() {
         "item/agentMessage/delta" if active_matches => {
-            if let Some(delta) = notification_delta(&notification) {
+            if let Some(delta) = crate::cli::debug_rpc::notification_delta(&notification) {
                 state.append_assistant_delta(delta);
             }
         }
         "item/agentThinking/delta" if active_matches => {
-            if let Some(delta) = notification_delta(&notification) {
+            if let Some(delta) = crate::cli::debug_rpc::notification_delta(&notification) {
                 state.append_thinking_delta(delta);
             }
         }
         "turn/completed"
-            if state
-                .active_turn_id
-                .as_deref()
-                .is_some_and(|turn_id| notification_turn_id(&notification) == Some(turn_id)) =>
+            if state.active_turn_id.as_deref().is_some_and(|turn_id| {
+                crate::cli::console::notification_turn_id(&notification) == Some(turn_id)
+            }) =>
         {
-            let message = notification_turn_error_message(&notification);
+            let message = crate::cli::debug_rpc::notification_turn_error_message(&notification);
             if message != "unknown error" {
                 state.push_error(message);
             }
             state.finish_turn();
         }
         "thread/status/changed"
-            if notification_thread_id(&notification) == Some(&state.thread_id) =>
+            if crate::cli::debug_rpc::notification_thread_id(&notification)
+                == Some(&state.thread_id) =>
         {
             state.turn_state = "thread status changed".to_string();
         }
@@ -952,7 +970,7 @@ fn handle_chat_notification(state: &mut ChatTuiState, notification: JsonRpcNotif
             {
                 let id = thread
                     .get("id")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("unknown");
                 state.push_lifecycle(format!("server started thread {}", short_id(id)));
             }
@@ -960,7 +978,7 @@ fn handle_chat_notification(state: &mut ChatTuiState, notification: JsonRpcNotif
         "error" => {
             state.push_error(format!(
                 "app-server error: {}",
-                notification_error_message(&notification)
+                crate::cli::console::notification_error_message(&notification)
             ));
             state.finish_turn();
         }
@@ -978,8 +996,8 @@ fn ensure_idle(state: &mut ChatTuiState, command: &str) -> bool {
     true
 }
 
-fn push_sessions(state: &mut ChatTuiState, threads: &Value) {
-    let Some(data) = threads.get("data").and_then(Value::as_array) else {
+fn push_sessions(state: &mut ChatTuiState, threads: &serde_json::Value) {
+    let Some(data) = threads.get("data").and_then(serde_json::Value::as_array) else {
         state.push_error("thread/list returned an unexpected shape");
         return;
     };
@@ -990,22 +1008,22 @@ fn push_sessions(state: &mut ChatTuiState, threads: &Value) {
     for thread in data.iter().take(12) {
         let id = thread
             .get("id")
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
         let name = thread
             .get("name")
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .filter(|name| !name.is_empty())
             .unwrap_or("unnamed");
         let preview = thread
             .get("preview")
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .filter(|preview| !preview.is_empty())
             .unwrap_or("");
         let status = thread
             .get("status")
             .and_then(|status| status.get("type"))
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
         let marker = if id == state.thread_id { "*" } else { " " };
         let preview = if preview.is_empty() {
@@ -1020,74 +1038,85 @@ fn push_sessions(state: &mut ChatTuiState, threads: &Value) {
     }
 }
 
-fn history_lines(state: &ChatTuiState) -> Vec<Line<'static>> {
+fn history_lines(state: &ChatTuiState) -> Vec<ratatui::text::Line<'static>> {
     let mut lines = Vec::new();
     for entry in &state.history {
         let style = role_style(entry.role, state.no_color);
         let label = entry.role.label();
         let mut text_lines = entry.text.lines();
         if let Some(first) = text_lines.next() {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{label:<9}"), style.add_modifier(Modifier::BOLD)),
-                Span::styled(first.to_string(), style),
+            lines.push(ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
+                    format!("{label:<9}"),
+                    style.add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                ratatui::text::Span::styled(first.to_string(), style),
             ]));
             for line in text_lines {
-                lines.push(Line::from(vec![
-                    Span::raw("         "),
-                    Span::styled(line.to_string(), style),
+                lines.push(ratatui::text::Line::from(vec![
+                    ratatui::text::Span::raw("         "),
+                    ratatui::text::Span::styled(line.to_string(), style),
                 ]));
             }
         } else {
-            lines.push(Line::from(vec![Span::styled(
-                format!("{label:<9}"),
-                style.add_modifier(Modifier::BOLD),
-            )]));
+            lines.push(ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
+                    format!("{label:<9}"),
+                    style.add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+            ]));
         }
     }
     lines
 }
 
-fn role_style(role: ChatLineRole, no_color: bool) -> Style {
+fn role_style(role: ChatLineRole, no_color: bool) -> ratatui::style::Style {
     if no_color {
-        return Style::default();
+        return ratatui::style::Style::default();
     }
     match role {
-        ChatLineRole::User => Style::default().fg(Color::Cyan),
-        ChatLineRole::Assistant => Style::default().fg(Color::Green),
-        ChatLineRole::System => Style::default().fg(Color::Yellow),
-        ChatLineRole::Error => Style::default().fg(Color::Red),
-        ChatLineRole::Thinking => Style::default().fg(Color::Magenta),
-        ChatLineRole::Lifecycle => Style::default().fg(Color::DarkGray),
+        ChatLineRole::User => ratatui::style::Style::default().fg(ratatui::style::Color::Cyan),
+        ChatLineRole::Assistant => {
+            ratatui::style::Style::default().fg(ratatui::style::Color::Green)
+        }
+        ChatLineRole::System => ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+        ChatLineRole::Error => ratatui::style::Style::default().fg(ratatui::style::Color::Red),
+        ChatLineRole::Thinking => {
+            ratatui::style::Style::default().fg(ratatui::style::Color::Magenta)
+        }
+        ChatLineRole::Lifecycle => {
+            ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)
+        }
     }
 }
 
-fn muted_style(no_color: bool) -> Style {
+fn muted_style(no_color: bool) -> ratatui::style::Style {
     if no_color {
-        Style::default()
+        ratatui::style::Style::default()
     } else {
-        Style::default().fg(Color::DarkGray)
+        ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)
     }
 }
 
-fn model_labels(models: &Value) -> Vec<String> {
+fn model_labels(models: &serde_json::Value) -> Vec<String> {
     models
         .get("data")
-        .and_then(Value::as_array)
+        .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .map(|model| {
             let provider = model
                 .get("providerId")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("provider");
             let id = model
                 .get("model")
                 .or_else(|| model.get("id"))
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("model");
             let default = model
                 .get("isDefault")
-                .and_then(Value::as_bool)
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let suffix = if default { " (default)" } else { "" };
             format!("{provider}/{id}{suffix}")
@@ -1095,17 +1124,17 @@ fn model_labels(models: &Value) -> Vec<String> {
         .collect()
 }
 
-fn thread_name(thread: &Value) -> Option<String> {
+fn thread_name(thread: &serde_json::Value) -> Option<String> {
     thread
         .get("name")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .map(ToString::to_string)
 }
 
-fn thread_cwd(thread: &Value) -> Option<String> {
+fn thread_cwd(thread: &serde_json::Value) -> Option<String> {
     thread
         .get("cwd")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .map(ToString::to_string)
 }
 

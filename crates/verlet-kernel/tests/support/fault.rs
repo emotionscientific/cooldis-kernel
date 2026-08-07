@@ -1,33 +1,15 @@
 #![allow(dead_code)]
 
-use super::fault_plan::{FaultComponent, FaultDirective, FaultPlan, FaultTiming, PlannedAction};
-use super::kernel_test::{
-    EventProvenance, EventRecord, EventSequence, EventStore, EventStreamId, HistoryError,
-    HistoryResult, NewEventRecord, NewObservationRecord, ObservationRecord, ObservationStore,
-    ProviderCapabilityRecord, ProviderClient, ProviderError, ProviderRequest, ProviderResponse,
-    ProviderResult, ProviderStreamEvent, RuntimeStore, SessionContext, SessionEntry,
-    SessionEntryId, SessionEntryKind, SessionStore, StreamCursorV1, ThreadBaseRef,
-    ThreadCoordinates,
-};
-use async_trait::async_trait;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use verlet_io_core::{
-    IngressAck, IngressEnvelope, IngressQueueStore, IngressSink, IoError, IoResult,
-    LeasedIngressEnvelope,
-};
-
 enum FaultAction<F> {
     Fail(F),
-    Delay(Duration),
+    Delay(std::time::Duration),
     FailAfter(F),
-    DelayAfter(Duration),
+    DelayAfter(std::time::Duration),
 }
 
 enum AfterAction<F> {
     Fail(F),
-    Delay(Duration),
+    Delay(std::time::Duration),
 }
 
 struct FaultRule<F> {
@@ -37,15 +19,15 @@ struct FaultRule<F> {
 }
 
 struct FaultScript<F> {
-    calls: Mutex<BTreeMap<&'static str, usize>>,
-    rules: Mutex<Vec<FaultRule<F>>>,
+    calls: std::sync::Mutex<std::collections::BTreeMap<&'static str, usize>>,
+    rules: std::sync::Mutex<Vec<FaultRule<F>>>,
 }
 
 impl<F> Default for FaultScript<F> {
     fn default() -> Self {
         Self {
-            calls: Mutex::new(BTreeMap::new()),
-            rules: Mutex::new(Vec::new()),
+            calls: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            rules: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -60,7 +42,7 @@ impl<F> FaultScript<F> {
         });
     }
 
-    fn delay_nth(&self, operation: &'static str, nth: usize, delay: Duration) {
+    fn delay_nth(&self, operation: &'static str, nth: usize, delay: std::time::Duration) {
         assert!(nth > 0, "fault operation index is one-based");
         self.rules.lock().unwrap().push(FaultRule {
             operation,
@@ -78,7 +60,7 @@ impl<F> FaultScript<F> {
         });
     }
 
-    fn delay_nth_after(&self, operation: &'static str, nth: usize, delay: Duration) {
+    fn delay_nth_after(&self, operation: &'static str, nth: usize, delay: std::time::Duration) {
         assert!(nth > 0, "fault operation index is one-based");
         self.rules.lock().unwrap().push(FaultRule {
             operation,
@@ -112,12 +94,12 @@ impl<F> FaultScript<F> {
 }
 
 pub struct FaultingRuntimeStore<S> {
-    inner: Arc<S>,
+    inner: std::sync::Arc<S>,
     faults: FaultScript<String>,
 }
 
 impl<S> FaultingRuntimeStore<S> {
-    pub fn new(inner: Arc<S>) -> Self {
+    pub fn new(inner: std::sync::Arc<S>) -> Self {
         Self {
             inner,
             faults: FaultScript::default(),
@@ -135,7 +117,12 @@ impl<S> FaultingRuntimeStore<S> {
             .fail_nth(operation, nth, format!("test panic: {}", message.into()));
     }
 
-    pub fn delay_nth(self, operation: &'static str, nth: usize, delay: Duration) -> Self {
+    pub fn delay_nth(
+        self,
+        operation: &'static str,
+        nth: usize,
+        delay: std::time::Duration,
+    ) -> Self {
         self.faults.delay_nth(operation, nth, delay);
         self
     }
@@ -150,7 +137,12 @@ impl<S> FaultingRuntimeStore<S> {
         self
     }
 
-    pub fn delay_nth_after(self, operation: &'static str, nth: usize, delay: Duration) -> Self {
+    pub fn delay_nth_after(
+        self,
+        operation: &'static str,
+        nth: usize,
+        delay: std::time::Duration,
+    ) -> Self {
         self.faults.delay_nth_after(operation, nth, delay);
         self
     }
@@ -159,15 +151,18 @@ impl<S> FaultingRuntimeStore<S> {
         self.faults.call_count(operation)
     }
 
-    pub fn inner(&self) -> &Arc<S> {
+    pub fn inner(&self) -> &std::sync::Arc<S> {
         &self.inner
     }
 
-    async fn start(&self, operation: &'static str) -> HistoryResult<Option<AfterAction<String>>> {
+    async fn start(
+        &self,
+        operation: &'static str,
+    ) -> verlet::HistoryResult<Option<AfterAction<String>>> {
         match self.faults.next(operation) {
             Some(FaultAction::Fail(message)) => match message.strip_prefix("test panic: ") {
                 Some(message) => panic!("{message}"),
-                None => Err(HistoryError::Storage(message)),
+                None => Err(verlet::HistoryError::Storage(message)),
             },
             Some(FaultAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
@@ -180,12 +175,12 @@ impl<S> FaultingRuntimeStore<S> {
     }
 
     async fn finish<T>(
-        result: HistoryResult<T>,
+        result: verlet::HistoryResult<T>,
         after: Option<AfterAction<String>>,
-    ) -> HistoryResult<T> {
+    ) -> verlet::HistoryResult<T> {
         let value = result?;
         match after {
-            Some(AfterAction::Fail(message)) => Err(HistoryError::Storage(message)),
+            Some(AfterAction::Fail(message)) => Err(verlet::HistoryError::Storage(message)),
             Some(AfterAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
                 Ok(value)
@@ -195,14 +190,14 @@ impl<S> FaultingRuntimeStore<S> {
     }
 }
 
-#[async_trait]
-impl<S: RuntimeStore + 'static> SessionStore for FaultingRuntimeStore<S> {
+#[async_trait::async_trait]
+impl<S: verlet::RuntimeStore + 'static> verlet::SessionStore for FaultingRuntimeStore<S> {
     async fn append(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &verlet::ThreadCoordinates,
+        parent_entry_id: Option<verlet::SessionEntryId>,
+        kind: verlet::SessionEntryKind,
+    ) -> verlet::HistoryResult<verlet::SessionEntry> {
         let after = self.start("append").await?;
         Self::finish(
             self.inner.append(coordinates, parent_entry_id, kind).await,
@@ -213,11 +208,11 @@ impl<S: RuntimeStore + 'static> SessionStore for FaultingRuntimeStore<S> {
 
     async fn append_with_provenance(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-        provenance: EventProvenance,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &verlet::ThreadCoordinates,
+        parent_entry_id: Option<verlet::SessionEntryId>,
+        kind: verlet::SessionEntryKind,
+        provenance: verlet::EventProvenance,
+    ) -> verlet::HistoryResult<verlet::SessionEntry> {
         let after = self.start("append_with_provenance").await?;
         Self::finish(
             self.inner
@@ -230,10 +225,10 @@ impl<S: RuntimeStore + 'static> SessionStore for FaultingRuntimeStore<S> {
 
     async fn append_turn_input(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet::ThreadCoordinates,
         turn_id: &str,
-        kind: SessionEntryKind,
-    ) -> HistoryResult<SessionEntry> {
+        kind: verlet::SessionEntryKind,
+    ) -> verlet::HistoryResult<verlet::SessionEntry> {
         let after = self.start("append_turn_input").await?;
         Self::finish(
             self.inner
@@ -246,17 +241,17 @@ impl<S: RuntimeStore + 'static> SessionStore for FaultingRuntimeStore<S> {
 
     async fn active_leaf(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<Option<SessionEntryId>> {
+        coordinates: &verlet::ThreadCoordinates,
+    ) -> verlet::HistoryResult<Option<verlet::SessionEntryId>> {
         let after = self.start("active_leaf").await?;
         Self::finish(self.inner.active_leaf(coordinates).await, after).await
     }
 
     async fn select_branch(
         &self,
-        coordinates: &ThreadCoordinates,
-        leaf_entry_id: Option<SessionEntryId>,
-    ) -> HistoryResult<()> {
+        coordinates: &verlet::ThreadCoordinates,
+        leaf_entry_id: Option<verlet::SessionEntryId>,
+    ) -> verlet::HistoryResult<()> {
         let after = self.start("select_branch").await?;
         Self::finish(
             self.inner.select_branch(coordinates, leaf_entry_id).await,
@@ -267,18 +262,18 @@ impl<S: RuntimeStore + 'static> SessionStore for FaultingRuntimeStore<S> {
 
     async fn build_context(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<SessionContext> {
+        coordinates: &verlet::ThreadCoordinates,
+    ) -> verlet::HistoryResult<verlet::SessionContext> {
         let after = self.start("build_context").await?;
         Self::finish(self.inner.build_context(coordinates).await, after).await
     }
 
     async fn clone_branch(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        source_leaf: Option<SessionEntryId>,
-        target_coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<Option<SessionEntryId>> {
+        source_coordinates: &verlet::ThreadCoordinates,
+        source_leaf: Option<verlet::SessionEntryId>,
+        target_coordinates: &verlet::ThreadCoordinates,
+    ) -> verlet::HistoryResult<Option<verlet::SessionEntryId>> {
         let after = self.start("clone_branch").await?;
         Self::finish(
             self.inner
@@ -291,10 +286,10 @@ impl<S: RuntimeStore + 'static> SessionStore for FaultingRuntimeStore<S> {
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        target_coordinates: &ThreadCoordinates,
-        base: ThreadBaseRef,
-    ) -> HistoryResult<()> {
+        source_coordinates: &verlet::ThreadCoordinates,
+        target_coordinates: &verlet::ThreadCoordinates,
+        base: verlet::ThreadBaseRef,
+    ) -> verlet::HistoryResult<()> {
         let after = self.start("fork_by_reference").await?;
         Self::finish(
             self.inner
@@ -306,23 +301,23 @@ impl<S: RuntimeStore + 'static> SessionStore for FaultingRuntimeStore<S> {
     }
 }
 
-#[async_trait]
-impl<S: RuntimeStore + 'static> EventStore for FaultingRuntimeStore<S> {
+#[async_trait::async_trait]
+impl<S: verlet::RuntimeStore + 'static> verlet::EventStore for FaultingRuntimeStore<S> {
     async fn append_events(
         &self,
-        stream_id: &EventStreamId,
-        records: Vec<NewEventRecord>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &verlet::EventStreamId,
+        records: Vec<verlet::NewEventRecord>,
+    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
         let after = self.start("append_events").await?;
         Self::finish(self.inner.append_events(stream_id, records).await, after).await
     }
 
     async fn append_events_fenced(
         &self,
-        stream_id: &EventStreamId,
-        expected_next_sequence: EventSequence,
-        records: Vec<NewEventRecord>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &verlet::EventStreamId,
+        expected_next_sequence: verlet::EventSequence,
+        records: Vec<verlet::NewEventRecord>,
+    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
         let after = self.start("append_events_fenced").await?;
         Self::finish(
             self.inner
@@ -335,9 +330,9 @@ impl<S: RuntimeStore + 'static> EventStore for FaultingRuntimeStore<S> {
 
     async fn read_events(
         &self,
-        stream_id: &EventStreamId,
-        from_sequence: Option<EventSequence>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &verlet::EventStreamId,
+        from_sequence: Option<verlet::EventSequence>,
+    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
         let after = self.start("read_events").await?;
         Self::finish(
             self.inner.read_events(stream_id, from_sequence).await,
@@ -348,9 +343,9 @@ impl<S: RuntimeStore + 'static> EventStore for FaultingRuntimeStore<S> {
 
     async fn read_events_after_cursor(
         &self,
-        stream_id: &EventStreamId,
-        cursor: &StreamCursorV1,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &verlet::EventStreamId,
+        cursor: &verlet::StreamCursorV1,
+    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
         let after = self.start("read_events_after_cursor").await?;
         Self::finish(
             self.inner.read_events_after_cursor(stream_id, cursor).await,
@@ -360,21 +355,21 @@ impl<S: RuntimeStore + 'static> EventStore for FaultingRuntimeStore<S> {
     }
 }
 
-#[async_trait]
-impl<S: RuntimeStore + 'static> ObservationStore for FaultingRuntimeStore<S> {
+#[async_trait::async_trait]
+impl<S: verlet::RuntimeStore + 'static> verlet::ObservationStore for FaultingRuntimeStore<S> {
     async fn append_observation(
         &self,
-        record: NewObservationRecord,
-    ) -> HistoryResult<ObservationRecord> {
+        record: verlet::NewObservationRecord,
+    ) -> verlet::HistoryResult<verlet::ObservationRecord> {
         let after = self.start("append_observation").await?;
         Self::finish(self.inner.append_observation(record).await, after).await
     }
 
     async fn list_observations(
         &self,
-        scope: &ThreadCoordinates,
+        scope: &verlet::ThreadCoordinates,
         kind: Option<&str>,
-    ) -> HistoryResult<Vec<ObservationRecord>> {
+    ) -> verlet::HistoryResult<Vec<verlet::ObservationRecord>> {
         let after = self.start("list_observations").await?;
         Self::finish(self.inner.list_observations(scope, kind).await, after).await
     }
@@ -387,12 +382,12 @@ enum ProviderFailure {
 }
 
 pub struct FaultingProviderClient<C> {
-    inner: Arc<C>,
+    inner: std::sync::Arc<C>,
     faults: FaultScript<ProviderFailure>,
 }
 
 impl<C> FaultingProviderClient<C> {
-    pub fn new(inner: Arc<C>) -> Self {
+    pub fn new(inner: std::sync::Arc<C>) -> Self {
         Self {
             inner,
             faults: FaultScript::default(),
@@ -421,7 +416,12 @@ impl<C> FaultingProviderClient<C> {
         self
     }
 
-    pub fn delay_nth(self, operation: &'static str, nth: usize, delay: Duration) -> Self {
+    pub fn delay_nth(
+        self,
+        operation: &'static str,
+        nth: usize,
+        delay: std::time::Duration,
+    ) -> Self {
         self.faults.delay_nth(operation, nth, delay);
         self
     }
@@ -437,7 +437,12 @@ impl<C> FaultingProviderClient<C> {
         self
     }
 
-    pub fn delay_nth_after(self, operation: &'static str, nth: usize, delay: Duration) -> Self {
+    pub fn delay_nth_after(
+        self,
+        operation: &'static str,
+        nth: usize,
+        delay: std::time::Duration,
+    ) -> Self {
         self.faults.delay_nth_after(operation, nth, delay);
         self
     }
@@ -446,20 +451,20 @@ impl<C> FaultingProviderClient<C> {
         self.faults.call_count(operation)
     }
 
-    pub fn inner(&self) -> &Arc<C> {
+    pub fn inner(&self) -> &std::sync::Arc<C> {
         &self.inner
     }
 
     async fn start(
         &self,
         operation: &'static str,
-    ) -> ProviderResult<Option<AfterAction<ProviderFailure>>> {
+    ) -> verlet::ProviderResult<Option<AfterAction<ProviderFailure>>> {
         match self.faults.next(operation) {
             Some(FaultAction::Fail(ProviderFailure::Http(message))) => {
-                Err(ProviderError::Http(message))
+                Err(verlet::ProviderError::Http(message))
             }
             Some(FaultAction::Fail(ProviderFailure::Decode(message))) => {
-                Err(ProviderError::Decode(message))
+                Err(verlet::ProviderError::Decode(message))
             }
             Some(FaultAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
@@ -472,16 +477,16 @@ impl<C> FaultingProviderClient<C> {
     }
 
     async fn finish<T>(
-        result: ProviderResult<T>,
+        result: verlet::ProviderResult<T>,
         after: Option<AfterAction<ProviderFailure>>,
-    ) -> ProviderResult<T> {
+    ) -> verlet::ProviderResult<T> {
         let value = result?;
         match after {
             Some(AfterAction::Fail(ProviderFailure::Http(message))) => {
-                Err(ProviderError::Http(message))
+                Err(verlet::ProviderError::Http(message))
             }
             Some(AfterAction::Fail(ProviderFailure::Decode(message))) => {
-                Err(ProviderError::Decode(message))
+                Err(verlet::ProviderError::Decode(message))
             }
             Some(AfterAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
@@ -492,30 +497,36 @@ impl<C> FaultingProviderClient<C> {
     }
 }
 
-#[async_trait]
-impl<C: ProviderClient + 'static> ProviderClient for FaultingProviderClient<C> {
-    fn capabilities(&self) -> Option<ProviderCapabilityRecord> {
+#[async_trait::async_trait]
+impl<C: verlet::ProviderClient + 'static> verlet::ProviderClient for FaultingProviderClient<C> {
+    fn capabilities(&self) -> Option<verlet::ProviderCapabilityRecord> {
         self.inner.capabilities()
     }
 
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+    async fn complete(
+        &self,
+        request: &verlet::ProviderRequest,
+    ) -> verlet::ProviderResult<verlet::ProviderResponse> {
         let after = self.start("complete").await?;
         Self::finish(self.inner.complete(request).await, after).await
     }
 
-    async fn stream(&self, request: &ProviderRequest) -> ProviderResult<Vec<ProviderStreamEvent>> {
+    async fn stream(
+        &self,
+        request: &verlet::ProviderRequest,
+    ) -> verlet::ProviderResult<Vec<verlet::ProviderStreamEvent>> {
         let after = self.start("stream").await?;
         Self::finish(self.inner.stream(request).await, after).await
     }
 }
 
 pub struct FaultingIngressQueue<Q> {
-    inner: Arc<Q>,
+    inner: std::sync::Arc<Q>,
     faults: FaultScript<String>,
 }
 
 impl<Q> FaultingIngressQueue<Q> {
-    pub fn new(inner: Arc<Q>) -> Self {
+    pub fn new(inner: std::sync::Arc<Q>) -> Self {
         Self {
             inner,
             faults: FaultScript::default(),
@@ -527,7 +538,12 @@ impl<Q> FaultingIngressQueue<Q> {
         self
     }
 
-    pub fn delay_nth(self, operation: &'static str, nth: usize, delay: Duration) -> Self {
+    pub fn delay_nth(
+        self,
+        operation: &'static str,
+        nth: usize,
+        delay: std::time::Duration,
+    ) -> Self {
         self.faults.delay_nth(operation, nth, delay);
         self
     }
@@ -542,7 +558,12 @@ impl<Q> FaultingIngressQueue<Q> {
         self
     }
 
-    pub fn delay_nth_after(self, operation: &'static str, nth: usize, delay: Duration) -> Self {
+    pub fn delay_nth_after(
+        self,
+        operation: &'static str,
+        nth: usize,
+        delay: std::time::Duration,
+    ) -> Self {
         self.faults.delay_nth_after(operation, nth, delay);
         self
     }
@@ -551,13 +572,16 @@ impl<Q> FaultingIngressQueue<Q> {
         self.faults.call_count(operation)
     }
 
-    pub fn inner(&self) -> &Arc<Q> {
+    pub fn inner(&self) -> &std::sync::Arc<Q> {
         &self.inner
     }
 
-    async fn start(&self, operation: &'static str) -> IoResult<Option<AfterAction<String>>> {
+    async fn start(
+        &self,
+        operation: &'static str,
+    ) -> verlet_io_core::IoResult<Option<AfterAction<String>>> {
         match self.faults.next(operation) {
-            Some(FaultAction::Fail(message)) => Err(IoError::Queue(message)),
+            Some(FaultAction::Fail(message)) => Err(verlet_io_core::IoError::Queue(message)),
             Some(FaultAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
                 Ok(None)
@@ -568,10 +592,13 @@ impl<Q> FaultingIngressQueue<Q> {
         }
     }
 
-    async fn finish<T>(result: IoResult<T>, after: Option<AfterAction<String>>) -> IoResult<T> {
+    async fn finish<T>(
+        result: verlet_io_core::IoResult<T>,
+        after: Option<AfterAction<String>>,
+    ) -> verlet_io_core::IoResult<T> {
         let value = result?;
         match after {
-            Some(AfterAction::Fail(message)) => Err(IoError::Queue(message)),
+            Some(AfterAction::Fail(message)) => Err(verlet_io_core::IoError::Queue(message)),
             Some(AfterAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
                 Ok(value)
@@ -581,22 +608,29 @@ impl<Q> FaultingIngressQueue<Q> {
     }
 }
 
-#[async_trait]
-impl<Q: IngressQueueStore + 'static> IngressSink for FaultingIngressQueue<Q> {
-    async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
+#[async_trait::async_trait]
+impl<Q: verlet_io_core::IngressQueueStore + 'static> verlet_io_core::IngressSink
+    for FaultingIngressQueue<Q>
+{
+    async fn submit(
+        &self,
+        envelope: verlet_io_core::IngressEnvelope,
+    ) -> verlet_io_core::IoResult<verlet_io_core::IngressAck> {
         let after = self.start("submit").await?;
         Self::finish(self.inner.submit(envelope).await, after).await
     }
 }
 
-#[async_trait]
-impl<Q: IngressQueueStore + 'static> IngressQueueStore for FaultingIngressQueue<Q> {
+#[async_trait::async_trait]
+impl<Q: verlet_io_core::IngressQueueStore + 'static> verlet_io_core::IngressQueueStore
+    for FaultingIngressQueue<Q>
+{
     async fn lease_ingress(
         &self,
         worker_id: &str,
         max_messages: usize,
         visibility_timeout_secs: u32,
-    ) -> IoResult<Vec<LeasedIngressEnvelope>> {
+    ) -> verlet_io_core::IoResult<Vec<verlet_io_core::LeasedIngressEnvelope>> {
         let after = self.start("lease_ingress").await?;
         Self::finish(
             self.inner
@@ -607,12 +641,16 @@ impl<Q: IngressQueueStore + 'static> IngressQueueStore for FaultingIngressQueue<
         .await
     }
 
-    async fn complete_ingress(&self, message_id: &str) -> IoResult<()> {
+    async fn complete_ingress(&self, message_id: &str) -> verlet_io_core::IoResult<()> {
         let after = self.start("complete_ingress").await?;
         Self::finish(self.inner.complete_ingress(message_id).await, after).await
     }
 
-    async fn hold_ingress_until(&self, message_id: &str, visible_at_ms: u64) -> IoResult<()> {
+    async fn hold_ingress_until(
+        &self,
+        message_id: &str,
+        visible_at_ms: u64,
+    ) -> verlet_io_core::IoResult<()> {
         let after = self.start("hold_ingress_until").await?;
         Self::finish(
             self.inner
@@ -623,7 +661,7 @@ impl<Q: IngressQueueStore + 'static> IngressQueueStore for FaultingIngressQueue<
         .await
     }
 
-    async fn retry_ingress(&self, message_id: &str, reason: &str) -> IoResult<()> {
+    async fn retry_ingress(&self, message_id: &str, reason: &str) -> verlet_io_core::IoResult<()> {
         let after = self.start("retry_ingress").await?;
         Self::finish(self.inner.retry_ingress(message_id, reason).await, after).await
     }
@@ -636,15 +674,15 @@ pub struct AppliedFaultPlan<S, Q, C> {
     pub store: FaultingRuntimeStore<S>,
     pub queue: FaultingIngressQueue<Q>,
     pub provider: FaultingProviderClient<C>,
-    pub process_cuts: Vec<FaultDirective>,
+    pub process_cuts: Vec<crate::support::fault_plan::FaultDirective>,
 }
 
-impl FaultPlan {
+impl crate::support::fault_plan::FaultPlan {
     pub fn apply<S, Q, C>(
         &self,
-        store: Arc<S>,
-        queue: Arc<Q>,
-        provider: Arc<C>,
+        store: std::sync::Arc<S>,
+        queue: std::sync::Arc<Q>,
+        provider: std::sync::Arc<C>,
     ) -> AppliedFaultPlan<S, Q, C> {
         let mut store = FaultingRuntimeStore::new(store);
         let mut queue = FaultingIngressQueue::new(queue);
@@ -656,44 +694,94 @@ impl FaultPlan {
                 self.seed, directive.operation, directive.nth
             );
             match (directive.component, directive.timing, &directive.action) {
-                (FaultComponent::Store, FaultTiming::Before, PlannedAction::Fail) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Store,
+                    crate::support::fault_plan::FaultTiming::Before,
+                    crate::support::fault_plan::PlannedAction::Fail,
+                ) => {
                     store = store.fail_nth(directive.operation, directive.nth, message);
                 }
-                (FaultComponent::Store, FaultTiming::After, PlannedAction::Fail) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Store,
+                    crate::support::fault_plan::FaultTiming::After,
+                    crate::support::fault_plan::PlannedAction::Fail,
+                ) => {
                     store = store.fail_nth_after(directive.operation, directive.nth, message);
                 }
-                (FaultComponent::Store, FaultTiming::Before, PlannedAction::Delay(delay)) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Store,
+                    crate::support::fault_plan::FaultTiming::Before,
+                    crate::support::fault_plan::PlannedAction::Delay(delay),
+                ) => {
                     store = store.delay_nth(directive.operation, directive.nth, *delay);
                 }
-                (FaultComponent::Store, FaultTiming::After, PlannedAction::Delay(delay)) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Store,
+                    crate::support::fault_plan::FaultTiming::After,
+                    crate::support::fault_plan::PlannedAction::Delay(delay),
+                ) => {
                     store = store.delay_nth_after(directive.operation, directive.nth, *delay);
                 }
-                (FaultComponent::Queue, FaultTiming::Before, PlannedAction::Fail) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Queue,
+                    crate::support::fault_plan::FaultTiming::Before,
+                    crate::support::fault_plan::PlannedAction::Fail,
+                ) => {
                     queue = queue.fail_nth(directive.operation, directive.nth, message);
                 }
-                (FaultComponent::Queue, FaultTiming::After, PlannedAction::Fail) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Queue,
+                    crate::support::fault_plan::FaultTiming::After,
+                    crate::support::fault_plan::PlannedAction::Fail,
+                ) => {
                     queue = queue.fail_nth_after(directive.operation, directive.nth, message);
                 }
-                (FaultComponent::Queue, FaultTiming::Before, PlannedAction::Delay(delay)) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Queue,
+                    crate::support::fault_plan::FaultTiming::Before,
+                    crate::support::fault_plan::PlannedAction::Delay(delay),
+                ) => {
                     queue = queue.delay_nth(directive.operation, directive.nth, *delay);
                 }
-                (FaultComponent::Queue, FaultTiming::After, PlannedAction::Delay(delay)) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Queue,
+                    crate::support::fault_plan::FaultTiming::After,
+                    crate::support::fault_plan::PlannedAction::Delay(delay),
+                ) => {
                     queue = queue.delay_nth_after(directive.operation, directive.nth, *delay);
                 }
-                (FaultComponent::Provider, FaultTiming::Before, PlannedAction::Fail) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Provider,
+                    crate::support::fault_plan::FaultTiming::Before,
+                    crate::support::fault_plan::PlannedAction::Fail,
+                ) => {
                     provider = provider.fail_nth_http(directive.operation, directive.nth, message);
                 }
-                (FaultComponent::Provider, FaultTiming::After, PlannedAction::Fail) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Provider,
+                    crate::support::fault_plan::FaultTiming::After,
+                    crate::support::fault_plan::PlannedAction::Fail,
+                ) => {
                     provider =
                         provider.fail_nth_after_http(directive.operation, directive.nth, message);
                 }
-                (FaultComponent::Provider, FaultTiming::Before, PlannedAction::Delay(delay)) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Provider,
+                    crate::support::fault_plan::FaultTiming::Before,
+                    crate::support::fault_plan::PlannedAction::Delay(delay),
+                ) => {
                     provider = provider.delay_nth(directive.operation, directive.nth, *delay);
                 }
-                (FaultComponent::Provider, FaultTiming::After, PlannedAction::Delay(delay)) => {
+                (
+                    crate::support::fault_plan::FaultComponent::Provider,
+                    crate::support::fault_plan::FaultTiming::After,
+                    crate::support::fault_plan::PlannedAction::Delay(delay),
+                ) => {
                     provider = provider.delay_nth_after(directive.operation, directive.nth, *delay);
                 }
-                (FaultComponent::Process, _, _) => process_cuts.push(directive.clone()),
+                (crate::support::fault_plan::FaultComponent::Process, _, _) => {
+                    process_cuts.push(directive.clone())
+                }
             }
         }
         AppliedFaultPlan {
@@ -707,83 +795,94 @@ impl FaultPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::super::fault_plan::{
-        FAULT_VOCABULARY_VERSION, FaultComponent, FaultDirective, FaultPlan, FaultTiming,
-        Intensity, PlannedAction,
-    };
-    use super::super::kernel_test::{CanonicalMessage, InMemorySessionStore, ProviderApi};
-    use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use verlet::ProviderClient as _;
+    use verlet::SessionStore as _;
+    use verlet_io_core::IngressQueueStore as _;
 
     #[tokio::test]
     async fn store_append_after_fault_keeps_durable_effect_and_reports_storage_error() {
-        let inner = Arc::new(InMemorySessionStore::new());
-        let store = FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
+        let inner = std::sync::Arc::new(verlet::InMemorySessionStore::new());
+        let store = crate::support::fault::FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
             "append",
             1,
             "append committed before disconnect",
         );
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates = verlet::ThreadCoordinates::new("tenant", "user", "session");
 
         let error = store
             .append(
                 &coordinates,
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("durable input"),
+                verlet::SessionEntryKind::Message {
+                    message: verlet::CanonicalMessage::user_text("durable input"),
                 },
             )
             .await
             .unwrap_err();
 
-        assert!(matches!(error, HistoryError::Storage(message) if message.contains("disconnect")));
+        assert!(
+            matches!(error, verlet::HistoryError::Storage(message) if message.contains("disconnect"))
+        );
         let context = inner.build_context(&coordinates).await.unwrap();
         assert_eq!(context.entries.len(), 1);
     }
 
     #[derive(Default)]
     struct DurableAckQueue {
-        completed: AtomicBool,
-        complete_calls: AtomicUsize,
+        completed: std::sync::atomic::AtomicBool,
+        complete_calls: std::sync::atomic::AtomicUsize,
     }
 
-    #[async_trait]
-    impl IngressSink for DurableAckQueue {
-        async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
-            Ok(IngressAck::accepted(&envelope))
+    #[async_trait::async_trait]
+    impl verlet_io_core::IngressSink for DurableAckQueue {
+        async fn submit(
+            &self,
+            envelope: verlet_io_core::IngressEnvelope,
+        ) -> verlet_io_core::IoResult<verlet_io_core::IngressAck> {
+            Ok(verlet_io_core::IngressAck::accepted(&envelope))
         }
     }
 
-    #[async_trait]
-    impl IngressQueueStore for DurableAckQueue {
+    #[async_trait::async_trait]
+    impl verlet_io_core::IngressQueueStore for DurableAckQueue {
         async fn lease_ingress(
             &self,
             _worker_id: &str,
             _max_messages: usize,
             _visibility_timeout_secs: u32,
-        ) -> IoResult<Vec<LeasedIngressEnvelope>> {
+        ) -> verlet_io_core::IoResult<Vec<verlet_io_core::LeasedIngressEnvelope>> {
             Ok(Vec::new())
         }
 
-        async fn complete_ingress(&self, _message_id: &str) -> IoResult<()> {
-            self.complete_calls.fetch_add(1, Ordering::SeqCst);
-            self.completed.store(true, Ordering::SeqCst);
+        async fn complete_ingress(&self, _message_id: &str) -> verlet_io_core::IoResult<()> {
+            self.complete_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.completed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
-        async fn hold_ingress_until(&self, _message_id: &str, _visible_at_ms: u64) -> IoResult<()> {
+        async fn hold_ingress_until(
+            &self,
+            _message_id: &str,
+            _visible_at_ms: u64,
+        ) -> verlet_io_core::IoResult<()> {
             Ok(())
         }
 
-        async fn retry_ingress(&self, _message_id: &str, _reason: &str) -> IoResult<()> {
+        async fn retry_ingress(
+            &self,
+            _message_id: &str,
+            _reason: &str,
+        ) -> verlet_io_core::IoResult<()> {
             Ok(())
         }
     }
 
     #[tokio::test]
     async fn complete_ingress_after_fault_keeps_durable_ack_and_reports_queue_error() {
-        let inner = Arc::new(DurableAckQueue::default());
-        let queue = FaultingIngressQueue::new(inner.clone()).fail_nth_after(
+        let inner = std::sync::Arc::new(DurableAckQueue::default());
+        let queue = crate::support::fault::FaultingIngressQueue::new(inner.clone()).fail_nth_after(
             "complete_ingress",
             1,
             "ack committed before disconnect",
@@ -791,15 +890,22 @@ mod tests {
 
         let error = queue.complete_ingress("message-1").await.unwrap_err();
 
-        assert!(matches!(error, IoError::Queue(message) if message.contains("disconnect")));
-        assert!(inner.completed.load(Ordering::SeqCst));
-        assert_eq!(inner.complete_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(error, verlet_io_core::IoError::Queue(message) if message.contains("disconnect"))
+        );
+        assert!(inner.completed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            inner
+                .complete_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]
     async fn complete_ingress_after_effect_redelivery_does_not_duplicate_turn() {
-        let inner = Arc::new(DurableAckQueue::default());
-        let queue = FaultingIngressQueue::new(inner.clone()).fail_nth_after(
+        let inner = std::sync::Arc::new(DurableAckQueue::default());
+        let queue = crate::support::fault::FaultingIngressQueue::new(inner.clone()).fail_nth_after(
             "complete_ingress",
             1,
             "ack committed before disconnect",
@@ -812,81 +918,93 @@ mod tests {
                 durable_turns += 1;
             }
             let result = queue.complete_ingress("message-1").await;
-            if inner.complete_calls.load(Ordering::SeqCst) == 1 {
-                assert!(matches!(result, Err(IoError::Queue(_))));
+            if inner
+                .complete_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 1
+            {
+                assert!(matches!(result, Err(verlet_io_core::IoError::Queue(_))));
             } else {
                 result.unwrap();
             }
         }
 
         assert_eq!(durable_turns, 1, "redelivery must adopt the durable turn");
-        assert!(inner.completed.load(Ordering::SeqCst));
-        assert_eq!(inner.complete_calls.load(Ordering::SeqCst), 2);
+        assert!(inner.completed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            inner
+                .complete_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
     }
 
     struct NeverCalledProvider;
 
-    #[async_trait]
-    impl ProviderClient for NeverCalledProvider {
-        fn capabilities(&self) -> Option<ProviderCapabilityRecord> {
+    #[async_trait::async_trait]
+    impl verlet::ProviderClient for NeverCalledProvider {
+        fn capabilities(&self) -> Option<verlet::ProviderCapabilityRecord> {
             None
         }
 
-        async fn complete(&self, _request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+        async fn complete(
+            &self,
+            _request: &verlet::ProviderRequest,
+        ) -> verlet::ProviderResult<verlet::ProviderResponse> {
             panic!("planned provider failure should fire before the inner call")
         }
 
         async fn stream(
             &self,
-            _request: &ProviderRequest,
-        ) -> ProviderResult<Vec<ProviderStreamEvent>> {
+            _request: &verlet::ProviderRequest,
+        ) -> verlet::ProviderResult<Vec<verlet::ProviderStreamEvent>> {
             panic!("planned provider failure should fire before the inner call")
         }
     }
 
     #[tokio::test]
     async fn applying_plan_maps_failures_to_wrapper_error_types() {
-        let plan = FaultPlan {
+        let plan = crate::support::fault_plan::FaultPlan {
             seed: 399,
-            vocabulary_version: FAULT_VOCABULARY_VERSION,
-            intensity: Intensity::Sparse,
+            vocabulary_version: crate::support::fault_plan::FAULT_VOCABULARY_VERSION,
+            intensity: crate::support::fault_plan::Intensity::Sparse,
             directives: vec![
-                FaultDirective {
-                    component: FaultComponent::Store,
+                crate::support::fault_plan::FaultDirective {
+                    component: crate::support::fault_plan::FaultComponent::Store,
                     operation: "append",
                     nth: 1,
-                    timing: FaultTiming::Before,
-                    action: PlannedAction::Fail,
+                    timing: crate::support::fault_plan::FaultTiming::Before,
+                    action: crate::support::fault_plan::PlannedAction::Fail,
                 },
-                FaultDirective {
-                    component: FaultComponent::Queue,
+                crate::support::fault_plan::FaultDirective {
+                    component: crate::support::fault_plan::FaultComponent::Queue,
                     operation: "complete_ingress",
                     nth: 1,
-                    timing: FaultTiming::Before,
-                    action: PlannedAction::Fail,
+                    timing: crate::support::fault_plan::FaultTiming::Before,
+                    action: crate::support::fault_plan::PlannedAction::Fail,
                 },
-                FaultDirective {
-                    component: FaultComponent::Provider,
+                crate::support::fault_plan::FaultDirective {
+                    component: crate::support::fault_plan::FaultComponent::Provider,
                     operation: "complete",
                     nth: 1,
-                    timing: FaultTiming::Before,
-                    action: PlannedAction::Fail,
+                    timing: crate::support::fault_plan::FaultTiming::Before,
+                    action: crate::support::fault_plan::PlannedAction::Fail,
                 },
-                FaultDirective {
-                    component: FaultComponent::Process,
+                crate::support::fault_plan::FaultDirective {
+                    component: crate::support::fault_plan::FaultComponent::Process,
                     operation: "queue-apply",
                     nth: 1,
-                    timing: FaultTiming::Before,
-                    action: PlannedAction::Fail,
+                    timing: crate::support::fault_plan::FaultTiming::Before,
+                    action: crate::support::fault_plan::PlannedAction::Fail,
                 },
             ],
         };
         let applied = plan.apply(
-            Arc::new(InMemorySessionStore::new()),
-            Arc::new(DurableAckQueue::default()),
-            Arc::new(NeverCalledProvider),
+            std::sync::Arc::new(verlet::InMemorySessionStore::new()),
+            std::sync::Arc::new(DurableAckQueue::default()),
+            std::sync::Arc::new(NeverCalledProvider),
         );
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates = verlet::ThreadCoordinates::new("tenant", "user", "session");
 
         assert!(matches!(
             applied
@@ -894,27 +1012,27 @@ mod tests {
                 .append(
                     &coordinates,
                     None,
-                    SessionEntryKind::Message {
-                        message: CanonicalMessage::user_text("blocked")
+                    verlet::SessionEntryKind::Message {
+                        message: verlet::CanonicalMessage::user_text("blocked")
                     }
                 )
                 .await,
-            Err(HistoryError::Storage(_))
+            Err(verlet::HistoryError::Storage(_))
         ));
         assert!(matches!(
             applied.queue.complete_ingress("message-1").await,
-            Err(IoError::Queue(_))
+            Err(verlet_io_core::IoError::Queue(_))
         ));
         assert!(matches!(
             applied
                 .provider
-                .complete(&ProviderRequest::new(
-                    ProviderApi::Other("test".to_string()),
+                .complete(&verlet::ProviderRequest::new(
+                    verlet::ProviderApi::Other("test".to_string()),
                     "test",
                     "model"
                 ))
                 .await,
-            Err(ProviderError::Http(_))
+            Err(verlet::ProviderError::Http(_))
         ));
         assert_eq!(applied.process_cuts, vec![plan.directives[3].clone()]);
     }

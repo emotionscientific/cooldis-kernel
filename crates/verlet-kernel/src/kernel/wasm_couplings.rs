@@ -1,30 +1,13 @@
-use crate::{
-    CouplingDischarge, CouplingExecutionResult, CouplingExecutor, CouplingInvocation, EventKind,
-    EventRecord, LocalOperationRegistry, VerletError, VerletResult,
-};
-use async_trait::async_trait;
-use std::collections::{HashMap, VecDeque};
-use std::fmt;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use verlet_abi::{
-    COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI, CouplingDischarge as AbiCouplingDischarge,
-    CouplingInvocation as AbiCouplingInvocation, CouplingInvocationEvent, CouplingInvocationMeta,
-    InvocationContext, WasmOperationManifest,
-};
-use verlet_wasm::{WasmHostImportPolicy, WasmModuleRuntime, WasmRuntimeFactory};
-
 const WASM_COUPLING_CACHE_CAPACITY: usize = 32;
 
 #[derive(Clone)]
 pub struct WasmCouplingExecutor {
-    operation_registry_root: PathBuf,
-    cache: Arc<Mutex<WasmCouplingCache>>,
+    operation_registry_root: std::path::PathBuf,
+    cache: std::sync::Arc<std::sync::Mutex<WasmCouplingCache>>,
 }
 
-impl fmt::Debug for WasmCouplingExecutor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Debug for WasmCouplingExecutor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WasmCouplingExecutor")
             .field("operation_registry_root", &self.operation_registry_root)
@@ -33,10 +16,10 @@ impl fmt::Debug for WasmCouplingExecutor {
 }
 
 impl WasmCouplingExecutor {
-    pub fn new(operation_registry_root: impl Into<PathBuf>) -> Self {
+    pub fn new(operation_registry_root: impl Into<std::path::PathBuf>) -> Self {
         Self {
             operation_registry_root: operation_registry_root.into(),
-            cache: Arc::new(Mutex::new(WasmCouplingCache::new(
+            cache: std::sync::Arc::new(std::sync::Mutex::new(WasmCouplingCache::new(
                 WASM_COUPLING_CACHE_CAPACITY,
             ))),
         }
@@ -46,7 +29,7 @@ impl WasmCouplingExecutor {
         !id.trim().is_empty() && !id.starts_with("std::")
     }
 
-    pub fn operation_registry_root(&self) -> &Path {
+    pub fn operation_registry_root(&self) -> &std::path::Path {
         &self.operation_registry_root
     }
 
@@ -56,16 +39,19 @@ impl WasmCouplingExecutor {
     }
 }
 
-#[async_trait]
-impl CouplingExecutor for WasmCouplingExecutor {
-    async fn invoke(&self, request: CouplingInvocation) -> VerletResult<CouplingExecutionResult> {
+#[async_trait::async_trait]
+impl crate::CouplingExecutor for WasmCouplingExecutor {
+    async fn invoke(
+        &self,
+        request: crate::CouplingInvocation,
+    ) -> crate::VerletResult<crate::CouplingExecutionResult> {
         let operation_name = request
             .coupling
             .function
             .operation_name
             .clone()
             .ok_or_else(|| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "wasm coupling {:?} must bind exactly one operation",
                     request.coupling.id
                 ))
@@ -94,7 +80,7 @@ impl CouplingExecutor for WasmCouplingExecutor {
         let output = match request.coupling.budget.max_ms {
             Some(max_ms) => {
                 match tokio::time::timeout(
-                    Duration::from_millis(max_ms),
+                    std::time::Duration::from_millis(max_ms),
                     cached
                         .runtime
                         .invoke_operation_bytes(&operation_name, input),
@@ -103,19 +89,19 @@ impl CouplingExecutor for WasmCouplingExecutor {
                 {
                     Ok(Ok(output)) => output,
                     Ok(Err(err)) if wasm_error_is_timeout(&err.to_string()) => {
-                        return Err(VerletError::RuntimeExecution(format!(
+                        return Err(crate::VerletError::RuntimeExecution(format!(
                             "timeout: wasm coupling {:?} exceeded max_ms budget",
                             request.coupling.id
                         )));
                     }
                     Ok(Err(err)) => {
-                        return Err(VerletError::RuntimeExecution(format!(
+                        return Err(crate::VerletError::RuntimeExecution(format!(
                             "trap: wasm coupling {:?} failed: {err}",
                             request.coupling.id
                         )));
                     }
                     Err(_) => {
-                        return Err(VerletError::RuntimeExecution(format!(
+                        return Err(crate::VerletError::RuntimeExecution(format!(
                             "timeout: wasm coupling {:?} exceeded max_ms budget",
                             request.coupling.id
                         )));
@@ -127,7 +113,7 @@ impl CouplingExecutor for WasmCouplingExecutor {
                 .invoke_operation_bytes(&operation_name, input)
                 .await
                 .map_err(|err| {
-                    VerletError::RuntimeExecution(format!(
+                    crate::VerletError::RuntimeExecution(format!(
                         "trap: wasm coupling {:?} failed: {err}",
                         request.coupling.id
                     ))
@@ -140,15 +126,15 @@ impl CouplingExecutor for WasmCouplingExecutor {
 impl WasmCouplingExecutor {
     async fn fill_cache_entry(
         &self,
-        request: &CouplingInvocation,
+        request: &crate::CouplingInvocation,
         operation_name: &str,
         key: &WasmCouplingCacheKey,
-    ) -> VerletResult<CachedWasmCoupling> {
-        let registry = LocalOperationRegistry::new(&self.operation_registry_root);
+    ) -> crate::VerletResult<CachedWasmCoupling> {
+        let registry = crate::LocalOperationRegistry::new(&self.operation_registry_root);
         let record = registry
             .load_version_record(&key.operation_name, &key.artifact_hash)
             .map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "wasm coupling {:?} operation {}@sha256:{} was not found: {err}",
                     request.coupling.id, key.operation_name, key.artifact_hash
                 ))
@@ -162,23 +148,23 @@ impl WasmCouplingExecutor {
         let mut config = registry.load_runtime_config_for_published_record(&record)?;
         config.operation_name = operation_name.to_string();
         config.capability_grants.clear();
-        config.invocation_context = InvocationContext::anonymous();
+        config.invocation_context = verlet_abi::InvocationContext::anonymous();
         config.secrets.clear();
         config.vfs = None;
-        config.host_import_policy = WasmHostImportPolicy::PureCompute;
+        config.host_import_policy = verlet_wasm::WasmHostImportPolicy::PureCompute;
 
-        let factory = WasmRuntimeFactory::new(config)?;
+        let factory = verlet_wasm::WasmRuntimeFactory::new(config)?;
         let runtime = factory
             .build_validated_operation_runtime()
             .await
             .map_err(|err| {
-                VerletError::RuntimeExecution(format!(
+                crate::VerletError::RuntimeExecution(format!(
                     "trap: wasm coupling {:?} violates pure-compute import policy: {err}",
                     request.coupling.id
                 ))
             })?;
         Ok(CachedWasmCoupling {
-            runtime: Arc::new(runtime),
+            runtime: std::sync::Arc::new(runtime),
             manifest: record.manifest,
         })
     }
@@ -203,14 +189,14 @@ impl WasmCouplingCacheKey {
 }
 
 struct CachedWasmCoupling {
-    runtime: Arc<WasmModuleRuntime>,
-    manifest: WasmOperationManifest,
+    runtime: std::sync::Arc<verlet_wasm::WasmModuleRuntime>,
+    manifest: verlet_abi::WasmOperationManifest,
 }
 
 struct WasmCouplingCache {
     capacity: usize,
-    entries: HashMap<WasmCouplingCacheKey, Arc<CachedWasmCoupling>>,
-    lru: VecDeque<WasmCouplingCacheKey>,
+    entries: std::collections::HashMap<WasmCouplingCacheKey, std::sync::Arc<CachedWasmCoupling>>,
+    lru: std::collections::VecDeque<WasmCouplingCacheKey>,
     #[cfg(test)]
     stats: WasmCouplingCacheStats,
 }
@@ -219,14 +205,14 @@ impl WasmCouplingCache {
     fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
-            entries: HashMap::new(),
-            lru: VecDeque::new(),
+            entries: std::collections::HashMap::new(),
+            lru: std::collections::VecDeque::new(),
             #[cfg(test)]
             stats: WasmCouplingCacheStats::default(),
         }
     }
 
-    fn get(&mut self, key: &WasmCouplingCacheKey) -> Option<Arc<CachedWasmCoupling>> {
+    fn get(&mut self, key: &WasmCouplingCacheKey) -> Option<std::sync::Arc<CachedWasmCoupling>> {
         let cached = self.entries.get(key).cloned()?;
         self.touch(key);
         #[cfg(test)]
@@ -240,14 +226,15 @@ impl WasmCouplingCache {
         &mut self,
         key: WasmCouplingCacheKey,
         entry: CachedWasmCoupling,
-    ) -> Arc<CachedWasmCoupling> {
+    ) -> std::sync::Arc<CachedWasmCoupling> {
         if let Some(cached) = self.entries.get(&key).cloned() {
             self.touch(&key);
             return cached;
         }
         self.evict_until_room();
-        let cached = Arc::new(entry);
-        self.entries.insert(key.clone(), Arc::clone(&cached));
+        let cached = std::sync::Arc::new(entry);
+        self.entries
+            .insert(key.clone(), std::sync::Arc::clone(&cached));
         self.lru.push_back(key);
         #[cfg(test)]
         {
@@ -298,19 +285,19 @@ struct WasmCouplingCacheStats {
 fn ensure_operation_exposed(
     coupling_id: &str,
     record_name: &str,
-    manifest: &WasmOperationManifest,
+    manifest: &verlet_abi::WasmOperationManifest,
     operation_name: &str,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     if manifest.operation(operation_name).is_none() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "wasm coupling {coupling_id:?} operation record {record_name:?} does not expose {operation_name:?}"
         )));
     }
     Ok(())
 }
 
-fn encode_invocation(request: &CouplingInvocation) -> VerletResult<Vec<u8>> {
-    let invocation = AbiCouplingInvocation::new(
+fn encode_invocation(request: &crate::CouplingInvocation) -> crate::VerletResult<Vec<u8>> {
+    let invocation = verlet_abi::CouplingInvocation::new(
         invocation_event(&request.trigger_event),
         request
             .source_events
@@ -318,21 +305,22 @@ fn encode_invocation(request: &CouplingInvocation) -> VerletResult<Vec<u8>> {
             .map(invocation_event)
             .collect::<Vec<_>>(),
         request.coupling.config.clone(),
-        CouplingInvocationMeta {
+        verlet_abi::CouplingInvocationMeta {
             coupling_id: request.coupling.id.clone(),
             thread_id: request.trigger_event.coordinates.thread_id.to_string(),
             depth: request.activation.depth,
         },
     );
     serde_json::to_vec(&invocation).map_err(|err| {
-        VerletError::RuntimeExecution(format!(
-            "trap: failed to encode {COUPLING_INVOCATION_ABI} payload: {err}"
+        crate::VerletError::RuntimeExecution(format!(
+            "trap: failed to encode {COUPLING_INVOCATION_ABI} payload: {err}",
+            COUPLING_INVOCATION_ABI = verlet_abi::COUPLING_INVOCATION_ABI
         ))
     })
 }
 
-fn invocation_event(event: &EventRecord) -> CouplingInvocationEvent {
-    CouplingInvocationEvent {
+fn invocation_event(event: &crate::EventRecord) -> verlet_abi::CouplingInvocationEvent {
+    verlet_abi::CouplingInvocationEvent {
         id: event.id.to_string(),
         stream_id: event.stream_id.to_string(),
         sequence: event.sequence.get(),
@@ -342,14 +330,18 @@ fn invocation_event(event: &EventRecord) -> CouplingInvocationEvent {
     }
 }
 
-fn decode_discharge(coupling_id: &str, bytes: &[u8]) -> VerletResult<CouplingExecutionResult> {
-    let discharge = serde_json::from_slice::<AbiCouplingDischarge>(bytes).map_err(|err| {
-        VerletError::RuntimeExecution(format!(
-            "trap: wasm coupling {coupling_id:?} emitted invalid discharge JSON: {err}"
-        ))
-    })?;
-    if discharge.abi != COUPLING_DISCHARGE_ABI {
-        return Err(VerletError::RuntimeExecution(format!(
+fn decode_discharge(
+    coupling_id: &str,
+    bytes: &[u8],
+) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    let discharge =
+        serde_json::from_slice::<verlet_abi::CouplingDischarge>(bytes).map_err(|err| {
+            crate::VerletError::RuntimeExecution(format!(
+                "trap: wasm coupling {coupling_id:?} emitted invalid discharge JSON: {err}"
+            ))
+        })?;
+    if discharge.abi != verlet_abi::COUPLING_DISCHARGE_ABI {
+        return Err(crate::VerletError::RuntimeExecution(format!(
             "trap: wasm coupling {coupling_id:?} emitted unsupported discharge ABI {:?}",
             discharge.abi
         )));
@@ -358,21 +350,21 @@ fn decode_discharge(coupling_id: &str, bytes: &[u8]) -> VerletResult<CouplingExe
         .events
         .into_iter()
         .map(|event| {
-            let kind = event.kind.parse::<EventKind>().map_err(|err| {
-                VerletError::RuntimeExecution(format!(
+            let kind = event.kind.parse::<crate::EventKind>().map_err(|err| {
+                crate::VerletError::RuntimeExecution(format!(
                     "trap: wasm coupling {coupling_id:?} emitted unknown event kind {:?}: {err}",
                     event.kind
                 ))
             })?;
-            Ok(CouplingDischarge {
+            Ok(crate::CouplingDischarge {
                 event_id: None,
                 stream: event.stream,
                 kind,
                 payload: event.payload,
             })
         })
-        .collect::<VerletResult<Vec<_>>>()?;
-    Ok(CouplingExecutionResult { discharges })
+        .collect::<crate::VerletResult<Vec<_>>>()?;
+    Ok(crate::CouplingExecutionResult { discharges })
 }
 
 fn wasm_error_is_timeout(message: &str) -> bool {
@@ -381,26 +373,13 @@ fn wasm_error_is_timeout(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        BoundCoupling, BoundCouplingFunction, BoundCouplingSelector, BoundCouplingSet,
-        BoundCouplingSink, CouplingRole, CouplingRunStatus, CouplingScheduler,
-        CouplingSchedulerConfig, EventOrigin, EventProvenance, EventStore, EventStreamId,
-        InMemorySessionStore, NewEventRecord, PublishOperationRequest, PublishedOperationRecord,
-        PublishedOperationSource, RuntimeExecutionPolicy, RuntimeServices, ThreadCoordinates,
-        WasmOperationDefinition, WasmOperationEventKind, WasmOperationManifest, WasmOperationMode,
-        WasmOperationValueKind,
-    };
-    use serde_json::{Value as JsonValue, json};
-    use std::fs;
-    use std::sync::Arc;
-    use uuid::Uuid;
+    use crate::kernel::history::EventStore as _;
 
     #[tokio::test]
     async fn runtime_services_dispatch_custom_wasm_coupling_from_registry() {
         let root = temp_dir("wasm-coupling-runtime-services");
-        let output = json!({
-            "abi": COUPLING_DISCHARGE_ABI,
+        let output = serde_json::json!({
+            "abi": verlet_abi::COUPLING_DISCHARGE_ABI,
             "events": [{
                 "stream": "derived:counter",
                 "kind": "placement.decision",
@@ -408,48 +387,50 @@ mod tests {
             }]
         });
         let operation = publish_coupling_operation(&root, "counter", "run", &output).await;
-        let store = Arc::new(InMemorySessionStore::default());
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = std::sync::Arc::new(crate::InMemorySessionStore::default());
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
         let coupling = test_coupling(
             "org.example.counter",
             "counter",
             "run",
             &operation,
             "derived:counter",
-            vec![EventKind::PlacementDecision],
+            vec![crate::EventKind::PlacementDecision],
         );
-        let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default())
-            .with_bound_coupling_set(BoundCouplingSet::new("snapshot-a", vec![coupling]))
-            .with_operation_registry_root(&root);
+        let services =
+            crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default())
+                .with_bound_coupling_set(crate::BoundCouplingSet::new("snapshot-a", vec![coupling]))
+                .with_operation_registry_root(&root);
 
         services
             .append_thread_event(
                 &coordinates,
-                NewEventRecord::witnessed(
+                crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnCompleted,
-                    json!({"turn_id": "t1"}),
+                    crate::EventKind::TurnCompleted,
+                    serde_json::json!({"turn_id": "t1"}),
                 ),
             )
             .await
             .unwrap();
 
         let derived_stream =
-            EventStreamId::new(format!("derived:counter:{}", coordinates.thread_id));
+            crate::EventStreamId::new(format!("derived:counter:{}", coordinates.thread_id));
         let derived = store.read_events(&derived_stream, None).await.unwrap();
         assert_eq!(derived.len(), 1);
         assert_eq!(derived[0].payload["count"], 1);
-        let control_stream = EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let control_stream =
+            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let control = store.read_events(&control_stream, None).await.unwrap();
-        assert_eq!(control[0].kind, EventKind::CouplingRunCompleted);
-        let _ = fs::remove_dir_all(root);
+        assert_eq!(control[0].kind, crate::EventKind::CouplingRunCompleted);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn wasm_coupling_discharges_with_kernel_stamped_provenance_and_receipt() {
         let root = temp_dir("wasm-coupling-completed");
-        let output = json!({
-            "abi": COUPLING_DISCHARGE_ABI,
+        let output = serde_json::json!({
+            "abi": verlet_abi::COUPLING_DISCHARGE_ABI,
             "events": [{
                 "stream": "derived:counter",
                 "kind": "placement.decision",
@@ -458,8 +439,8 @@ mod tests {
             }]
         });
         let operation = publish_coupling_operation(&root, "counter", "run", &output).await;
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
         let appended = append_turn_completed(&store, &coordinates).await;
         let coupling = test_coupling(
             "org.example.counter",
@@ -467,25 +448,25 @@ mod tests {
             "run",
             &operation,
             "derived:counter",
-            vec![EventKind::PlacementDecision],
+            vec![crate::EventKind::PlacementDecision],
         );
-        let executor = WasmCouplingExecutor::new(&root);
-        let scheduler = CouplingScheduler::new(&store, &executor);
+        let executor = crate::kernel::wasm_couplings::WasmCouplingExecutor::new(&root);
+        let scheduler = crate::CouplingScheduler::new(&store, &executor);
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 appended,
             )
             .await
             .unwrap();
 
-        assert_eq!(receipt.runs[0].status, CouplingRunStatus::Completed);
+        assert_eq!(receipt.runs[0].status, crate::CouplingRunStatus::Completed);
         assert_eq!(receipt.runs[0].discharged_event_ids.len(), 1);
         let derived_stream = scheduler.stream_id_for(&coordinates, "derived:counter");
         let derived = store.read_events(&derived_stream, None).await.unwrap();
         assert_eq!(derived.len(), 1);
-        assert_eq!(derived[0].origin, EventOrigin::Discharged);
+        assert_eq!(derived[0].origin, crate::EventOrigin::Discharged);
         assert_eq!(
             derived[0].provenance.discharged_by.as_deref(),
             Some("coupling:org.example.counter")
@@ -498,8 +479,8 @@ mod tests {
         assert_eq!(derived[0].payload["count"], 3);
         assert_eq!(
             derived[0].provenance,
-            EventProvenance {
-                source_streams: vec![EventStreamId::for_thread(&coordinates)],
+            crate::EventProvenance {
+                source_streams: vec![crate::EventStreamId::for_thread(&coordinates)],
                 source_event_ids: vec![receipt.runs[0].trigger_event_id],
                 discharged_by: Some("coupling:org.example.counter".to_string()),
                 function: Some(format!(
@@ -507,14 +488,17 @@ mod tests {
                     operation.active_artifact_hash
                 )),
                 config_hash: Some("sha256:test".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             }
         );
         let control_events = store
             .read_events(&scheduler.stream_id_for(&coordinates, "control"), None)
             .await
             .unwrap();
-        assert_eq!(control_events[0].kind, EventKind::CouplingRunCompleted);
+        assert_eq!(
+            control_events[0].kind,
+            crate::EventKind::CouplingRunCompleted
+        );
         assert_eq!(
             control_events[0].payload["discharged_event_ids"]
                 .as_array()
@@ -522,14 +506,14 @@ mod tests {
                 .len(),
             1
         );
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn wasm_coupling_sink_violation_fails_without_partial_append() {
         let root = temp_dir("wasm-coupling-sink-violation");
-        let output = json!({
-            "abi": COUPLING_DISCHARGE_ABI,
+        let output = serde_json::json!({
+            "abi": verlet_abi::COUPLING_DISCHARGE_ABI,
             "events": [{
                 "stream": "derived:counter",
                 "kind": "loop.completed",
@@ -537,8 +521,8 @@ mod tests {
             }]
         });
         let operation = publish_coupling_operation(&root, "counter", "run", &output).await;
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
         let appended = append_turn_completed(&store, &coordinates).await;
         let coupling = test_coupling(
             "org.example.counter",
@@ -546,20 +530,20 @@ mod tests {
             "run",
             &operation,
             "derived:counter",
-            vec![EventKind::PlacementDecision],
+            vec![crate::EventKind::PlacementDecision],
         );
-        let executor = WasmCouplingExecutor::new(&root);
-        let scheduler = CouplingScheduler::new(&store, &executor);
+        let executor = crate::kernel::wasm_couplings::WasmCouplingExecutor::new(&root);
+        let scheduler = crate::CouplingScheduler::new(&store, &executor);
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 appended,
             )
             .await
             .unwrap();
 
-        assert_eq!(receipt.runs[0].status, CouplingRunStatus::Failed);
+        assert_eq!(receipt.runs[0].status, crate::CouplingRunStatus::Failed);
         assert!(
             receipt.runs[0]
                 .reason
@@ -575,22 +559,22 @@ mod tests {
             .await
             .unwrap();
         assert!(derived.is_empty());
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn wasm_coupling_discharge_budget_fails_without_partial_append() {
         let root = temp_dir("wasm-coupling-budget");
-        let output = json!({
-            "abi": COUPLING_DISCHARGE_ABI,
+        let output = serde_json::json!({
+            "abi": verlet_abi::COUPLING_DISCHARGE_ABI,
             "events": [
                 {"stream": "derived:counter", "kind": "placement.decision", "payload": {"n": 1}},
                 {"stream": "derived:counter", "kind": "placement.decision", "payload": {"n": 2}}
             ]
         });
         let operation = publish_coupling_operation(&root, "counter", "run", &output).await;
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
         let appended = append_turn_completed(&store, &coordinates).await;
         let mut coupling = test_coupling(
             "org.example.counter",
@@ -598,21 +582,21 @@ mod tests {
             "run",
             &operation,
             "derived:counter",
-            vec![EventKind::PlacementDecision],
+            vec![crate::EventKind::PlacementDecision],
         );
         coupling.budget.max_discharge_events = Some(1);
-        let executor = WasmCouplingExecutor::new(&root);
-        let scheduler = CouplingScheduler::new(&store, &executor);
+        let executor = crate::kernel::wasm_couplings::WasmCouplingExecutor::new(&root);
+        let scheduler = crate::CouplingScheduler::new(&store, &executor);
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 appended,
             )
             .await
             .unwrap();
 
-        assert_eq!(receipt.runs[0].status, CouplingRunStatus::Failed);
+        assert_eq!(receipt.runs[0].status, crate::CouplingRunStatus::Failed);
         assert!(
             receipt.runs[0]
                 .reason
@@ -628,15 +612,15 @@ mod tests {
             .await
             .unwrap();
         assert!(derived.is_empty());
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn wasm_coupling_timeout_fails_with_paused_time() {
         let root = temp_dir("wasm-coupling-timeout");
         let operation = publish_spin_operation(&root, "spinner", "run").await;
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
         let appended = append_turn_completed(&store, &coordinates).await;
         let mut coupling = test_coupling(
             "org.example.spinner",
@@ -644,24 +628,24 @@ mod tests {
             "run",
             &operation,
             "derived:counter",
-            vec![EventKind::PlacementDecision],
+            vec![crate::EventKind::PlacementDecision],
         );
         coupling.budget.max_ms = Some(10);
-        let executor = WasmCouplingExecutor::new(&root);
-        let scheduler = CouplingScheduler::new(&store, &executor);
-        let bindings = BoundCouplingSet::new("snapshot-a", vec![coupling]);
+        let executor = crate::kernel::wasm_couplings::WasmCouplingExecutor::new(&root);
+        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let bindings = crate::BoundCouplingSet::new("snapshot-a", vec![coupling]);
         let run = scheduler.run_batch(&bindings, appended);
         tokio::pin!(run);
         let receipt = loop {
             tokio::select! {
                 receipt = &mut run => break receipt.unwrap(),
                 _ = tokio::task::yield_now() => {
-                    tokio::time::advance(Duration::from_millis(10)).await;
+                    tokio::time::advance(std::time::Duration::from_millis(10)).await;
                 }
             }
         };
 
-        assert_eq!(receipt.runs[0].status, CouplingRunStatus::Failed);
+        assert_eq!(receipt.runs[0].status, crate::CouplingRunStatus::Failed);
         assert!(
             receipt.runs[0]
                 .reason
@@ -669,15 +653,15 @@ mod tests {
                 .unwrap()
                 .contains("timeout")
         );
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn wasm_coupling_rejects_effectful_import_without_partial_append() {
         let root = temp_dir("wasm-coupling-effectful-import");
         let operation = publish_operation(&root, "httpy", "run", http_import_guest("run")).await;
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
         let appended = append_turn_completed(&store, &coordinates).await;
         let coupling = test_coupling(
             "org.example.httpy",
@@ -685,20 +669,20 @@ mod tests {
             "run",
             &operation,
             "derived:counter",
-            vec![EventKind::PlacementDecision],
+            vec![crate::EventKind::PlacementDecision],
         );
-        let executor = WasmCouplingExecutor::new(&root);
-        let scheduler = CouplingScheduler::new(&store, &executor);
+        let executor = crate::kernel::wasm_couplings::WasmCouplingExecutor::new(&root);
+        let scheduler = crate::CouplingScheduler::new(&store, &executor);
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 appended,
             )
             .await
             .unwrap();
 
-        assert_eq!(receipt.runs[0].status, CouplingRunStatus::Failed);
+        assert_eq!(receipt.runs[0].status, crate::CouplingRunStatus::Failed);
         assert!(
             receipt.runs[0]
                 .reason
@@ -714,14 +698,14 @@ mod tests {
             .await
             .unwrap();
         assert!(derived.is_empty());
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn wasm_coupling_cyclic_trigger_halts_at_depth_eight() {
         let root = temp_dir("wasm-coupling-depth");
-        let output = json!({
-            "abi": COUPLING_DISCHARGE_ABI,
+        let output = serde_json::json!({
+            "abi": verlet_abi::COUPLING_DISCHARGE_ABI,
             "events": [{
                 "stream": "control",
                 "kind": "turn.completed",
@@ -729,8 +713,8 @@ mod tests {
             }]
         });
         let operation = publish_coupling_operation(&root, "loop", "run", &output).await;
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
         let appended = append_turn_completed(&store, &coordinates).await;
         let coupling = test_coupling(
             "org.example.loop",
@@ -738,15 +722,18 @@ mod tests {
             "run",
             &operation,
             "control",
-            vec![EventKind::TurnCompleted],
+            vec![crate::EventKind::TurnCompleted],
         );
-        let executor = WasmCouplingExecutor::new(&root);
-        let scheduler =
-            CouplingScheduler::with_config(&store, &executor, CouplingSchedulerConfig::default());
+        let executor = crate::kernel::wasm_couplings::WasmCouplingExecutor::new(&root);
+        let scheduler = crate::CouplingScheduler::with_config(
+            &store,
+            &executor,
+            crate::CouplingSchedulerConfig::default(),
+        );
 
         let receipt = scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 appended,
             )
             .await
@@ -756,7 +743,7 @@ mod tests {
             receipt
                 .runs
                 .iter()
-                .filter(|run| run.status == CouplingRunStatus::Completed)
+                .filter(|run| run.status == crate::CouplingRunStatus::Completed)
                 .count(),
             9
         );
@@ -764,17 +751,17 @@ mod tests {
             receipt
                 .runs
                 .iter()
-                .any(|run| run.status == CouplingRunStatus::Skipped
+                .any(|run| run.status == crate::CouplingRunStatus::Skipped
                     && run.reason.as_deref() == Some("depth_limit_exhausted"))
         );
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn wasm_coupling_reuses_validated_runtime_for_same_artifact() {
         let root = temp_dir("wasm-coupling-cache");
-        let output = json!({
-            "abi": COUPLING_DISCHARGE_ABI,
+        let output = serde_json::json!({
+            "abi": verlet_abi::COUPLING_DISCHARGE_ABI,
             "events": [{
                 "stream": "derived:counter",
                 "kind": "placement.decision",
@@ -782,19 +769,19 @@ mod tests {
             }]
         });
         let operation = publish_coupling_operation(&root, "counter", "run", &output).await;
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
+        let store = crate::InMemorySessionStore::default();
+        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
         let coupling = test_coupling(
             "org.example.counter",
             "counter",
             "run",
             &operation,
             "derived:counter",
-            vec![EventKind::PlacementDecision],
+            vec![crate::EventKind::PlacementDecision],
         );
-        let coupling_set = BoundCouplingSet::new("snapshot-a", vec![coupling]);
-        let executor = WasmCouplingExecutor::new(&root);
-        let scheduler = CouplingScheduler::new(&store, &executor);
+        let coupling_set = crate::BoundCouplingSet::new("snapshot-a", vec![coupling]);
+        let executor = crate::kernel::wasm_couplings::WasmCouplingExecutor::new(&root);
+        let scheduler = crate::CouplingScheduler::new(&store, &executor);
 
         let first = append_turn_completed(&store, &coordinates).await;
         scheduler.run_batch(&coupling_set, first).await.unwrap();
@@ -805,20 +792,20 @@ mod tests {
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.fills, 1);
         assert_eq!(stats.hits, 1);
-        let _ = fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     async fn append_turn_completed(
-        store: &InMemorySessionStore,
-        coordinates: &ThreadCoordinates,
-    ) -> Vec<EventRecord> {
+        store: &crate::InMemorySessionStore,
+        coordinates: &crate::ThreadCoordinates,
+    ) -> Vec<crate::EventRecord> {
         store
             .append_events(
-                &EventStreamId::for_thread(coordinates),
-                vec![NewEventRecord::witnessed(
+                &crate::EventStreamId::for_thread(coordinates),
+                vec![crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnCompleted,
-                    json!({"turn_id": "t1"}),
+                    crate::EventKind::TurnCompleted,
+                    serde_json::json!({"turn_id": "t1"}),
                 )],
             )
             .await
@@ -829,27 +816,27 @@ mod tests {
         id: &str,
         record_name: &str,
         operation_name: &str,
-        operation: &PublishedOperationRecord,
+        operation: &crate::PublishedOperationRecord,
         sink_stream: &str,
-        sink_kinds: Vec<EventKind>,
-    ) -> BoundCoupling {
-        BoundCoupling {
+        sink_kinds: Vec<crate::EventKind>,
+    ) -> crate::BoundCoupling {
+        crate::BoundCoupling {
             id: id.to_string(),
             role: if sink_stream == "control" {
-                CouplingRole::Controller
+                crate::CouplingRole::Controller
             } else {
-                CouplingRole::Projection
+                crate::CouplingRole::Projection
             },
-            trigger_kind: EventKind::TurnCompleted,
+            trigger_kind: crate::EventKind::TurnCompleted,
             trigger_match: Default::default(),
             trigger_quota: Default::default(),
-            source_selectors: vec![BoundCouplingSelector {
+            source_selectors: vec![crate::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![EventKind::TurnCompleted],
+                kinds: vec![crate::EventKind::TurnCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: BoundCouplingSink {
+            sink: crate::BoundCouplingSink {
                 stream: sink_stream.to_string(),
                 kinds: sink_kinds,
             },
@@ -857,7 +844,7 @@ mod tests {
                 "op://{record_name}/{operation_name}@sha256:{}",
                 operation.active_artifact_hash
             ),
-            function: BoundCouplingFunction {
+            function: crate::BoundCouplingFunction {
                 name: record_name.to_string(),
                 artifact_hash: operation.active_artifact_hash.clone(),
                 operation_name: Some(operation_name.to_string()),
@@ -867,17 +854,17 @@ mod tests {
                 format!("stream.write:{sink_stream}"),
             ],
             budget: Default::default(),
-            config: JsonValue::Null,
+            config: serde_json::Value::Null,
             config_hash: "sha256:test".to_string(),
         }
     }
 
     async fn publish_coupling_operation(
-        root: &Path,
+        root: &std::path::Path,
         record_name: &str,
         operation_name: &str,
-        output: &JsonValue,
-    ) -> PublishedOperationRecord {
+        output: &serde_json::Value,
+    ) -> crate::PublishedOperationRecord {
         publish_operation(
             root,
             record_name,
@@ -888,10 +875,10 @@ mod tests {
     }
 
     async fn publish_spin_operation(
-        root: &Path,
+        root: &std::path::Path,
         record_name: &str,
         operation_name: &str,
-    ) -> PublishedOperationRecord {
+    ) -> crate::PublishedOperationRecord {
         publish_operation(
             root,
             record_name,
@@ -902,20 +889,20 @@ mod tests {
     }
 
     async fn publish_operation(
-        root: &Path,
+        root: &std::path::Path,
         record_name: &str,
         _operation_name: &str,
         wat: String,
-    ) -> PublishedOperationRecord {
-        fs::create_dir_all(root).unwrap();
+    ) -> crate::PublishedOperationRecord {
+        std::fs::create_dir_all(root).unwrap();
         let wasm = wat::parse_str(wat).expect("coupling test WAT should compile");
         let artifact_path = root.join(format!("{record_name}.wasm"));
-        fs::write(&artifact_path, wasm).unwrap();
-        LocalOperationRegistry::new(root)
-            .publish_artifact(PublishOperationRequest {
+        std::fs::write(&artifact_path, wasm).unwrap();
+        crate::LocalOperationRegistry::new(root)
+            .publish_artifact(crate::PublishOperationRequest {
                 name: record_name.to_string(),
                 artifact_path: artifact_path.clone(),
-                source: PublishedOperationSource::Wasm {
+                source: crate::PublishedOperationSource::Wasm {
                     bin_path: artifact_path,
                 },
                 interface: None,
@@ -926,7 +913,7 @@ mod tests {
             .unwrap()
     }
 
-    fn coupling_guest(operation_name: &str, output: &JsonValue) -> String {
+    fn coupling_guest(operation_name: &str, output: &serde_json::Value) -> String {
         let manifest = manifest(operation_name);
         let output = serde_json::to_string(output).unwrap();
         format!(
@@ -1009,8 +996,8 @@ mod tests {
 
     fn http_import_guest(operation_name: &str) -> String {
         let manifest = manifest(operation_name);
-        let output = serde_json::to_string(&json!({
-            "abi": COUPLING_DISCHARGE_ABI,
+        let output = serde_json::to_string(&serde_json::json!({
+            "abi": verlet_abi::COUPLING_DISCHARGE_ABI,
             "events": [{
                 "stream": "derived:counter",
                 "kind": "placement.decision",
@@ -1066,15 +1053,15 @@ mod tests {
     }
 
     fn manifest(operation_name: &str) -> String {
-        serde_json::to_string(&WasmOperationManifest {
+        serde_json::to_string(&crate::WasmOperationManifest {
             abi: "cooldis.operation/0.1".to_string(),
-            operations: vec![WasmOperationDefinition {
+            operations: vec![crate::WasmOperationDefinition {
                 id: 1,
                 name: operation_name.to_string(),
-                input: WasmOperationValueKind::Json,
-                output: WasmOperationValueKind::Json,
-                events: WasmOperationEventKind::None,
-                mode: WasmOperationMode::Sync,
+                input: crate::WasmOperationValueKind::Json,
+                output: crate::WasmOperationValueKind::Json,
+                events: crate::WasmOperationEventKind::None,
+                mode: crate::WasmOperationMode::Sync,
                 required_capabilities: Vec::new(),
             }],
         })
@@ -1089,7 +1076,7 @@ mod tests {
             .join("")
     }
 
-    fn temp_dir(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("{label}-{}", Uuid::now_v7()))
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("{label}-{}", uuid::Uuid::now_v7()))
     }
 }

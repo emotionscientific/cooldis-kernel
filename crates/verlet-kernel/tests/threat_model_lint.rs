@@ -1,9 +1,5 @@
 //! Enforces the public threat-model registry as an append-only documentation ratchet.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Component, Path, PathBuf};
-
 const BASELINE: &str = include_str!("threat_model_ids.txt");
 const ALLOWED_AREAS: &[&str] = &[
     "INGRESS", "AUTHZ", "EXEC", "STORE", "SECRET", "SUPPLY", "DOS",
@@ -26,13 +22,13 @@ struct ThreatEntry {
     number: usize,
     title: String,
     line: usize,
-    fields: BTreeMap<String, String>,
+    fields: std::collections::BTreeMap<String, String>,
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(Path::parent)
+        .and_then(std::path::Path::parent)
         .expect("kernel crate should live two levels below repo root")
         .to_path_buf()
 }
@@ -41,7 +37,7 @@ fn repo_root() -> PathBuf {
 fn threat_model_registry_is_well_formed() {
     let root = repo_root();
     let doc_path = root.join("docs/threat-model.md");
-    let source = fs::read_to_string(&doc_path)
+    let source = std::fs::read_to_string(&doc_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", doc_path.display()));
     let entries = parse_entries(&source).unwrap_or_else(|message| panic!("{message}"));
 
@@ -136,13 +132,13 @@ fn parse_heading(heading: &str, line: usize) -> Result<ThreatEntry, String> {
         number,
         title: title.trim().to_string(),
         line,
-        fields: BTreeMap::new(),
+        fields: std::collections::BTreeMap::new(),
     })
 }
 
-fn validate_registry(root: &Path, entries: &[ThreatEntry]) -> Result<(), String> {
-    let mut ids = BTreeSet::new();
-    let mut numbers_by_area = BTreeMap::<&str, Vec<usize>>::new();
+fn validate_registry(root: &std::path::Path, entries: &[ThreatEntry]) -> Result<(), String> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut numbers_by_area = std::collections::BTreeMap::<&str, Vec<usize>>::new();
 
     for entry in entries {
         if !ids.insert(entry.id.as_str()) {
@@ -211,7 +207,7 @@ fn validate_registry(root: &Path, entries: &[ThreatEntry]) -> Result<(), String>
     Ok(())
 }
 
-fn validate_code_refs(root: &Path, entry: &ThreatEntry) -> Result<(), String> {
+fn validate_code_refs(root: &std::path::Path, entry: &ThreatEntry) -> Result<(), String> {
     let refs = backtick_values(&entry.fields["Affected surface"])?;
     if refs.is_empty() {
         return Err(format!(
@@ -220,11 +216,14 @@ fn validate_code_refs(root: &Path, entry: &ThreatEntry) -> Result<(), String> {
         ));
     }
     for reference in refs {
-        let path = Path::new(reference);
+        let path = std::path::Path::new(reference);
         if path.is_absolute()
-            || path
-                .components()
-                .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::RootDir
+                )
+            })
             || reference.contains('\\')
         {
             return Err(format!(
@@ -281,17 +280,16 @@ fn validate_baseline(entries: &[ThreatEntry], baseline: &str) -> Result<(), Stri
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn parser_rejects_non_three_digit_ids() {
-        let error = parse_entries("## TM-EXEC-1: bad\n").unwrap_err();
+        let error = crate::parse_entries("## TM-EXEC-1: bad\n").unwrap_err();
         assert!(error.contains("expected TM-<AREA>-<NNN>"));
     }
 
     #[test]
     fn affected_surface_parser_rejects_unclosed_backticks() {
-        let error = backtick_values("`crates/verlet-kernel/src/lib.rs").unwrap_err();
+        let error = crate::backtick_values("`crates/verlet-kernel/src/lib.rs").unwrap_err();
         assert!(error.contains("unclosed backtick"));
     }
 }

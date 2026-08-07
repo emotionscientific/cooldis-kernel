@@ -15,15 +15,7 @@
 //! events: the `EventKind` vocabulary is thread-scoped and frozen, and a
 //! boundary session has no thread.
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::future::Future;
-use std::sync::Arc;
-use uuid::Uuid;
-use verlet_sqlite::{Connection, Row, TransactionBehavior, params};
-
-use crate::{DaemonClock, SqliteSessionStore, VerletError, VerletResult};
+use sha2::Digest as _;
 
 /// Schema id for a principal declaration/revocation record.
 pub const IDENTITY_PRINCIPAL_SCHEMA_V1: &str = "cooldis.identity.principal/1";
@@ -37,7 +29,7 @@ pub const IDENTITY_AUTH_REJECTION_SCHEMA_V1: &str = "cooldis.identity.auth_rejec
 pub const IDENTITY_HOST_EFFECT_SCHEMA_V1: &str = "cooldis.identity.host_effect/1";
 
 /// A named identity within the tenant (ADR 0008 D1).
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct PrincipalId(String);
 
@@ -63,7 +55,7 @@ impl std::fmt::Display for PrincipalId {
 /// its later arrival is additive, but [`PrincipalKind::is_declarable`] is
 /// false for it and declaration must be rejected. End users reach agents
 /// through adapters; the envelope records them as adapter testimony.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrincipalKind {
     /// Full host authority plus interactive use: whoever operates the daemon.
@@ -93,7 +85,7 @@ impl PrincipalKind {
 /// The authority class of a JSON-RPC method (ADR 0008 D4). The taxonomy is
 /// the durable part of the design; kinds map onto it via
 /// [`PrincipalKind::permits`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorityClass {
     /// Touches the host: command exec, filesystem, process handles, secrets,
@@ -173,7 +165,7 @@ pub fn authority_class_for_method(method: &str) -> AuthorityClass {
 /// A declared principal, as persisted (ADR 0008 D1). Declaration and
 /// revocation are append-only witnessed records; the in-memory boundary set
 /// is rebuilt from them and refreshed on change.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrincipalRecordV1 {
     pub schema: String,
     pub principal_id: PrincipalId,
@@ -189,7 +181,7 @@ pub struct PrincipalRecordV1 {
 
 /// A credential binding a bearer secret to exactly one principal (ADR 0008
 /// D2). The secret is returned once at mint and persisted only as a digest.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityCredentialV1 {
     pub schema: String,
     pub credential_id: String,
@@ -210,7 +202,7 @@ pub struct IdentityCredentialV1 {
 /// random secrets, so a plain SHA-256 digest is sufficient and no
 /// password-style slow hash applies.
 pub fn identity_token_digest(token: &str) -> String {
-    format!("sha256:{:x}", Sha256::digest(token.as_bytes()))
+    format!("sha256:{:x}", sha2::Sha256::digest(token.as_bytes()))
 }
 
 /// How a connection proved itself (ADR 0008 D3).
@@ -234,7 +226,7 @@ pub struct ResolvedPrincipal {
 }
 
 /// The boundary surface a session or rejection was witnessed on.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoundarySurface {
     UnixSocket,
@@ -244,7 +236,7 @@ pub enum BoundarySurface {
 
 /// A witnessed boundary session (ADR 0008 D6): open and close of one
 /// authenticated connection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IdentitySessionV1 {
     pub schema: String,
     pub session_id: String,
@@ -262,7 +254,7 @@ pub struct IdentitySessionV1 {
 /// Why a boundary request was refused (ADR 0008 D3/D4). Persisted as a
 /// witnessed rejection so pre-guard intrusion attempts are not invisible;
 /// follows `SyncPushRejectionReason` (`daemon/remote_store/endpoint.rs`).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reason")]
 pub enum IdentityAuthRejectionReason {
     /// No credential matches the presented token.
@@ -288,7 +280,7 @@ pub enum IdentityAuthRejectionReason {
 }
 
 /// A witnessed authentication/authorization rejection (ADR 0008 D6).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityAuthRejectionV1 {
     pub schema: String,
     pub surface: BoundarySurface,
@@ -299,7 +291,7 @@ pub struct IdentityAuthRejectionV1 {
 }
 
 /// A host-authority effect attributed to an authenticated boundary session.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityHostEffectV1 {
     pub schema: String,
     pub session_id: String,
@@ -318,7 +310,7 @@ pub struct IdentityHostEffectV1 {
 /// fail-closed verification outcome. Test conventions: inline unit tests
 /// against `SqliteSessionStore::in_memory()` with an injected clock, plus an
 /// integration file alongside `tests/remote_store_lease.rs`.
-#[async_trait]
+#[async_trait::async_trait]
 pub trait IdentityAuthority: Send + Sync {
     /// Declare a principal. Rejects kinds where
     /// [`PrincipalKind::is_declarable`] is false (the reserved `member`).
@@ -328,13 +320,13 @@ pub trait IdentityAuthority: Send + Sync {
         principal_id: &PrincipalId,
         kind: PrincipalKind,
         display: &str,
-    ) -> VerletResult<PrincipalRecordV1>;
+    ) -> crate::VerletResult<PrincipalRecordV1>;
 
     async fn revoke_principal(
         &self,
         revoked_by: &PrincipalId,
         principal_id: &PrincipalId,
-    ) -> VerletResult<()>;
+    ) -> crate::VerletResult<()>;
 
     /// Mint a credential for a principal. Returns the persisted record and
     /// the bearer secret, which is shown exactly once and never persisted.
@@ -343,43 +335,49 @@ pub trait IdentityAuthority: Send + Sync {
         minted_by: &PrincipalId,
         principal_id: &PrincipalId,
         expires_at_ms: Option<i64>,
-    ) -> VerletResult<(IdentityCredentialV1, String)>;
+    ) -> crate::VerletResult<(IdentityCredentialV1, String)>;
 
     async fn revoke_credential(
         &self,
         revoked_by: &PrincipalId,
         credential_id: &str,
-    ) -> VerletResult<()>;
+    ) -> crate::VerletResult<()>;
 
     /// Resolve a bearer token to a principal. `Ok(None)` is the fail-closed
     /// rejection outcome: unknown, expired, or revoked credentials and
     /// revoked principals all resolve to nothing.
-    async fn verify_token(&self, token: &str) -> VerletResult<Option<ResolvedPrincipal>>;
+    async fn verify_token(&self, token: &str) -> crate::VerletResult<Option<ResolvedPrincipal>>;
 
     /// Resolve a same-uid Unix peer to the operator principal. Local mode
     /// only (ADR 0008 D3): in managed mode this returns `Ok(None)` and the
     /// attempt is witnessed with [`IdentityAuthRejectionReason::PeerMappingDisabled`].
-    async fn resolve_peer_uid(&self, uid: u32) -> VerletResult<Option<ResolvedPrincipal>>;
+    async fn resolve_peer_uid(&self, uid: u32) -> crate::VerletResult<Option<ResolvedPrincipal>>;
 
-    async fn list_principals(&self) -> VerletResult<Vec<PrincipalRecordV1>>;
+    async fn list_principals(&self) -> crate::VerletResult<Vec<PrincipalRecordV1>>;
 
     async fn list_credentials(
         &self,
         principal_id: &PrincipalId,
-    ) -> VerletResult<Vec<IdentityCredentialV1>>;
+    ) -> crate::VerletResult<Vec<IdentityCredentialV1>>;
 
     /// Witness a boundary session opening (ADR 0008 D6).
-    async fn witness_session_opened(&self, session: &IdentitySessionV1) -> VerletResult<()>;
+    async fn witness_session_opened(&self, session: &IdentitySessionV1) -> crate::VerletResult<()>;
 
     /// Witness a boundary session closing.
-    async fn witness_session_closed(&self, session_id: &str, closed_at_ms: i64)
-    -> VerletResult<()>;
+    async fn witness_session_closed(
+        &self,
+        session_id: &str,
+        closed_at_ms: i64,
+    ) -> crate::VerletResult<()>;
 
     /// Witness a rejected authentication or authorization attempt.
-    async fn witness_auth_rejected(&self, rejection: &IdentityAuthRejectionV1) -> VerletResult<()>;
+    async fn witness_auth_rejected(
+        &self,
+        rejection: &IdentityAuthRejectionV1,
+    ) -> crate::VerletResult<()>;
 
     /// Witness a host-authority effect before it is allowed to proceed.
-    async fn witness_host_effect(&self, effect: &IdentityHostEffectV1) -> VerletResult<()>;
+    async fn witness_host_effect(&self, effect: &IdentityHostEffectV1) -> crate::VerletResult<()>;
 }
 
 /// SQLite-backed durable authority for identity-plane records.
@@ -390,8 +388,8 @@ pub trait IdentityAuthority: Send + Sync {
 /// SHA-256 digests.
 #[derive(Clone)]
 pub struct SqliteIdentityAuthority {
-    store: SqliteSessionStore,
-    clock: Arc<dyn DaemonClock>,
+    store: crate::SqliteSessionStore,
+    clock: std::sync::Arc<dyn crate::DaemonClock>,
     peer_operator: Option<PrincipalId>,
 }
 
@@ -410,10 +408,10 @@ impl SqliteIdentityAuthority {
     /// operator it resolves to. The boundary remains responsible for proving
     /// that the supplied uid belongs to the daemon user.
     pub async fn new(
-        store: SqliteSessionStore,
-        clock: Arc<dyn DaemonClock>,
+        store: crate::SqliteSessionStore,
+        clock: std::sync::Arc<dyn crate::DaemonClock>,
         peer_operator: Option<PrincipalId>,
-    ) -> VerletResult<Self> {
+    ) -> crate::VerletResult<Self> {
         let authority = Self {
             store,
             clock,
@@ -431,12 +429,12 @@ impl SqliteIdentityAuthority {
         &self,
         principal_id: &PrincipalId,
         display: &str,
-    ) -> VerletResult<(PrincipalRecordV1, IdentityCredentialV1, String)> {
+    ) -> crate::VerletResult<(PrincipalRecordV1, IdentityCredentialV1, String)> {
         let store = self.store.clone();
-        let clock = Arc::clone(&self.clock);
+        let clock = std::sync::Arc::clone(&self.clock);
         let principal_id = principal_id.clone();
         let display = display.to_string();
-        let credential_id = format!("credential_{}", Uuid::new_v4());
+        let credential_id = format!("credential_{}", uuid::Uuid::new_v4());
         let token = mint_identity_secret()?;
         let token_digest = identity_token_digest(&token);
         cancellation_safe(async move {
@@ -444,7 +442,7 @@ impl SqliteIdentityAuthority {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             let now_ms = clock.now().timestamp_millis();
@@ -460,7 +458,7 @@ impl SqliteIdentityAuthority {
                         schema, principal_id, kind, display, declared_by, declared_at_ms,
                         revoked_at_ms, revoked_by, bootstrap_root
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, 1)",
-                    params![
+                    verlet_sqlite::params![
                         IDENTITY_PRINCIPAL_SCHEMA_V1,
                         principal_id.as_str(),
                         principal_kind_text(PrincipalKind::Operator),
@@ -477,7 +475,7 @@ impl SqliteIdentityAuthority {
                         schema, credential_id, principal_id, token_digest, minted_by,
                         minted_at_ms, expires_at_ms, revoked_at_ms, revoked_by
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)",
-                    params![
+                    verlet_sqlite::params![
                         IDENTITY_CREDENTIAL_SCHEMA_V1,
                         credential_id.as_str(),
                         principal_id.as_str(),
@@ -515,14 +513,14 @@ impl SqliteIdentityAuthority {
         .await
     }
 
-    async fn init_schema(&self) -> VerletResult<()> {
+    async fn init_schema(&self) -> crate::VerletResult<()> {
         let store = self.store.clone();
         cancellation_safe(async move {
             let _writer = store.daemon_write_guard().await;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             transaction
@@ -609,7 +607,7 @@ impl SqliteIdentityAuthority {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl IdentityAuthority for SqliteIdentityAuthority {
     async fn declare_principal(
         &self,
@@ -617,14 +615,14 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         principal_id: &PrincipalId,
         kind: PrincipalKind,
         display: &str,
-    ) -> VerletResult<PrincipalRecordV1> {
+    ) -> crate::VerletResult<PrincipalRecordV1> {
         if !kind.is_declarable() {
             return Err(authority_error(
                 "member principals are reserved and cannot be declared in identity plane v0",
             ));
         }
         let store = self.store.clone();
-        let clock = Arc::clone(&self.clock);
+        let clock = std::sync::Arc::clone(&self.clock);
         let declared_by = declared_by.clone();
         let principal_id = principal_id.clone();
         let display = display.to_string();
@@ -633,7 +631,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             if let Some(status) = principal_status(&transaction, &principal_id).await? {
@@ -655,7 +653,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                         schema, principal_id, kind, display, declared_by, declared_at_ms,
                         revoked_at_ms, revoked_by, bootstrap_root
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, 0)",
-                    params![
+                    verlet_sqlite::params![
                         IDENTITY_PRINCIPAL_SCHEMA_V1,
                         principal_id.as_str(),
                         principal_kind_text(kind),
@@ -684,9 +682,9 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         &self,
         revoked_by: &PrincipalId,
         principal_id: &PrincipalId,
-    ) -> VerletResult<()> {
+    ) -> crate::VerletResult<()> {
         let store = self.store.clone();
-        let clock = Arc::clone(&self.clock);
+        let clock = std::sync::Arc::clone(&self.clock);
         let revoked_by = revoked_by.clone();
         let principal_id = principal_id.clone();
         cancellation_safe(async move {
@@ -694,7 +692,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             let now_ms = clock.now().timestamp_millis();
@@ -704,7 +702,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                      SET revoked_at_ms = COALESCE(revoked_at_ms, ?2),
                          revoked_by = COALESCE(revoked_by, ?3)
                      WHERE principal_id = ?1",
-                    params![principal_id.as_str(), now_ms, revoked_by.as_str()],
+                    verlet_sqlite::params![principal_id.as_str(), now_ms, revoked_by.as_str()],
                 )
                 .await
                 .map_err(storage_error)?;
@@ -723,12 +721,12 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         minted_by: &PrincipalId,
         principal_id: &PrincipalId,
         expires_at_ms: Option<i64>,
-    ) -> VerletResult<(IdentityCredentialV1, String)> {
+    ) -> crate::VerletResult<(IdentityCredentialV1, String)> {
         let store = self.store.clone();
-        let clock = Arc::clone(&self.clock);
+        let clock = std::sync::Arc::clone(&self.clock);
         let minted_by = minted_by.clone();
         let principal_id = principal_id.clone();
-        let credential_id = format!("credential_{}", Uuid::new_v4());
+        let credential_id = format!("credential_{}", uuid::Uuid::new_v4());
         let token = mint_identity_secret()?;
         let token_digest = identity_token_digest(&token);
         cancellation_safe(async move {
@@ -736,7 +734,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             if !principal_is_active(&transaction, &principal_id).await? {
@@ -752,7 +750,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                         schema, credential_id, principal_id, token_digest, minted_by,
                         minted_at_ms, expires_at_ms, revoked_at_ms, revoked_by
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL)",
-                    params![
+                    verlet_sqlite::params![
                         IDENTITY_CREDENTIAL_SCHEMA_V1,
                         credential_id.as_str(),
                         principal_id.as_str(),
@@ -786,9 +784,9 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         &self,
         revoked_by: &PrincipalId,
         credential_id: &str,
-    ) -> VerletResult<()> {
+    ) -> crate::VerletResult<()> {
         let store = self.store.clone();
-        let clock = Arc::clone(&self.clock);
+        let clock = std::sync::Arc::clone(&self.clock);
         let revoked_by = revoked_by.clone();
         let credential_id = credential_id.to_string();
         cancellation_safe(async move {
@@ -796,7 +794,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             let now_ms = clock.now().timestamp_millis();
@@ -806,7 +804,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                      SET revoked_at_ms = COALESCE(revoked_at_ms, ?2),
                          revoked_by = COALESCE(revoked_by, ?3)
                      WHERE credential_id = ?1",
-                    params![credential_id.as_str(), now_ms, revoked_by.as_str()],
+                    verlet_sqlite::params![credential_id.as_str(), now_ms, revoked_by.as_str()],
                 )
                 .await
                 .map_err(storage_error)?;
@@ -820,7 +818,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         .await
     }
 
-    async fn verify_token(&self, token: &str) -> VerletResult<Option<ResolvedPrincipal>> {
+    async fn verify_token(&self, token: &str) -> crate::VerletResult<Option<ResolvedPrincipal>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let digest = identity_token_digest(token);
@@ -837,7 +835,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                    AND principal.revoked_at_ms IS NULL
                    AND principal.kind IN (?3, ?4)
                  LIMIT 1",
-                params![
+                verlet_sqlite::params![
                     digest,
                     now_ms,
                     principal_kind_text(PrincipalKind::Operator),
@@ -859,7 +857,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         Ok(principal)
     }
 
-    async fn resolve_peer_uid(&self, uid: u32) -> VerletResult<Option<ResolvedPrincipal>> {
+    async fn resolve_peer_uid(&self, uid: u32) -> crate::VerletResult<Option<ResolvedPrincipal>> {
         let Some(principal_id) = self.peer_operator.as_ref() else {
             return Ok(None);
         };
@@ -873,7 +871,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                    AND kind = ?2
                    AND revoked_at_ms IS NULL
                  LIMIT 1",
-                params![
+                verlet_sqlite::params![
                     principal_id.as_str(),
                     principal_kind_text(PrincipalKind::Operator)
                 ],
@@ -890,7 +888,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         }))
     }
 
-    async fn list_principals(&self) -> VerletResult<Vec<PrincipalRecordV1>> {
+    async fn list_principals(&self) -> crate::VerletResult<Vec<PrincipalRecordV1>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let mut rows = connection
@@ -913,7 +911,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
     async fn list_credentials(
         &self,
         principal_id: &PrincipalId,
-    ) -> VerletResult<Vec<IdentityCredentialV1>> {
+    ) -> crate::VerletResult<Vec<IdentityCredentialV1>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let mut rows = connection
@@ -923,7 +921,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                  FROM cooldis_identity_credentials
                  WHERE principal_id = ?1
                  ORDER BY minted_at_ms, credential_id",
-                params![principal_id.as_str()],
+                verlet_sqlite::params![principal_id.as_str()],
             )
             .await
             .map_err(storage_error)?;
@@ -934,7 +932,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         Ok(credentials)
     }
 
-    async fn witness_session_opened(&self, session: &IdentitySessionV1) -> VerletResult<()> {
+    async fn witness_session_opened(&self, session: &IdentitySessionV1) -> crate::VerletResult<()> {
         if session.schema != IDENTITY_SESSION_SCHEMA_V1 {
             return Err(authority_error(
                 "identity session schema id is not supported",
@@ -952,7 +950,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             transaction
@@ -961,7 +959,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                         schema, session_id, principal_id, kind, surface, credential_ref,
                         opened_at_ms, closed_at_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
+                    verlet_sqlite::params![
                         session.schema,
                         session.session_id,
                         session.principal_id.as_str(),
@@ -984,7 +982,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         &self,
         session_id: &str,
         closed_at_ms: i64,
-    ) -> VerletResult<()> {
+    ) -> crate::VerletResult<()> {
         let store = self.store.clone();
         let session_id = session_id.to_string();
         cancellation_safe(async move {
@@ -992,7 +990,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             transaction
@@ -1013,7 +1011,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                        )
                      ORDER BY rowid
                      LIMIT 1",
-                    params![session_id, closed_at_ms],
+                    verlet_sqlite::params![session_id, closed_at_ms],
                 )
                 .await
                 .map_err(storage_error)?;
@@ -1023,7 +1021,10 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         .await
     }
 
-    async fn witness_auth_rejected(&self, rejection: &IdentityAuthRejectionV1) -> VerletResult<()> {
+    async fn witness_auth_rejected(
+        &self,
+        rejection: &IdentityAuthRejectionV1,
+    ) -> crate::VerletResult<()> {
         if rejection.schema != IDENTITY_AUTH_REJECTION_SCHEMA_V1 {
             return Err(authority_error(
                 "identity auth rejection schema id is not supported",
@@ -1039,7 +1040,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             let principal_id = rejection
@@ -1051,7 +1052,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                     "INSERT INTO cooldis_identity_auth_rejections (
                         schema, surface, reason_json, principal_id, rejected_at_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
+                    verlet_sqlite::params![
                         rejection.schema,
                         boundary_surface_text(rejection.surface),
                         reason_json,
@@ -1067,7 +1068,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         .await
     }
 
-    async fn witness_host_effect(&self, effect: &IdentityHostEffectV1) -> VerletResult<()> {
+    async fn witness_host_effect(&self, effect: &IdentityHostEffectV1) -> crate::VerletResult<()> {
         if effect.schema != IDENTITY_HOST_EFFECT_SCHEMA_V1 {
             return Err(authority_error(
                 "identity host effect schema id is not supported",
@@ -1104,7 +1105,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                                  AND closed.closed_at_ms IS NOT NULL
                            )
                      )",
-                    params![
+                    verlet_sqlite::params![
                         effect.schema,
                         effect.session_id,
                         effect.principal_id.as_str(),
@@ -1125,14 +1126,16 @@ impl IdentityAuthority for SqliteIdentityAuthority {
     }
 }
 
-async fn active_operator_exists(connection: &Connection) -> VerletResult<bool> {
+async fn active_operator_exists(
+    connection: &verlet_sqlite::Connection,
+) -> crate::VerletResult<bool> {
     let mut rows = connection
         .query(
             "SELECT 1
              FROM cooldis_identity_principals
              WHERE kind = ?1 AND revoked_at_ms IS NULL
              LIMIT 1",
-            params![principal_kind_text(PrincipalKind::Operator)],
+            verlet_sqlite::params![principal_kind_text(PrincipalKind::Operator)],
         )
         .await
         .map_err(storage_error)?;
@@ -1140,16 +1143,16 @@ async fn active_operator_exists(connection: &Connection) -> VerletResult<bool> {
 }
 
 async fn principal_is_active(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     principal_id: &PrincipalId,
-) -> VerletResult<bool> {
+) -> crate::VerletResult<bool> {
     let mut rows = connection
         .query(
             "SELECT 1
              FROM cooldis_identity_principals
              WHERE principal_id = ?1 AND revoked_at_ms IS NULL
              LIMIT 1",
-            params![principal_id.as_str()],
+            verlet_sqlite::params![principal_id.as_str()],
         )
         .await
         .map_err(storage_error)?;
@@ -1163,16 +1166,16 @@ enum PrincipalStatus {
 }
 
 async fn principal_status(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     principal_id: &PrincipalId,
-) -> VerletResult<Option<PrincipalStatus>> {
+) -> crate::VerletResult<Option<PrincipalStatus>> {
     let mut rows = connection
         .query(
             "SELECT revoked_at_ms
              FROM cooldis_identity_principals
              WHERE principal_id = ?1
              LIMIT 1",
-            params![principal_id.as_str()],
+            verlet_sqlite::params![principal_id.as_str()],
         )
         .await
         .map_err(storage_error)?;
@@ -1189,7 +1192,7 @@ async fn principal_status(
     }
 }
 
-fn principal_from_row(row: &Row) -> VerletResult<PrincipalRecordV1> {
+fn principal_from_row(row: &verlet_sqlite::Row) -> crate::VerletResult<PrincipalRecordV1> {
     Ok(PrincipalRecordV1 {
         schema: row.get(0).map_err(storage_error)?,
         principal_id: PrincipalId::new(row.get::<String>(1).map_err(storage_error)?),
@@ -1201,7 +1204,7 @@ fn principal_from_row(row: &Row) -> VerletResult<PrincipalRecordV1> {
     })
 }
 
-fn credential_from_row(row: &Row) -> VerletResult<IdentityCredentialV1> {
+fn credential_from_row(row: &verlet_sqlite::Row) -> crate::VerletResult<IdentityCredentialV1> {
     Ok(IdentityCredentialV1 {
         schema: row.get(0).map_err(storage_error)?,
         credential_id: row.get(1).map_err(storage_error)?,
@@ -1222,7 +1225,7 @@ fn principal_kind_text(kind: PrincipalKind) -> &'static str {
     }
 }
 
-fn parse_principal_kind(value: &str) -> VerletResult<PrincipalKind> {
+fn parse_principal_kind(value: &str) -> crate::VerletResult<PrincipalKind> {
     match value {
         "operator" => Ok(PrincipalKind::Operator),
         "adapter" => Ok(PrincipalKind::Adapter),
@@ -1241,7 +1244,7 @@ fn boundary_surface_text(surface: BoundarySurface) -> &'static str {
     }
 }
 
-fn mint_identity_secret() -> VerletResult<String> {
+fn mint_identity_secret() -> crate::VerletResult<String> {
     let mut random = [0_u8; 32];
     getrandom::fill(&mut random)
         .map_err(|error| authority_error(format!("failed to mint identity credential: {error}")))?;
@@ -1255,29 +1258,29 @@ fn mint_identity_secret() -> VerletResult<String> {
     Ok(token)
 }
 
-fn authority_error(message: impl Into<String>) -> VerletError {
-    VerletError::History(message.into())
+fn authority_error(message: impl Into<String>) -> crate::VerletError {
+    crate::VerletError::History(message.into())
 }
 
-fn storage_error(error: impl std::fmt::Display) -> VerletError {
-    VerletError::History(error.to_string())
+fn storage_error(error: impl std::fmt::Display) -> crate::VerletError {
+    crate::VerletError::History(error.to_string())
 }
 
 async fn cancellation_safe<T>(
-    future: impl Future<Output = VerletResult<T>> + Send + 'static,
-) -> VerletResult<T>
+    future: impl std::future::Future<Output = crate::VerletResult<T>> + Send + 'static,
+) -> crate::VerletResult<T>
 where
     T: Send + 'static,
 {
     tokio::spawn(future).await.map_err(|error| {
-        VerletError::History(format!(
+        crate::VerletError::History(format!(
             "sqlite identity authority transaction task failed: {error}"
         ))
     })?
 }
 
 /// Deployment mode (ADR 0008 D5).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityMode {
     /// Single-user developer box: a missing `[daemon.identity]` section
@@ -1291,7 +1294,7 @@ pub enum IdentityMode {
 }
 
 /// The `[daemon.identity]` config section (ADR 0008 D5).
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletDaemonIdentityConfig {
     #[serde(default)]
     pub mode: IdentityMode,
@@ -1339,33 +1342,30 @@ impl VerletDaemonIdentityConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use chrono::{TimeZone, Utc};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use tokio::sync::Barrier;
-    use verlet_sqlite::params;
+    use crate::daemon::identity::IdentityAuthority as _;
+    use chrono::TimeZone as _;
 
     struct TestClock {
-        now_ms: AtomicI64,
+        now_ms: std::sync::atomic::AtomicI64,
     }
 
     impl TestClock {
         fn new(now_ms: i64) -> Self {
             Self {
-                now_ms: AtomicI64::new(now_ms),
+                now_ms: std::sync::atomic::AtomicI64::new(now_ms),
             }
         }
 
         fn set(&self, now_ms: i64) {
-            self.now_ms.store(now_ms, Ordering::SeqCst);
+            self.now_ms
+                .store(now_ms, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     impl crate::DaemonClock for TestClock {
-        fn now(&self) -> chrono::DateTime<Utc> {
-            Utc.timestamp_millis_opt(self.now_ms.load(Ordering::SeqCst))
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::Utc
+                .timestamp_millis_opt(self.now_ms.load(std::sync::atomic::Ordering::SeqCst))
                 .single()
                 .expect("test timestamp should be representable")
         }
@@ -1373,17 +1373,17 @@ mod tests {
 
     async fn authority(
         now_ms: i64,
-        peer_operator: Option<PrincipalId>,
+        peer_operator: Option<crate::daemon::identity::PrincipalId>,
     ) -> (
-        SqliteIdentityAuthority,
+        crate::daemon::identity::SqliteIdentityAuthority,
         crate::SqliteSessionStore,
-        Arc<TestClock>,
+        std::sync::Arc<TestClock>,
     ) {
         let store = crate::SqliteSessionStore::in_memory().await.unwrap();
-        let clock = Arc::new(TestClock::new(now_ms));
-        let authority = SqliteIdentityAuthority::new(
+        let clock = std::sync::Arc::new(TestClock::new(now_ms));
+        let authority = crate::daemon::identity::SqliteIdentityAuthority::new(
             store.clone(),
-            Arc::clone(&clock) as Arc<dyn crate::DaemonClock>,
+            std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::DaemonClock>,
             peer_operator,
         )
         .await
@@ -1393,72 +1393,93 @@ mod tests {
 
     #[test]
     fn member_kind_is_reserved_not_declarable() {
-        assert!(PrincipalKind::Operator.is_declarable());
-        assert!(PrincipalKind::Adapter.is_declarable());
-        assert!(!PrincipalKind::Member.is_declarable());
+        assert!(crate::daemon::identity::PrincipalKind::Operator.is_declarable());
+        assert!(crate::daemon::identity::PrincipalKind::Adapter.is_declarable());
+        assert!(!crate::daemon::identity::PrincipalKind::Member.is_declarable());
     }
 
     #[test]
     fn kind_to_class_mapping_matches_adr() {
-        assert!(PrincipalKind::Operator.permits(AuthorityClass::Host));
-        assert!(PrincipalKind::Operator.permits(AuthorityClass::Interactive));
-        assert!(PrincipalKind::Operator.permits(AuthorityClass::Ingress));
-        assert!(!PrincipalKind::Adapter.permits(AuthorityClass::Host));
-        assert!(!PrincipalKind::Adapter.permits(AuthorityClass::Interactive));
-        assert!(PrincipalKind::Adapter.permits(AuthorityClass::Ingress));
-        assert!(!PrincipalKind::Member.permits(AuthorityClass::Host));
+        assert!(
+            crate::daemon::identity::PrincipalKind::Operator
+                .permits(crate::daemon::identity::AuthorityClass::Host)
+        );
+        assert!(
+            crate::daemon::identity::PrincipalKind::Operator
+                .permits(crate::daemon::identity::AuthorityClass::Interactive)
+        );
+        assert!(
+            crate::daemon::identity::PrincipalKind::Operator
+                .permits(crate::daemon::identity::AuthorityClass::Ingress)
+        );
+        assert!(
+            !crate::daemon::identity::PrincipalKind::Adapter
+                .permits(crate::daemon::identity::AuthorityClass::Host)
+        );
+        assert!(
+            !crate::daemon::identity::PrincipalKind::Adapter
+                .permits(crate::daemon::identity::AuthorityClass::Interactive)
+        );
+        assert!(
+            crate::daemon::identity::PrincipalKind::Adapter
+                .permits(crate::daemon::identity::AuthorityClass::Ingress)
+        );
+        assert!(
+            !crate::daemon::identity::PrincipalKind::Member
+                .permits(crate::daemon::identity::AuthorityClass::Host)
+        );
     }
 
     #[test]
     fn explicit_overrides_beat_interactive_prefixes() {
         assert_eq!(
-            authority_class_for_method("thread/shellCommand"),
-            AuthorityClass::Host
+            crate::daemon::identity::authority_class_for_method("thread/shellCommand"),
+            crate::daemon::identity::AuthorityClass::Host
         );
         assert_eq!(
-            authority_class_for_method("thread/start"),
-            AuthorityClass::Host
+            crate::daemon::identity::authority_class_for_method("thread/start"),
+            crate::daemon::identity::AuthorityClass::Host
         );
         assert_eq!(
-            authority_class_for_method("thread/submit"),
-            AuthorityClass::Interactive
+            crate::daemon::identity::authority_class_for_method("thread/submit"),
+            crate::daemon::identity::AuthorityClass::Interactive
         );
         assert_eq!(
-            authority_class_for_method("turn/start"),
-            AuthorityClass::Ingress
+            crate::daemon::identity::authority_class_for_method("turn/start"),
+            crate::daemon::identity::AuthorityClass::Ingress
         );
     }
 
     #[test]
     fn unknown_method_fails_closed_to_host() {
         assert_eq!(
-            authority_class_for_method("someFuture/method"),
-            AuthorityClass::Host
+            crate::daemon::identity::authority_class_for_method("someFuture/method"),
+            crate::daemon::identity::AuthorityClass::Host
         );
     }
 
     #[test]
     fn managed_mode_without_tenant_hard_fails() {
-        let config = VerletDaemonIdentityConfig {
-            mode: IdentityMode::Managed,
+        let config = crate::daemon::identity::VerletDaemonIdentityConfig {
+            mode: crate::daemon::identity::IdentityMode::Managed,
             ..Default::default()
         };
         assert!(config.validate().is_err());
-        let local = VerletDaemonIdentityConfig::default();
+        let local = crate::daemon::identity::VerletDaemonIdentityConfig::default();
         assert!(local.validate().is_ok());
     }
 
     #[test]
     fn managed_mode_rejects_blank_identity_fields() {
-        let blank_tenant = VerletDaemonIdentityConfig {
-            mode: IdentityMode::Managed,
+        let blank_tenant = crate::daemon::identity::VerletDaemonIdentityConfig {
+            mode: crate::daemon::identity::IdentityMode::Managed,
             tenant_id: Some("   ".to_string()),
-            console_principal: Some(PrincipalId::new("operator:root")),
+            console_principal: Some(crate::daemon::identity::PrincipalId::new("operator:root")),
         };
         assert!(blank_tenant.validate().unwrap_err().contains("tenant_id"));
 
-        let missing_console = VerletDaemonIdentityConfig {
-            mode: IdentityMode::Managed,
+        let missing_console = crate::daemon::identity::VerletDaemonIdentityConfig {
+            mode: crate::daemon::identity::IdentityMode::Managed,
             tenant_id: Some("tenant-a".to_string()),
             console_principal: None,
         };
@@ -1469,10 +1490,10 @@ mod tests {
                 .contains("console_principal")
         );
 
-        let blank_console = VerletDaemonIdentityConfig {
-            mode: IdentityMode::Managed,
+        let blank_console = crate::daemon::identity::VerletDaemonIdentityConfig {
+            mode: crate::daemon::identity::IdentityMode::Managed,
             tenant_id: Some("tenant-a".to_string()),
-            console_principal: Some(PrincipalId::new(" ")),
+            console_principal: Some(crate::daemon::identity::PrincipalId::new(" ")),
         };
         assert!(
             blank_console
@@ -1481,23 +1502,23 @@ mod tests {
                 .contains("console_principal")
         );
 
-        let complete = VerletDaemonIdentityConfig {
-            mode: IdentityMode::Managed,
+        let complete = crate::daemon::identity::VerletDaemonIdentityConfig {
+            mode: crate::daemon::identity::IdentityMode::Managed,
             tenant_id: Some("tenant-a".to_string()),
-            console_principal: Some(PrincipalId::new("operator:root")),
+            console_principal: Some(crate::daemon::identity::PrincipalId::new("operator:root")),
         };
         assert!(complete.validate().is_ok());
     }
 
     #[test]
     fn token_digest_convention_matches_sync_authority() {
-        assert!(identity_token_digest("secret").starts_with("sha256:"));
+        assert!(crate::daemon::identity::identity_token_digest("secret").starts_with("sha256:"));
     }
 
     #[tokio::test]
     async fn principal_declaration_revocation_and_member_rejection_are_durable() {
-        let operator = PrincipalId::new("operator:root");
-        let adapter = PrincipalId::new("adapter:inbound");
+        let operator = crate::daemon::identity::PrincipalId::new("operator:root");
+        let adapter = crate::daemon::identity::PrincipalId::new("adapter:inbound");
         let (authority, _, clock) = authority(1_000, None).await;
         authority
             .bootstrap_operator(&operator, "Root operator")
@@ -1508,19 +1529,22 @@ mod tests {
             .declare_principal(
                 &operator,
                 &adapter,
-                PrincipalKind::Adapter,
+                crate::daemon::identity::PrincipalKind::Adapter,
                 "Telegram adapter",
             )
             .await
             .unwrap();
-        assert_eq!(declared.schema, IDENTITY_PRINCIPAL_SCHEMA_V1);
+        assert_eq!(
+            declared.schema,
+            crate::daemon::identity::IDENTITY_PRINCIPAL_SCHEMA_V1
+        );
         assert_eq!(declared.declared_at_ms, 1_000);
         assert!(
             authority
                 .declare_principal(
                     &operator,
                     &adapter,
-                    PrincipalKind::Adapter,
+                    crate::daemon::identity::PrincipalKind::Adapter,
                     "Duplicate adapter",
                 )
                 .await
@@ -1532,8 +1556,8 @@ mod tests {
             authority
                 .declare_principal(
                     &operator,
-                    &PrincipalId::new("member:reserved"),
-                    PrincipalKind::Member,
+                    &crate::daemon::identity::PrincipalId::new("member:reserved"),
+                    crate::daemon::identity::PrincipalKind::Member,
                     "Reserved member",
                 )
                 .await
@@ -1565,8 +1589,8 @@ mod tests {
         let (authority, _, _) = authority(1_000, None).await;
         let error = authority
             .revoke_principal(
-                &PrincipalId::new("operator:root"),
-                &PrincipalId::new("adapter:missing"),
+                &crate::daemon::identity::PrincipalId::new("operator:root"),
+                &crate::daemon::identity::PrincipalId::new("adapter:missing"),
             )
             .await
             .unwrap_err();
@@ -1578,7 +1602,10 @@ mod tests {
     async fn revoking_an_unknown_credential_fails() {
         let (authority, _, _) = authority(1_000, None).await;
         let error = authority
-            .revoke_credential(&PrincipalId::new("operator:root"), "credential_missing")
+            .revoke_credential(
+                &crate::daemon::identity::PrincipalId::new("operator:root"),
+                "credential_missing",
+            )
             .await
             .unwrap_err();
 
@@ -1587,8 +1614,8 @@ mod tests {
 
     #[tokio::test]
     async fn revoking_principals_and_credentials_is_idempotent() {
-        let operator = PrincipalId::new("operator:root");
-        let adapter = PrincipalId::new("adapter:webhook");
+        let operator = crate::daemon::identity::PrincipalId::new("operator:root");
+        let adapter = crate::daemon::identity::PrincipalId::new("adapter:webhook");
         let (authority, _, clock) = authority(1_000, None).await;
         authority
             .bootstrap_operator(&operator, "Root operator")
@@ -1598,7 +1625,7 @@ mod tests {
             .declare_principal(
                 &operator,
                 &adapter,
-                PrincipalKind::Adapter,
+                crate::daemon::identity::PrincipalKind::Adapter,
                 "Webhook adapter",
             )
             .await
@@ -1646,8 +1673,8 @@ mod tests {
 
     #[tokio::test]
     async fn credential_verification_fails_closed_for_expiry_and_both_revocations() {
-        let operator = PrincipalId::new("operator:root");
-        let adapter = PrincipalId::new("adapter:webhook");
+        let operator = crate::daemon::identity::PrincipalId::new("operator:root");
+        let adapter = crate::daemon::identity::PrincipalId::new("adapter:webhook");
         let (authority, _, clock) = authority(10_000, None).await;
         let (_, _, bootstrap_token) = authority
             .bootstrap_operator(&operator, "Root operator")
@@ -1657,7 +1684,7 @@ mod tests {
             .declare_principal(
                 &operator,
                 &adapter,
-                PrincipalKind::Adapter,
+                crate::daemon::identity::PrincipalKind::Adapter,
                 "Webhook adapter",
             )
             .await
@@ -1736,7 +1763,7 @@ mod tests {
 
     #[tokio::test]
     async fn reserved_member_records_never_resolve_or_open_sessions() {
-        let member = PrincipalId::new("member:reserved");
+        let member = crate::daemon::identity::PrincipalId::new("member:reserved");
         let token = "test-only-member-token";
         let (authority, store, _) = authority(1_000, None).await;
         let database = store.sqlite_database();
@@ -1747,8 +1774,8 @@ mod tests {
                     schema, principal_id, kind, display, declared_by, declared_at_ms,
                     revoked_at_ms, revoked_by, bootstrap_root
                  ) VALUES (?1, ?2, 'member', ?3, ?2, ?4, NULL, NULL, 0)",
-                params![
-                    IDENTITY_PRINCIPAL_SCHEMA_V1,
+                verlet_sqlite::params![
+                    crate::daemon::identity::IDENTITY_PRINCIPAL_SCHEMA_V1,
                     member.as_str(),
                     "Reserved member",
                     1_000_i64,
@@ -1762,11 +1789,11 @@ mod tests {
                     schema, credential_id, principal_id, token_digest, minted_by,
                     minted_at_ms, expires_at_ms, revoked_at_ms, revoked_by
                  ) VALUES (?1, ?2, ?3, ?4, ?3, ?5, NULL, NULL, NULL)",
-                params![
-                    IDENTITY_CREDENTIAL_SCHEMA_V1,
+                verlet_sqlite::params![
+                    crate::daemon::identity::IDENTITY_CREDENTIAL_SCHEMA_V1,
                     "credential_member",
                     member.as_str(),
-                    identity_token_digest(token),
+                    crate::daemon::identity::identity_token_digest(token),
                     1_000_i64,
                 ],
             )
@@ -1775,12 +1802,12 @@ mod tests {
 
         assert!(authority.verify_token(token).await.unwrap().is_none());
         let error = authority
-            .witness_session_opened(&IdentitySessionV1 {
-                schema: IDENTITY_SESSION_SCHEMA_V1.to_string(),
+            .witness_session_opened(&crate::daemon::identity::IdentitySessionV1 {
+                schema: crate::daemon::identity::IDENTITY_SESSION_SCHEMA_V1.to_string(),
                 session_id: "session-member".to_string(),
                 principal_id: member,
-                kind: PrincipalKind::Member,
-                surface: BoundarySurface::Websocket,
+                kind: crate::daemon::identity::PrincipalKind::Member,
+                surface: crate::daemon::identity::BoundarySurface::Websocket,
                 credential_ref: "credential_member".to_string(),
                 opened_at_ms: 1_000,
                 closed_at_ms: None,
@@ -1792,7 +1819,7 @@ mod tests {
 
     #[tokio::test]
     async fn minted_secret_is_256_bit_prefixed_and_only_its_digest_is_persisted() {
-        let operator = PrincipalId::new("operator:root");
+        let operator = crate::daemon::identity::PrincipalId::new("operator:root");
         let (authority, store, _) = authority(1_000, None).await;
         let (_, credential, token) = authority
             .bootstrap_operator(&operator, "Root operator")
@@ -1808,7 +1835,7 @@ mod tests {
                 "SELECT schema, credential_id, principal_id, token_digest, minted_by
                  FROM cooldis_identity_credentials
                  WHERE credential_id = ?1",
-                params![credential.credential_id],
+                verlet_sqlite::params![credential.credential_id],
             )
             .await
             .unwrap();
@@ -1817,13 +1844,16 @@ mod tests {
             .map(|index| row.get::<String>(index).unwrap())
             .collect::<Vec<_>>();
         let digest = &persisted[3];
-        assert_eq!(digest.as_str(), identity_token_digest(&token));
+        assert_eq!(
+            digest.as_str(),
+            crate::daemon::identity::identity_token_digest(&token)
+        );
         assert!(persisted.iter().all(|value| !value.contains(&token)));
     }
 
     #[tokio::test]
     async fn credential_digest_uniqueness_prevents_ambiguous_verification() {
-        let operator = PrincipalId::new("operator:root");
+        let operator = crate::daemon::identity::PrincipalId::new("operator:root");
         let (authority, store, _) = authority(1_000, None).await;
         let (_, credential, token) = authority
             .bootstrap_operator(&operator, "Root operator")
@@ -1837,11 +1867,11 @@ mod tests {
                     schema, credential_id, principal_id, token_digest, minted_by,
                     minted_at_ms, expires_at_ms, revoked_at_ms, revoked_by
                  ) VALUES (?1, ?2, ?3, ?4, ?3, ?5, NULL, NULL, NULL)",
-                params![
-                    IDENTITY_CREDENTIAL_SCHEMA_V1,
+                verlet_sqlite::params![
+                    crate::daemon::identity::IDENTITY_CREDENTIAL_SCHEMA_V1,
                     "credential_collision",
                     operator.as_str(),
-                    identity_token_digest(&token),
+                    crate::daemon::identity::identity_token_digest(&token),
                     1_001_i64,
                 ],
             )
@@ -1853,7 +1883,7 @@ mod tests {
         assert_eq!(resolved.principal_id, operator);
         assert_eq!(
             resolved.auth,
-            AuthenticationPath::Credential {
+            crate::daemon::identity::AuthenticationPath::Credential {
                 credential_id: credential.credential_id,
             }
         );
@@ -1862,15 +1892,15 @@ mod tests {
     #[tokio::test]
     async fn concurrent_bootstrap_commits_exactly_one_active_root() {
         let (authority, _, _) = authority(1_000, None).await;
-        let authority = Arc::new(authority);
-        let barrier = Arc::new(Barrier::new(3));
+        let authority = std::sync::Arc::new(authority);
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
         let spawn = |id: &'static str| {
-            let authority = Arc::clone(&authority);
-            let barrier = Arc::clone(&barrier);
+            let authority = std::sync::Arc::clone(&authority);
+            let barrier = std::sync::Arc::clone(&barrier);
             tokio::spawn(async move {
                 barrier.wait().await;
                 authority
-                    .bootstrap_operator(&PrincipalId::new(id), id)
+                    .bootstrap_operator(&crate::daemon::identity::PrincipalId::new(id), id)
                     .await
             })
         };
@@ -1888,7 +1918,8 @@ mod tests {
             principals
                 .iter()
                 .filter(|record| {
-                    record.kind == PrincipalKind::Operator && record.revoked_at_ms.is_none()
+                    record.kind == crate::daemon::identity::PrincipalKind::Operator
+                        && record.revoked_at_ms.is_none()
                 })
                 .count(),
             1
@@ -1897,8 +1928,8 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_after_root_revocation_preserves_one_active_root() {
-        let first = PrincipalId::new("operator:first");
-        let second = PrincipalId::new("operator:second");
+        let first = crate::daemon::identity::PrincipalId::new("operator:first");
+        let second = crate::daemon::identity::PrincipalId::new("operator:second");
         let (authority, _, clock) = authority(1_000, None).await;
         let (_, _, first_token) = authority
             .bootstrap_operator(&first, "First operator")
@@ -1933,7 +1964,8 @@ mod tests {
             principals
                 .iter()
                 .filter(|record| {
-                    record.kind == PrincipalKind::Operator && record.revoked_at_ms.is_none()
+                    record.kind == crate::daemon::identity::PrincipalKind::Operator
+                        && record.revoked_at_ms.is_none()
                 })
                 .count(),
             1
@@ -1942,7 +1974,7 @@ mod tests {
 
     #[tokio::test]
     async fn schema_initialization_is_idempotent_and_preserves_records() {
-        let operator = PrincipalId::new("operator:root");
+        let operator = crate::daemon::identity::PrincipalId::new("operator:root");
         let (authority, store, clock) = authority(1_000, None).await;
         let (_, credential, token) = authority
             .bootstrap_operator(&operator, "Root operator")
@@ -1950,9 +1982,9 @@ mod tests {
             .unwrap();
         drop(authority);
 
-        let reopened = SqliteIdentityAuthority::new(
+        let reopened = crate::daemon::identity::SqliteIdentityAuthority::new(
             store,
-            Arc::clone(&clock) as Arc<dyn crate::DaemonClock>,
+            std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::DaemonClock>,
             None,
         )
         .await
@@ -1975,7 +2007,7 @@ mod tests {
 
     #[tokio::test]
     async fn peer_mapping_and_witness_records_use_the_fixed_surface() {
-        let operator = PrincipalId::new("operator:root");
+        let operator = crate::daemon::identity::PrincipalId::new("operator:root");
         let (authority, store, _) = authority(1_000, Some(operator.clone())).await;
         authority
             .bootstrap_operator(&operator, "Root operator")
@@ -1983,27 +2015,27 @@ mod tests {
             .unwrap();
         assert_eq!(
             authority.resolve_peer_uid(501).await.unwrap(),
-            Some(ResolvedPrincipal {
+            Some(crate::daemon::identity::ResolvedPrincipal {
                 principal_id: operator.clone(),
-                kind: PrincipalKind::Operator,
-                auth: AuthenticationPath::PeerUid { uid: 501 },
+                kind: crate::daemon::identity::PrincipalKind::Operator,
+                auth: crate::daemon::identity::AuthenticationPath::PeerUid { uid: 501 },
             })
         );
 
-        let session = IdentitySessionV1 {
-            schema: IDENTITY_SESSION_SCHEMA_V1.to_string(),
+        let session = crate::daemon::identity::IdentitySessionV1 {
+            schema: crate::daemon::identity::IDENTITY_SESSION_SCHEMA_V1.to_string(),
             session_id: "session-1".to_string(),
             principal_id: operator.clone(),
-            kind: PrincipalKind::Operator,
-            surface: BoundarySurface::UnixSocket,
+            kind: crate::daemon::identity::PrincipalKind::Operator,
+            surface: crate::daemon::identity::BoundarySurface::UnixSocket,
             credential_ref: "peer_uid:501".to_string(),
             opened_at_ms: 1_000,
             closed_at_ms: None,
         };
         authority.witness_session_opened(&session).await.unwrap();
         authority
-            .witness_host_effect(&IdentityHostEffectV1 {
-                schema: IDENTITY_HOST_EFFECT_SCHEMA_V1.to_string(),
+            .witness_host_effect(&crate::daemon::identity::IdentityHostEffectV1 {
+                schema: crate::daemon::identity::IDENTITY_HOST_EFFECT_SCHEMA_V1.to_string(),
                 session_id: "session-1".to_string(),
                 principal_id: operator.clone(),
                 method: "command/exec".to_string(),
@@ -2013,8 +2045,8 @@ mod tests {
             .unwrap();
         assert!(
             authority
-                .witness_host_effect(&IdentityHostEffectV1 {
-                    schema: IDENTITY_HOST_EFFECT_SCHEMA_V1.to_string(),
+                .witness_host_effect(&crate::daemon::identity::IdentityHostEffectV1 {
+                    schema: crate::daemon::identity::IDENTITY_HOST_EFFECT_SCHEMA_V1.to_string(),
                     session_id: "session-never-opened".to_string(),
                     principal_id: operator.clone(),
                     method: "fs/writeFile".to_string(),
@@ -2028,10 +2060,10 @@ mod tests {
             .await
             .unwrap();
         authority
-            .witness_auth_rejected(&IdentityAuthRejectionV1 {
-                schema: IDENTITY_AUTH_REJECTION_SCHEMA_V1.to_string(),
-                surface: BoundarySurface::Websocket,
-                reason: IdentityAuthRejectionReason::CredentialUnknown,
+            .witness_auth_rejected(&crate::daemon::identity::IdentityAuthRejectionV1 {
+                schema: crate::daemon::identity::IDENTITY_AUTH_REJECTION_SCHEMA_V1.to_string(),
+                surface: crate::daemon::identity::BoundarySurface::Websocket,
+                reason: crate::daemon::identity::IdentityAuthRejectionReason::CredentialUnknown,
                 principal_id: None,
                 rejected_at_ms: 2_100,
             })
@@ -2043,7 +2075,7 @@ mod tests {
         let mut rows = connection
             .query(
                 "SELECT COUNT(*), MAX(closed_at_ms) FROM cooldis_identity_sessions WHERE session_id = ?1",
-                params!["session-1"],
+                verlet_sqlite::params!["session-1"],
             )
             .await
             .unwrap();
@@ -2061,7 +2093,7 @@ mod tests {
         let mut rows = connection
             .query(
                 "SELECT COUNT(*) FROM cooldis_identity_host_effects WHERE session_id = ?1 AND principal_id = ?2 AND method = ?3 AND witnessed_at_ms = ?4",
-                params!["session-1", operator.as_str(), "command/exec", 1_500],
+                verlet_sqlite::params!["session-1", operator.as_str(), "command/exec", 1_500],
             )
             .await
             .unwrap();

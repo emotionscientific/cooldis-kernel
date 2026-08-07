@@ -1,21 +1,7 @@
-use super::*;
-use crate::adapters::app_server::{
-    runtime_factory_from_provider_parts, runtime_factory_from_provider_parts_with_secret_resolver,
-};
-use crate::{
-    APP_SERVER_OPENAI_COMPATIBLE_MODEL, APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentLoopConfig,
-    AppServerListenAddr, CanonicalContent, CanonicalStopReason, CanonicalUsage,
-    CapsuleBindingsConfig, EventStore, EventStreamId, LocalOperationRegistry, ProviderApi,
-    ProviderClient, ProviderRequest, ProviderResponse, ProviderResult, PublishOperationRequest,
-    PublishedOperationSource, SecretSourceKind, SqliteSecretStore, SqliteSessionStore,
-    VerletAppServer, VerletAppServerConfig,
-};
-use async_trait::async_trait;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use uuid::Uuid;
+use crate::EventStore as _;
+use tokio::io::AsyncBufReadExt as _;
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 const SEARCH_FIXTURE_TEMPLATE: &str =
     include_str!("../../../tests/fixtures/search_operation.wat.tpl");
@@ -24,16 +10,17 @@ static MCP_CAPSULE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 #[tokio::test]
 async fn mcp_server_lists_tools_without_daemon_connection() {
     let (client, server) = tokio::io::duplex(64 * 1024);
-    let config = VerletMcpServerConfig {
-        daemon_socket: PathBuf::from("/tmp/missing-verlet-daemon.sock"),
-        request_timeout: Duration::from_secs(1),
+    let config = crate::adapters::mcp_server::VerletMcpServerConfig {
+        daemon_socket: std::path::PathBuf::from("/tmp/missing-verlet-daemon.sock"),
+        request_timeout: std::time::Duration::from_secs(1),
     };
     let (server_read, server_write) = tokio::io::split(server);
-    let server_task =
-        tokio::spawn(async move { serve_mcp_stdio(server_read, server_write, config).await });
+    let server_task = tokio::spawn(async move {
+        crate::adapters::mcp_server::serve_mcp_stdio(server_read, server_write, config).await
+    });
 
     let (read, mut write) = tokio::io::split(client);
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = tokio::io::BufReader::new(read).lines();
     write
             .write_all(
                 br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -70,25 +57,27 @@ async fn mcp_server_lists_tools_without_daemon_connection() {
 
 #[tokio::test]
 async fn mcp_server_runs_prompt_and_command_through_daemon() {
-    let root = PathBuf::from("/tmp").join(format!("cdis-mcp-{}", Uuid::now_v7().simple()));
+    let root = std::path::PathBuf::from("/tmp")
+        .join(format!("cdis-mcp-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
-    let listen = AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::AppServerListenAddr::Unix(socket.clone());
     let config = isolated_app_config(listen.clone(), &root);
-    let app = VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::VerletAppServer::new_local(config).await.unwrap();
     let session_store_path = app.session_store_path().to_path_buf();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
     let (client, server) = tokio::io::duplex(256 * 1024);
-    let config = VerletMcpServerConfig {
+    let config = crate::adapters::mcp_server::VerletMcpServerConfig {
         daemon_socket: socket.clone(),
-        request_timeout: Duration::from_secs(10),
+        request_timeout: std::time::Duration::from_secs(10),
     };
     let (server_read, server_write) = tokio::io::split(server);
-    let server_task =
-        tokio::spawn(async move { serve_mcp_stdio(server_read, server_write, config).await });
+    let server_task = tokio::spawn(async move {
+        crate::adapters::mcp_server::serve_mcp_stdio(server_read, server_write, config).await
+    });
     let (read, mut write) = tokio::io::split(client);
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = tokio::io::BufReader::new(read).lines();
 
     send(
             &mut write,
@@ -136,7 +125,7 @@ async fn mcp_server_runs_prompt_and_command_through_daemon() {
         Some("root")
     );
 
-    let child_start = json!({
+    let child_start = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 4,
         "method": "tools/call",
@@ -216,47 +205,49 @@ async fn mcp_server_runs_prompt_and_command_through_daemon() {
 #[tokio::test]
 async fn mcp_prompt_lets_model_shaped_agent_see_and_call_search_shell_command() {
     let _guard = MCP_CAPSULE_TEST_LOCK.lock().await;
-    let root = PathBuf::from("/tmp").join(format!("cdis-mcp-search-{}", Uuid::now_v7().simple()));
+    let root = std::path::PathBuf::from("/tmp")
+        .join(format!("cdis-mcp-search-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
     let registry_root = root.join("capsules");
-    let listen = AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::AppServerListenAddr::Unix(socket.clone());
     publish_exa_without_secret(&registry_root).await;
-    let provider = Arc::new(ModelVbinLifecycleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = provider.clone();
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::OpenAIChatCompletions,
-        APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
-        APP_SERVER_OPENAI_COMPATIBLE_MODEL,
+    let provider = std::sync::Arc::new(ModelVbinLifecycleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = provider.clone();
+    let mut runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIChatCompletions,
+        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     );
     runtime_config.max_tokens = 512;
-    let capsule_bindings = CapsuleBindingsConfig::default()
+    let capsule_bindings = crate::CapsuleBindingsConfig::default()
         .with_registry_root(&registry_root)
         .with_global_operation_name("search");
-    let runtime_factory = runtime_factory_from_provider_parts(
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
         provider_client,
         capsule_bindings.clone(),
     );
     let mut app_config = isolated_app_config(listen.clone(), &root);
-    app_config.model_provider = APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
-    app_config.model = APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
+    app_config.model_provider = crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
+    app_config.model = crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
     app_config.capsule_bindings = capsule_bindings;
-    let app = VerletAppServer::with_runtime_factory(app_config, runtime_factory)
+    let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
         .await
         .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
     let (client, server) = tokio::io::duplex(256 * 1024);
-    let config = VerletMcpServerConfig {
+    let config = crate::adapters::mcp_server::VerletMcpServerConfig {
         daemon_socket: socket.clone(),
-        request_timeout: Duration::from_secs(10),
+        request_timeout: std::time::Duration::from_secs(10),
     };
     let (server_read, server_write) = tokio::io::split(server);
-    let server_task =
-        tokio::spawn(async move { serve_mcp_stdio(server_read, server_write, config).await });
+    let server_task = tokio::spawn(async move {
+        crate::adapters::mcp_server::serve_mcp_stdio(server_read, server_write, config).await
+    });
     let (read, mut write) = tokio::io::split(client);
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = tokio::io::BufReader::new(read).lines();
 
     send(
             &mut write,
@@ -302,45 +293,48 @@ async fn mcp_prompt_lets_model_shaped_agent_see_and_call_search_shell_command() 
 #[tokio::test]
 async fn mcp_capsule_binding_tools_update_global_scope() {
     let _guard = MCP_CAPSULE_TEST_LOCK.lock().await;
-    let root = PathBuf::from("/tmp").join(format!("cdis-mcp-bind-{}", Uuid::now_v7().simple()));
+    let root = std::path::PathBuf::from("/tmp")
+        .join(format!("cdis-mcp-bind-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
     let registry_root = root.join("capsules");
-    let listen = AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::AppServerListenAddr::Unix(socket.clone());
     publish_exa_without_secret(&registry_root).await;
-    let provider = Arc::new(ModelVbinLifecycleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = provider.clone();
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::OpenAIChatCompletions,
-        APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
-        APP_SERVER_OPENAI_COMPATIBLE_MODEL,
+    let provider = std::sync::Arc::new(ModelVbinLifecycleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = provider.clone();
+    let mut runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIChatCompletions,
+        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     );
     runtime_config.max_tokens = 512;
-    let capsule_bindings = CapsuleBindingsConfig::default().with_registry_root(&registry_root);
-    let runtime_factory = runtime_factory_from_provider_parts(
+    let capsule_bindings =
+        crate::CapsuleBindingsConfig::default().with_registry_root(&registry_root);
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
         provider_client,
         capsule_bindings.clone(),
     );
     let mut app_config = isolated_app_config(listen.clone(), &root);
-    app_config.model_provider = APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
-    app_config.model = APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
+    app_config.model_provider = crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
+    app_config.model = crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
     app_config.capsule_bindings = capsule_bindings;
-    let app = VerletAppServer::with_runtime_factory(app_config, runtime_factory)
+    let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
         .await
         .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
     let (client, server) = tokio::io::duplex(256 * 1024);
-    let config = VerletMcpServerConfig {
+    let config = crate::adapters::mcp_server::VerletMcpServerConfig {
         daemon_socket: socket.clone(),
-        request_timeout: Duration::from_secs(10),
+        request_timeout: std::time::Duration::from_secs(10),
     };
     let (server_read, server_write) = tokio::io::split(server);
-    let server_task =
-        tokio::spawn(async move { serve_mcp_stdio(server_read, server_write, config).await });
+    let server_task = tokio::spawn(async move {
+        crate::adapters::mcp_server::serve_mcp_stdio(server_read, server_write, config).await
+    });
     let (read, mut write) = tokio::io::split(client);
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = tokio::io::BufReader::new(read).lines();
 
     send(
             &mut write,
@@ -411,13 +405,13 @@ async fn mcp_capsule_binding_tools_update_global_scope() {
 #[tokio::test]
 async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
     let _guard = MCP_CAPSULE_TEST_LOCK.lock().await;
-    let root = PathBuf::from("/tmp").join(format!(
+    let root = std::path::PathBuf::from("/tmp").join(format!(
         "cdis-mcp-search-secret-{}",
-        Uuid::now_v7().simple()
+        uuid::Uuid::now_v7().simple()
     ));
     let socket = root.join("app.sock");
     let registry_root = root.join("capsules");
-    let listen = AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::AppServerListenAddr::Unix(socket.clone());
     let (base_url, http_server) = spawn_http_server(
         r#"{"results":[{"title":"Verlet runtime","url":"https://verlet.local"}]}"#,
         vec![
@@ -431,55 +425,57 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
     let url = format!("{base_url}/search");
     let http_grant = format!("net.http.private:POST:{base_url}");
     publish_search_for_url(&registry_root, &url, &http_grant, br#"{"query":"verlet"}"#).await;
-    let secret_store = SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
+    let secret_store = crate::SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
         .await
         .unwrap();
     secret_store
         .set_secret(
             "EXAMPLE_API_KEY",
             "fixture-secret",
-            SecretSourceKind::Env,
+            crate::SecretSourceKind::Env,
             Some("EXAMPLE_API_KEY".to_string()),
         )
         .await
         .unwrap();
-    let provider = Arc::new(ModelVbinLifecycleClient::expecting_search_success());
-    let provider_client: Arc<dyn ProviderClient> = provider.clone();
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::OpenAIChatCompletions,
-        APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
-        APP_SERVER_OPENAI_COMPATIBLE_MODEL,
+    let provider = std::sync::Arc::new(ModelVbinLifecycleClient::expecting_search_success());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = provider.clone();
+    let mut runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIChatCompletions,
+        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     );
     runtime_config.max_tokens = 512;
-    let capsule_bindings = CapsuleBindingsConfig::default()
+    let capsule_bindings = crate::CapsuleBindingsConfig::default()
         .with_registry_root(&registry_root)
         .with_global_operation_name("search");
-    let runtime_factory = runtime_factory_from_provider_parts_with_secret_resolver(
-        runtime_config,
-        provider_client,
-        capsule_bindings.clone(),
-        Some(Arc::new(secret_store)),
-    );
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_secret_resolver(
+            runtime_config,
+            provider_client,
+            capsule_bindings.clone(),
+            Some(std::sync::Arc::new(secret_store)),
+        );
     let mut app_config = isolated_app_config(listen.clone(), &root);
-    app_config.model_provider = APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
-    app_config.model = APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
+    app_config.model_provider = crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
+    app_config.model = crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
     app_config.capsule_bindings = capsule_bindings;
-    let app = VerletAppServer::with_runtime_factory(app_config, runtime_factory)
+    let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
         .await
         .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
     let (client, server) = tokio::io::duplex(256 * 1024);
-    let config = VerletMcpServerConfig {
+    let config = crate::adapters::mcp_server::VerletMcpServerConfig {
         daemon_socket: socket.clone(),
-        request_timeout: Duration::from_secs(10),
+        request_timeout: std::time::Duration::from_secs(10),
     };
     let (server_read, server_write) = tokio::io::split(server);
-    let server_task =
-        tokio::spawn(async move { serve_mcp_stdio(server_read, server_write, config).await });
+    let server_task = tokio::spawn(async move {
+        crate::adapters::mcp_server::serve_mcp_stdio(server_read, server_write, config).await
+    });
     let (read, mut write) = tokio::io::split(client);
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = tokio::io::BufReader::new(read).lines();
 
     send(
             &mut write,
@@ -515,46 +511,50 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
 #[tokio::test]
 async fn mcp_prompt_rejects_thread_capsule_bindings() {
     let _guard = MCP_CAPSULE_TEST_LOCK.lock().await;
-    let root =
-        PathBuf::from("/tmp").join(format!("cdis-mcp-thread-bind-{}", Uuid::now_v7().simple()));
+    let root = std::path::PathBuf::from("/tmp").join(format!(
+        "cdis-mcp-thread-bind-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
     let socket = root.join("app.sock");
     let registry_root = root.join("capsules");
-    let listen = AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::AppServerListenAddr::Unix(socket.clone());
     publish_exa_without_secret(&registry_root).await;
-    let provider = Arc::new(ModelVbinLifecycleClient::default());
-    let provider_client: Arc<dyn ProviderClient> = provider.clone();
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::OpenAIChatCompletions,
-        APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
-        APP_SERVER_OPENAI_COMPATIBLE_MODEL,
+    let provider = std::sync::Arc::new(ModelVbinLifecycleClient::default());
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = provider.clone();
+    let mut runtime_config = crate::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIChatCompletions,
+        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     );
     runtime_config.max_tokens = 512;
-    let capsule_bindings = CapsuleBindingsConfig::default().with_registry_root(&registry_root);
-    let runtime_factory = runtime_factory_from_provider_parts(
+    let capsule_bindings =
+        crate::CapsuleBindingsConfig::default().with_registry_root(&registry_root);
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
         provider_client,
         capsule_bindings.clone(),
     );
     let mut app_config = isolated_app_config(listen.clone(), &root);
-    app_config.model_provider = APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
-    app_config.model = APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
+    app_config.model_provider = crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
+    app_config.model = crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
     app_config.capsule_bindings = capsule_bindings;
-    let app = VerletAppServer::with_runtime_factory(app_config, runtime_factory)
+    let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
         .await
         .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
     let (client, server) = tokio::io::duplex(256 * 1024);
-    let config = VerletMcpServerConfig {
+    let config = crate::adapters::mcp_server::VerletMcpServerConfig {
         daemon_socket: socket.clone(),
-        request_timeout: Duration::from_secs(10),
+        request_timeout: std::time::Duration::from_secs(10),
     };
     let (server_read, server_write) = tokio::io::split(server);
-    let server_task =
-        tokio::spawn(async move { serve_mcp_stdio(server_read, server_write, config).await });
+    let server_task = tokio::spawn(async move {
+        crate::adapters::mcp_server::serve_mcp_stdio(server_read, server_write, config).await
+    });
     let (read, mut write) = tokio::io::split(client);
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = tokio::io::BufReader::new(read).lines();
 
     send(
             &mut write,
@@ -603,7 +603,7 @@ where
     writer.flush().await.unwrap();
 }
 
-async fn read_json_line<R>(lines: &mut tokio::io::Lines<R>) -> Value
+async fn read_json_line<R>(lines: &mut tokio::io::Lines<R>) -> serde_json::Value
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
@@ -611,13 +611,13 @@ where
     serde_json::from_str(&line).unwrap()
 }
 
-async fn read_json_response<R>(lines: &mut tokio::io::Lines<R>, id: i64) -> Value
+async fn read_json_response<R>(lines: &mut tokio::io::Lines<R>, id: i64) -> serde_json::Value
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     for _ in 0..32 {
         let message = read_json_line(lines).await;
-        if message.get("id").and_then(Value::as_i64) == Some(id) {
+        if message.get("id").and_then(serde_json::Value::as_i64) == Some(id) {
             return message;
         }
     }
@@ -629,27 +629,36 @@ async fn wait_for_socket(path: &std::path::Path) {
         if path.exists() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for {}", path.display());
 }
 
-fn isolated_app_config(listen: AppServerListenAddr, root: &Path) -> VerletAppServerConfig {
-    let mut config = VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+fn isolated_app_config(
+    listen: crate::AppServerListenAddr,
+    root: &std::path::Path,
+) -> crate::VerletAppServerConfig {
+    let mut config = crate::VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     config
 }
 
-async fn assert_admission_surface(store_path: &Path, thread_id: &str, surface: &str) {
-    let store = SqliteSessionStore::open(store_path).await.unwrap();
+async fn assert_admission_surface(store_path: &std::path::Path, thread_id: &str, surface: &str) {
+    let store = crate::SqliteSessionStore::open(store_path).await.unwrap();
     let control_events = store
-        .read_events(&EventStreamId::new(format!("control:{thread_id}")), None)
+        .read_events(
+            &crate::EventStreamId::new(format!("control:{thread_id}")),
+            None,
+        )
         .await
         .unwrap();
     let thread_events = store
-        .read_events(&EventStreamId::new(format!("thread:{thread_id}")), None)
+        .read_events(
+            &crate::EventStreamId::new(format!("thread:{thread_id}")),
+            None,
+        )
         .await
         .unwrap();
     let admission = crate::kernel::admission::assert_admission_precedes_turn_records(
@@ -661,7 +670,7 @@ async fn assert_admission_surface(store_path: &Path, thread_id: &str, surface: &
 
 #[derive(Default)]
 struct ModelVbinLifecycleClient {
-    requests: Mutex<Vec<ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     expected: ModelSearchExpectation,
 }
 
@@ -675,19 +684,22 @@ enum ModelSearchExpectation {
 impl ModelVbinLifecycleClient {
     fn expecting_search_success() -> Self {
         Self {
-            requests: Mutex::new(Vec::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
             expected: ModelSearchExpectation::Success,
         }
     }
 
-    fn requests(&self) -> Vec<ProviderRequest> {
+    fn requests(&self) -> Vec<crate::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
-#[async_trait]
-impl ProviderClient for ModelVbinLifecycleClient {
-    async fn complete(&self, request: &ProviderRequest) -> ProviderResult<ProviderResponse> {
+#[async_trait::async_trait]
+impl crate::ProviderClient for ModelVbinLifecycleClient {
+    async fn complete(
+        &self,
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
@@ -704,16 +716,16 @@ impl ProviderClient for ModelVbinLifecycleClient {
                 bash_description.contains("search"),
                 "bash tool description should advertise search: {bash_description}"
             );
-            return Ok(ProviderResponse {
-                content: vec![CanonicalContent::tool_call(
+            return Ok(crate::ProviderResponse {
+                content: vec![crate::CanonicalContent::tool_call(
                     "model_call_1",
                     "bash",
-                    json!({
+                    serde_json::json!({
                         "command": "command -v search && search '{\"query\":\"verlet\"}'"
                     }),
                 )],
-                usage: CanonicalUsage::default(),
-                stop_reason: CanonicalStopReason::ToolUse,
+                usage: crate::CanonicalUsage::default(),
+                stop_reason: crate::CanonicalStopReason::ToolUse,
             });
         }
 
@@ -724,10 +736,12 @@ impl ProviderClient for ModelVbinLifecycleClient {
                     text.contains("search") && text.contains(r#""exit_code":1"#),
                     "expected bash tool result to report failed Example Search command, got: {text}"
                 );
-                Ok(ProviderResponse {
-                    content: vec![CanonicalContent::text("MODEL_SEARCH_FAILURE_REPORTED")],
-                    usage: CanonicalUsage::default(),
-                    stop_reason: CanonicalStopReason::EndTurn,
+                Ok(crate::ProviderResponse {
+                    content: vec![crate::CanonicalContent::text(
+                        "MODEL_SEARCH_FAILURE_REPORTED",
+                    )],
+                    usage: crate::CanonicalUsage::default(),
+                    stop_reason: crate::CanonicalStopReason::EndTurn,
                 })
             }
             ModelSearchExpectation::Success => {
@@ -737,17 +751,19 @@ impl ProviderClient for ModelVbinLifecycleClient {
                         && text.contains("Verlet runtime"),
                     "expected bash tool result to report successful Example Search command, got: {text}"
                 );
-                Ok(ProviderResponse {
-                    content: vec![CanonicalContent::text("MODEL_SEARCH_SUCCESS_REPORTED")],
-                    usage: CanonicalUsage::default(),
-                    stop_reason: CanonicalStopReason::EndTurn,
+                Ok(crate::ProviderResponse {
+                    content: vec![crate::CanonicalContent::text(
+                        "MODEL_SEARCH_SUCCESS_REPORTED",
+                    )],
+                    usage: crate::CanonicalUsage::default(),
+                    stop_reason: crate::CanonicalStopReason::EndTurn,
                 })
             }
         }
     }
 }
 
-async fn publish_exa_without_secret(registry_root: &Path) {
+async fn publish_exa_without_secret(registry_root: &std::path::Path) {
     publish_search_for_url(
         registry_root,
         "https://api.example.invalid/search",
@@ -757,17 +773,22 @@ async fn publish_exa_without_secret(registry_root: &Path) {
     .await;
 }
 
-async fn publish_search_for_url(registry_root: &Path, url: &str, http_grant: &str, body: &[u8]) {
+async fn publish_search_for_url(
+    registry_root: &std::path::Path,
+    url: &str,
+    http_grant: &str,
+    body: &[u8],
+) {
     std::fs::create_dir_all(registry_root).unwrap();
     let wasm = wat::parse_str(render_search_fixture(url, http_grant, body))
         .expect("Example Search WAT fixture should compile to wasm");
     let artifact_path = registry_root.join("search.wasm");
     std::fs::write(&artifact_path, wasm).unwrap();
-    LocalOperationRegistry::new(registry_root)
-        .publish_artifact(PublishOperationRequest {
+    crate::LocalOperationRegistry::new(registry_root)
+        .publish_artifact(crate::PublishOperationRequest {
             name: "search".to_string(),
             artifact_path: artifact_path.clone(),
-            source: PublishedOperationSource::Wasm {
+            source: crate::PublishedOperationSource::Wasm {
                 bin_path: artifact_path,
             },
             interface: None,
@@ -784,7 +805,7 @@ async fn spawn_http_server(
     response_body: &'static str,
     request_contains: Vec<&'static str>,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
     let handle = tokio::spawn(async move {
@@ -887,9 +908,11 @@ fn text_from_canonical_messages(messages: &[crate::CanonicalMessage]) -> String 
             | crate::CanonicalMessage::ToolResult { content, .. } => content,
         })
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(text.as_str()),
-            CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
-            CanonicalContent::Image { .. } | CanonicalContent::ToolCall { .. } => None,
+            crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            crate::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
+            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {
+                None
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")

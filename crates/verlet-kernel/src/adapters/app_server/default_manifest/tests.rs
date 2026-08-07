@@ -1,23 +1,25 @@
-use super::*;
-use crate::AppServerListenAddr;
-
 #[test]
 fn patch_bump_version_rejects_overflow() {
     let version = format!("1.0.{}", u64::MAX);
-    let err = patch_bump_version(&version).unwrap_err();
+    let err =
+        crate::adapters::app_server::default_manifest::patch_bump_version(&version).unwrap_err();
     assert!(err.to_string().contains("not a patch-bumpable semver"));
 }
 
 #[test]
 fn synthesized_default_manifest_preserves_slash_bearing_model_ids() {
-    let mut config = VerletAppServerConfig::local(
-        AppServerListenAddr::Unix(std::env::temp_dir().join("verlet-test.sock")),
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        crate::AppServerListenAddr::Unix(std::env::temp_dir().join("verlet-test.sock")),
         std::env::temp_dir(),
     );
     config.model_provider = "anthropic".to_string();
     config.model = "bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0".to_string();
 
-    let manifest = synthesize_default_manifest_with_version(&config, false, "0.1.0").unwrap();
+    let manifest =
+        crate::adapters::app_server::default_manifest::synthesize_default_manifest_with_version(
+            &config, false, "0.1.0",
+        )
+        .unwrap();
     let profile = &manifest.model_profiles[0];
 
     assert_eq!(profile.provider_ref, "provider://anthropic");
@@ -33,29 +35,43 @@ fn existing_legacy_default_agent_record_is_migrated_in_place() {
         "verlet-default-manifest-legacy-{}",
         uuid::Uuid::now_v7()
     ));
-    let mut config = VerletAppServerConfig::local(
-        AppServerListenAddr::Unix(root.join("app-server.sock")),
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        crate::AppServerListenAddr::Unix(root.join("app-server.sock")),
         &root,
     );
     config.agent_registry_root = root.join("agents");
 
-    let mut manifest = synthesize_default_manifest_with_version(&config, false, "1.0.0").unwrap();
-    manifest.identity.namespace = Some(LEGACY_DEFAULT_AGENT_NAMESPACE.to_string());
-    let source = default_manifest_source(&manifest).unwrap();
-    let legacy = LocalAgentRegistry::new(&config.agent_registry_root)
-        .publish_plan(AgentPublishPlan::from_source(&source).unwrap())
+    let mut manifest =
+        crate::adapters::app_server::default_manifest::synthesize_default_manifest_with_version(
+            &config, false, "1.0.0",
+        )
+        .unwrap();
+    manifest.identity.namespace = Some(
+        crate::adapters::app_server::default_manifest::LEGACY_DEFAULT_AGENT_NAMESPACE.to_string(),
+    );
+    let source =
+        crate::adapters::app_server::default_manifest::default_manifest_source(&manifest).unwrap();
+    let legacy = crate::agent::manifest::LocalAgentRegistry::new(&config.agent_registry_root)
+        .publish_plan(crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap())
         .unwrap();
     assert_eq!(
         legacy.namespace.as_deref(),
-        Some(LEGACY_DEFAULT_AGENT_NAMESPACE)
+        Some(crate::adapters::app_server::default_manifest::LEGACY_DEFAULT_AGENT_NAMESPACE)
     );
 
-    let migrated = ensure_default_manifest_published(&config, false).unwrap();
-    assert_eq!(migrated.namespace.as_deref(), Some(DEFAULT_AGENT_NAMESPACE));
+    let migrated =
+        crate::adapters::app_server::default_manifest::ensure_default_manifest_published(
+            &config, false,
+        )
+        .unwrap();
+    assert_eq!(
+        migrated.namespace.as_deref(),
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAMESPACE)
+    );
     assert_eq!(migrated.version, "1.0.1");
     assert_eq!(
-        LocalAgentRegistry::new(&config.agent_registry_root)
-            .load_ref(DEFAULT_AGENT_REF)
+        crate::agent::manifest::LocalAgentRegistry::new(&config.agent_registry_root)
+            .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
             .unwrap()
             .ref_uri,
         migrated.ref_uri

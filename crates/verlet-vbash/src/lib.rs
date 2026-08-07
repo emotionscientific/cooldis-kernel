@@ -2,18 +2,10 @@ mod apply_patch;
 mod harness;
 
 pub use apply_patch::apply_patch_to_bashkit;
-use bashkit::{ExecResult, FileSystem};
 pub use harness::{
     BashkitExecutionConfig, BashkitExecutionHarness, BashkitLiveBackend, VbashOperationRegistry,
     operation_shell_command_names,
 };
-use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use verlet_abi::WasmOperationValueKind;
-use verlet_operations::OperationProjection;
-use verlet_process::{ExternalCommandResult, ExternalExecutorKind, VirtualCommandOutput};
-use verlet_vfs::ObjectStoreMountConfig;
 
 pub type VerletVirtualBashResult<T> = Result<T, VerletVirtualBashError>;
 
@@ -29,14 +21,14 @@ pub const BASH_TOOL: &str = "bash";
 
 #[derive(Clone, Debug)]
 pub struct VirtualMount {
-    pub path: PathBuf,
+    pub path: std::path::PathBuf,
     pub mode: VirtualMountMode,
     pub backend: VirtualMountBackend,
     pub files: Vec<VirtualFile>,
 }
 
 impl VirtualMount {
-    pub fn writable(path: impl Into<PathBuf>) -> Self {
+    pub fn writable(path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             path: path.into(),
             mode: VirtualMountMode::ReadWrite,
@@ -45,7 +37,7 @@ impl VirtualMount {
         }
     }
 
-    pub fn readonly(path: impl Into<PathBuf>, files: Vec<VirtualFile>) -> Self {
+    pub fn readonly(path: impl Into<std::path::PathBuf>, files: Vec<VirtualFile>) -> Self {
         Self {
             path: path.into(),
             mode: VirtualMountMode::ReadOnly,
@@ -54,7 +46,10 @@ impl VirtualMount {
         }
     }
 
-    pub fn object_store(path: impl Into<PathBuf>, config: ObjectStoreMountConfig) -> Self {
+    pub fn object_store(
+        path: impl Into<std::path::PathBuf>,
+        config: verlet_vfs::ObjectStoreMountConfig,
+    ) -> Self {
         Self {
             path: path.into(),
             mode: VirtualMountMode::ReadWrite,
@@ -63,7 +58,10 @@ impl VirtualMount {
         }
     }
 
-    pub fn readonly_object_store(path: impl Into<PathBuf>, config: ObjectStoreMountConfig) -> Self {
+    pub fn readonly_object_store(
+        path: impl Into<std::path::PathBuf>,
+        config: verlet_vfs::ObjectStoreMountConfig,
+    ) -> Self {
         Self {
             path: path.into(),
             mode: VirtualMountMode::ReadOnly,
@@ -72,7 +70,11 @@ impl VirtualMount {
         }
     }
 
-    pub fn with_file(mut self, path: impl Into<PathBuf>, content: impl Into<Vec<u8>>) -> Self {
+    pub fn with_file(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+        content: impl Into<Vec<u8>>,
+    ) -> Self {
         self.files.push(VirtualFile::new(path, content));
         self
     }
@@ -81,7 +83,7 @@ impl VirtualMount {
 #[derive(Clone, Debug)]
 pub enum VirtualMountBackend {
     Memory,
-    ObjectStore(ObjectStoreMountConfig),
+    ObjectStore(verlet_vfs::ObjectStoreMountConfig),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,12 +94,12 @@ pub enum VirtualMountMode {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VirtualFile {
-    pub path: PathBuf,
+    pub path: std::path::PathBuf,
     pub content: Vec<u8>,
 }
 
 impl VirtualFile {
-    pub fn new(path: impl Into<PathBuf>, content: impl Into<Vec<u8>>) -> Self {
+    pub fn new(path: impl Into<std::path::PathBuf>, content: impl Into<Vec<u8>>) -> Self {
         Self {
             path: path.into(),
             content: content.into(),
@@ -114,10 +116,10 @@ pub enum CommandRoute {
 }
 
 impl CommandRoute {
-    pub fn executor_kind(self) -> Option<ExternalExecutorKind> {
+    pub fn executor_kind(self) -> Option<verlet_process::ExternalExecutorKind> {
         match self {
-            Self::HostBash => Some(ExternalExecutorKind::HostBash),
-            Self::RemoteLinux => Some(ExternalExecutorKind::RemoteLinux),
+            Self::HostBash => Some(verlet_process::ExternalExecutorKind::HostBash),
+            Self::RemoteLinux => Some(verlet_process::ExternalExecutorKind::RemoteLinux),
             Self::VirtualBash | Self::Deny => None,
         }
     }
@@ -126,28 +128,28 @@ impl CommandRoute {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandRoutingPolicy {
     pub default_route: CommandRoute,
-    pub named_proxy_routes: BTreeMap<String, CommandRoute>,
+    pub named_proxy_routes: std::collections::BTreeMap<String, CommandRoute>,
 }
 
 impl CommandRoutingPolicy {
     pub fn virtual_only() -> Self {
         Self {
             default_route: CommandRoute::VirtualBash,
-            named_proxy_routes: BTreeMap::new(),
+            named_proxy_routes: std::collections::BTreeMap::new(),
         }
     }
 
     pub fn host_always() -> Self {
         Self {
             default_route: CommandRoute::HostBash,
-            named_proxy_routes: BTreeMap::new(),
+            named_proxy_routes: std::collections::BTreeMap::new(),
         }
     }
 
     pub fn remote_always() -> Self {
         Self {
             default_route: CommandRoute::RemoteLinux,
-            named_proxy_routes: BTreeMap::new(),
+            named_proxy_routes: std::collections::BTreeMap::new(),
         }
     }
 
@@ -225,11 +227,11 @@ impl Default for BashExecutionPolicy {
     }
 }
 
-pub fn absolute_mount_path(path: PathBuf) -> PathBuf {
+pub fn absolute_mount_path(path: std::path::PathBuf) -> std::path::PathBuf {
     if path.is_absolute() {
         bashkit::normalize_path(&path)
     } else {
-        bashkit::normalize_path(&PathBuf::from("/").join(path))
+        bashkit::normalize_path(&std::path::PathBuf::from("/").join(path))
     }
 }
 
@@ -251,7 +253,7 @@ pub fn default_virtual_mounts() -> Vec<VirtualMount> {
 }
 
 pub fn validate_mounts(mounts: &[VirtualMount]) -> VerletVirtualBashResult<()> {
-    let mut seen = BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     for mount in mounts {
         if !mount.path.is_absolute() {
             return Err(VerletVirtualBashError::RuntimeFactory(format!(
@@ -260,12 +262,12 @@ pub fn validate_mounts(mounts: &[VirtualMount]) -> VerletVirtualBashResult<()> {
             )));
         }
         let normalized = bashkit::normalize_path(&mount.path);
-        if normalized == Path::new("/") {
+        if normalized == std::path::Path::new("/") {
             return Err(VerletVirtualBashError::RuntimeFactory(
                 "virtual mount path must not be /".to_string(),
             ));
         }
-        if normalized.starts_with(Path::new("/spill")) {
+        if normalized.starts_with(std::path::Path::new("/spill")) {
             return Err(VerletVirtualBashError::RuntimeFactory(
                 "virtual mount path /spill and its descendants are reserved for tool output spill"
                     .to_string(),
@@ -282,8 +284,8 @@ pub fn validate_mounts(mounts: &[VirtualMount]) -> VerletVirtualBashResult<()> {
 }
 
 pub async fn apply_external_file_writes(
-    fs: &dyn FileSystem,
-    result: &ExternalCommandResult,
+    fs: &dyn bashkit::FileSystem,
+    result: &verlet_process::ExternalCommandResult,
 ) -> VerletVirtualBashResult<()> {
     for write in &result.file_writes {
         validate_external_file_write(&write.path)?;
@@ -294,7 +296,7 @@ pub async fn apply_external_file_writes(
     Ok(())
 }
 
-pub fn validate_external_file_write(path: &Path) -> VerletVirtualBashResult<()> {
+pub fn validate_external_file_write(path: &std::path::Path) -> VerletVirtualBashResult<()> {
     let normalized = absolute_mount_path(path.to_path_buf());
     if normalized != path {
         return Err(VerletVirtualBashError::RuntimeExecution(format!(
@@ -302,7 +304,7 @@ pub fn validate_external_file_write(path: &Path) -> VerletVirtualBashResult<()> 
             path.display()
         )));
     }
-    if normalized == Path::new("/") {
+    if normalized == std::path::Path::new("/") {
         return Err(VerletVirtualBashError::RuntimeExecution(
             "external file write path must not be /".to_string(),
         ));
@@ -310,8 +312,8 @@ pub fn validate_external_file_write(path: &Path) -> VerletVirtualBashResult<()> 
     Ok(())
 }
 
-pub fn deny_output(label: &str) -> VirtualCommandOutput {
-    VirtualCommandOutput {
+pub fn deny_output(label: &str) -> verlet_process::VirtualCommandOutput {
+    verlet_process::VirtualCommandOutput {
         stdout: String::new(),
         stderr: format!("verlet: command denied by routing policy: {label}\n"),
         exit_code: 126,
@@ -320,8 +322,10 @@ pub fn deny_output(label: &str) -> VirtualCommandOutput {
     }
 }
 
-pub fn virtual_command_output_from_exec_result(result: ExecResult) -> VirtualCommandOutput {
-    VirtualCommandOutput {
+pub fn virtual_command_output_from_exec_result(
+    result: bashkit::ExecResult,
+) -> verlet_process::VirtualCommandOutput {
+    verlet_process::VirtualCommandOutput {
         stdout: result.stdout,
         stderr: result.stderr,
         exit_code: result.exit_code,
@@ -330,8 +334,10 @@ pub fn virtual_command_output_from_exec_result(result: ExecResult) -> VirtualCom
     }
 }
 
-pub fn exec_result_from_virtual_output(output: VirtualCommandOutput) -> ExecResult {
-    ExecResult {
+pub fn exec_result_from_virtual_output(
+    output: verlet_process::VirtualCommandOutput,
+) -> bashkit::ExecResult {
+    bashkit::ExecResult {
         stdout: output.stdout,
         stderr: output.stderr,
         exit_code: output.exit_code,
@@ -342,9 +348,9 @@ pub fn exec_result_from_virtual_output(output: VirtualCommandOutput) -> ExecResu
 }
 
 pub fn enforce_output_limit(
-    mut output: VirtualCommandOutput,
+    mut output: verlet_process::VirtualCommandOutput,
     max_output_bytes: usize,
-) -> VirtualCommandOutput {
+) -> verlet_process::VirtualCommandOutput {
     let capped_stdout = truncate_text_to_byte_limit(&mut output.stdout, max_output_bytes);
     let capped_stderr = truncate_text_to_byte_limit(&mut output.stderr, max_output_bytes);
     output.stdout_truncated |= capped_stdout;
@@ -493,7 +499,7 @@ pub fn verlet_usage() -> String {
     "usage: verlet run <registered> <operation>\n".to_string()
 }
 
-pub fn reserved_operation_shell_commands() -> BTreeSet<String> {
+pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String> {
     [
         ".",
         ":",
@@ -667,13 +673,13 @@ pub fn reserved_operation_shell_commands() -> BTreeSet<String> {
 
 pub fn operation_shell_reserved_commands(
     execution_policy: &BashExecutionPolicy,
-) -> BTreeSet<String> {
+) -> std::collections::BTreeSet<String> {
     let mut reserved = reserved_operation_shell_commands();
     reserved.extend(execution_policy.routing.named_proxy_routes.keys().cloned());
     reserved
 }
 
-pub fn summarize_operation_shell_commands(commands: &BTreeSet<String>) -> String {
+pub fn summarize_operation_shell_commands(commands: &std::collections::BTreeSet<String>) -> String {
     const MAX_COMMANDS: usize = 12;
     let names = commands
         .iter()
@@ -691,7 +697,10 @@ pub fn summarize_operation_shell_commands(commands: &BTreeSet<String>) -> String
     }
 }
 
-pub fn operation_shell_manual(command: &str, projection: &OperationProjection) -> String {
+pub fn operation_shell_manual(
+    command: &str,
+    projection: &verlet_operations::OperationProjection,
+) -> String {
     let mut manual = String::new();
     manual.push_str("NAME\n");
     manual.push_str(&format!(
@@ -725,7 +734,7 @@ pub fn operation_shell_manual(command: &str, projection: &OperationProjection) -
     manual
 }
 
-pub fn operation_shell_command_name(projection: &OperationProjection) -> String {
+pub fn operation_shell_command_name(projection: &verlet_operations::OperationProjection) -> String {
     normalize_operation_shell_command_name(&projection.operation_name)
 }
 
@@ -749,7 +758,7 @@ pub fn normalize_operation_shell_command_name(raw: &str) -> String {
 }
 
 pub fn operation_shell_input(
-    projection: &OperationProjection,
+    projection: &verlet_operations::OperationProjection,
     args: &[String],
     stdin: Option<&str>,
 ) -> VerletVirtualBashResult<Vec<u8>> {
@@ -758,8 +767,10 @@ pub fn operation_shell_input(
     }
 
     match projection.input {
-        WasmOperationValueKind::Bytes | WasmOperationValueKind::Text => Ok(args.join(" ").into()),
-        WasmOperationValueKind::Json => {
+        verlet_abi::WasmOperationValueKind::Bytes | verlet_abi::WasmOperationValueKind::Text => {
+            Ok(args.join(" ").into())
+        }
+        verlet_abi::WasmOperationValueKind::Json => {
             if args.is_empty() {
                 return Ok(b"{}".to_vec());
             }
@@ -772,7 +783,7 @@ pub fn operation_shell_input(
                 })?;
                 return Ok(args[0].as_bytes().to_vec());
             }
-            serde_json::to_vec(&json!({ "query": args.join(" ") })).map_err(|err| {
+            serde_json::to_vec(&serde_json::json!({ "query": args.join(" ") })).map_err(|err| {
                 VerletVirtualBashError::RuntimeExecution(format!(
                     "operation command {} could not encode JSON input: {err}",
                     operation_shell_command_name(projection)
@@ -788,8 +799,8 @@ pub fn looks_like_json(value: &str) -> bool {
 }
 
 pub fn missing_operation_capability_grants(
-    projection: &OperationProjection,
-    capability_grants: &BTreeSet<String>,
+    projection: &verlet_operations::OperationProjection,
+    capability_grants: &std::collections::BTreeSet<String>,
 ) -> Vec<String> {
     projection
         .abi
@@ -806,32 +817,31 @@ pub fn virtual_bash_execution_error(err: impl std::fmt::Display) -> VerletVirtua
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn routing_policy_defaults_to_virtual_bash() {
         assert_eq!(
-            BashExecutionPolicy::default().routing.default_route,
-            CommandRoute::VirtualBash
+            crate::BashExecutionPolicy::default().routing.default_route,
+            crate::CommandRoute::VirtualBash
         );
         assert_eq!(
-            BashExecutionPolicy::selective([("cargo", CommandRoute::RemoteLinux)])
+            crate::BashExecutionPolicy::selective([("cargo", crate::CommandRoute::RemoteLinux)])
                 .routing
                 .route_for_proxy("cargo"),
-            Some(CommandRoute::RemoteLinux)
+            Some(crate::CommandRoute::RemoteLinux)
         );
     }
 
     #[test]
     fn mount_validation_rejects_relative_duplicate_and_root_mounts() {
-        assert!(validate_mounts(&[VirtualMount::writable("relative")]).is_err());
-        assert!(validate_mounts(&[VirtualMount::writable("/")]).is_err());
-        assert!(validate_mounts(&[VirtualMount::writable("/spill")]).is_err());
-        assert!(validate_mounts(&[VirtualMount::writable("/spill/nested")]).is_err());
+        assert!(crate::validate_mounts(&[crate::VirtualMount::writable("relative")]).is_err());
+        assert!(crate::validate_mounts(&[crate::VirtualMount::writable("/")]).is_err());
+        assert!(crate::validate_mounts(&[crate::VirtualMount::writable("/spill")]).is_err());
+        assert!(crate::validate_mounts(&[crate::VirtualMount::writable("/spill/nested")]).is_err());
         assert!(
-            validate_mounts(&[
-                VirtualMount::writable("/workspace"),
-                VirtualMount::readonly("/workspace/../workspace", Vec::new()),
+            crate::validate_mounts(&[
+                crate::VirtualMount::writable("/workspace"),
+                crate::VirtualMount::readonly("/workspace/../workspace", Vec::new()),
             ])
             .is_err()
         );
@@ -839,8 +849,8 @@ mod tests {
 
     #[test]
     fn output_limit_marks_capped_streams() {
-        let output = enforce_output_limit(
-            VirtualCommandOutput {
+        let output = crate::enforce_output_limit(
+            verlet_process::VirtualCommandOutput {
                 stdout: "abcdef".to_string(),
                 stderr: "xyz".to_string(),
                 exit_code: 0,
@@ -856,8 +866,8 @@ mod tests {
 
     #[test]
     fn output_limit_never_expands_past_the_byte_ceiling() {
-        let output = enforce_output_limit(
-            VirtualCommandOutput {
+        let output = crate::enforce_output_limit(
+            verlet_process::VirtualCommandOutput {
                 stdout: "💥💥".to_string(),
                 stderr: String::new(),
                 exit_code: 0,
@@ -874,20 +884,21 @@ mod tests {
 
     #[test]
     fn overflow_plan_preserves_inline_bytes_and_spills_with_utf8_safe_preview() {
-        let inline = plan_output_overflow(b"exact output\n", 13, false, "/spill/call.stdout.txt");
+        let inline =
+            crate::plan_output_overflow(b"exact output\n", 13, false, "/spill/call.stdout.txt");
         assert_eq!(
             inline,
-            OverflowPlan::Inline(InlinePlan {
+            crate::OverflowPlan::Inline(crate::InlinePlan {
                 content: "exact output\n".to_string(),
             })
         );
 
-        let mut raw = vec![b'a'; DEFAULT_SPILL_PREVIEW_BYTES - 1];
+        let mut raw = vec![b'a'; crate::DEFAULT_SPILL_PREVIEW_BYTES - 1];
         raw.extend_from_slice("💥".as_bytes());
         raw.extend_from_slice(b"tail");
-        let OverflowPlan::Spill(plan) = plan_output_overflow(
+        let crate::OverflowPlan::Spill(plan) = crate::plan_output_overflow(
             &raw,
-            DEFAULT_SPILL_PREVIEW_BYTES,
+            crate::DEFAULT_SPILL_PREVIEW_BYTES,
             false,
             "/spill/call.stdout.txt",
         ) else {
@@ -897,42 +908,46 @@ mod tests {
         assert_eq!(plan.raw, raw);
         assert_eq!(plan.raw.as_ptr(), raw.as_ptr());
         assert_eq!(plan.path, "/spill/call.stdout.txt");
-        assert_eq!(plan.total_bytes, DEFAULT_SPILL_PREVIEW_BYTES + 7);
-        assert_eq!(plan.preview_bytes, DEFAULT_SPILL_PREVIEW_BYTES - 1);
+        assert_eq!(plan.total_bytes, crate::DEFAULT_SPILL_PREVIEW_BYTES + 7);
+        assert_eq!(plan.preview_bytes, crate::DEFAULT_SPILL_PREVIEW_BYTES - 1);
         assert_eq!(
             plan.preview.as_bytes(),
-            &raw[..DEFAULT_SPILL_PREVIEW_BYTES - 1]
+            &raw[..crate::DEFAULT_SPILL_PREVIEW_BYTES - 1]
         );
         assert!(!plan.preview.contains('\u{fffd}'));
 
-        let stub = format_spill_stub(&plan);
+        let stub = crate::format_spill_stub(&plan);
         assert!(stub.contains("[CONTENT_SPILL: 16391 bytes]"));
         assert!(stub.contains("- Path: /spill/call.stdout.txt"));
         assert!(stub.contains("- Preview bytes: 16383"));
         assert!(stub.contains("Tip: cat /spill/call.stdout.txt"));
 
-        let OverflowPlan::Spill(retained) =
-            plan_output_overflow(b"retained", usize::MAX, true, "/spill/retained.stdout.txt")
-        else {
+        let crate::OverflowPlan::Spill(retained) = crate::plan_output_overflow(
+            b"retained",
+            usize::MAX,
+            true,
+            "/spill/retained.stdout.txt",
+        ) else {
             panic!("retention-truncated output must spill regardless of presentation cap");
         };
         assert!(retained.retention_truncated);
         assert!(
-            format_spill_stub(&retained).contains("exceeded the 67108864-byte retention ceiling")
+            crate::format_spill_stub(&retained)
+                .contains("exceeded the 67108864-byte retention ceiling")
         );
         assert!(
-            build_emergency_spill_stub(retained.raw, &retained.path, true)
+            crate::build_emergency_spill_stub(retained.raw, &retained.path, true)
                 .contains("exceeded the 67108864-byte retention ceiling")
         );
     }
 
     #[test]
     fn emergency_spill_stub_has_utf8_safe_head_and_tail() {
-        let mut raw = vec![b'h'; EMERGENCY_SPILL_PREVIEW_BYTES - 1];
+        let mut raw = vec![b'h'; crate::EMERGENCY_SPILL_PREVIEW_BYTES - 1];
         raw.extend_from_slice("💥".as_bytes());
-        raw.extend_from_slice(&vec![b't'; EMERGENCY_SPILL_PREVIEW_BYTES]);
+        raw.extend_from_slice(&vec![b't'; crate::EMERGENCY_SPILL_PREVIEW_BYTES]);
 
-        let stub = build_emergency_spill_stub(&raw, "/spill/call.stderr.txt", false);
+        let stub = crate::build_emergency_spill_stub(&raw, "/spill/call.stderr.txt", false);
 
         assert!(stub.contains("[CONTENT_OVERFLOW - spill path unavailable]"));
         assert!(stub.contains("Path: /spill/call.stderr.txt"));
@@ -945,16 +960,18 @@ mod tests {
 
     #[test]
     fn spill_retention_ceiling_is_sixty_four_mibibytes() {
-        assert_eq!(SPILL_RETENTION_MAX_BYTES, 64 * 1024 * 1024);
-        assert_eq!(SPILL_VFS_MAX_BYTES, 2 * SPILL_RETENTION_MAX_BYTES);
+        assert_eq!(crate::SPILL_RETENTION_MAX_BYTES, 64 * 1024 * 1024);
+        assert_eq!(
+            crate::SPILL_VFS_MAX_BYTES,
+            2 * crate::SPILL_RETENTION_MAX_BYTES
+        );
     }
 
     #[test]
     fn reserved_commands_include_builtin_surfaces() {
-        let reserved = operation_shell_reserved_commands(&BashExecutionPolicy::selective([(
-            "cargo",
-            CommandRoute::HostBash,
-        )]));
+        let reserved = crate::operation_shell_reserved_commands(
+            &crate::BashExecutionPolicy::selective([("cargo", crate::CommandRoute::HostBash)]),
+        );
         assert!(reserved.contains("verlet"));
         assert!(reserved.contains("apply_patch"));
         assert!(reserved.contains("cargo"));

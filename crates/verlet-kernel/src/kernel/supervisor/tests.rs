@@ -1,83 +1,75 @@
-use super::*;
-use crate::{
-    AgentRuntime, RuntimeServices, ThreadCommand, ThreadContext, ThreadEvent, ThreadSignal,
-    ThreadStatus,
-};
-use async_trait::async_trait;
-use tokio::sync::{broadcast, mpsc, watch};
-use tokio::time::{Duration, timeout};
-use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
-
 struct EchoRuntimeFactory;
 
-#[async_trait]
-impl AgentRuntimeFactory for EchoRuntimeFactory {
-    async fn build(&self, _context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::AgentRuntimeFactory for EchoRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &crate::ThreadContext,
+    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
         Ok(Box::new(EchoRuntime))
     }
 }
 
 struct EchoRuntime;
 
-#[async_trait]
-impl AgentRuntime for EchoRuntime {
+#[async_trait::async_trait]
+impl crate::AgentRuntime for EchoRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        context: crate::ThreadContext,
+        services: crate::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = events.send(crate::ThreadEvent::Started { context });
+        let _ = status.send(crate::ThreadStatus::Idle);
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    let _ = status.send(ThreadStatus::Stopped);
-                    let _ = events.send(ThreadEvent::Stopped { thread_id });
+                    let _ = status.send(crate::ThreadStatus::Stopped);
+                    let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
                     break;
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { turn_id, input, .. }) => {
-                            let _ = status.send(ThreadStatus::Running);
+                        Some(crate::ThreadCommand::Submit { turn_id, input, .. }) => {
+                            let _ = status.send(crate::ThreadStatus::Running);
                             if let Ok(entry) = services.append_user_turn_input(&coordinates, &turn_id, &input).await {
-                                let _ = events.send(ThreadEvent::CanonicalMirror { thread_id, entry });
+                                let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
                             }
-                            let _ = events.send(ThreadEvent::Output {
+                            let _ = events.send(crate::ThreadEvent::Output {
                                 thread_id,
                                 text: format!("{turn_id}:{}", input.text_projection()),
                             });
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::Cancel { reason }) => {
-                            let _ = status.send(ThreadStatus::Cancelling);
-                            let _ = events.send(ThreadEvent::Signal {
+                        Some(crate::ThreadCommand::Cancel { reason }) => {
+                            let _ = status.send(crate::ThreadStatus::Cancelling);
+                            let _ = events.send(crate::ThreadEvent::Signal {
                                 thread_id,
-                                signal: ThreadSignal::interrupt_cancel(&coordinates, reason.clone()),
+                                signal: crate::ThreadSignal::interrupt_cancel(&coordinates, reason.clone()),
                             });
-                            let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::CancelTurn { .. }) => {}
-                        Some(ThreadCommand::Compact { .. }) => {
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::ThreadCommand::CancelTurn { .. }) => {}
+                        Some(crate::ThreadCommand::Compact { .. }) => {
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::ResumeToolCall { .. }) => {
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::ThreadCommand::ResumeToolCall { .. }) => {
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::Shutdown) | None => {
-                            let _ = events.send(ThreadEvent::Signal {
+                        Some(crate::ThreadCommand::Shutdown) | None => {
+                            let _ = events.send(crate::ThreadEvent::Signal {
                                 thread_id,
-                                signal: ThreadSignal::shutdown(&coordinates),
+                                signal: crate::ThreadSignal::shutdown(&coordinates),
                             });
-                            let _ = status.send(ThreadStatus::Stopped);
-                            let _ = events.send(ThreadEvent::Stopped { thread_id });
+                            let _ = status.send(crate::ThreadStatus::Stopped);
+                            let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
                             break;
                         }
                     }
@@ -87,43 +79,51 @@ impl AgentRuntime for EchoRuntime {
     }
 }
 
-async fn supervisor() -> VerletSupervisor {
+async fn supervisor() -> crate::kernel::supervisor::VerletSupervisor {
     supervisor_with_root(&unique_temp_dir("verlet-supervisor")).await
 }
 
-async fn supervisor_with_root(root: &std::path::Path) -> VerletSupervisor {
-    let supervisor = VerletSupervisor::new();
+async fn supervisor_with_root(
+    root: &std::path::Path,
+) -> crate::kernel::supervisor::VerletSupervisor {
+    let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(TenantRegistration {
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
             context: tenant_context(root, "tenant_a"),
-            runtime_factory: Arc::new(EchoRuntimeFactory),
+            runtime_factory: std::sync::Arc::new(EchoRuntimeFactory),
         })
         .await
         .unwrap();
     supervisor
-        .register_tenant(TenantRegistration {
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
             context: tenant_context(root, "tenant_b"),
-            runtime_factory: Arc::new(EchoRuntimeFactory),
+            runtime_factory: std::sync::Arc::new(EchoRuntimeFactory),
         })
         .await
         .unwrap();
     supervisor
 }
 
-fn tenant_context(root: &std::path::Path, tenant_id: &str) -> TenantRuntimeContext {
-    TenantRuntimeContext::local(
+fn tenant_context(
+    root: &std::path::Path,
+    tenant_id: &str,
+) -> crate::kernel::supervisor::TenantRuntimeContext {
+    crate::kernel::supervisor::TenantRuntimeContext::local(
         tenant_id,
         root.join(tenant_id).join("runtime"),
         root.join(tenant_id).join("state"),
     )
 }
 
-fn start_request(tenant_id: &str) -> ThreadStartRequest {
-    start_request_with_topology(tenant_id, ThreadTopology::root())
+fn start_request(tenant_id: &str) -> crate::kernel::supervisor::ThreadStartRequest {
+    start_request_with_topology(tenant_id, crate::ThreadTopology::root())
 }
 
-fn start_request_with_topology(tenant_id: &str, topology: ThreadTopology) -> ThreadStartRequest {
-    ThreadStartRequest {
+fn start_request_with_topology(
+    tenant_id: &str,
+    topology: crate::ThreadTopology,
+) -> crate::kernel::supervisor::ThreadStartRequest {
+    crate::kernel::supervisor::ThreadStartRequest {
         tenant_id: tenant_id.to_string(),
         user_id: "user_1".to_string(),
         session_id: "session_1".to_string(),
@@ -185,7 +185,7 @@ async fn supervisor_turn_submission_is_idempotent_on_turn_id() {
         .await
         .unwrap();
     let mut status = thread.subscribe_status();
-    while *status.borrow() != ThreadStatus::Idle {
+    while *status.borrow() != crate::ThreadStatus::Idle {
         status.changed().await.unwrap();
     }
     let mut events = thread.subscribe_events();
@@ -202,9 +202,9 @@ async fn supervisor_turn_submission_is_idempotent_on_turn_id() {
     assert_output(&mut events, "turn-same:hello").await;
     assert!(
         // tight-timeout: a duplicate output must remain absent after the idempotent submit
-        timeout(Duration::from_millis(50), async {
+        tokio::time::timeout(tokio::time::Duration::from_millis(50), async {
             loop {
-                if matches!(events.recv().await, Ok(ThreadEvent::Output { .. })) {
+                if matches!(events.recv().await, Ok(crate::ThreadEvent::Output { .. })) {
                     return;
                 }
             }
@@ -227,7 +227,7 @@ async fn dropped_turn_reservation_releases_turn_id() {
         .await
         .unwrap();
     let mut status = thread.subscribe_status();
-    while *status.borrow() != ThreadStatus::Idle {
+    while *status.borrow() != crate::ThreadStatus::Idle {
         status.changed().await.unwrap();
     }
     let mut events = thread.subscribe_events();
@@ -238,8 +238,8 @@ async fn dropped_turn_reservation_releases_turn_id() {
             .reserve_admitted_turn_to(
                 coordinates,
                 "turn-retry",
-                TurnInput::text("first"),
-                TurnSubmissionMode::Queue,
+                crate::TurnInput::text("first"),
+                crate::TurnSubmissionMode::Queue,
                 None,
             )
             .await
@@ -261,7 +261,7 @@ async fn cancelling_idle_thread_is_a_witnessed_no_op() {
         .await
         .unwrap();
     let mut status = thread.subscribe_status();
-    while *status.borrow() != ThreadStatus::Idle {
+    while *status.borrow() != crate::ThreadStatus::Idle {
         status.changed().await.unwrap();
     }
     let mut events = thread.subscribe_events();
@@ -276,12 +276,15 @@ async fn cancelling_idle_thread_is_a_witnessed_no_op() {
         thread.lifecycle_record().await.latest_signal_id,
         prior_signal
     );
-    assert_eq!(thread.status(), ThreadStatus::Idle);
+    assert_eq!(thread.status(), crate::ThreadStatus::Idle);
     assert!(
         // tight-timeout: idle cancellation must not emit a runtime cancellation event
-        timeout(Duration::from_millis(50), async {
+        tokio::time::timeout(tokio::time::Duration::from_millis(50), async {
             loop {
-                if matches!(events.recv().await, Ok(ThreadEvent::Cancelled { .. })) {
+                if matches!(
+                    events.recv().await,
+                    Ok(crate::ThreadEvent::Cancelled { .. })
+                ) {
                     return;
                 }
             }
@@ -299,18 +302,22 @@ async fn supervisor_runtime_contexts_keep_tenant_homes_and_stores_isolated() {
     let state_a = root.join("tenant-a/state");
     let runtime_b = root.join("tenant-b/runtime");
     let state_b = root.join("tenant-b/state");
-    let supervisor = VerletSupervisor::new();
+    let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(TenantRegistration {
-            context: TenantRuntimeContext::local("tenant_a", &runtime_a, &state_a),
-            runtime_factory: Arc::new(EchoRuntimeFactory),
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
+            context: crate::kernel::supervisor::TenantRuntimeContext::local(
+                "tenant_a", &runtime_a, &state_a,
+            ),
+            runtime_factory: std::sync::Arc::new(EchoRuntimeFactory),
         })
         .await
         .unwrap();
     supervisor
-        .register_tenant(TenantRegistration {
-            context: TenantRuntimeContext::local("tenant_b", &runtime_b, &state_b),
-            runtime_factory: Arc::new(EchoRuntimeFactory),
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
+            context: crate::kernel::supervisor::TenantRuntimeContext::local(
+                "tenant_b", &runtime_b, &state_b,
+            ),
+            runtime_factory: std::sync::Arc::new(EchoRuntimeFactory),
         })
         .await
         .unwrap();
@@ -408,7 +415,7 @@ async fn supervisor_supports_coordinate_addressed_submit_and_cancel() {
         thread.lifecycle_record().await.latest_signal_id,
         prior_signal
     );
-    assert_eq!(thread.status(), ThreadStatus::Idle);
+    assert_eq!(thread.status(), crate::ThreadStatus::Idle);
 }
 
 #[tokio::test]
@@ -430,7 +437,7 @@ async fn supervisor_rejects_coordinate_scope_mismatch() {
     };
     assert!(matches!(
         err,
-        VerletError::ThreadScopeMismatch {
+        crate::VerletError::ThreadScopeMismatch {
             thread_id,
             ..
         } if thread_id == thread.context().coordinates.thread_id
@@ -447,16 +454,16 @@ async fn supervisor_snapshot_groups_sessions() {
     supervisor
         .start_thread(start_request_with_topology(
             "tenant_a",
-            ThreadTopology::spawned_from(root.context().coordinates.thread_id),
+            crate::ThreadTopology::spawned_from(root.context().coordinates.thread_id),
         ))
         .await
         .unwrap();
     supervisor
-        .start_thread(ThreadStartRequest {
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: "tenant_a".to_string(),
             user_id: "user_1".to_string(),
             session_id: "session_2".to_string(),
-            topology: ThreadTopology::root(),
+            topology: crate::ThreadTopology::root(),
             metadata: Default::default(),
         })
         .await
@@ -471,12 +478,12 @@ async fn supervisor_snapshot_groups_sessions() {
     assert_eq!(
         tenant_a.sessions,
         vec![
-            SessionSnapshot {
+            crate::kernel::supervisor::SessionSnapshot {
                 user_id: "user_1".to_string(),
                 session_id: "session_1".to_string(),
                 thread_count: 2,
             },
-            SessionSnapshot {
+            crate::kernel::supervisor::SessionSnapshot {
                 user_id: "user_1".to_string(),
                 session_id: "session_2".to_string(),
                 thread_count: 1,
@@ -495,7 +502,7 @@ async fn supervisor_children_of_at_validates_parent_coordinates() {
     let child = supervisor
         .start_thread(start_request_with_topology(
             "tenant_a",
-            ThreadTopology::spawned_from(root.context().coordinates.thread_id),
+            crate::ThreadTopology::spawned_from(root.context().coordinates.thread_id),
         ))
         .await
         .unwrap();
@@ -518,7 +525,7 @@ async fn supervisor_children_of_at_validates_parent_coordinates() {
     };
     assert!(matches!(
         err,
-        VerletError::ThreadScopeMismatch {
+        crate::VerletError::ThreadScopeMismatch {
             thread_id,
             ..
         } if thread_id == root.context().coordinates.thread_id
@@ -537,7 +544,7 @@ async fn supervisor_lifecycle_snapshot_and_checkpoint_use_records() {
             &thread.context().coordinates,
             None,
             Some("supervisor-checkpoint".to_string()),
-            BTreeMap::from([("product_key".to_string(), "opaque".to_string())]),
+            std::collections::BTreeMap::from([("product_key".to_string(), "opaque".to_string())]),
         )
         .await
         .unwrap();
@@ -619,7 +626,7 @@ async fn supervisor_can_shutdown_all_tenants() {
 async fn supervisor_rejects_unknown_tenant() {
     let supervisor = supervisor().await;
     let err = start_thread_err(&supervisor, start_request("missing")).await;
-    assert!(matches!(err, VerletError::TenantNotFound(tenant) if tenant == "missing"));
+    assert!(matches!(err, crate::VerletError::TenantNotFound(tenant) if tenant == "missing"));
 }
 
 #[tokio::test]
@@ -632,10 +639,13 @@ async fn supervisor_rejects_cross_tenant_thread_topology() {
     let source_thread_id = source.context().coordinates.thread_id;
     let err = start_thread_err(
         &supervisor,
-        start_request_with_topology("tenant_b", ThreadTopology::spawned_from(source_thread_id)),
+        start_request_with_topology(
+            "tenant_b",
+            crate::ThreadTopology::spawned_from(source_thread_id),
+        ),
     )
     .await;
-    assert!(matches!(err, VerletError::RelatedThreadNotFound(id) if id == source_thread_id));
+    assert!(matches!(err, crate::VerletError::RelatedThreadNotFound(id) if id == source_thread_id));
 }
 
 #[tokio::test]
@@ -648,18 +658,18 @@ async fn supervisor_rejects_cross_session_thread_topology_inside_tenant() {
     let source_thread_id = source.context().coordinates.thread_id;
     let err = start_thread_err(
         &supervisor,
-        ThreadStartRequest {
+        crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: "tenant_a".to_string(),
             user_id: "user_1".to_string(),
             session_id: "session_2".to_string(),
-            topology: ThreadTopology::spawned_from(source_thread_id),
+            topology: crate::ThreadTopology::spawned_from(source_thread_id),
             metadata: Default::default(),
         },
     )
     .await;
     assert!(matches!(
         err,
-        VerletError::RelatedThreadScopeMismatch {
+        crate::VerletError::RelatedThreadScopeMismatch {
             thread_id,
             ..
         } if thread_id == source_thread_id
@@ -667,22 +677,25 @@ async fn supervisor_rejects_cross_session_thread_topology_inside_tenant() {
 }
 
 async fn start_thread_err(
-    supervisor: &VerletSupervisor,
-    request: ThreadStartRequest,
-) -> VerletError {
+    supervisor: &crate::kernel::supervisor::VerletSupervisor,
+    request: crate::kernel::supervisor::ThreadStartRequest,
+) -> crate::VerletError {
     match supervisor.start_thread(request).await {
         Ok(_) => panic!("start_thread unexpectedly succeeded"),
         Err(err) => err,
     }
 }
 
-async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
+async fn assert_output(
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+    expected: &str,
+) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::Output { text, .. } = event {
+        if let crate::ThreadEvent::Output { text, .. } = event {
             assert_eq!(text, expected);
             return;
         }
@@ -707,6 +720,6 @@ fn text_messages(context: &crate::SessionContext) -> Vec<String> {
         .collect()
 }
 
-fn unique_temp_dir(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("{prefix}-{}", Uuid::now_v7()))
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::now_v7()))
 }

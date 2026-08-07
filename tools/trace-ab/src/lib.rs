@@ -1,15 +1,10 @@
 mod runner;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, Write};
-
 pub use runner::{RunArtifacts, RunOptions, run_ab};
 
 pub const COMMON_TRACE_SCHEMA: &str = "cooldis.trace.common/1";
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordKind {
     SourceMetadata,
@@ -21,7 +16,7 @@ pub enum RecordKind {
     Unmapped,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, serde::Serialize)]
 pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
@@ -40,17 +35,17 @@ impl TokenUsage {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, serde::Serialize)]
 pub struct ToolRecord {
     pub call_id: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<Value>,
+    pub arguments: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub success: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, serde::Serialize)]
 pub struct EditSignal {
     #[serde(default)]
     pub application: bool,
@@ -60,7 +55,7 @@ pub struct EditSignal {
     pub retry: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, serde::Serialize)]
 pub struct CommonRecord {
     pub schema: String,
     pub harness: String,
@@ -82,15 +77,15 @@ pub struct CommonRecord {
     pub tool: Option<ToolRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit: Option<EditSignal>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub details: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub details: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, serde::Serialize)]
 pub struct TraceStats {
     pub turns: u64,
     pub rounds: u64,
-    pub tool_calls: BTreeMap<String, u64>,
+    pub tool_calls: std::collections::BTreeMap<String, u64>,
     pub tokens: TokenUsage,
     pub wall_time_ms: Option<u64>,
     pub edit_failures: u64,
@@ -98,7 +93,7 @@ pub struct TraceStats {
     pub unmapped_records: u64,
 }
 
-pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
+pub fn convert_pi<R: std::io::BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
     let mut records = Vec::new();
     let mut turn = 0_u32;
     let mut round = 0_u32;
@@ -106,7 +101,7 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
     let mut turn_started_ms = None;
     let mut last_timestamp_ms = None;
     let mut turn_outcome = "completed";
-    let mut tool_started_ms = BTreeMap::<String, i64>::new();
+    let mut tool_started_ms = std::collections::BTreeMap::<String, i64>::new();
 
     for (line_index, line) in reader.lines().enumerate() {
         let line =
@@ -114,9 +109,9 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
         if line.trim().is_empty() {
             continue;
         }
-        let entry: Value = serde_json::from_str(&line)
+        let entry: serde_json::Value = serde_json::from_str(&line)
             .map_err(|err| format!("invalid pi JSON on line {}: {err}", line_index + 1))?;
-        match entry.get("type").and_then(Value::as_str) {
+        match entry.get("type").and_then(serde_json::Value::as_str) {
             Some("session") => {
                 push_record(
                     &mut records,
@@ -127,12 +122,12 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
             Some("message") => {
                 let message = entry
                     .get("message")
-                    .and_then(Value::as_object)
+                    .and_then(serde_json::Value::as_object)
                     .ok_or_else(|| {
                         format!("pi message line {} has no message object", line_index + 1)
                     })?;
-                let timestamp_ms = message.get("timestamp").and_then(Value::as_i64);
-                match message.get("role").and_then(Value::as_str) {
+                let timestamp_ms = message.get("timestamp").and_then(serde_json::Value::as_i64);
+                match message.get("role").and_then(serde_json::Value::as_str) {
                     Some("user") => {
                         if active_turn {
                             finish_pi_turn(
@@ -142,7 +137,7 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
                                 turn_started_ms,
                                 last_timestamp_ms,
                                 turn_outcome,
-                                json!({"derived": "next_user_message"}),
+                                serde_json::json!({"derived": "next_user_message"}),
                             );
                         }
                         turn += 1;
@@ -179,9 +174,13 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
                                 .tokens(usage)
                                 .details(pi_details(&entry, message)),
                         );
-                        if let Some(content) = message.get("content").and_then(Value::as_array) {
+                        if let Some(content) =
+                            message.get("content").and_then(serde_json::Value::as_array)
+                        {
                             for block in content {
-                                if block.get("type").and_then(Value::as_str) != Some("toolCall") {
+                                if block.get("type").and_then(serde_json::Value::as_str)
+                                    != Some("toolCall")
+                                {
                                     continue;
                                 }
                                 let call_id = string_field(block, "id", "missing-call-id");
@@ -219,7 +218,7 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
                         let name = string_field_from_map(message, "toolName", "unknown");
                         let success = !message
                             .get("isError")
-                            .and_then(Value::as_bool)
+                            .and_then(serde_json::Value::as_bool)
                             .unwrap_or(false);
                         push_record(
                             &mut records,
@@ -259,7 +258,7 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
                         .content(
                             entry
                                 .get("summary")
-                                .and_then(Value::as_str)
+                                .and_then(serde_json::Value::as_str)
                                 .map(str::to_string),
                         )
                         .details(pi_entry_details(&entry)),
@@ -284,7 +283,7 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
             turn_started_ms,
             last_timestamp_ms,
             turn_outcome,
-            json!({"derived": "end_of_session"}),
+            serde_json::json!({"derived": "end_of_session"}),
         );
     }
     resolve_pi_tool_result_rounds(&mut records);
@@ -292,19 +291,21 @@ pub fn convert_pi<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
     Ok(records)
 }
 
-pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String> {
-    if value.get("schema").and_then(Value::as_str) != Some("cooldis.debug.thread_export/1") {
+pub fn convert_verlet_export(value: &serde_json::Value) -> Result<Vec<CommonRecord>, String> {
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some("cooldis.debug.thread_export/1")
+    {
         return Err("verlet input is not a cooldis.debug.thread_export/1 bundle".to_string());
     }
     let mut events = value
         .get("streams")
-        .and_then(Value::as_array)
+        .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "verlet export has no streams array".to_string())?
         .iter()
         .flat_map(|stream| {
             stream
                 .get("data")
-                .and_then(Value::as_array)
+                .and_then(serde_json::Value::as_array)
                 .into_iter()
                 .flatten()
                 .cloned()
@@ -318,18 +319,18 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
         &mut records,
         record("verlet", RecordKind::SourceMetadata, 0, 0).details(verlet_source_details(value)),
     );
-    let mut turn_ordinals = BTreeMap::<String, u32>::new();
-    let mut round_by_turn = BTreeMap::<String, u32>::new();
-    let mut start_by_turn = BTreeMap::<String, i64>::new();
-    let mut context_compile_by_turn = BTreeMap::<String, i64>::new();
+    let mut turn_ordinals = std::collections::BTreeMap::<String, u32>::new();
+    let mut round_by_turn = std::collections::BTreeMap::<String, u32>::new();
+    let mut start_by_turn = std::collections::BTreeMap::<String, i64>::new();
+    let mut context_compile_by_turn = std::collections::BTreeMap::<String, i64>::new();
     let mut current_turn_id = String::new();
 
     for event in events {
         let event_kind = event
             .get("kind")
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
-        let payload = event.get("payload").unwrap_or(&Value::Null);
+        let payload = event.get("payload").unwrap_or(&serde_json::Value::Null);
         let event_turn_id = event_turn_id(payload).unwrap_or_else(|| current_turn_id.clone());
         if event_kind == "turn.submitted" && !event_turn_id.is_empty() {
             current_turn_id = event_turn_id.clone();
@@ -351,7 +352,7 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
                         .content(
                             payload
                                 .get("input_text")
-                                .and_then(Value::as_str)
+                                .and_then(serde_json::Value::as_str)
                                 .map(str::to_string),
                         )
                         .boundary("started")
@@ -380,14 +381,17 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
                                 .get("summary")
                                 .or_else(|| payload.get("text"))
                                 .or_else(|| payload.pointer("/content/text"))
-                                .and_then(Value::as_str)
+                                .and_then(serde_json::Value::as_str)
                                 .map(str::to_string),
                         )
                         .details(details),
                 );
             }
             "session.entry.appended"
-                if payload.get("entry_kind").and_then(Value::as_str) == Some("compaction") =>
+                if payload
+                    .get("entry_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("compaction") =>
             {
                 push_record(
                     &mut records,
@@ -396,7 +400,7 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
                         .content(
                             payload
                                 .get("summary")
-                                .and_then(Value::as_str)
+                                .and_then(serde_json::Value::as_str)
                                 .map(str::to_string),
                         )
                         .details(details),
@@ -424,7 +428,7 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
                 }
                 let call_id = payload
                     .pointer("/subject/call_id")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("missing-call-id")
                     .to_string();
                 let item = turn_views
@@ -432,7 +436,7 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
                     .and_then(|view| view.tools.get(&call_id));
                 let name = payload
                     .get("tool_name")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .or_else(|| item.and_then(|item| item.name.as_deref()))
                     .unwrap_or("unknown")
                     .to_string();
@@ -458,7 +462,7 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
                 }
                 let call_id = payload
                     .pointer("/subject/call_id")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("missing-call-id")
                     .to_string();
                 let item = turn_views
@@ -466,13 +470,13 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
                     .and_then(|view| view.tools.get(&call_id));
                 let name = payload
                     .get("tool_name")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .or_else(|| item.and_then(|item| item.name.as_deref()))
                     .unwrap_or("unknown")
                     .to_string();
                 let success = payload
                     .get("success")
-                    .and_then(Value::as_bool)
+                    .and_then(serde_json::Value::as_bool)
                     .or_else(|| item.and_then(|item| item.success));
                 push_record(
                     &mut records,
@@ -481,7 +485,7 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
                         .latency(
                             payload
                                 .get("duration_ms")
-                                .and_then(Value::as_u64)
+                                .and_then(serde_json::Value::as_u64)
                                 .or_else(|| item.and_then(|item| item.duration_ms)),
                         )
                         .content(item.and_then(|item| item.content.clone()))
@@ -552,7 +556,7 @@ pub fn convert_verlet_export(value: &Value) -> Result<Vec<CommonRecord>, String>
 
 pub fn summarize(records: &[CommonRecord]) -> TraceStats {
     let mut stats = TraceStats::default();
-    let mut turns = BTreeSet::new();
+    let mut turns = std::collections::BTreeSet::new();
     let mut first_timestamp = None;
     let mut last_timestamp = None;
     let mut first_turn_started = None;
@@ -643,7 +647,7 @@ pub fn render_diff(pi: &[CommonRecord], verlet: &[CommonRecord]) -> String {
         .keys()
         .chain(verlet_grouped.keys())
         .copied()
-        .collect::<BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>();
     for (turn, round) in keys {
         let label = format!("T{turn} R{round}");
         output.push_str(&format!("{label}\n"));
@@ -665,7 +669,10 @@ pub fn render_diff(pi: &[CommonRecord], verlet: &[CommonRecord]) -> String {
     output
 }
 
-pub fn write_common_jsonl<W: Write>(records: &[CommonRecord], mut writer: W) -> Result<(), String> {
+pub fn write_common_jsonl<W: std::io::Write>(
+    records: &[CommonRecord],
+    mut writer: W,
+) -> Result<(), String> {
     for record in records {
         serde_json::to_writer(&mut writer, record)
             .map_err(|err| format!("failed to encode common trace: {err}"))?;
@@ -676,7 +683,7 @@ pub fn write_common_jsonl<W: Write>(records: &[CommonRecord], mut writer: W) -> 
     Ok(())
 }
 
-pub fn read_common_jsonl<R: BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
+pub fn read_common_jsonl<R: std::io::BufRead>(reader: R) -> Result<Vec<CommonRecord>, String> {
     reader
         .lines()
         .enumerate()
@@ -710,7 +717,7 @@ fn record(harness: &str, kind: RecordKind, turn: u32, round: u32) -> RecordBuild
         tokens: None,
         tool: None,
         edit: None,
-        details: BTreeMap::new(),
+        details: std::collections::BTreeMap::new(),
     })
 }
 
@@ -745,7 +752,7 @@ impl RecordBuilder {
         self
     }
 
-    fn details(mut self, value: BTreeMap<String, Value>) -> Self {
+    fn details(mut self, value: std::collections::BTreeMap<String, serde_json::Value>) -> Self {
         self.0.details = value;
         self
     }
@@ -781,9 +788,9 @@ fn ensure_pi_turn(
         record("pi", RecordKind::TurnBoundary, *turn, 0)
             .timestamp(timestamp_ms)
             .boundary("started")
-            .details(BTreeMap::from([(
+            .details(std::collections::BTreeMap::from([(
                 "pi".to_string(),
-                json!({"entry": null, "derived": "missing_user_boundary"}),
+                serde_json::json!({"entry": null, "derived": "missing_user_boundary"}),
             )])),
     );
 }
@@ -795,7 +802,7 @@ fn finish_pi_turn(
     started_ms: Option<i64>,
     ended_ms: Option<i64>,
     outcome: &str,
-    derived: Value,
+    derived: serde_json::Value,
 ) {
     push_record(
         records,
@@ -803,15 +810,18 @@ fn finish_pi_turn(
             .timestamp(ended_ms)
             .latency(elapsed_ms(started_ms, ended_ms))
             .boundary(outcome)
-            .details(BTreeMap::from([(
+            .details(std::collections::BTreeMap::from([(
                 "pi".to_string(),
-                json!({"entry": null, "derivation": derived}),
+                serde_json::json!({"entry": null, "derivation": derived}),
             )])),
     );
 }
 
-fn pi_turn_outcome(message: &Map<String, Value>) -> Option<&'static str> {
-    match message.get("stopReason").and_then(Value::as_str) {
+fn pi_turn_outcome(message: &serde_json::Map<String, serde_json::Value>) -> Option<&'static str> {
+    match message
+        .get("stopReason")
+        .and_then(serde_json::Value::as_str)
+    {
         Some("aborted" | "abort" | "cancelled" | "canceled") => Some("aborted"),
         Some("error" | "failed") => Some("failed"),
         _ if message
@@ -834,7 +844,7 @@ fn resolve_pi_tool_result_rounds(records: &mut [CommonRecord]) {
                 .as_ref()
                 .map(|tool| (tool.call_id.clone(), (record.turn, record.round)))
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<std::collections::BTreeMap<_, _>>();
     for record in records {
         if record.kind != RecordKind::ToolResult {
             continue;
@@ -852,10 +862,13 @@ fn resolve_pi_tool_result_rounds(records: &mut [CommonRecord]) {
     }
 }
 
-fn pi_details(entry: &Value, message: &Map<String, Value>) -> BTreeMap<String, Value> {
-    BTreeMap::from([(
+fn pi_details(
+    entry: &serde_json::Value,
+    message: &serde_json::Map<String, serde_json::Value>,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    std::collections::BTreeMap::from([(
         "pi".to_string(),
-        json!({
+        serde_json::json!({
             "entry": entry,
             "role": message.get("role"),
             "provider": message.get("provider"),
@@ -866,11 +879,13 @@ fn pi_details(entry: &Value, message: &Map<String, Value>) -> BTreeMap<String, V
     )])
 }
 
-fn pi_entry_details(entry: &Value) -> BTreeMap<String, Value> {
-    BTreeMap::from([("pi".to_string(), json!({"entry": entry}))])
+fn pi_entry_details(
+    entry: &serde_json::Value,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    std::collections::BTreeMap::from([("pi".to_string(), serde_json::json!({"entry": entry}))])
 }
 
-fn pi_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
+fn pi_token_usage(value: Option<&serde_json::Value>) -> Option<TokenUsage> {
     let value = value?;
     if !value.is_object() {
         return None;
@@ -881,7 +896,7 @@ fn pi_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
     let cache_write = u64_field(value, "cacheWrite");
     let total = value
         .get("totalTokens")
-        .and_then(Value::as_u64)
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or_else(|| {
             input
                 .saturating_add(output)
@@ -897,7 +912,7 @@ fn pi_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
     })
 }
 
-fn verlet_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
+fn verlet_token_usage(value: Option<&serde_json::Value>) -> Option<TokenUsage> {
     let value = value?;
     if !value.is_object() {
         return None;
@@ -918,10 +933,12 @@ fn verlet_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
     })
 }
 
-fn verlet_source_details(bundle: &Value) -> BTreeMap<String, Value> {
+fn verlet_source_details(
+    bundle: &serde_json::Value,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
     let streams = bundle
         .get("streams")
-        .and_then(Value::as_array)
+        .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .map(|stream| {
@@ -932,9 +949,9 @@ fn verlet_source_details(bundle: &Value) -> BTreeMap<String, Value> {
             metadata
         })
         .collect::<Vec<_>>();
-    BTreeMap::from([(
+    std::collections::BTreeMap::from([(
         "verlet".to_string(),
-        json!({
+        serde_json::json!({
             "thread_id": bundle.get("threadId"),
             "generated_at_ms": bundle.get("generatedAtMs"),
             "backend": bundle.get("backend"),
@@ -947,50 +964,55 @@ fn verlet_source_details(bundle: &Value) -> BTreeMap<String, Value> {
     )])
 }
 
-fn verlet_event_details(event: &Value) -> BTreeMap<String, Value> {
-    BTreeMap::from([("verlet".to_string(), json!({"event": event}))])
+fn verlet_event_details(
+    event: &serde_json::Value,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    std::collections::BTreeMap::from([("verlet".to_string(), serde_json::json!({"event": event}))])
 }
 
 #[derive(Default)]
 struct TurnView {
     assistant_texts: Vec<String>,
-    assistant_entry_ids: BTreeSet<String>,
-    tools: BTreeMap<String, ToolView>,
+    assistant_entry_ids: std::collections::BTreeSet<String>,
+    tools: std::collections::BTreeMap<String, ToolView>,
 }
 
 #[derive(Default)]
 struct ToolView {
     name: Option<String>,
-    arguments: Option<Value>,
+    arguments: Option<serde_json::Value>,
     success: Option<bool>,
     duration_ms: Option<u64>,
     content: Option<String>,
 }
 
-fn verlet_turn_views(bundle: &Value) -> BTreeMap<String, TurnView> {
-    let mut views = BTreeMap::new();
-    let Some(turns) = bundle.pointer("/thread/turns").and_then(Value::as_array) else {
+fn verlet_turn_views(bundle: &serde_json::Value) -> std::collections::BTreeMap<String, TurnView> {
+    let mut views = std::collections::BTreeMap::new();
+    let Some(turns) = bundle
+        .pointer("/thread/turns")
+        .and_then(serde_json::Value::as_array)
+    else {
         return views;
     };
     for turn in turns {
-        let Some(turn_id) = turn.get("id").and_then(Value::as_str) else {
+        let Some(turn_id) = turn.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
         let mut view = TurnView::default();
         for item in turn
             .get("items")
-            .and_then(Value::as_array)
+            .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
         {
-            match item.get("type").and_then(Value::as_str) {
+            match item.get("type").and_then(serde_json::Value::as_str) {
                 Some("agentMessage") => {
-                    if let Some(id) = item.get("id").and_then(Value::as_str) {
+                    if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
                         view.assistant_entry_ids.insert(id.to_string());
                     }
                     if let Some(text) = item
                         .get("text")
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         .map(str::to_string)
                         .or_else(|| message_text(item.get("content")))
                     {
@@ -998,16 +1020,19 @@ fn verlet_turn_views(bundle: &Value) -> BTreeMap<String, TurnView> {
                     }
                 }
                 Some("dynamicToolCall") => {
-                    let Some(call_id) = item.get("id").and_then(Value::as_str) else {
+                    let Some(call_id) = item.get("id").and_then(serde_json::Value::as_str) else {
                         continue;
                     };
                     view.tools.insert(
                         call_id.to_string(),
                         ToolView {
-                            name: item.get("tool").and_then(Value::as_str).map(str::to_string),
+                            name: item
+                                .get("tool")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string),
                             arguments: item.get("arguments").cloned(),
-                            success: item.get("success").and_then(Value::as_bool),
-                            duration_ms: item.get("durationMs").and_then(Value::as_u64),
+                            success: item.get("success").and_then(serde_json::Value::as_bool),
+                            duration_ms: item.get("durationMs").and_then(serde_json::Value::as_u64),
                             content: message_text(item.get("contentItems")),
                         },
                     );
@@ -1021,14 +1046,14 @@ fn verlet_turn_views(bundle: &Value) -> BTreeMap<String, TurnView> {
 }
 
 fn is_verlet_assistant_entry(
-    payload: &Value,
+    payload: &serde_json::Value,
     turn_id: &str,
-    turn_views: &BTreeMap<String, TurnView>,
+    turn_views: &std::collections::BTreeMap<String, TurnView>,
 ) -> bool {
     if payload.get("usage").is_some() {
         return true;
     }
-    let Some(entry_id) = payload.get("entry_id").and_then(Value::as_str) else {
+    let Some(entry_id) = payload.get("entry_id").and_then(serde_json::Value::as_str) else {
         return false;
     };
     turn_views
@@ -1036,44 +1061,44 @@ fn is_verlet_assistant_entry(
         .is_some_and(|view| view.assistant_entry_ids.contains(entry_id))
 }
 
-fn event_sort_key(event: &Value) -> (i64, String, u64, String) {
+fn event_sort_key(event: &serde_json::Value) -> (i64, String, u64, String) {
     (
         event_timestamp(event).unwrap_or_default(),
         event
             .get("stream_id")
             .or_else(|| event.get("streamId"))
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
         event
             .get("sequence")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or_default(),
         event
             .get("event_id")
             .or_else(|| event.get("eventId"))
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
     )
 }
 
-fn event_timestamp(event: &Value) -> Option<i64> {
+fn event_timestamp(event: &serde_json::Value) -> Option<i64> {
     event
         .get("created_at_ms")
         .or_else(|| event.get("atMs"))
-        .and_then(Value::as_i64)
+        .and_then(serde_json::Value::as_i64)
 }
 
-fn event_turn_id(payload: &Value) -> Option<String> {
+fn event_turn_id(payload: &serde_json::Value) -> Option<String> {
     payload
         .get("turn_id")
         .or_else(|| payload.pointer("/subject/turn_id"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .map(str::to_string)
 }
 
-fn ordinal_for_turn(turns: &mut BTreeMap<String, u32>, turn_id: &str) -> u32 {
+fn ordinal_for_turn(turns: &mut std::collections::BTreeMap<String, u32>, turn_id: &str) -> u32 {
     if turn_id.is_empty() {
         return 0;
     }
@@ -1086,7 +1111,7 @@ fn ordinal_for_turn(turns: &mut BTreeMap<String, u32>, turn_id: &str) -> u32 {
 }
 
 fn annotate_edit_signals(records: &mut [CommonRecord]) {
-    let mut failed = BTreeMap::<u32, BTreeSet<String>>::new();
+    let mut failed = std::collections::BTreeMap::<u32, std::collections::BTreeSet<String>>::new();
     for record in records {
         let Some(tool) = &record.tool else {
             continue;
@@ -1132,8 +1157,10 @@ fn is_edit_tool(name: &str) -> bool {
         || normalized.ends_with("/edit")
 }
 
-fn group_for_diff(records: &[CommonRecord]) -> BTreeMap<(u32, u32), Vec<&CommonRecord>> {
-    let mut grouped = BTreeMap::<(u32, u32), Vec<&CommonRecord>>::new();
+fn group_for_diff(
+    records: &[CommonRecord],
+) -> std::collections::BTreeMap<(u32, u32), Vec<&CommonRecord>> {
+    let mut grouped = std::collections::BTreeMap::<(u32, u32), Vec<&CommonRecord>>::new();
     for record in records {
         grouped
             .entry((record.turn, record.round))
@@ -1250,7 +1277,7 @@ fn format_record(record: &CommonRecord) -> String {
                 tool.name,
                 tool.arguments
                     .as_ref()
-                    .map(Value::to_string)
+                    .map(serde_json::Value::to_string)
                     .unwrap_or_default()
             )
         }
@@ -1306,17 +1333,17 @@ fn truncate(value: &str, width: usize) -> String {
         + "…"
 }
 
-fn message_text(value: Option<&Value>) -> Option<String> {
+fn message_text(value: Option<&serde_json::Value>) -> Option<String> {
     match value? {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(blocks) => {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(blocks) => {
             let text = blocks
                 .iter()
                 .filter_map(|block| {
                     block
                         .get("text")
                         .or_else(|| block.get("thinking"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -1331,22 +1358,29 @@ fn elapsed_ms(start: Option<i64>, end: Option<i64>) -> Option<u64> {
         .and_then(|value| u64::try_from(value).ok())
 }
 
-fn u64_field(value: &Value, key: &str) -> u64 {
-    value.get(key).and_then(Value::as_u64).unwrap_or_default()
-}
-
-fn string_field(value: &Value, key: &str, fallback: &str) -> String {
+fn u64_field(value: &serde_json::Value, key: &str) -> u64 {
     value
         .get(key)
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default()
+}
+
+fn string_field(value: &serde_json::Value, key: &str, fallback: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or(fallback)
         .to_string()
 }
 
-fn string_field_from_map(value: &Map<String, Value>, key: &str, fallback: &str) -> String {
+fn string_field_from_map(
+    value: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    fallback: &str,
+) -> String {
     value
         .get(key)
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or(fallback)
         .to_string()
 }

@@ -1,17 +1,6 @@
-use std::env;
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Arc;
-use verlet::daemon::remote_store::endpoint_http::HttpSyncClient;
-use verlet::daemon::remote_store::lease::StreamLeaseGrantV1;
-use verlet::daemon::remote_store::propagator::{
-    LocalFirstStreamPropagator, PropagationStep, SqlitePropagationStateStore,
-    StreamPropagationState, StreamPropagator,
-};
-use verlet::{
-    EventKind, EventStore, EventStreamId, NewEventRecord, SqliteSessionStore, SystemDaemonClock,
-};
-use verlet_runtime_contracts::ThreadCoordinates;
+use std::io::Write as _;
+use verlet::EventStore as _;
+use verlet::daemon::remote_store::propagator::StreamPropagator as _;
 
 #[tokio::main]
 async fn main() {
@@ -22,7 +11,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args().skip(1);
+    let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("child-once") => {
             let child_db = required_arg(&mut args, "child db path")?;
@@ -45,15 +34,19 @@ async fn run_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint_url = required_env("VERLET_SYNC_TEST_URL")?;
     let bearer_token = required_env("VERLET_SYNC_TEST_TOKEN")?;
-    let stream_id = EventStreamId::new(required_env("VERLET_SYNC_TEST_STREAM")?);
-    let grant: StreamLeaseGrantV1 = serde_json::from_str(&required_env("VERLET_SYNC_TEST_GRANT")?)?;
-    let store = SqliteSessionStore::open(PathBuf::from(child_db)).await?;
+    let stream_id = verlet::EventStreamId::new(required_env("VERLET_SYNC_TEST_STREAM")?);
+    let grant: verlet::daemon::remote_store::lease::StreamLeaseGrantV1 =
+        serde_json::from_str(&required_env("VERLET_SYNC_TEST_GRANT")?)?;
+    let store = verlet::SqliteSessionStore::open(std::path::PathBuf::from(child_db)).await?;
     if let Some(label) = label {
         store
             .append_events(&stream_id, vec![record(&label)])
             .await?;
     }
-    let state_store = Arc::new(SqlitePropagationStateStore::new(store.clone()).await?);
+    let state_store = std::sync::Arc::new(
+        verlet::daemon::remote_store::propagator::SqlitePropagationStateStore::new(store.clone())
+            .await?,
+    );
     let mut state = match state_store.load(&stream_id).await? {
         Some(mut state) => {
             if state.lease.lease_id != grant.lease_id {
@@ -61,7 +54,7 @@ async fn run_child(
             }
             state
         }
-        None => StreamPropagationState {
+        None => verlet::daemon::remote_store::propagator::StreamPropagationState {
             stream_id: stream_id.clone(),
             lease: grant,
             pushed_through: None,
@@ -74,25 +67,36 @@ async fn run_child(
         std::future::pending::<()>().await;
         unreachable!();
     }
-    let client = Arc::new(HttpSyncClient::new(endpoint_url)?);
-    let propagator = LocalFirstStreamPropagator::new(
+    let client = std::sync::Arc::new(
+        verlet::daemon::remote_store::endpoint_http::HttpSyncClient::new(endpoint_url)?,
+    );
+    let propagator = verlet::daemon::remote_store::propagator::LocalFirstStreamPropagator::new(
         store,
-        Arc::clone(&client) as Arc<dyn verlet::daemon::remote_store::endpoint::SyncPushGate>,
-        Arc::clone(&client) as Arc<dyn verlet::daemon::remote_store::endpoint::SyncPullSource>,
-        Arc::clone(&client) as Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+        std::sync::Arc::clone(&client)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncPushGate>,
+        std::sync::Arc::clone(&client)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncPullSource>,
+        std::sync::Arc::clone(&client)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store,
         bearer_token,
-        Arc::new(SystemDaemonClock),
+        std::sync::Arc::new(verlet::SystemDaemonClock),
     );
     let step = propagator.propagate_once(&mut state).await?;
     match step {
-        PropagationStep::Converged => println!("STEP converged"),
-        PropagationStep::Advanced { pushed_through } => {
+        verlet::daemon::remote_store::propagator::PropagationStep::Converged => {
+            println!("STEP converged")
+        }
+        verlet::daemon::remote_store::propagator::PropagationStep::Advanced { pushed_through } => {
             println!("STEP advanced={}", pushed_through.get())
         }
-        PropagationStep::EndpointUnavailable => println!("STEP endpoint_unavailable"),
-        PropagationStep::LeaseFenced => println!("STEP lease_fenced"),
-        PropagationStep::StreamDiverged {
+        verlet::daemon::remote_store::propagator::PropagationStep::EndpointUnavailable => {
+            println!("STEP endpoint_unavailable")
+        }
+        verlet::daemon::remote_store::propagator::PropagationStep::LeaseFenced => {
+            println!("STEP lease_fenced")
+        }
+        verlet::daemon::remote_store::propagator::PropagationStep::StreamDiverged {
             actual_next_sequence,
         } => println!("STEP stream_diverged={}", actual_next_sequence.get()),
     }
@@ -100,10 +104,14 @@ async fn run_child(
     Ok(())
 }
 
-fn record(label: &str) -> NewEventRecord {
-    NewEventRecord::witnessed(
-        ThreadCoordinates::new("tenant-process", "user-process", "session-process"),
-        EventKind::SessionEntryAppended,
+fn record(label: &str) -> verlet::NewEventRecord {
+    verlet::NewEventRecord::witnessed(
+        verlet_runtime_contracts::ThreadCoordinates::new(
+            "tenant-process",
+            "user-process",
+            "session-process",
+        ),
+        verlet::EventKind::SessionEntryAppended,
         serde_json::json!({ "entry_id": label }),
     )
 }

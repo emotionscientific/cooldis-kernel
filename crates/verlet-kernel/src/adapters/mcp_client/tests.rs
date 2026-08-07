@@ -1,22 +1,18 @@
-use super::*;
-use crate::{
-    AgentToolRouter, OperationRegistry, SecretSourceKind, SqliteSecretStore,
-    agent::agent_tool_router::AgentKernelToolProvider,
-};
-use std::sync::Mutex as StdMutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use crate::AgentKernelToolProvider as _;
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 #[tokio::test]
 async fn mcp_stdio_provider_imports_and_invokes_tool() {
-    let provider = McpStdioToolProvider::connect(
-        McpStdioServerConfig::new("test-echo", "python3").with_args(["-u", "-c", ECHO_SERVER]),
-    )
-    .await
-    .expect("mcp provider should connect");
-    let router = AgentToolRouter::new(Arc::new(OperationRegistry::new()))
-        .with_kernel_tool_provider(Arc::new(provider));
+    let provider =
+        crate::adapters::mcp_client::McpStdioToolProvider::connect(
+            crate::adapters::mcp_client::McpStdioServerConfig::new("test-echo", "python3")
+                .with_args(["-u", "-c", ECHO_SERVER]),
+        )
+        .await
+        .expect("mcp provider should connect");
+    let router = crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
+        .with_kernel_tool_provider(std::sync::Arc::new(provider));
 
     let tools = router.tool_definitions().await;
     assert!(tools.iter().any(|tool| tool.name == "verlet_mcp_echo"));
@@ -25,13 +21,13 @@ async fn mcp_stdio_provider_imports_and_invokes_tool() {
         .invoke_tool_call(
             "call_1",
             "verlet_mcp_echo",
-            json!({"message": "hello from test"}),
+            serde_json::json!({"message": "hello from test"}),
         )
         .await;
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -45,10 +41,10 @@ async fn mcp_stdio_provider_imports_and_invokes_tool() {
 
 #[test]
 fn sqlite_remote_mcp_registry_persists_and_redacts_source_records() {
-    let registry = SqliteMcpSourceRegistry::in_memory().unwrap();
-    let config = McpRemoteServerConfig::new(
+    let registry = crate::adapters::mcp_client::SqliteMcpSourceRegistry::in_memory().unwrap();
+    let config = crate::adapters::mcp_client::McpRemoteServerConfig::new(
         "arcade",
-        McpRemoteTransport::StreamableHttp,
+        crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
         "https://example.com/mcp",
     )
     .unwrap()
@@ -70,12 +66,12 @@ fn sqlite_remote_mcp_registry_persists_and_redacts_source_records() {
 #[test]
 fn sqlite_remote_mcp_registry_sync_boundary_is_reentrant_from_futures_executor() {
     futures_executor::block_on(async {
-        let registry = SqliteMcpSourceRegistry::in_memory().unwrap();
+        let registry = crate::adapters::mcp_client::SqliteMcpSourceRegistry::in_memory().unwrap();
         registry
             .upsert_source(
-                McpRemoteServerConfig::new(
+                crate::adapters::mcp_client::McpRemoteServerConfig::new(
                     "nested-executor",
-                    McpRemoteTransport::StreamableHttp,
+                    crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
                     "https://nested.example.invalid/mcp",
                 )
                 .unwrap(),
@@ -88,17 +84,19 @@ fn sqlite_remote_mcp_registry_sync_boundary_is_reentrant_from_futures_executor()
 
 #[tokio::test]
 async fn remote_mcp_provider_fails_closed_when_bearer_secret_is_missing() {
-    let config = McpRemoteServerConfig::new(
+    let config = crate::adapters::mcp_client::McpRemoteServerConfig::new(
         "missing-secret",
-        McpRemoteTransport::StreamableHttp,
+        crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
         "http://127.0.0.1:9/mcp",
     )
     .unwrap()
     .with_bearer_secret("MISSING_MCP_TOKEN")
     .unwrap();
-    let err = match McpRemoteToolProvider::connect(
+    let err = match crate::adapters::mcp_client::McpRemoteToolProvider::connect(
         config,
-        Some(Arc::new(SqliteSecretStore::in_memory().await.unwrap())),
+        Some(std::sync::Arc::new(
+            crate::SqliteSecretStore::in_memory().await.unwrap(),
+        )),
     )
     .await
     {
@@ -111,38 +109,49 @@ async fn remote_mcp_provider_fails_closed_when_bearer_secret_is_missing() {
 
 #[tokio::test]
 async fn remote_mcp_provider_discovers_and_invokes_streamable_http_tool() {
-    let seen_authorization = Arc::new(StdMutex::new(Vec::new()));
+    let seen_authorization = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (url, server) =
         spawn_mcp_http_fixture("application/json", seen_authorization.clone()).await;
-    let secret_store = SqliteSecretStore::in_memory().await.unwrap();
+    let secret_store = crate::SqliteSecretStore::in_memory().await.unwrap();
     secret_store
         .set_secret(
             "ARCADE_API_KEY",
             "fixture-token",
-            SecretSourceKind::Local,
+            crate::SecretSourceKind::Local,
             None,
         )
         .await
         .unwrap();
-    let config = McpRemoteServerConfig::new("arcade", McpRemoteTransport::StreamableHttp, url)
-        .unwrap()
-        .with_bearer_secret("ARCADE_API_KEY")
-        .unwrap()
-        .with_include_tools(["remote_echo"]);
+    let config = crate::adapters::mcp_client::McpRemoteServerConfig::new(
+        "arcade",
+        crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
+        url,
+    )
+    .unwrap()
+    .with_bearer_secret("ARCADE_API_KEY")
+    .unwrap()
+    .with_include_tools(["remote_echo"]);
 
-    let provider = McpRemoteToolProvider::connect(config, Some(Arc::new(secret_store)))
-        .await
-        .unwrap();
-    let router = AgentToolRouter::new(Arc::new(OperationRegistry::new()))
-        .with_kernel_tool_provider(Arc::new(provider));
+    let provider = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
+        config,
+        Some(std::sync::Arc::new(secret_store)),
+    )
+    .await
+    .unwrap();
+    let router = crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
+        .with_kernel_tool_provider(std::sync::Arc::new(provider));
 
     assert_eq!(router.tool_definitions().await[0].name, "remote_echo");
     let result = router
-        .invoke_tool_call("call_remote", "remote_echo", json!({"message": "hello"}))
+        .invoke_tool_call(
+            "call_remote",
+            "remote_echo",
+            serde_json::json!({"message": "hello"}),
+        )
         .await;
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -159,16 +168,23 @@ async fn remote_mcp_provider_discovers_and_invokes_streamable_http_tool() {
 
 #[tokio::test]
 async fn remote_mcp_provider_accepts_sse_response_bodies() {
-    let seen_authorization = Arc::new(StdMutex::new(Vec::new()));
+    let seen_authorization = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (url, server) = spawn_mcp_http_fixture("text/event-stream", seen_authorization).await;
-    let config = McpRemoteServerConfig::new("sse", McpRemoteTransport::HttpSse, url).unwrap();
+    let config = crate::adapters::mcp_client::McpRemoteServerConfig::new(
+        "sse",
+        crate::adapters::mcp_client::McpRemoteTransport::HttpSse,
+        url,
+    )
+    .unwrap();
 
-    let provider = McpRemoteToolProvider::connect(config, None).await.unwrap();
+    let provider = crate::adapters::mcp_client::McpRemoteToolProvider::connect(config, None)
+        .await
+        .unwrap();
     let result = provider
-        .invoke_tool_call(AgentKernelToolCall {
+        .invoke_tool_call(crate::AgentKernelToolCall {
             call_id: "call_sse".to_string(),
             tool_name: "remote_echo".to_string(),
-            arguments: json!({"message": "stream"}),
+            arguments: serde_json::json!({"message": "stream"}),
             turn_context: None,
         })
         .await
@@ -176,7 +192,7 @@ async fn remote_mcp_provider_accepts_sse_response_bodies() {
         .unwrap();
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
@@ -193,59 +209,73 @@ async fn remote_mcp_provider_accepts_sse_response_bodies() {
 async fn router_imports_and_invokes_three_remote_mcp_sources() {
     let (search_url, search_server) = spawn_named_mcp_http_fixture(
         "application/json",
-        Arc::new(StdMutex::new(Vec::new())),
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         "search_docs",
         "SEARCH_OK",
     )
     .await;
     let (crm_url, crm_server) = spawn_named_mcp_http_fixture(
         "application/json",
-        Arc::new(StdMutex::new(Vec::new())),
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         "crm_lookup",
         "CRM_OK",
     )
     .await;
     let (ticket_url, ticket_server) = spawn_named_mcp_http_fixture(
         "text/event-stream",
-        Arc::new(StdMutex::new(Vec::new())),
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         "ticket_create",
         "TICKET_OK",
     )
     .await;
 
-    let search = McpRemoteToolProvider::connect(
-        McpRemoteServerConfig::new("search", McpRemoteTransport::StreamableHttp, search_url)
-            .unwrap(),
+    let search = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
+        crate::adapters::mcp_client::McpRemoteServerConfig::new(
+            "search",
+            crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
+            search_url,
+        )
+        .unwrap(),
         None,
     )
     .await
     .unwrap();
-    let crm = McpRemoteToolProvider::connect(
-        McpRemoteServerConfig::new("crm", McpRemoteTransport::StreamableHttp, crm_url).unwrap(),
+    let crm = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
+        crate::adapters::mcp_client::McpRemoteServerConfig::new(
+            "crm",
+            crate::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
+            crm_url,
+        )
+        .unwrap(),
         None,
     )
     .await
     .unwrap();
-    let ticket = McpRemoteToolProvider::connect(
-        McpRemoteServerConfig::new("ticket", McpRemoteTransport::HttpSse, ticket_url).unwrap(),
+    let ticket = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
+        crate::adapters::mcp_client::McpRemoteServerConfig::new(
+            "ticket",
+            crate::adapters::mcp_client::McpRemoteTransport::HttpSse,
+            ticket_url,
+        )
+        .unwrap(),
         None,
     )
     .await
     .unwrap();
-    let router = AgentToolRouter::new(Arc::new(OperationRegistry::new()))
-        .with_kernel_tool_provider(Arc::new(search))
-        .with_kernel_tool_provider(Arc::new(crm))
-        .with_kernel_tool_provider(Arc::new(ticket));
+    let router = crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
+        .with_kernel_tool_provider(std::sync::Arc::new(search))
+        .with_kernel_tool_provider(std::sync::Arc::new(crm))
+        .with_kernel_tool_provider(std::sync::Arc::new(ticket));
 
     let tool_names = router
         .tool_definitions()
         .await
         .into_iter()
         .map(|tool| tool.name)
-        .collect::<BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         tool_names,
-        BTreeSet::from([
+        std::collections::BTreeSet::from([
             "crm_lookup".to_string(),
             "search_docs".to_string(),
             "ticket_create".to_string(),
@@ -257,11 +287,11 @@ async fn router_imports_and_invokes_three_remote_mcp_sources() {
         ("ticket_create", "TICKET_OK"),
     ] {
         let result = router
-            .invoke_tool_call("call_multi", tool, json!({"message": tool}))
+            .invoke_tool_call("call_multi", tool, serde_json::json!({"message": tool}))
             .await;
         assert!(matches!(
             result,
-            CanonicalMessage::ToolResult {
+            crate::CanonicalMessage::ToolResult {
                 is_error: false,
                 content,
                 ..
@@ -279,8 +309,8 @@ async fn router_imports_and_invokes_three_remote_mcp_sources() {
 
 async fn spawn_mcp_http_fixture(
     content_type: &'static str,
-    seen_authorization: Arc<StdMutex<Vec<String>>>,
-) -> (String, JoinHandle<()>) {
+    seen_authorization: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> (String, tokio::task::JoinHandle<()>) {
     spawn_named_mcp_http_fixture(
         content_type,
         seen_authorization,
@@ -292,11 +322,11 @@ async fn spawn_mcp_http_fixture(
 
 async fn spawn_named_mcp_http_fixture(
     content_type: &'static str,
-    seen_authorization: Arc<StdMutex<Vec<String>>>,
+    seen_authorization: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     tool_name: &'static str,
     marker: &'static str,
-) -> (String, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}/mcp");
     let task = tokio::spawn(async move {
@@ -339,7 +369,7 @@ async fn spawn_named_mcp_http_fixture(
                 assert!(read > 0);
                 buffer.extend_from_slice(&chunk[..read]);
             }
-            let request: Value =
+            let request: serde_json::Value =
                 serde_json::from_slice(&buffer[body_start..body_start + content_length]).unwrap();
             let response = mcp_fixture_response(&request, tool_name, marker);
             let body = if content_type == "text/event-stream" {
@@ -362,10 +392,10 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn mcp_fixture_response(request: &Value, tool_name: &str, marker: &str) -> String {
+fn mcp_fixture_response(request: &serde_json::Value, tool_name: &str, marker: &str) -> String {
     let id = request.get("id").cloned();
-    match request.get("method").and_then(Value::as_str) {
-        Some("initialize") => json!({
+    match request.get("method").and_then(serde_json::Value::as_str) {
+        Some("initialize") => serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": {
@@ -374,11 +404,11 @@ fn mcp_fixture_response(request: &Value, tool_name: &str, marker: &str) -> Strin
                 "serverInfo": {"name": "remote-fixture", "version": "1"}
             }
         }),
-        Some("notifications/initialized") => json!({
+        Some("notifications/initialized") => serde_json::json!({
             "jsonrpc": "2.0",
             "result": {}
         }),
-        Some("tools/list") => json!({
+        Some("tools/list") => serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": {
@@ -397,9 +427,9 @@ fn mcp_fixture_response(request: &Value, tool_name: &str, marker: &str) -> Strin
         Some("tools/call") => {
             let message = request
                 .pointer("/params/arguments/message")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            json!({
+            serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
@@ -408,7 +438,7 @@ fn mcp_fixture_response(request: &Value, tool_name: &str, marker: &str) -> Strin
                 }
             })
         }
-        _ => json!({
+        _ => serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": -32601, "message": "unknown method"}

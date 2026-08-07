@@ -22,13 +22,6 @@
 //! - The DST seam is [`Db::open_with_io`]: scenario harnesses drive the
 //!   engine through simulated, fault-injectable, deterministic IO.
 
-use std::future::Future;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-use std::time::Duration;
-
 pub use turso::{
     params, transaction::TransactionBehavior, Connection, IntoParams, Row, Rows, Statement, Value,
 };
@@ -66,35 +59,39 @@ pub type SqliteResult<T> = Result<T, SqliteError>;
 /// nested because it has no executor-specific nesting guard. Do not call this
 /// from an async context: pending work parks the current thread and can block
 /// the executor running it.
-pub fn block_on<F: Future>(future: F) -> F::Output {
+pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     struct ThreadWaker {
         thread: std::thread::Thread,
-        notified: AtomicBool,
+        notified: std::sync::atomic::AtomicBool,
     }
 
-    impl Wake for ThreadWaker {
-        fn wake(self: Arc<Self>) {
+    impl std::task::Wake for ThreadWaker {
+        fn wake(self: std::sync::Arc<Self>) {
             self.wake_by_ref();
         }
 
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.notified.store(true, Ordering::Release);
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.notified
+                .store(true, std::sync::atomic::Ordering::Release);
             self.thread.unpark();
         }
     }
 
     let mut future = std::pin::pin!(future);
-    let thread_waker = Arc::new(ThreadWaker {
+    let thread_waker = std::sync::Arc::new(ThreadWaker {
         thread: std::thread::current(),
-        notified: AtomicBool::new(false),
+        notified: std::sync::atomic::AtomicBool::new(false),
     });
-    let waker = Waker::from(Arc::clone(&thread_waker));
-    let mut context = Context::from_waker(&waker);
+    let waker = std::task::Waker::from(std::sync::Arc::clone(&thread_waker));
+    let mut context = std::task::Context::from_waker(&waker);
     loop {
         match future.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => {
-                while !thread_waker.notified.swap(false, Ordering::AcqRel) {
+            std::task::Poll::Ready(output) => return output,
+            std::task::Poll::Pending => {
+                while !thread_waker
+                    .notified
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
                     std::thread::park();
                 }
             }
@@ -124,7 +121,7 @@ pub enum JournalMode {
 pub struct DbConfig {
     pub journal_mode: JournalMode,
     pub foreign_keys: bool,
-    pub busy_timeout: Duration,
+    pub busy_timeout: std::time::Duration,
     /// Applied per connection with `PRAGMA query_only`. ADVISORY, not
     /// enforced: the pinned Turso 0.7 pre-releases have no local read-only
     /// open flag (checked on pre.18; pin now pre.19), and a
@@ -139,7 +136,7 @@ impl Default for DbConfig {
         Self {
             journal_mode: JournalMode::Wal,
             foreign_keys: true,
-            busy_timeout: Duration::from_secs(5),
+            busy_timeout: std::time::Duration::from_secs(5),
             read_only: false,
         }
     }
@@ -158,7 +155,7 @@ pub struct Db {
 impl Db {
     /// Open the database at `path`, creating parent directories, and apply
     /// `config`. The file is created if missing (unless `read_only`).
-    pub async fn open(path: impl AsRef<Path>, config: DbConfig) -> SqliteResult<Self> {
+    pub async fn open(path: impl AsRef<std::path::Path>, config: DbConfig) -> SqliteResult<Self> {
         let path = path.as_ref();
         let path_str = sqlite_path(path)?;
         prepare_path(path, config.read_only)?;
@@ -172,9 +169,9 @@ impl Db {
     /// `FaultingRuntimeStore` wraps. Path creation and existence checks are
     /// delegated to that IO implementation rather than the host filesystem.
     pub async fn open_with_io(
-        path: impl AsRef<Path>,
+        path: impl AsRef<std::path::Path>,
         config: DbConfig,
-        io: Arc<dyn io::IO>,
+        io: std::sync::Arc<dyn io::IO>,
     ) -> SqliteResult<Self> {
         let path = path.as_ref();
         let path_str = sqlite_path(path)?;
@@ -220,7 +217,7 @@ impl Db {
     }
 }
 
-fn sqlite_path(path: &Path) -> SqliteResult<&str> {
+fn sqlite_path(path: &std::path::Path) -> SqliteResult<&str> {
     path.to_str().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -232,7 +229,7 @@ fn sqlite_path(path: &Path) -> SqliteResult<&str> {
 
 /// Create a writable database's parent directory, or reject a missing
 /// read-only database before Turso can create it as a side effect of open.
-fn prepare_path(path: &Path, read_only: bool) -> SqliteResult<()> {
+fn prepare_path(path: &std::path::Path, read_only: bool) -> SqliteResult<()> {
     if read_only {
         if !path.is_file() {
             return Err(std::io::Error::new(
@@ -315,67 +312,68 @@ pub async fn ensure_column(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn nested_block_on_preserves_the_outer_wake() {
         let (completed_tx, completed_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let outer_polls = Arc::new(AtomicUsize::new(0));
-            let result = block_on(std::future::poll_fn({
-                let outer_polls = Arc::clone(&outer_polls);
+            let outer_polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let result = crate::block_on(std::future::poll_fn({
+                let outer_polls = std::sync::Arc::clone(&outer_polls);
                 move |outer_context| {
-                    if outer_polls.fetch_add(1, Ordering::SeqCst) > 0 {
-                        return Poll::Ready("completed");
+                    if outer_polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                        return std::task::Poll::Ready("completed");
                     }
 
-                    let inner_polls = Arc::new(AtomicUsize::new(0));
-                    let inner_waker = Arc::new(std::sync::Mutex::new(None::<Waker>));
+                    let inner_polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let inner_waker =
+                        std::sync::Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
                     let delayed_wake = {
-                        let inner_polls = Arc::clone(&inner_polls);
-                        let inner_waker = Arc::clone(&inner_waker);
+                        let inner_polls = std::sync::Arc::clone(&inner_polls);
+                        let inner_waker = std::sync::Arc::clone(&inner_waker);
                         std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(50));
-                            if inner_polls.load(Ordering::SeqCst) == 1 {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            if inner_polls.load(std::sync::atomic::Ordering::SeqCst) == 1 {
                                 if let Some(waker) = inner_waker.lock().unwrap().take() {
                                     waker.wake();
                                 }
                             }
                         })
                     };
-                    block_on(std::future::poll_fn({
-                        let inner_polls = Arc::clone(&inner_polls);
-                        let inner_waker = Arc::clone(&inner_waker);
+                    crate::block_on(std::future::poll_fn({
+                        let inner_polls = std::sync::Arc::clone(&inner_polls);
+                        let inner_waker = std::sync::Arc::clone(&inner_waker);
                         let outer_waker = outer_context.waker().clone();
-                        move |inner_context| match inner_polls.fetch_add(1, Ordering::SeqCst) {
+                        move |inner_context| match inner_polls
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        {
                             0 => {
                                 *inner_waker.lock().unwrap() = Some(inner_context.waker().clone());
                                 outer_waker.wake_by_ref();
-                                Poll::Pending
+                                std::task::Poll::Pending
                             }
                             1 => {
                                 inner_context.waker().wake_by_ref();
-                                Poll::Pending
+                                std::task::Poll::Pending
                             }
-                            _ => Poll::Ready(()),
+                            _ => std::task::Poll::Ready(()),
                         }
                     }));
                     delayed_wake.join().unwrap();
-                    Poll::Pending
+                    std::task::Poll::Pending
                 }
             }));
             completed_tx.send(result).unwrap();
         });
 
         assert_eq!(
-            completed_rx.recv_timeout(Duration::from_secs(30)),
+            completed_rx.recv_timeout(std::time::Duration::from_secs(30)),
             Ok("completed"),
             "nested block_on consumed the outer future's wake"
         );
     }
 
-    async fn pragma_value(conn: &Connection, name: &str) -> Value {
+    async fn pragma_value(conn: &crate::Connection, name: &str) -> crate::Value {
         let mut value = None;
         conn.pragma_query(name, |row| {
             value = Some(row.get_value(0).expect("pragma value"));
@@ -390,37 +388,45 @@ mod tests {
     async fn tempfile_open_creates_parents_and_applies_connection_pragmas() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("nested/state/metadata.sqlite3");
-        let config = DbConfig {
-            busy_timeout: Duration::from_millis(1_234),
-            ..DbConfig::default()
+        let config = crate::DbConfig {
+            busy_timeout: std::time::Duration::from_millis(1_234),
+            ..crate::DbConfig::default()
         };
 
-        let db = Db::open(&path, config).await.unwrap();
+        let db = crate::Db::open(&path, config).await.unwrap();
         assert!(path.exists());
         let conn = db.connect().await.unwrap();
 
         assert_eq!(
             pragma_value(&conn, "journal_mode").await,
-            Value::Text("wal".into())
+            crate::Value::Text("wal".into())
         );
-        assert_eq!(pragma_value(&conn, "foreign_keys").await, Value::Integer(1));
+        assert_eq!(
+            pragma_value(&conn, "foreign_keys").await,
+            crate::Value::Integer(1)
+        );
         assert_eq!(
             pragma_value(&conn, "busy_timeout").await,
-            Value::Integer(1_234)
+            crate::Value::Integer(1_234)
         );
-        assert_eq!(pragma_value(&conn, "query_only").await, Value::Integer(0));
+        assert_eq!(
+            pragma_value(&conn, "query_only").await,
+            crate::Value::Integer(0)
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn invalid_utf8_path_is_rejected_without_creating_parents() {
-        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::ffi::OsStringExt as _;
 
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path().join("must-not-exist");
         let path = parent.join(std::ffi::OsString::from_vec(vec![0xff]));
 
-        assert!(Db::open(path, DbConfig::default()).await.is_err());
+        assert!(crate::Db::open(path, crate::DbConfig::default())
+            .await
+            .is_err());
         assert!(!parent.exists());
     }
 
@@ -429,9 +435,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path().join("owned-by-custom-io");
         let path = parent.join("store.sqlite3");
-        let io: Arc<dyn turso_core::IO> = Arc::new(turso_core::MemoryIO::new());
+        let io: std::sync::Arc<dyn turso_core::IO> =
+            std::sync::Arc::new(turso_core::MemoryIO::new());
 
-        let db = Db::open_with_io(&path, DbConfig::default(), io)
+        let db = crate::Db::open_with_io(&path, crate::DbConfig::default(), io)
             .await
             .unwrap();
         db.connect()
@@ -446,31 +453,39 @@ mod tests {
 
     #[tokio::test]
     async fn in_memory_applies_pragmas_and_migrates_columns_idempotently() {
-        let db = Db::in_memory(DbConfig::default()).await.unwrap();
+        let db = crate::Db::in_memory(crate::DbConfig::default())
+            .await
+            .unwrap();
         let conn = db.connect().await.unwrap();
-        assert_eq!(pragma_value(&conn, "foreign_keys").await, Value::Integer(1));
+        assert_eq!(
+            pragma_value(&conn, "foreign_keys").await,
+            crate::Value::Integer(1)
+        );
         assert_eq!(
             pragma_value(&conn, "busy_timeout").await,
-            Value::Integer(5_000)
+            crate::Value::Integer(5_000)
         );
 
         conn.execute("CREATE TABLE widgets (id INTEGER PRIMARY KEY)", ())
             .await
             .unwrap();
-        assert_eq!(table_columns(&conn, "widgets").await.unwrap(), vec!["id"]);
-        assert!(table_columns(&conn, "missing_table")
+        assert_eq!(
+            crate::table_columns(&conn, "widgets").await.unwrap(),
+            vec!["id"]
+        );
+        assert!(crate::table_columns(&conn, "missing_table")
             .await
             .unwrap()
             .is_empty());
 
-        ensure_column(&conn, "widgets", "label", "label TEXT NOT NULL DEFAULT ''")
+        crate::ensure_column(&conn, "widgets", "label", "label TEXT NOT NULL DEFAULT ''")
             .await
             .unwrap();
-        ensure_column(&conn, "widgets", "label", "label TEXT NOT NULL DEFAULT ''")
+        crate::ensure_column(&conn, "widgets", "label", "label TEXT NOT NULL DEFAULT ''")
             .await
             .unwrap();
         assert_eq!(
-            table_columns(&conn, "widgets").await.unwrap(),
+            crate::table_columns(&conn, "widgets").await.unwrap(),
             vec!["id", "label"]
         );
     }
@@ -479,21 +494,25 @@ mod tests {
     async fn tempfile_table_columns_and_ensure_column_survive_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("store.sqlite3");
-        let db = Db::open(&path, DbConfig::default()).await.unwrap();
+        let db = crate::Db::open(&path, crate::DbConfig::default())
+            .await
+            .unwrap();
         let conn = db.connect().await.unwrap();
         conn.execute("CREATE TABLE records (key TEXT PRIMARY KEY)", ())
             .await
             .unwrap();
-        ensure_column(&conn, "records", "payload", "payload BLOB")
+        crate::ensure_column(&conn, "records", "payload", "payload BLOB")
             .await
             .unwrap();
         drop(conn);
         drop(db);
 
-        let reopened = Db::open(&path, DbConfig::default()).await.unwrap();
+        let reopened = crate::Db::open(&path, crate::DbConfig::default())
+            .await
+            .unwrap();
         let conn = reopened.connect().await.unwrap();
         assert_eq!(
-            table_columns(&conn, "records").await.unwrap(),
+            crate::table_columns(&conn, "records").await.unwrap(),
             vec!["key", "payload"]
         );
     }
@@ -502,7 +521,9 @@ mod tests {
     async fn concurrent_ensure_column_calls_are_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("store.sqlite3");
-        let db = Db::open(&path, DbConfig::default()).await.unwrap();
+        let db = crate::Db::open(&path, crate::DbConfig::default())
+            .await
+            .unwrap();
         db.connect()
             .await
             .unwrap()
@@ -511,7 +532,7 @@ mod tests {
             .unwrap();
 
         let workers = 8;
-        let barrier = Arc::new(tokio::sync::Barrier::new(workers));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(workers));
         let mut handles = Vec::new();
         for _ in 0..workers {
             let db = db.clone();
@@ -519,7 +540,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let conn = db.connect().await.unwrap();
                 barrier.wait().await;
-                ensure_column(&conn, "records", "payload", "payload BLOB").await
+                crate::ensure_column(&conn, "records", "payload", "payload BLOB").await
             }));
         }
 
@@ -527,7 +548,7 @@ mod tests {
             handle.await.unwrap().unwrap();
         }
         assert_eq!(
-            table_columns(&db.connect().await.unwrap(), "records")
+            crate::table_columns(&db.connect().await.unwrap(), "records")
                 .await
                 .unwrap(),
             vec!["key", "payload"]
@@ -538,7 +559,9 @@ mod tests {
     async fn read_only_connections_can_read_and_reject_writes() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("store.sqlite3");
-        let writable = Db::open(&path, DbConfig::default()).await.unwrap();
+        let writable = crate::Db::open(&path, crate::DbConfig::default())
+            .await
+            .unwrap();
         let conn = writable.connect().await.unwrap();
         conn.execute_batch(
             "CREATE TABLE records (value TEXT); INSERT INTO records VALUES ('seed');",
@@ -548,17 +571,20 @@ mod tests {
         drop(conn);
         drop(writable);
 
-        let read_only = Db::open(
+        let read_only = crate::Db::open(
             &path,
-            DbConfig {
+            crate::DbConfig {
                 read_only: true,
-                ..DbConfig::default()
+                ..crate::DbConfig::default()
             },
         )
         .await
         .unwrap();
         let conn = read_only.connect().await.unwrap();
-        assert_eq!(pragma_value(&conn, "query_only").await, Value::Integer(1));
+        assert_eq!(
+            pragma_value(&conn, "query_only").await,
+            crate::Value::Integer(1)
+        );
         let mut rows = conn.query("SELECT value FROM records", ()).await.unwrap();
         assert_eq!(
             rows.next()
@@ -586,7 +612,9 @@ mod tests {
         const MAX_ATTEMPTS_PER_WORKER: usize = 4;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("transaction-repro.sqlite3");
-        let db = Db::open(&path, DbConfig::default()).await.unwrap();
+        let db = crate::Db::open(&path, crate::DbConfig::default())
+            .await
+            .unwrap();
         let conn = db.connect().await.unwrap();
         conn.execute(
             "CREATE TABLE records (
@@ -603,8 +631,8 @@ mod tests {
         drop(conn);
 
         let workers = 2;
-        let start_barrier = Arc::new(tokio::sync::Barrier::new(workers));
-        let first_snapshot_barrier = Arc::new(tokio::sync::Barrier::new(workers));
+        let start_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(workers));
+        let first_snapshot_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(workers));
         let mut handles = Vec::new();
         for worker in 0..workers {
             let db = db.clone();
@@ -617,7 +645,7 @@ mod tests {
 
                 for attempt in 1..=MAX_ATTEMPTS_PER_WORKER {
                     let tx = conn
-                        .transaction_with_behavior(TransactionBehavior::Deferred)
+                        .transaction_with_behavior(crate::TransactionBehavior::Deferred)
                         .await
                         .unwrap_or_else(|error| {
                             panic!("worker {worker} attempt {attempt} begin failed: {error:?}")
@@ -725,7 +753,9 @@ mod tests {
     async fn immediate_transactions_serialize_without_busy_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("immediate-serialization.sqlite3");
-        let db = Db::open(&path, DbConfig::default()).await.unwrap();
+        let db = crate::Db::open(&path, crate::DbConfig::default())
+            .await
+            .unwrap();
         db.connect()
             .await
             .unwrap()
@@ -740,7 +770,7 @@ mod tests {
             .unwrap();
 
         let workers = 2;
-        let begin_barrier = Arc::new(tokio::sync::Barrier::new(workers));
+        let begin_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(workers));
         let mut handles = Vec::new();
         for worker in 0..workers {
             let db = db.clone();
@@ -752,7 +782,7 @@ mod tests {
                 // deferred snapshot.
                 begin_barrier.wait().await;
                 let tx = conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .transaction_with_behavior(crate::TransactionBehavior::Immediate)
                     .await
                     .unwrap_or_else(|error| {
                         panic!("worker {worker} BEGIN IMMEDIATE failed: {error:?}")

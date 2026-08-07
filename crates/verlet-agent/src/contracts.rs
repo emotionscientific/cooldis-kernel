@@ -1,14 +1,4 @@
-use crate::{VerletAgentError as VerletError, VerletResult};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use verlet_abi::{
-    AbiEffectBinding, AbiEffectKind, AbiEffectPort, AbiEventBinding, AbiEventPort, AbiEventValue,
-    AbiOperationContract, AbiPortValue, AbiSinkBinding, AbiSinkPort, AbiSourceBinding,
-    AbiSourcePort, AbiVfsWriteMode,
-};
-use verlet_runtime_contracts::{ThreadId, ThreadStatus};
+use sha2::Digest as _;
 
 pub const THREAD_CONTRACT_KIND: &str = "cooldis.thread-contract";
 pub const THREAD_CONTRACT_VERSION: u32 = 0;
@@ -27,7 +17,7 @@ pub const AGENT_CONTRACT_SOURCE_FORMAT: &str = LEGACY_AGENT_CONTRACT_SOURCE_FORM
 pub const AGENT_THREAD_DECLARATION_KIND: &str = LEGACY_AGENT_THREAD_DECLARATION_KIND;
 pub const AGENT_THREAD_HANDLE_KIND: &str = LEGACY_AGENT_THREAD_HANDLE_KIND;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadContractSource {
     pub format: ThreadContractSourceFormat,
     pub source: String,
@@ -42,7 +32,7 @@ impl ThreadContractSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadContractSourceFormat {
     #[default]
@@ -57,7 +47,7 @@ impl ThreadContractSourceFormat {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompiledThreadContract {
     pub kind: String,
     pub version: u32,
@@ -74,20 +64,20 @@ pub struct CompiledThreadContract {
     #[serde(default)]
     pub delegates: Vec<ThreadDelegateRequirement>,
     #[serde(default)]
-    pub runtime: BTreeMap<String, String>,
+    pub runtime: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 }
 
 impl CompiledThreadContract {
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         if !is_supported_contract_kind(&self.kind) {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletAgentError::RuntimeExecution(format!(
                 "thread contract kind must be {THREAD_CONTRACT_KIND}"
             )));
         }
         if self.version != THREAD_CONTRACT_VERSION {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletAgentError::RuntimeExecution(format!(
                 "thread contract version must be {THREAD_CONTRACT_VERSION}"
             )));
         }
@@ -116,59 +106,63 @@ impl CompiledThreadContract {
         Ok(())
     }
 
-    pub fn contract_hash(&self) -> VerletResult<String> {
+    pub fn contract_hash(&self) -> crate::VerletResult<String> {
         self.validate()?;
         let bytes = serde_json::to_vec(self).map_err(json_error)?;
         Ok(sha256_hex(&bytes))
     }
 
-    pub fn abi_projection(&self) -> VerletResult<AbiOperationContract> {
+    pub fn abi_projection(&self) -> crate::VerletResult<verlet_abi::AbiOperationContract> {
         self.validate()?;
-        Ok(AbiOperationContract {
+        Ok(verlet_abi::AbiOperationContract {
             registered_name: self.name.clone(),
             operation_name: "run_thread".to_string(),
             source_ports: self
                 .requires
                 .iter()
-                .map(|field| AbiSourcePort {
+                .map(|field| verlet_abi::AbiSourcePort {
                     name: field.name.clone(),
                     value: field.value.clone().into(),
-                    binding: AbiSourceBinding::InvocationInput,
+                    binding: verlet_abi::AbiSourceBinding::InvocationInput,
                     required: true,
                 })
                 .collect(),
             sink_ports: self
                 .ensures
                 .iter()
-                .map(|field| AbiSinkPort {
+                .map(|field| verlet_abi::AbiSinkPort {
                     name: field.name.clone(),
                     value: field.value.clone().into(),
-                    binding: AbiSinkBinding::InvocationOutput,
+                    binding: verlet_abi::AbiSinkBinding::InvocationOutput,
                     required: true,
                 })
                 .collect(),
             effect_ports: self
                 .effects
                 .iter()
-                .map(|effect| AbiEffectPort {
+                .map(|effect| verlet_abi::AbiEffectPort {
                     name: effect.name.clone(),
-                    kind: AbiEffectKind::VfsWrite {
-                        mode: AbiVfsWriteMode::WriteNew,
+                    kind: verlet_abi::AbiEffectKind::VfsWrite {
+                        mode: verlet_abi::AbiVfsWriteMode::WriteNew,
                     },
                     binding: match effect.binding.as_str() {
-                        "caller_bound" => AbiEffectBinding::CallerBoundPath { path: None },
-                        "operation_selected" => AbiEffectBinding::OperationSelectedPath {
-                            scope: effect.name.clone(),
-                        },
-                        _ => AbiEffectBinding::HostAllocatedPath,
+                        "caller_bound" => {
+                            verlet_abi::AbiEffectBinding::CallerBoundPath { path: None }
+                        }
+                        "operation_selected" => {
+                            verlet_abi::AbiEffectBinding::OperationSelectedPath {
+                                scope: effect.name.clone(),
+                            }
+                        }
+                        _ => verlet_abi::AbiEffectBinding::HostAllocatedPath,
                     },
                     required: false,
                 })
                 .collect(),
-            event_ports: vec![AbiEventPort {
+            event_ports: vec![verlet_abi::AbiEventPort {
                 name: "events".to_string(),
-                value: AbiEventValue::Jsonl,
-                binding: AbiEventBinding::InvocationEvents,
+                value: verlet_abi::AbiEventValue::Jsonl,
+                binding: verlet_abi::AbiEventBinding::InvocationEvents,
             }],
             required_capabilities: self
                 .capabilities
@@ -179,7 +173,7 @@ impl CompiledThreadContract {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadContractField {
     pub name: String,
     #[serde(rename = "kind", alias = "value")]
@@ -188,7 +182,7 @@ pub struct ThreadContractField {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadContractValueKind {
     Bytes,
@@ -196,7 +190,7 @@ pub enum ThreadContractValueKind {
     Json,
 }
 
-impl From<ThreadContractValueKind> for AbiPortValue {
+impl From<ThreadContractValueKind> for verlet_abi::AbiPortValue {
     fn from(value: ThreadContractValueKind) -> Self {
         match value {
             ThreadContractValueKind::Bytes => Self::Bytes,
@@ -206,13 +200,13 @@ impl From<ThreadContractValueKind> for AbiPortValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadCapabilityRequirement {
     pub kind: String,
     pub name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadEffectRequirement {
     pub name: String,
     pub kind: String,
@@ -221,14 +215,14 @@ pub struct ThreadEffectRequirement {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadDelegateRequirement {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadDeclaration {
     #[serde(default = "default_thread_declaration_kind")]
     pub kind: String,
@@ -236,14 +230,14 @@ pub struct ThreadDeclaration {
     pub version: u32,
     pub contract: ThreadContractReference,
     #[serde(default)]
-    pub inputs: Value,
+    pub inputs: serde_json::Value,
     pub initial_turn: ThreadInitialTurn,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub propagator: Option<ThreadPropagatorSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topology: Option<ThreadTopologyDeclaration>,
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl ThreadDeclaration {
@@ -252,22 +246,22 @@ impl ThreadDeclaration {
             kind: THREAD_DECLARATION_KIND.to_string(),
             version: THREAD_CONTRACT_VERSION,
             contract,
-            inputs: Value::Object(Default::default()),
+            inputs: serde_json::Value::Object(Default::default()),
             initial_turn,
             propagator: None,
             topology: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         if !is_supported_declaration_kind(&self.kind) {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletAgentError::RuntimeExecution(format!(
                 "thread declaration kind must be {THREAD_DECLARATION_KIND}"
             )));
         }
         if self.version != THREAD_CONTRACT_VERSION {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletAgentError::RuntimeExecution(format!(
                 "thread declaration version must be {THREAD_CONTRACT_VERSION}"
             )));
         }
@@ -276,7 +270,7 @@ impl ThreadDeclaration {
             propagator.validate()?;
         }
         if self.initial_turn.content.trim().is_empty() {
-            return Err(VerletError::RuntimeExecution(
+            return Err(crate::VerletAgentError::RuntimeExecution(
                 "thread declaration initial_turn.content cannot be empty".to_string(),
             ));
         }
@@ -284,7 +278,7 @@ impl ThreadDeclaration {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadContractReference {
     #[serde(
         default,
@@ -329,12 +323,12 @@ impl ThreadContractReference {
         }
     }
 
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         let populated = self.ref_path.is_some() as u8
             + self.inline.is_some() as u8
             + self.compiled.is_some() as u8;
         if populated != 1 {
-            return Err(VerletError::RuntimeExecution(
+            return Err(crate::VerletAgentError::RuntimeExecution(
                 "thread contract reference must set exactly one of ref_path, inline, or compiled"
                     .to_string(),
             ));
@@ -342,7 +336,7 @@ impl ThreadContractReference {
         if let Some(format) = &self.format
             && !is_supported_source_format(format)
         {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletAgentError::RuntimeExecution(format!(
                 "unsupported thread contract source format {format}"
             )));
         }
@@ -353,14 +347,14 @@ impl ThreadContractReference {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadInitialTurn {
     #[serde(default = "default_initial_turn_role")]
     pub role: String,
     pub content: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadPropagatorSelection {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,7 +386,7 @@ impl ThreadPropagatorSelection {
         }
     }
 
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         validate_name("thread propagator kind", &self.kind)?;
         if let Some(name) = &self.name {
             validate_name("thread propagator name", name)?;
@@ -410,24 +404,24 @@ impl ThreadInitialTurn {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadTopologyDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spawned_from: Option<ThreadId>,
+    pub spawned_from: Option<verlet_runtime_contracts::ThreadId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadReceiptSet {
     pub compile: String,
     pub spawn: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadHandle {
     pub kind: String,
     pub version: u32,
-    pub thread_id: ThreadId,
-    pub status: ThreadStatus,
+    pub thread_id: verlet_runtime_contracts::ThreadId,
+    pub status: verlet_runtime_contracts::ThreadStatus,
     pub propagator: ThreadPropagatorSelection,
     pub contract_hash: String,
     pub submitted_turn_id: String,
@@ -437,25 +431,24 @@ pub struct ThreadHandle {
 pub struct ThreadContractCompiler;
 
 impl ThreadContractCompiler {
-    pub fn compile(source: &ThreadContractSource) -> VerletResult<CompiledThreadContract> {
+    pub fn compile(source: &ThreadContractSource) -> crate::VerletResult<CompiledThreadContract> {
         match source.format {
             ThreadContractSourceFormat::MarkdownV0 => compile_markdown_v0(&source.source),
         }
     }
 }
 
-fn compile_markdown_v0(source: &str) -> VerletResult<CompiledThreadContract> {
+fn compile_markdown_v0(source: &str) -> crate::VerletResult<CompiledThreadContract> {
     let (frontmatter, body) = parse_frontmatter(source)?;
-    let name = frontmatter
-        .get("name")
-        .cloned()
-        .ok_or_else(|| VerletError::RuntimeExecution("thread contract missing name".to_string()))?;
+    let name = frontmatter.get("name").cloned().ok_or_else(|| {
+        crate::VerletAgentError::RuntimeExecution("thread contract missing name".to_string())
+    })?;
     let kind = frontmatter
         .get("kind")
         .map(String::as_str)
         .unwrap_or("thread");
     if !matches!(kind, "thread" | "agent") {
-        return Err(VerletError::RuntimeExecution(format!(
+        return Err(crate::VerletAgentError::RuntimeExecution(format!(
             "thread contract frontmatter kind must be thread, got {kind}"
         )));
     }
@@ -463,10 +456,12 @@ fn compile_markdown_v0(source: &str) -> VerletResult<CompiledThreadContract> {
         .get("version")
         .map(|value| value.parse::<u32>())
         .transpose()
-        .map_err(|err| VerletError::RuntimeExecution(format!("invalid thread version: {err}")))?
+        .map_err(|err| {
+            crate::VerletAgentError::RuntimeExecution(format!("invalid thread version: {err}"))
+        })?
         .unwrap_or(THREAD_CONTRACT_VERSION);
     if version != THREAD_CONTRACT_VERSION {
-        return Err(VerletError::RuntimeExecution(format!(
+        return Err(crate::VerletAgentError::RuntimeExecution(format!(
             "thread contract version must be {THREAD_CONTRACT_VERSION}"
         )));
     }
@@ -492,12 +487,16 @@ fn compile_markdown_v0(source: &str) -> VerletResult<CompiledThreadContract> {
     Ok(contract)
 }
 
-fn parse_frontmatter(source: &str) -> VerletResult<(BTreeMap<String, String>, &str)> {
+fn parse_frontmatter(
+    source: &str,
+) -> crate::VerletResult<(std::collections::BTreeMap<String, String>, &str)> {
     let trimmed = source.strip_prefix("---\n").ok_or_else(|| {
-        VerletError::RuntimeExecution("agent contract missing YAML-like frontmatter".to_string())
+        crate::VerletAgentError::RuntimeExecution(
+            "agent contract missing YAML-like frontmatter".to_string(),
+        )
     })?;
     let Some(end) = trimmed.find("\n---") else {
-        return Err(VerletError::RuntimeExecution(
+        return Err(crate::VerletAgentError::RuntimeExecution(
             "agent contract frontmatter is not closed".to_string(),
         ));
     };
@@ -506,14 +505,14 @@ fn parse_frontmatter(source: &str) -> VerletResult<(BTreeMap<String, String>, &s
     let body = trimmed[body_start..]
         .strip_prefix('\n')
         .unwrap_or(&trimmed[body_start..]);
-    let mut frontmatter = BTreeMap::new();
+    let mut frontmatter = std::collections::BTreeMap::new();
     for line in frontmatter_text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let Some((key, value)) = line.split_once(':') else {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletAgentError::RuntimeExecution(format!(
                 "invalid frontmatter line {line:?}"
             )));
         };
@@ -522,8 +521,8 @@ fn parse_frontmatter(source: &str) -> VerletResult<(BTreeMap<String, String>, &s
     Ok((frontmatter, body))
 }
 
-fn parse_sections(body: &str) -> BTreeMap<String, String> {
-    let mut sections = BTreeMap::new();
+fn parse_sections(body: &str) -> std::collections::BTreeMap<String, String> {
+    let mut sections = std::collections::BTreeMap::new();
     let mut current: Option<String> = None;
     let mut buffer = String::new();
 
@@ -602,7 +601,7 @@ fn parse_delegates(section: &str) -> Vec<ThreadDelegateRequirement> {
         .collect()
 }
 
-fn parse_runtime(section: &str) -> BTreeMap<String, String> {
+fn parse_runtime(section: &str) -> std::collections::BTreeMap<String, String> {
     bullet_items(section)
         .into_iter()
         .filter_map(|item| parse_pair(&item))
@@ -683,7 +682,7 @@ fn infer_effect_binding(description: &str) -> String {
     }
 }
 
-fn validate_name(label: &str, value: &str) -> VerletResult<()> {
+fn validate_name(label: &str, value: &str) -> crate::VerletResult<()> {
     let valid = !value.is_empty()
         && value
             .chars()
@@ -691,7 +690,7 @@ fn validate_name(label: &str, value: &str) -> VerletResult<()> {
     if valid {
         Ok(())
     } else {
-        Err(VerletError::RuntimeExecution(format!(
+        Err(crate::VerletAgentError::RuntimeExecution(format!(
             "{label} contains invalid characters: {value:?}"
         )))
     }
@@ -700,12 +699,12 @@ fn validate_name(label: &str, value: &str) -> VerletResult<()> {
 fn validate_unique_fields<'a>(
     label: &str,
     names: impl Iterator<Item = &'a str>,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     let mut seen = std::collections::BTreeSet::new();
     for name in names {
         validate_name(label, name)?;
         if !seen.insert(name.to_string()) {
-            return Err(VerletError::RuntimeExecution(format!(
+            return Err(crate::VerletAgentError::RuntimeExecution(format!(
                 "duplicate {label} field {name:?}"
             )));
         }
@@ -713,9 +712,9 @@ fn validate_unique_fields<'a>(
     Ok(())
 }
 
-fn validate_hash(label: &str, value: &str) -> VerletResult<()> {
+fn validate_hash(label: &str, value: &str) -> crate::VerletResult<()> {
     let Some(hash) = value.strip_prefix("sha256:") else {
-        return Err(VerletError::RuntimeExecution(format!(
+        return Err(crate::VerletAgentError::RuntimeExecution(format!(
             "{label} must start with sha256:"
         )));
     };
@@ -726,19 +725,19 @@ fn validate_hash(label: &str, value: &str) -> VerletResult<()> {
     if valid {
         Ok(())
     } else {
-        Err(VerletError::RuntimeExecution(format!(
+        Err(crate::VerletAgentError::RuntimeExecution(format!(
             "{label} must be a lowercase sha256 hash"
         )))
     }
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    let digest = sha2::Sha256::digest(bytes);
     format!("sha256:{digest:x}")
 }
 
-fn json_error(err: serde_json::Error) -> VerletError {
-    VerletError::RuntimeExecution(format!("thread contract JSON error: {err}"))
+fn json_error(err: serde_json::Error) -> crate::VerletAgentError {
+    crate::VerletAgentError::RuntimeExecution(format!("thread contract JSON error: {err}"))
 }
 
 fn default_initial_turn_role() -> String {

@@ -5,10 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
-async-trait = "0.1"
+async-trait = { workspace = true }
 verlet-runtime-contracts = { path = "../verlet-runtime-contracts" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
-uuid = { version = "1", features = ["serde", "v7"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+uuid = { workspace = true, features = ["serde", "v7"] }

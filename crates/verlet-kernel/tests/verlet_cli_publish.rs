@@ -1,20 +1,6 @@
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::thread;
-use uuid::Uuid;
-use verlet::{
-    ImportPackageSource, LocalAgentRegistry, LocalBlobRegistry, LocalOperationRegistry,
-    LocalSkillRegistry, OperationImportPlan, PublishOperationRequest, PublishedAgentRecord,
-    PublishedOperationBuild, PublishedOperationRecord, PublishedOperationSource,
-    RegisteredOperation, WasmOperationDefinition, WasmOperationManifest, WasmOperationValueKind,
-    render_openapi_import_artifact,
-};
+use sha2::Digest as _;
+use std::io::Read as _;
+use std::io::Write as _;
 
 const TEST_OPERATION_HASH: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -76,12 +62,12 @@ fn verlet_cli_import_help_is_canonical() {
 fn openapi_import_build_is_deterministic_and_publish_records_provenance() {
     let root = temp_dir("openapi-import-determinism");
     let package = write_openapi_import_package(&root, "https://api.example.com", "", "200");
-    let first_source = ImportPackageSource::load(&package).unwrap();
-    let first_plan = OperationImportPlan::from_package(&first_source).unwrap();
-    let first_artifact = render_openapi_import_artifact(&first_plan).unwrap();
-    let second_source = ImportPackageSource::load(&package).unwrap();
-    let second_plan = OperationImportPlan::from_package(&second_source).unwrap();
-    let second_artifact = render_openapi_import_artifact(&second_plan).unwrap();
+    let first_source = verlet::ImportPackageSource::load(&package).unwrap();
+    let first_plan = verlet::OperationImportPlan::from_package(&first_source).unwrap();
+    let first_artifact = verlet::render_openapi_import_artifact(&first_plan).unwrap();
+    let second_source = verlet::ImportPackageSource::load(&package).unwrap();
+    let second_plan = verlet::OperationImportPlan::from_package(&second_source).unwrap();
+    let second_artifact = verlet::render_openapi_import_artifact(&second_plan).unwrap();
     assert_eq!(first_artifact, second_artifact);
 
     let build = run_verlet(["import", "build", "--package", package.to_str().unwrap()]);
@@ -98,21 +84,21 @@ fn openapi_import_build_is_deterministic_and_publish_records_provenance() {
         registry_root.to_str().unwrap(),
     ]);
     assert!(publish.contains("published catalog"));
-    let record = LocalOperationRegistry::new(&registry_root)
+    let record = verlet::LocalOperationRegistry::new(&registry_root)
         .load_record("catalog")
         .unwrap();
     assert_eq!(
         record.active_artifact_hash,
-        format!("{:x}", Sha256::digest(first_artifact))
+        format!("{:x}", sha2::Sha256::digest(first_artifact))
     );
     assert!(matches!(
         record.source,
-        PublishedOperationSource::Import {
+        verlet::PublishedOperationSource::Import {
             spec_sha256,
             ..
         } if spec_sha256 == first_source.spec_sha256
     ));
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -124,43 +110,43 @@ async fn openapi_import_publish_gate_rejects_missing_network_and_secret_grants()
         "[auth]\nscheme = \"apiKey\"\nheader = \"x-api-key\"\nsecret = \"SEARCH_API_KEY\"\n",
         "200",
     );
-    let source = ImportPackageSource::load(&package).unwrap();
-    let plan = OperationImportPlan::from_package(&source).unwrap();
+    let source = verlet::ImportPackageSource::load(&package).unwrap();
+    let plan = verlet::OperationImportPlan::from_package(&source).unwrap();
     let artifact_path = root.join("catalog.wasm");
-    fs::write(
+    std::fs::write(
         &artifact_path,
-        render_openapi_import_artifact(&plan).unwrap(),
+        verlet::render_openapi_import_artifact(&plan).unwrap(),
     )
     .unwrap();
-    let registry = LocalOperationRegistry::new(root.join("operations"));
-    let request = |capability_grants| PublishOperationRequest {
+    let registry = verlet::LocalOperationRegistry::new(root.join("operations"));
+    let request = |capability_grants| verlet::PublishOperationRequest {
         name: "catalog".to_string(),
         artifact_path: artifact_path.clone(),
-        source: PublishedOperationSource::Import {
+        source: verlet::PublishedOperationSource::Import {
             manifest_path: package.clone(),
             spec_sha256: source.spec_sha256.clone(),
         },
         interface: None,
         capability_grants,
-        metadata: BTreeMap::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
 
     let missing_network = registry
-        .publish_artifact(request(BTreeSet::new()))
+        .publish_artifact(request(std::collections::BTreeSet::new()))
         .await
         .unwrap_err()
         .to_string();
     assert!(missing_network.contains("net.http:POST:https://api.example.com"));
 
     let missing_secret = registry
-        .publish_artifact(request(BTreeSet::from([
+        .publish_artifact(request(std::collections::BTreeSet::from([
             "net.http:POST:https://api.example.com".to_string(),
         ])))
         .await
         .unwrap_err()
         .to_string();
     assert!(missing_secret.contains("secret:SEARCH_API_KEY"));
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -216,7 +202,7 @@ fn openapi_import_publishes_and_runs_through_the_existing_cli_path() {
     assert!(output.contains("Verlet runtime"), "{output}");
     assert!(output.contains(r#""truncated":false"#), "{output}");
     server.join().unwrap();
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -248,7 +234,7 @@ fn openapi_import_returns_http_500_as_operation_output() {
     assert!(output.contains(r#""status":500"#), "{output}");
     assert!(output.contains("upstream"), "{output}");
     server.join().unwrap();
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -374,15 +360,15 @@ fn verlet_cli_init_creates_folder_first_agent_project() {
     assert!(coupling_refs_path.exists());
     assert!(operation_slot_path.exists());
 
-    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
     assert!(manifest.contains("name = \"release-verifier\""));
     assert!(manifest.contains("provider_ref = \"provider://local_offline\""));
     assert!(!manifest.contains("0000000000000000000000000000000000000000000000000000000000000000"));
-    let prompt = fs::read_to_string(&prompt_path).unwrap();
+    let prompt = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(prompt.contains("You are the release-verifier agent."));
-    let refs = fs::read_to_string(&refs_path).unwrap();
+    let refs = std::fs::read_to_string(&refs_path).unwrap();
     assert!(refs.contains("component-first"));
-    let coupling_refs = fs::read_to_string(&coupling_refs_path).unwrap();
+    let coupling_refs = std::fs::read_to_string(&coupling_refs_path).unwrap();
     assert!(coupling_refs.contains("std::queue.task"));
     assert!(coupling_refs.contains("std::context.spill"));
     assert!(coupling_refs.contains("channel_decision_required = true"));
@@ -435,11 +421,11 @@ fn verlet_cli_init_creates_folder_first_agent_project() {
 fn verlet_cli_agent_plan_publish_accepts_explicit_folder_first_context() {
     let workspace = temp_dir("agent-explicit-folder-context");
     let project = workspace.join("explicit-runner");
-    fs::create_dir_all(project.join("prompts")).unwrap();
+    std::fs::create_dir_all(project.join("prompts")).unwrap();
     let prompt_text = "You are the explicit folder-first runner.\n";
-    fs::write(project.join("prompts/system.md"), prompt_text).unwrap();
+    std::fs::write(project.join("prompts/system.md"), prompt_text).unwrap();
     let manifest_path = project.join("verlet.agent.toml");
-    fs::write(
+    std::fs::write(
         &manifest_path,
         r#"
 [agent]
@@ -516,18 +502,19 @@ budget_share = 0.75
         record.resolved_manifest["context"]["sources"][1]["budget_share"].as_f64(),
         Some(0.75)
     );
-    let (_prompt_record, published_prompt) = LocalBlobRegistry::new(workspace.join("blobs"))
-        .load_text_ref(prompt_ref)
-        .unwrap();
+    let (_prompt_record, published_prompt) =
+        verlet::LocalBlobRegistry::new(workspace.join("blobs"))
+            .load_text_ref(prompt_ref)
+            .unwrap();
     assert_eq!(published_prompt, prompt_text);
-    let _ = fs::remove_dir_all(workspace);
+    let _ = std::fs::remove_dir_all(workspace);
 }
 
 #[test]
 fn verlet_cli_blob_publish_is_idempotent() {
     let root = temp_dir("blob-publish-cli");
     let file = root.join("system.md");
-    fs::write(&file, "Prompt text for the model.\n").unwrap();
+    std::fs::write(&file, "Prompt text for the model.\n").unwrap();
     let registry_root = root.join("blobs");
 
     let first = run_verlet([
@@ -560,7 +547,7 @@ fn verlet_cli_blob_publish_is_idempotent() {
             .join(format!("sha256-{artifact}.json"))
             .exists()
     );
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -578,7 +565,7 @@ fn verlet_cli_agent_run_uses_registry_relative_blob_root() {
         project.to_str().unwrap(),
     ]);
     let manifest_path = project.join("verlet.agent.toml");
-    let prompt_text = fs::read_to_string(project.join("prompts/system.md")).unwrap();
+    let prompt_text = std::fs::read_to_string(project.join("prompts/system.md")).unwrap();
     assert!(prompt_text.contains("You are the smokey agent."));
 
     let publish = run_verlet([
@@ -602,7 +589,7 @@ fn verlet_cli_agent_run_uses_registry_relative_blob_root() {
         .declared
         .clone();
     let (_prompt_record, published_prompt) =
-        LocalBlobRegistry::new(agent_registry_root.join("blobs"))
+        verlet::LocalBlobRegistry::new(agent_registry_root.join("blobs"))
             .load_text_ref(&prompt_ref)
             .unwrap();
     assert_eq!(published_prompt, prompt_text);
@@ -620,7 +607,7 @@ fn verlet_cli_agent_run_uses_registry_relative_blob_root() {
     assert!(run.contains("manifest.compile.completed:"));
     assert!(run.contains("manifest.bind.completed:"));
 
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -639,7 +626,7 @@ fn verlet_cli_agent_init_out_toml_keeps_single_file_compatibility() {
     assert!(manifest_path.exists());
     assert!(!workspace.join("prompts").exists());
 
-    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
     assert!(manifest.contains("name = \"single-agent\""));
     assert!(manifest.contains("cooldis.agent-manifest"));
 }
@@ -747,7 +734,7 @@ Unicode description line.
     assert!(first.contains(&format!("ref skill://karl-skills@sha256:{first_hash}")));
     assert!(first.contains("floating skill://karl-skills"));
 
-    let record = LocalSkillRegistry::new(&registry_root)
+    let record = verlet::LocalSkillRegistry::new(&registry_root)
         .load_record("karl-skills")
         .unwrap();
     assert_eq!(record.active_artifact_hash, first_hash);
@@ -755,26 +742,26 @@ Unicode description line.
         record.package.render_index(),
         "frontmatter-skill — Uses declared metadata.\nplain — First plain description line.\n設計 — Unicode description line.\n"
     );
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn verlet_cli_skill_import_dry_run_and_publish_are_deterministic() {
     let root = temp_dir("skill-import-cli");
     let skill_dir = root.join("fixture-skill");
-    fs::create_dir_all(skill_dir.join("references")).unwrap();
-    fs::create_dir_all(skill_dir.join("assets")).unwrap();
-    fs::create_dir_all(skill_dir.join("scripts")).unwrap();
-    fs::write(
+    std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+    std::fs::create_dir_all(skill_dir.join("assets")).unwrap();
+    std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+    std::fs::write(
         skill_dir.join("SKILL.md"),
         "# Fixture Skill\n\nFixture description.\n",
     )
     .unwrap();
-    fs::write(skill_dir.join("references/guide.md"), "# Guide\n").unwrap();
-    fs::write(skill_dir.join("assets/icon.bin"), [0_u8, 1, 2, 3]).unwrap();
-    fs::write(skill_dir.join("scripts/check.py"), "print('check')\n").unwrap();
-    fs::write(skill_dir.join("hooks.json"), r#"{"hooks": []}"#).unwrap();
-    fs::write(skill_dir.join("README.md"), "not imported\n").unwrap();
+    std::fs::write(skill_dir.join("references/guide.md"), "# Guide\n").unwrap();
+    std::fs::write(skill_dir.join("assets/icon.bin"), [0_u8, 1, 2, 3]).unwrap();
+    std::fs::write(skill_dir.join("scripts/check.py"), "print('check')\n").unwrap();
+    std::fs::write(skill_dir.join("hooks.json"), r#"{"hooks": []}"#).unwrap();
+    std::fs::write(skill_dir.join("README.md"), "not imported\n").unwrap();
     let skill_registry = root.join("skills");
     let blob_registry = root.join("blobs");
 
@@ -800,8 +787,8 @@ fn verlet_cli_skill_import_dry_run_and_publish_are_deterministic() {
     assert!(!blob_registry.exists());
 
     let invalid_skill_dir = root.join("invalid-skill");
-    fs::create_dir_all(&invalid_skill_dir).unwrap();
-    fs::write(invalid_skill_dir.join("SKILL.md"), "").unwrap();
+    std::fs::create_dir_all(&invalid_skill_dir).unwrap();
+    std::fs::write(invalid_skill_dir.join("SKILL.md"), "").unwrap();
     let invalid_skill_registry = root.join("invalid-skills");
     let invalid_blob_registry = root.join("invalid-blobs");
     let failed_dry_run = run_verlet_failed([
@@ -847,18 +834,18 @@ fn verlet_cli_skill_import_dry_run_and_publish_are_deterministic() {
         skill_registry.join("records/fixture-skill.json").display()
     )));
     assert_eq!(
-        fs::read_dir(skill_registry.join("versions/fixture-skill"))
+        std::fs::read_dir(skill_registry.join("versions/fixture-skill"))
             .unwrap()
             .count(),
         1
     );
     assert_eq!(
-        fs::read_dir(blob_registry.join("records/artifact"))
+        std::fs::read_dir(blob_registry.join("records/artifact"))
             .unwrap()
             .count(),
         1
     );
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -977,7 +964,7 @@ fn verlet_cli_tool_source_add_list_show_and_remove_redacts_remote_mcp_auth() {
     assert!(list.contains(r#""type": "bearer_secret""#));
     assert!(!list.contains("demo"));
 
-    let sources: Vec<Value> = serde_json::from_str(&list).unwrap();
+    let sources: Vec<serde_json::Value> = serde_json::from_str(&list).unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0]["name"], "arcade");
     assert_eq!(sources[0]["transport"], "streamable_http");
@@ -996,7 +983,7 @@ fn verlet_cli_tool_source_add_list_show_and_remove_redacts_remote_mcp_auth() {
         "--state-home",
         state_home.to_str().unwrap(),
     ]);
-    let source: Value = serde_json::from_str(&show).unwrap();
+    let source: serde_json::Value = serde_json::from_str(&show).unwrap();
     assert_eq!(source["name"], "arcade");
     assert_eq!(source["auth"]["secret"], "arcade.api_key");
     assert_eq!(source["auth"]["value"]["redacted"], true);
@@ -1026,7 +1013,7 @@ fn verlet_cli_tool_source_add_list_show_and_remove_redacts_remote_mcp_auth() {
 
 #[test]
 fn verlet_cli_tool_build_gates_stateless_conversion() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-csv-profile");
 
     let build = run_verlet([
@@ -1070,14 +1057,14 @@ fn verlet_cli_tool_build_gates_stateless_conversion() {
     assert!(publish_stderr.contains("package proof gate"));
     assert!(publish_stderr.contains("--package"));
     assert!(
-        !LocalOperationRegistry::new(&registry_root)
+        !verlet::LocalOperationRegistry::new(&registry_root)
             .record_path("data")
             .unwrap()
             .exists()
     );
 
     let bad = temp_dir("stateful-conversion");
-    fs::write(
+    std::fs::write(
         bad.join("Cargo.toml"),
         r#"
 [package]
@@ -1093,8 +1080,8 @@ notify = "6"
 "#,
     )
     .unwrap();
-    fs::create_dir_all(bad.join("src")).unwrap();
-    fs::write(
+    std::fs::create_dir_all(bad.join("src")).unwrap();
+    std::fs::write(
         bad.join("src/lib.rs"),
         "#[unsafe(no_mangle)] pub extern \"C\" fn noop() {}\n",
     )
@@ -1121,7 +1108,7 @@ notify = "6"
 
 #[test]
 fn verlet_cli_tool_package_build_publish_and_persist_interface() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-csv-profile");
     let package = temp_dir("tool-package-csv");
     write_json_file(
@@ -1167,7 +1154,7 @@ fn verlet_cli_tool_package_build_publish_and_persist_interface() {
   ]
 }"#,
     );
-    fs::write(
+    std::fs::write(
         package.join("verlet.tool.toml"),
         format!(
             r#"
@@ -1292,13 +1279,13 @@ expect = "fixtures/basic.expect.json"
         "--registry-root",
         registry_root.to_str().unwrap(),
     ]);
-    let manuals: Vec<Value> = serde_json::from_str(&manual_json).unwrap();
+    let manuals: Vec<serde_json::Value> = serde_json::from_str(&manual_json).unwrap();
     assert_eq!(manuals[0]["tool_name"], "data");
     assert_eq!(manuals[0]["operation_name"], "csv_profile");
     assert_eq!(manuals[0]["generated"], false);
 
     let agent_manifest_path = package.join("vendor-risk-agent.verlet.agent.toml");
-    fs::write(
+    std::fs::write(
         &agent_manifest_path,
         format!(
             r#"
@@ -1353,7 +1340,7 @@ fn verlet_cli_rejects_user_authored_kernel_tool_packages() {
         &package.join("schemas/thread_spawn.output.json"),
         r#"{"type":"object","properties":{"thread_id":{"type":"string"}}}"#,
     );
-    fs::write(
+    std::fs::write(
         package.join("verlet.tool.toml"),
         r#"
 kind = "cooldis.tool"
@@ -1412,7 +1399,7 @@ stdout = "json"
 
 #[test]
 fn verlet_cli_tool_package_build_warns_on_generated_manuals() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-csv-profile");
     let package = temp_dir("tool-package-generated-manual");
     write_json_file(
@@ -1423,7 +1410,7 @@ fn verlet_cli_tool_package_build_warns_on_generated_manuals() {
         &package.join("schemas/csv_profile.output.json"),
         r#"{"type":"object","properties":{"rows":{"type":"integer"}}}"#,
     );
-    fs::write(
+    std::fs::write(
         package.join("verlet.tool.toml"),
         format!(
             r#"
@@ -1488,7 +1475,7 @@ stdout = "json"
 #[test]
 fn verlet_cli_tool_package_build_runs_internal_http_fixture() {
     let (base_url, server) = spawn_employee_server();
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-employee-lookup");
     let package = temp_dir("tool-package-employee");
     write_json_file(
@@ -1525,7 +1512,7 @@ fn verlet_cli_tool_package_build_runs_internal_http_fixture() {
         r#"{"employee_id":"ada","name":"Ada Lovelace","department":"Research","source_status":200}"#,
     );
     let origin = base_url;
-    fs::write(
+    std::fs::write(
         package.join("verlet.tool.toml"),
         format!(
             r#"
@@ -1590,7 +1577,7 @@ expect = "fixtures/ada.expect.json"
 fn verlet_cli_plans_publishes_lists_and_shows_agent_manifest() {
     let workspace = temp_dir("agent-manifest");
     let manifest_path = workspace.join("release-verifier.verlet.agent.toml");
-    fs::write(
+    std::fs::write(
         &manifest_path,
         format!(
             r#"
@@ -1649,7 +1636,7 @@ operation_ref = "op://tailcat@sha256:{TEST_OPERATION_HASH}"
     assert!(plan.contains("tools: 1"));
     assert!(plan.contains("[verified]"));
     assert!(
-        LocalAgentRegistry::new(&registry_root)
+        verlet::LocalAgentRegistry::new(&registry_root)
             .list_records()
             .unwrap()
             .is_empty()
@@ -1705,7 +1692,7 @@ operation_ref = "op://tailcat@sha256:{TEST_OPERATION_HASH}"
 fn verlet_cli_lists_and_diffs_immutable_agent_version_snapshots() {
     let workspace = temp_dir("agent-version-snapshots");
     let project = workspace.join("auditor");
-    fs::create_dir_all(project.join("prompts")).unwrap();
+    std::fs::create_dir_all(project.join("prompts")).unwrap();
     let manifest_path = project.join("verlet.agent.toml");
     let source = |version: &str, description: &str| {
         format!(
@@ -1721,8 +1708,8 @@ model_ref = "model://example-chat-model"
 "#,
         )
     };
-    fs::write(project.join("prompts/system.md"), "Audit every release.\n").unwrap();
-    fs::write(&manifest_path, source("1.0.0", "First snapshot.")).unwrap();
+    std::fs::write(project.join("prompts/system.md"), "Audit every release.\n").unwrap();
+    std::fs::write(&manifest_path, source("1.0.0", "First snapshot.")).unwrap();
     let registry_root = workspace.join("agents");
     let operation_registry_root = workspace.join("operations");
 
@@ -1735,7 +1722,7 @@ model_ref = "model://example-chat-model"
         "--operations-registry-root",
         operation_registry_root.to_str().unwrap(),
     ]);
-    fs::write(&manifest_path, source("2.0.0", "Second snapshot.")).unwrap();
+    std::fs::write(&manifest_path, source("2.0.0", "Second snapshot.")).unwrap();
     run_verlet([
         "agent",
         "publish",
@@ -1747,12 +1734,13 @@ model_ref = "model://example-chat-model"
     ]);
 
     for (version, published_at_ms) in [("1.0.0", 0_u64), ("2.0.0", 1_000_u64)] {
-        let path = LocalAgentRegistry::new(&registry_root)
+        let path = verlet::LocalAgentRegistry::new(&registry_root)
             .version_record_path("auditor", version)
             .unwrap();
-        let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        record["published_at_ms"] = Value::from(published_at_ms);
-        fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["published_at_ms"] = serde_json::Value::from(published_at_ms);
+        std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
     }
 
     let versions = run_verlet([
@@ -1778,7 +1766,7 @@ model_ref = "model://example-chat-model"
         "--registry-root",
         registry_root.to_str().unwrap(),
     ]);
-    let versions: Vec<Value> = serde_json::from_str(&versions_json).unwrap();
+    let versions: Vec<serde_json::Value> = serde_json::from_str(&versions_json).unwrap();
     assert_eq!(versions.len(), 2);
     assert_eq!(versions[0]["version"], "1.0.0");
     assert_eq!(versions[1]["version"], "2.0.0");
@@ -1822,7 +1810,7 @@ model_ref = "model://example-chat-model"
         "--registry-root",
         registry_root.to_str().unwrap(),
     ]);
-    let changes: Vec<Value> = serde_json::from_str(&diff_json).unwrap();
+    let changes: Vec<serde_json::Value> = serde_json::from_str(&diff_json).unwrap();
     assert!(changes.iter().any(|change| {
         change["path"] == "/identity/description" && change["kind"] == "changed"
     }));
@@ -1842,12 +1830,13 @@ model_ref = "model://example-chat-model"
     assert!(cross_form.contains("~ /context:"));
     assert!(cross_form.contains("+ /resources/0:"));
 
-    let legacy_path = LocalAgentRegistry::new(&registry_root)
+    let legacy_path = verlet::LocalAgentRegistry::new(&registry_root)
         .version_record_path("auditor", "1.0.0")
         .unwrap();
-    let mut legacy: Value = serde_json::from_slice(&fs::read(&legacy_path).unwrap()).unwrap();
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&legacy_path).unwrap()).unwrap();
     legacy.as_object_mut().unwrap().remove("authored_source");
-    fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    std::fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
     let failed = run_verlet_failed([
         "agent",
         "diff",
@@ -1875,13 +1864,13 @@ model_ref = "model://example-chat-model"
     ]);
     assert!(stderr(&missing_value).contains("--from requires a value"));
 
-    let invalid_timestamp_path = LocalAgentRegistry::new(&registry_root)
+    let invalid_timestamp_path = verlet::LocalAgentRegistry::new(&registry_root)
         .version_record_path("auditor", "2.0.0")
         .unwrap();
-    let mut invalid_timestamp: Value =
-        serde_json::from_slice(&fs::read(&invalid_timestamp_path).unwrap()).unwrap();
-    invalid_timestamp["published_at_ms"] = Value::from(u64::MAX);
-    fs::write(
+    let mut invalid_timestamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&invalid_timestamp_path).unwrap()).unwrap();
+    invalid_timestamp["published_at_ms"] = serde_json::Value::from(u64::MAX);
+    std::fs::write(
         &invalid_timestamp_path,
         serde_json::to_vec_pretty(&invalid_timestamp).unwrap(),
     )
@@ -1902,7 +1891,7 @@ model_ref = "model://example-chat-model"
 fn verlet_cli_agent_publish_resolve_ops_pins_unpinned_manifest_refs() {
     let workspace = temp_dir("agent-resolve-ops");
     let manifest_path = workspace.join("resolve-ops.verlet.agent.toml");
-    fs::write(
+    std::fs::write(
         &manifest_path,
         r#"
 # keep this comment across value rewrites
@@ -1965,7 +1954,7 @@ operation_ref = "op://analytics/export@latest"
     )));
     assert!(publish.contains("published agent://resolve-ops@0.1.0"));
 
-    let rewritten = fs::read_to_string(&manifest_path).unwrap();
+    let rewritten = std::fs::read_to_string(&manifest_path).unwrap();
     assert!(rewritten.contains("# keep this comment across value rewrites"));
     assert!(rewritten.contains(&format!("operation_ref = \"{tailcat_ref}\"")));
     assert!(rewritten.contains(&format!("operation_ref = \"{analytics_ref}\"")));
@@ -1981,7 +1970,7 @@ operation_ref = "op://analytics/export@latest"
 fn verlet_cli_agent_publish_unpinned_ops_without_resolve_hint_fails() {
     let workspace = temp_dir("agent-unpinned-op-hint");
     let manifest_path = workspace.join("unresolved.verlet.agent.toml");
-    fs::write(
+    std::fs::write(
         &manifest_path,
         r#"
 [agent]
@@ -2046,7 +2035,7 @@ id = "missing"
 command = "cat"
 operation_ref = "op://missing"
 "#;
-    fs::write(&manifest_path, source).unwrap();
+    std::fs::write(&manifest_path, source).unwrap();
     let registry_root = temp_dir("agent-resolve-ops-unknown-registry");
     let operation_registry_root = temp_dir("agent-resolve-ops-unknown-operation-registry");
     seed_operation_record(
@@ -2068,9 +2057,9 @@ operation_ref = "op://missing"
     ]);
     let err = stderr(&publish);
     assert!(err.contains("was not found in the local operation registry"));
-    assert_eq!(fs::read_to_string(&manifest_path).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), source);
     assert!(
-        LocalAgentRegistry::new(&registry_root)
+        verlet::LocalAgentRegistry::new(&registry_root)
             .list_records()
             .unwrap()
             .is_empty()
@@ -2118,7 +2107,7 @@ fn verlet_cli_tool_list_prints_records_and_empty_absent_root() {
 
 #[test]
 fn verlet_cli_flat_source_publish_is_refused_without_writing_record() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let registry_root = temp_dir("publish-source-refused");
 
@@ -2138,7 +2127,7 @@ fn verlet_cli_flat_source_publish_is_refused_without_writing_record() {
     assert!(err.contains("package proof gate"));
     assert!(err.contains("--package"));
     assert!(
-        !LocalOperationRegistry::new(&registry_root)
+        !verlet::LocalOperationRegistry::new(&registry_root)
             .record_path("tailcat")
             .unwrap()
             .exists()
@@ -2147,7 +2136,7 @@ fn verlet_cli_flat_source_publish_is_refused_without_writing_record() {
 
 #[test]
 fn verlet_cli_flat_bin_publish_is_refused_without_writing_record() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let registry_root = temp_dir("publish-bin-refused");
     let build_output = run_verlet([
@@ -2175,7 +2164,7 @@ fn verlet_cli_flat_bin_publish_is_refused_without_writing_record() {
     assert!(err.contains("package proof gate"));
     assert!(err.contains("--package"));
     assert!(
-        !LocalOperationRegistry::new(&registry_root)
+        !verlet::LocalOperationRegistry::new(&registry_root)
             .record_path("tailcat-bin")
             .unwrap()
             .exists()
@@ -2193,7 +2182,7 @@ fn verlet_cli_flat_publish_refusal_preserves_previous_active_record() {
     );
     let before = registry_record(&registry_root, "tailcat");
     let invalid_path = registry_root.join("invalid.wasm");
-    fs::write(&invalid_path, b"\0asm\x01\0\0\0\xff").unwrap();
+    std::fs::write(&invalid_path, b"\0asm\x01\0\0\0\xff").unwrap();
 
     let failed = run_verlet_failed([
         "tool",
@@ -2214,20 +2203,20 @@ fn verlet_cli_flat_publish_refusal_preserves_previous_active_record() {
 
 #[test]
 fn verlet_cli_registry_run_rejects_corrupt_or_mismatched_artifacts() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let registry_root = temp_dir("corrupt-blob");
     let mount = fixture_mount(&module_path);
 
     publish_vfs_tool_package(&registry_root, "tailcat");
 
-    let registry = LocalOperationRegistry::new(&registry_root);
+    let registry = verlet::LocalOperationRegistry::new(&registry_root);
     let record = registry.load_record("tailcat").unwrap();
     let blob_path = registry
         .blobs()
         .artifact_path(&record.active_artifact_hash)
         .unwrap();
-    fs::remove_file(&blob_path).unwrap();
+    std::fs::remove_file(&blob_path).unwrap();
     let missing = run_verlet_failed([
         "tool",
         "run",
@@ -2248,7 +2237,7 @@ fn verlet_cli_registry_run_rejects_corrupt_or_mismatched_artifacts() {
         .blobs()
         .artifact_path(&record.active_artifact_hash)
         .unwrap();
-    fs::write(&blob_path, b"corrupt").unwrap();
+    std::fs::write(&blob_path, b"corrupt").unwrap();
     let corrupt = run_verlet_failed([
         "tool",
         "run",
@@ -2267,14 +2256,14 @@ fn verlet_cli_registry_run_rejects_corrupt_or_mismatched_artifacts() {
     let mut record = registry.load_record("tailcat").unwrap();
     record.manifest.operations[0].name = "other".to_string();
     record.interface = None;
-    let registered = RegisteredOperation {
+    let registered = verlet::RegisteredOperation {
         name: record.name.clone(),
         manifest: record.manifest.clone(),
         capability_grants: record.capability_grants.clone(),
-        metadata: BTreeMap::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
     record.projections = registered.projections();
-    fs::write(
+    std::fs::write(
         registry.record_path("tailcat").unwrap(),
         serde_json::to_vec_pretty(&record).unwrap(),
     )
@@ -2315,12 +2304,12 @@ fn verlet_cli_registry_run_rejects_missing_record() {
 
 #[test]
 fn verlet_cli_flat_publish_config_file_is_refused() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let temp = temp_dir("config");
     let registry_root = temp.join("registry");
     let config_path = temp.join("verlet.json");
-    fs::write(
+    std::fs::write(
         &config_path,
         serde_json::json!({
             "name": "tailcat-config",
@@ -2339,7 +2328,7 @@ fn verlet_cli_flat_publish_config_file_is_refused() {
     assert!(stderr(&failed).contains("package proof gate"));
     assert!(stderr(&failed).contains("--package"));
     assert!(
-        !LocalOperationRegistry::new(&registry_root)
+        !verlet::LocalOperationRegistry::new(&registry_root)
             .record_path("tailcat-config")
             .unwrap()
             .exists()
@@ -2348,12 +2337,12 @@ fn verlet_cli_flat_publish_config_file_is_refused() {
 
 #[test]
 fn verlet_cli_flat_publish_discovered_config_file_is_refused() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let temp = temp_dir("config-discovery");
     let registry_root = temp.join("registry");
     let config_path = temp.join("verlet.json");
-    fs::write(
+    std::fs::write(
         &config_path,
         serde_json::json!({
             "name": "tailcat-discovered",
@@ -2369,15 +2358,18 @@ fn verlet_cli_flat_publish_discovered_config_file_is_refused() {
     assert!(stderr(&failed).contains("package proof gate"));
     assert!(stderr(&failed).contains("--package"));
     assert!(
-        !LocalOperationRegistry::new(&registry_root)
+        !verlet::LocalOperationRegistry::new(&registry_root)
             .record_path("tailcat-discovered")
             .unwrap()
             .exists()
     );
 }
 
-fn publish_vfs_tool_package(registry_root: &Path, name: &str) -> PublishedOperationRecord {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+fn publish_vfs_tool_package(
+    registry_root: &std::path::Path,
+    name: &str,
+) -> verlet::PublishedOperationRecord {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let package = temp_dir("vfs-tool-package");
     write_json_file(
@@ -2388,7 +2380,7 @@ fn publish_vfs_tool_package(registry_root: &Path, name: &str) -> PublishedOperat
         &package.join("schemas/bytes.output.json"),
         r#"{"type":"string"}"#,
     );
-    fs::write(
+    std::fs::write(
         package.join("verlet.tool.toml"),
         format!(
             r#"
@@ -2445,22 +2437,22 @@ stdout = "bytes"
     registry_record(registry_root, name)
 }
 
-fn temp_dir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("verlet-cli-{label}-{}", Uuid::now_v7()));
-    fs::create_dir_all(&path).unwrap();
+fn temp_dir(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("verlet-cli-{label}-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&path).unwrap();
     path
 }
 
-fn write_json_file(path: &Path, body: &str) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, body).unwrap();
+fn write_json_file(path: &std::path::Path, body: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
 }
 
-fn spawn_employee_server() -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+fn spawn_employee_server() -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
-    let handle = thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = [0u8; 2048];
         let read = stream.read(&mut request).unwrap();
@@ -2484,10 +2476,10 @@ fn spawn_openapi_import_server(
     status: u16,
     response_body: &'static str,
     expected_header: Option<&'static str>,
-) -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
-    let handle = thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = Vec::new();
         let mut buffer = [0_u8; 1024];
@@ -2535,12 +2527,12 @@ fn spawn_openapi_import_server(
 }
 
 fn write_openapi_import_package(
-    root: &Path,
+    root: &std::path::Path,
     base_url: &str,
     auth: &str,
     response_status: &str,
-) -> PathBuf {
-    fs::create_dir_all(root).unwrap();
+) -> std::path::PathBuf {
+    std::fs::create_dir_all(root).unwrap();
     let spec = serde_json::json!({
         "openapi": "3.0.3",
         "info": {"title": "Catalog", "version": "1"},
@@ -2563,7 +2555,7 @@ fn write_openapi_import_package(
                             }
                         }
                     },
-                    "responses": BTreeMap::from([(
+                    "responses": std::collections::BTreeMap::from([(
                         response_status,
                         serde_json::json!({"description": "response"})
                     )])
@@ -2572,10 +2564,10 @@ fn write_openapi_import_package(
         }
     });
     let spec_bytes = serde_json::to_vec_pretty(&spec).unwrap();
-    fs::write(root.join("openapi.json"), &spec_bytes).unwrap();
-    let spec_sha256 = format!("{:x}", Sha256::digest(&spec_bytes));
+    std::fs::write(root.join("openapi.json"), &spec_bytes).unwrap();
+    let spec_sha256 = format!("{:x}", sha2::Sha256::digest(&spec_bytes));
     let package = root.join("catalog.import.toml");
-    fs::write(
+    std::fs::write(
         &package,
         format!(
             "[import]\nname = \"catalog\"\nversion = \"1.0.0\"\ndescription = \"Catalog API\"\n\n[spec]\npath = \"openapi.json\"\nsha256 = {spec_sha256:?}\n\n{auth}\n[[operations]]\noperation_id = \"search\"\n"
@@ -2585,17 +2577,17 @@ fn write_openapi_import_package(
     package
 }
 
-fn fixture_mount(module_path: &Path) -> String {
+fn fixture_mount(module_path: &std::path::Path) -> String {
     format!(
         "/workspace={}",
         module_path.join("testdata").to_string_lossy()
     )
 }
 
-fn write_skill_fixture(package_dir: &Path, name: &str, body: &str) {
+fn write_skill_fixture(package_dir: &std::path::Path, name: &str, body: &str) {
     let dir = package_dir.join(name);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("SKILL.md"), body).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
 }
 
 fn skill_artifact_hash(output: &str) -> String {
@@ -2610,36 +2602,38 @@ fn output_line_suffix(output: &str, prefix: &str) -> String {
         .to_string()
 }
 
-fn registry_record(root: &Path, name: &str) -> PublishedOperationRecord {
-    LocalOperationRegistry::new(root).load_record(name).unwrap()
+fn registry_record(root: &std::path::Path, name: &str) -> verlet::PublishedOperationRecord {
+    verlet::LocalOperationRegistry::new(root)
+        .load_record(name)
+        .unwrap()
 }
 
 fn seed_operation_record(
-    root: &Path,
+    root: &std::path::Path,
     name: &str,
     artifact_hash: &str,
     operations: &[(&str, &[&str])],
-) -> PublishedOperationRecord {
-    let registry = LocalOperationRegistry::new(root);
-    let manifest = WasmOperationManifest {
+) -> verlet::PublishedOperationRecord {
+    let registry = verlet::LocalOperationRegistry::new(root);
+    let manifest = verlet::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
         operations: operations
             .iter()
             .enumerate()
-            .map(
-                |(index, (operation_name, required_capabilities))| WasmOperationDefinition {
+            .map(|(index, (operation_name, required_capabilities))| {
+                verlet::WasmOperationDefinition {
                     id: (index + 1) as u32,
                     name: (*operation_name).to_string(),
-                    input: WasmOperationValueKind::Text,
-                    output: WasmOperationValueKind::Text,
+                    input: verlet::WasmOperationValueKind::Text,
+                    output: verlet::WasmOperationValueKind::Text,
                     events: Default::default(),
                     mode: Default::default(),
                     required_capabilities: required_capabilities
                         .iter()
                         .map(|capability| (*capability).to_string())
                         .collect(),
-                },
-            )
+                }
+            })
             .collect(),
     };
     let capability_grants = operations
@@ -2649,14 +2643,14 @@ fn seed_operation_record(
                 .iter()
                 .map(|capability| (*capability).to_string())
         })
-        .collect::<BTreeSet<_>>();
-    let registered = RegisteredOperation {
+        .collect::<std::collections::BTreeSet<_>>();
+    let registered = verlet::RegisteredOperation {
         name: name.to_string(),
         manifest: manifest.clone(),
         capability_grants: capability_grants.clone(),
-        metadata: BTreeMap::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
-    let record = PublishedOperationRecord {
+    let record = verlet::PublishedOperationRecord {
         schema_version: 1,
         name: name.to_string(),
         active_artifact_hash: artifact_hash.to_string(),
@@ -2664,27 +2658,29 @@ fn seed_operation_record(
         projections: registered.projections(),
         interface: None,
         capability_grants,
-        metadata: BTreeMap::new(),
-        source: PublishedOperationSource::Kernel {
+        metadata: std::collections::BTreeMap::new(),
+        source: verlet::PublishedOperationSource::Kernel {
             package: "test".to_string(),
         },
-        build: PublishedOperationBuild {
-            artifact_path: PathBuf::from("<test>"),
+        build: verlet::PublishedOperationBuild {
+            artifact_path: std::path::PathBuf::from("<test>"),
             published_at_ms: 0,
         },
     };
     record.validate().unwrap();
     let record_path = registry.record_path(name).unwrap();
-    fs::create_dir_all(record_path.parent().unwrap()).unwrap();
-    fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+    std::fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
     let version_path = registry.version_record_path(name, artifact_hash).unwrap();
-    fs::create_dir_all(version_path.parent().unwrap()).unwrap();
-    fs::write(&version_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    std::fs::create_dir_all(version_path.parent().unwrap()).unwrap();
+    std::fs::write(&version_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
     record
 }
 
-fn agent_record(root: &Path, name: &str) -> PublishedAgentRecord {
-    LocalAgentRegistry::new(root).load_record(name).unwrap()
+fn agent_record(root: &std::path::Path, name: &str) -> verlet::PublishedAgentRecord {
+    verlet::LocalAgentRegistry::new(root)
+        .load_record(name)
+        .unwrap()
 }
 
 fn assert_no_command(output: &str, path: &[&str]) {
@@ -2698,11 +2694,11 @@ fn assert_no_command(output: &str, path: &[&str]) {
 }
 
 fn run_verlet<const N: usize>(args: [&str; N]) -> String {
-    run_verlet_command(Command::new(env!("CARGO_BIN_EXE_verlet")).args(args))
+    run_verlet_command(std::process::Command::new(env!("CARGO_BIN_EXE_verlet")).args(args))
 }
 
 fn run_verlet_with_env<const N: usize>(args: [&str; N], envs: &[(&str, &str)]) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_verlet"));
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
     command.args(args);
     for (key, value) in envs {
         command.env(key, value);
@@ -2711,11 +2707,11 @@ fn run_verlet_with_env<const N: usize>(args: [&str; N], envs: &[(&str, &str)]) -
 }
 
 fn run_verlet_with_stdin<const N: usize>(args: [&str; N], stdin: &str) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to spawn verlet cli");
     child
@@ -2734,8 +2730,11 @@ fn run_verlet_with_stdin<const N: usize>(args: [&str; N], stdin: &str) -> String
     String::from_utf8(output.stdout).expect("verlet output should be utf8")
 }
 
-fn run_verlet_failed_in_dir<const N: usize>(dir: &Path, args: [&str; N]) -> Output {
-    let output = Command::new(env!("CARGO_BIN_EXE_verlet"))
+fn run_verlet_failed_in_dir<const N: usize>(
+    dir: &std::path::Path,
+    args: [&str; N],
+) -> std::process::Output {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .current_dir(dir)
         .args(args)
         .output()
@@ -2749,7 +2748,7 @@ fn run_verlet_failed_in_dir<const N: usize>(dir: &Path, args: [&str; N]) -> Outp
     output
 }
 
-fn run_verlet_command(command: &mut Command) -> String {
+fn run_verlet_command(command: &mut std::process::Command) -> String {
     let output = command.output().expect("failed to run verlet cli");
     assert!(
         output.status.success(),
@@ -2760,8 +2759,8 @@ fn run_verlet_command(command: &mut Command) -> String {
     String::from_utf8(output.stdout).expect("verlet output should be utf8")
 }
 
-fn run_verlet_failed<const N: usize>(args: [&str; N]) -> Output {
-    let output = Command::new(env!("CARGO_BIN_EXE_verlet"))
+fn run_verlet_failed<const N: usize>(args: [&str; N]) -> std::process::Output {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .args(args)
         .output()
         .expect("failed to run verlet cli");
@@ -2774,10 +2773,10 @@ fn run_verlet_failed<const N: usize>(args: [&str; N]) -> Output {
     output
 }
 
-fn stderr(output: &Output) -> String {
+fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
 }
 
-fn stdout(output: &Output) -> String {
+fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }

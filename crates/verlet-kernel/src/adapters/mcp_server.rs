@@ -1,28 +1,19 @@
-use crate::{
-    CodexTuiCompletedTurn, CodexTuiConnectConfig, CodexTuiTestClient, VerletError, VerletResult,
-    default_verlet_daemon_socket_path,
-};
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
-use std::path::PathBuf;
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
-#[cfg(unix)]
-use tokio::net::UnixStream;
+use tokio::io::AsyncBufReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(Clone, Debug)]
 pub struct VerletMcpServerConfig {
-    pub daemon_socket: PathBuf,
-    pub request_timeout: Duration,
+    pub daemon_socket: std::path::PathBuf,
+    pub request_timeout: std::time::Duration,
 }
 
 impl Default for VerletMcpServerConfig {
     fn default() -> Self {
         Self {
-            daemon_socket: default_verlet_daemon_socket_path(),
-            request_timeout: Duration::from_secs(120),
+            daemon_socket: crate::default_verlet_daemon_socket_path(),
+            request_timeout: std::time::Duration::from_secs(120),
         }
     }
 }
@@ -31,23 +22,23 @@ pub async fn serve_mcp_stdio<R, W>(
     reader: R,
     writer: W,
     config: VerletMcpServerConfig,
-) -> VerletResult<()>
+) -> crate::VerletResult<()>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
 {
     let mut server = VerletMcpServer::new(config);
-    let mut lines = BufReader::new(reader).lines();
-    let mut writer = BufWriter::new(writer);
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let mut writer = tokio::io::BufWriter::new(writer);
 
     while let Some(line) = lines.next_line().await.map_err(mcp_io_error)? {
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<Value>(&line) {
+        let response = match serde_json::from_str::<serde_json::Value>(&line) {
             Ok(message) => server.handle_message(message).await,
             Err(err) => Some(error_response(
-                Value::Null,
+                serde_json::Value::Null,
                 -32700,
                 format!("invalid JSON-RPC message: {err}"),
                 None,
@@ -55,7 +46,7 @@ where
         };
         if let Some(response) = response {
             let payload = serde_json::to_string(&response).map_err(|err| {
-                VerletError::RuntimeFactory(format!("failed to encode MCP response: {err}"))
+                crate::VerletError::RuntimeFactory(format!("failed to encode MCP response: {err}"))
             })?;
             writer
                 .write_all(payload.as_bytes())
@@ -73,9 +64,9 @@ struct VerletMcpServer {
     config: VerletMcpServerConfig,
     initialize_seen: bool,
     initialized_seen: bool,
-    client_info: Option<Value>,
+    client_info: Option<serde_json::Value>,
     #[cfg(unix)]
-    daemon_client: Option<CodexTuiTestClient<UnixStream>>,
+    daemon_client: Option<crate::CodexTuiTestClient<tokio::net::UnixStream>>,
 }
 
 impl VerletMcpServer {
@@ -89,20 +80,23 @@ impl VerletMcpServer {
         }
     }
 
-    async fn handle_message(&mut self, message: Value) -> Option<Value> {
-        let Some(method) = message.get("method").and_then(Value::as_str) else {
+    async fn handle_message(&mut self, message: serde_json::Value) -> Option<serde_json::Value> {
+        let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
             return request_id(&message)
                 .map(|id| error_response(id, -32600, "JSON-RPC request missing method", None));
         };
         let id = request_id(&message);
-        let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+        let params = message
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
 
         if id.is_none() {
             self.handle_notification(method, params).await;
             return None;
         }
 
-        let id = id.unwrap_or(Value::Null);
+        let id = id.unwrap_or(serde_json::Value::Null);
         if method != "initialize" && method != "ping" && !self.initialize_seen {
             return Some(error_response(
                 id,
@@ -114,8 +108,8 @@ impl VerletMcpServer {
 
         let result = match method {
             "initialize" => self.initialize(params).await,
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+            "ping" => Ok(serde_json::json!({})),
+            "tools/list" => Ok(serde_json::json!({ "tools": tool_definitions() })),
             "tools/call" => self.call_tool(params).await,
             _ => Err(McpError::protocol(
                 -32601,
@@ -124,7 +118,7 @@ impl VerletMcpServer {
         };
 
         Some(match result {
-            Ok(result) => json!({
+            Ok(result) => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": result,
@@ -133,20 +127,23 @@ impl VerletMcpServer {
         })
     }
 
-    async fn handle_notification(&mut self, method: &str, _params: Value) {
+    async fn handle_notification(&mut self, method: &str, _params: serde_json::Value) {
         if method == "notifications/initialized" || method == "initialized" {
             self.initialized_seen = self.initialize_seen;
         }
     }
 
-    async fn initialize(&mut self, params: Value) -> Result<Value, McpError> {
+    async fn initialize(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
         let requested_protocol = params
             .get("protocolVersion")
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .unwrap_or(MCP_PROTOCOL_VERSION);
         self.client_info = params.get("clientInfo").cloned();
         self.initialize_seen = true;
-        Ok(json!({
+        Ok(serde_json::json!({
             "protocolVersion": negotiated_protocol_version(requested_protocol),
             "capabilities": {
                 "tools": {
@@ -162,7 +159,10 @@ impl VerletMcpServer {
         }))
     }
 
-    async fn call_tool(&mut self, params: Value) -> Result<Value, McpError> {
+    async fn call_tool(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
         let params: CallToolParams = from_value(params)?;
         let arguments = params.arguments.unwrap_or_default();
         let canonical_name = if let Some(suffix) = params.name.strip_prefix(concat!("cool", "dis_"))
@@ -212,25 +212,28 @@ impl VerletMcpServer {
 
         Ok(match result {
             Ok(value) => tool_result(value, false),
-            Err(err) => tool_result(json!({ "error": err }), true),
+            Err(err) => tool_result(serde_json::json!({ "error": err }), true),
         })
     }
 
-    async fn tool_daemon_status(&mut self) -> Result<Value, String> {
+    async fn tool_daemon_status(&mut self) -> Result<serde_json::Value, String> {
         let socket = self.config.daemon_socket.display().to_string();
         let client = self.client().await.map_err(|err| err.to_string())?;
         let models = client
             .model_list()
             .await
             .map_err(|err| format!("daemon model/list failed: {err}"))?;
-        Ok(json!({
+        Ok(serde_json::json!({
             "connected": true,
             "daemonSocket": socket,
             "models": models,
         }))
     }
 
-    async fn tool_thread_start(&mut self, args: Map<String, Value>) -> Result<Value, String> {
+    async fn tool_thread_start(
+        &mut self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let params = optional_thread_start_params(args)?;
         let thread = self
             .client()
@@ -238,13 +241,13 @@ impl VerletMcpServer {
             .thread_start(params)
             .await
             .map_err(|err| err.to_string())?;
-        Ok(json!({
+        Ok(serde_json::json!({
             "threadId": thread.id,
             "thread": thread.raw,
         }))
     }
 
-    async fn tool_thread_list(&mut self) -> Result<Value, String> {
+    async fn tool_thread_list(&mut self) -> Result<serde_json::Value, String> {
         self.client()
             .await?
             .thread_list()
@@ -252,7 +255,10 @@ impl VerletMcpServer {
             .map_err(|err| err.to_string())
     }
 
-    async fn tool_thread_read(&mut self, args: Map<String, Value>) -> Result<Value, String> {
+    async fn tool_thread_read(
+        &mut self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let params: ThreadReadArgs = from_map(args)?;
         self.client()
             .await?
@@ -261,7 +267,10 @@ impl VerletMcpServer {
             .map_err(|err| err.to_string())
     }
 
-    async fn tool_turn_start(&mut self, args: Map<String, Value>) -> Result<Value, String> {
+    async fn tool_turn_start(
+        &mut self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let params: TurnStartArgs = from_map(args)?;
         let timeout = timeout_from_ms(params.timeout_ms, self.config.request_timeout);
         let client = self.client().await?;
@@ -276,14 +285,17 @@ impl VerletMcpServer {
                 .map_err(|err| err.to_string())?;
             return Ok(completed_turn_json(completed, Some(turn.raw)));
         }
-        Ok(json!({
+        Ok(serde_json::json!({
             "threadId": params.thread_id,
             "turnId": turn.id,
             "turn": turn.raw,
         }))
     }
 
-    async fn tool_turn_wait(&mut self, args: Map<String, Value>) -> Result<Value, String> {
+    async fn tool_turn_wait(
+        &mut self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let params: TurnWaitArgs = from_map(args)?;
         let timeout = timeout_from_ms(params.timeout_ms, self.config.request_timeout);
         let completed = self
@@ -295,7 +307,10 @@ impl VerletMcpServer {
         Ok(completed_turn_json(completed, None))
     }
 
-    async fn tool_turn_interrupt(&mut self, args: Map<String, Value>) -> Result<Value, String> {
+    async fn tool_turn_interrupt(
+        &mut self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let params: TurnInterruptArgs = from_map(args)?;
         self.client()
             .await?
@@ -304,7 +319,10 @@ impl VerletMcpServer {
             .map_err(|err| err.to_string())
     }
 
-    async fn tool_prompt(&mut self, args: Map<String, Value>) -> Result<Value, String> {
+    async fn tool_prompt(
+        &mut self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let params: PromptArgs = from_map(args)?;
         let timeout = timeout_from_ms(params.timeout_ms, self.config.request_timeout);
         let thread_params = optional_thread_start_params(params.thread.unwrap_or_default())?;
@@ -321,7 +339,7 @@ impl VerletMcpServer {
             .wait_for_turn_completed(&thread.id, &turn.id, timeout)
             .await
             .map_err(|err| err.to_string())?;
-        Ok(json!({
+        Ok(serde_json::json!({
             "threadId": completed.thread_id,
             "turnId": completed.turn_id,
             "assistantText": completed.assistant_text,
@@ -331,28 +349,31 @@ impl VerletMcpServer {
         }))
     }
 
-    async fn tool_command_exec(&mut self, args: Map<String, Value>) -> Result<Value, String> {
+    async fn tool_command_exec(
+        &mut self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let params: CommandExecArgs = from_map(args)?;
         if params.command.is_empty() {
             return Err("command must contain at least one argv item".to_string());
         }
-        let mut request = json!({
+        let mut request = serde_json::json!({
             "command": params.command,
             "tty": false,
             "streamStdin": false,
             "streamStdoutStderr": false,
         });
         if let Some(cwd) = params.cwd {
-            request["cwd"] = json!(cwd);
+            request["cwd"] = serde_json::json!(cwd);
         }
         if let Some(timeout_ms) = params.timeout_ms {
-            request["timeoutMs"] = json!(timeout_ms);
+            request["timeoutMs"] = serde_json::json!(timeout_ms);
         }
         if let Some(output_bytes_cap) = params.output_bytes_cap {
-            request["outputBytesCap"] = json!(output_bytes_cap);
+            request["outputBytesCap"] = serde_json::json!(output_bytes_cap);
         }
         if let Some(env) = params.env {
-            request["env"] = json!(env);
+            request["env"] = serde_json::json!(env);
         }
         self.client()
             .await?
@@ -364,23 +385,25 @@ impl VerletMcpServer {
     async fn tool_capsule_binding(
         &mut self,
         method: &str,
-        args: Map<String, Value>,
-    ) -> Result<Value, String> {
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         self.client()
             .await?
-            .request(method, Value::Object(args))
+            .request(method, serde_json::Value::Object(args))
             .await
             .map_err(|err| err.to_string())
     }
 
     #[cfg(unix)]
-    async fn client(&mut self) -> Result<&mut CodexTuiTestClient<UnixStream>, String> {
+    async fn client(
+        &mut self,
+    ) -> Result<&mut crate::CodexTuiTestClient<tokio::net::UnixStream>, String> {
         if self.daemon_client.is_none() {
-            let mut client = CodexTuiTestClient::connect_unix(
+            let mut client = crate::CodexTuiTestClient::connect_unix(
                 self.config.daemon_socket.clone(),
-                CodexTuiConnectConfig {
+                crate::CodexTuiConnectConfig {
                     client_name: "verlet-mcp-server".to_string(),
-                    ..CodexTuiConnectConfig::default()
+                    ..crate::CodexTuiConnectConfig::default()
                 },
             )
             .await
@@ -399,14 +422,14 @@ impl VerletMcpServer {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct CallToolParams {
     name: String,
     #[serde(default)]
-    arguments: Option<Map<String, Value>>,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadReadArgs {
     thread_id: String,
@@ -414,7 +437,7 @@ struct ThreadReadArgs {
     include_turns: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurnStartArgs {
     thread_id: String,
@@ -425,7 +448,7 @@ struct TurnStartArgs {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurnWaitArgs {
     thread_id: String,
@@ -434,24 +457,24 @@ struct TurnWaitArgs {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurnInterruptArgs {
     thread_id: String,
     turn_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PromptArgs {
     message: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
     #[serde(default)]
-    thread: Option<Map<String, Value>>,
+    thread: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandExecArgs {
     command: Vec<String>,
@@ -469,7 +492,7 @@ struct CommandExecArgs {
 struct McpError {
     code: i64,
     message: String,
-    data: Option<Value>,
+    data: Option<serde_json::Value>,
 }
 
 impl McpError {
@@ -482,21 +505,23 @@ impl McpError {
     }
 }
 
-fn from_value<T>(value: Value) -> Result<T, McpError>
+fn from_value<T>(value: serde_json::Value) -> Result<T, McpError>
 where
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> serde::Deserialize<'de>,
 {
     serde_json::from_value(value).map_err(|err| McpError::protocol(-32602, err.to_string()))
 }
 
-fn from_map<T>(map: Map<String, Value>) -> Result<T, String>
+fn from_map<T>(map: serde_json::Map<String, serde_json::Value>) -> Result<T, String>
 where
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> serde::Deserialize<'de>,
 {
-    serde_json::from_value(Value::Object(map)).map_err(|err| err.to_string())
+    serde_json::from_value(serde_json::Value::Object(map)).map_err(|err| err.to_string())
 }
 
-fn optional_thread_start_params(args: Map<String, Value>) -> Result<Value, String> {
+fn optional_thread_start_params(
+    args: serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     let allowed = [
         "cwd",
         "model",
@@ -511,7 +536,7 @@ fn optional_thread_start_params(args: Map<String, Value>) -> Result<Value, Strin
         "capsuleBindings",
         "capsule_bindings",
     ];
-    let mut output = Map::new();
+    let mut output = serde_json::Map::new();
     for (key, value) in args {
         if !allowed.contains(&key.as_str()) {
             return Err(format!("unknown thread start argument `{key}`"));
@@ -525,15 +550,20 @@ fn optional_thread_start_params(args: Map<String, Value>) -> Result<Value, Strin
         };
         output.insert(key.to_string(), value);
     }
-    Ok(Value::Object(output))
+    Ok(serde_json::Value::Object(output))
 }
 
-fn timeout_from_ms(timeout_ms: Option<u64>, default: Duration) -> Duration {
-    timeout_ms.map(Duration::from_millis).unwrap_or(default)
+fn timeout_from_ms(timeout_ms: Option<u64>, default: std::time::Duration) -> std::time::Duration {
+    timeout_ms
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(default)
 }
 
-fn completed_turn_json(completed: CodexTuiCompletedTurn, submitted_turn: Option<Value>) -> Value {
-    json!({
+fn completed_turn_json(
+    completed: crate::CodexTuiCompletedTurn,
+    submitted_turn: Option<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
         "threadId": completed.thread_id,
         "turnId": completed.turn_id,
         "assistantText": completed.assistant_text,
@@ -542,7 +572,7 @@ fn completed_turn_json(completed: CodexTuiCompletedTurn, submitted_turn: Option<
     })
 }
 
-fn request_id(message: &Value) -> Option<Value> {
+fn request_id(message: &serde_json::Value) -> Option<serde_json::Value> {
     message.get("id").cloned()
 }
 
@@ -553,23 +583,28 @@ fn negotiated_protocol_version(requested: &str) -> &str {
     }
 }
 
-fn error_response(id: Value, code: i64, message: impl Into<String>, data: Option<Value>) -> Value {
-    let mut error = json!({
+fn error_response(
+    id: serde_json::Value,
+    code: i64,
+    message: impl Into<String>,
+    data: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut error = serde_json::json!({
         "code": code,
         "message": message.into(),
     });
     if let Some(data) = data {
         error["data"] = data;
     }
-    json!({
+    serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
         "error": error,
     })
 }
 
-fn tool_result(value: Value, is_error: bool) -> Value {
-    json!({
+fn tool_result(value: serde_json::Value, is_error: bool) -> serde_json::Value {
+    serde_json::json!({
         "content": [
             {
                 "type": "text",
@@ -581,7 +616,7 @@ fn tool_result(value: Value, is_error: bool) -> Value {
     })
 }
 
-fn tool_definitions() -> Vec<Value> {
+fn tool_definitions() -> Vec<serde_json::Value> {
     vec![
         tool(
             "verlet_daemon_status",
@@ -768,8 +803,13 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> Value {
-    json!({
+fn tool(
+    name: &str,
+    description: &str,
+    input_schema: serde_json::Value,
+    read_only: bool,
+) -> serde_json::Value {
+    serde_json::json!({
         "name": name,
         "title": name,
         "description": description,
@@ -782,50 +822,56 @@ fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> 
     })
 }
 
-fn schema(properties: Vec<(&'static str, Value)>, required: Vec<&'static str>) -> Value {
-    let mut props = Map::new();
+fn schema(
+    properties: Vec<(&'static str, serde_json::Value)>,
+    required: Vec<&'static str>,
+) -> serde_json::Value {
+    let mut props = serde_json::Map::new();
     for (key, value) in properties {
         props.insert(key.to_string(), value);
     }
-    json!({
+    serde_json::json!({
         "type": "object",
         "properties": props,
         "required": required,
     })
 }
 
-fn string_prop(description: &'static str, text: &'static str) -> (&'static str, Value) {
+fn string_prop(description: &'static str, text: &'static str) -> (&'static str, serde_json::Value) {
     (
         description,
-        json!({ "type": "string", "description": text }),
+        serde_json::json!({ "type": "string", "description": text }),
     )
 }
 
-fn bool_prop(description: &'static str, text: &'static str) -> (&'static str, Value) {
+fn bool_prop(description: &'static str, text: &'static str) -> (&'static str, serde_json::Value) {
     (
         description,
-        json!({ "type": "boolean", "description": text }),
+        serde_json::json!({ "type": "boolean", "description": text }),
     )
 }
 
-fn uint_prop(description: &'static str, text: &'static str) -> (&'static str, Value) {
+fn uint_prop(description: &'static str, text: &'static str) -> (&'static str, serde_json::Value) {
     (
         description,
-        json!({ "type": "integer", "minimum": 0, "description": text }),
+        serde_json::json!({ "type": "integer", "minimum": 0, "description": text }),
     )
 }
 
-fn object_prop(description: &'static str, text: &'static str) -> (&'static str, Value) {
+fn object_prop(description: &'static str, text: &'static str) -> (&'static str, serde_json::Value) {
     (
         description,
-        json!({ "type": "object", "description": text }),
+        serde_json::json!({ "type": "object", "description": text }),
     )
 }
 
-fn array_string_prop(description: &'static str, text: &'static str) -> (&'static str, Value) {
+fn array_string_prop(
+    description: &'static str,
+    text: &'static str,
+) -> (&'static str, serde_json::Value) {
     (
         description,
-        json!({
+        serde_json::json!({
             "type": "array",
             "items": { "type": "string" },
             "description": text,
@@ -833,8 +879,8 @@ fn array_string_prop(description: &'static str, text: &'static str) -> (&'static
     )
 }
 
-fn mcp_io_error(err: std::io::Error) -> VerletError {
-    VerletError::RuntimeFactory(format!("MCP stdio I/O failed: {err}"))
+fn mcp_io_error(err: std::io::Error) -> crate::VerletError {
+    crate::VerletError::RuntimeFactory(format!("MCP stdio I/O failed: {err}"))
 }
 
 #[cfg(test)]

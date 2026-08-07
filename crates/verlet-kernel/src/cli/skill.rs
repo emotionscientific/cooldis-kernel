@@ -1,8 +1,6 @@
 //! The `skill` subcommand family.
 
-use super::*;
-
-pub(super) async fn run_skill(mut args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_skill(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -19,20 +17,24 @@ pub(super) async fn run_skill(mut args: Vec<OsString>) -> VerletResult<()> {
         match subcommand.to_string_lossy().as_ref() {
             "publish" => print_skill_publish_help(),
             "import" => print_skill_import_help(),
-            other => return Err(usage_error(format!("unknown skill subcommand {other:?}"))),
+            other => {
+                return Err(crate::cli::usage_error(format!(
+                    "unknown skill subcommand {other:?}"
+                )));
+            }
         }
         return Ok(());
     }
     match subcommand.to_string_lossy().as_ref() {
         "publish" => skill_publish(args).await,
         "import" => skill_import(args).await,
-        _ => Err(usage_error(format!(
+        _ => Err(crate::cli::usage_error(format!(
             "unknown skill subcommand {subcommand:?}"
         ))),
     }
 }
 
-pub(super) async fn skill_publish(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn skill_publish(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_skill_publish_args(args)?;
     if options.help {
         print_skill_publish_help();
@@ -40,10 +42,10 @@ pub(super) async fn skill_publish(args: Vec<OsString>) -> VerletResult<()> {
     }
     let package_dir = options
         .package_dir
-        .ok_or_else(|| usage_error("skill publish requires <dir>"))?;
+        .ok_or_else(|| crate::cli::usage_error("skill publish requires <dir>"))?;
     let registry_root = skill_registry_root(options.registry_root);
-    let registry = LocalSkillRegistry::new(registry_root);
-    let record = registry.publish_directory(PublishSkillPackageRequest {
+    let registry = crate::LocalSkillRegistry::new(registry_root);
+    let record = registry.publish_directory(crate::PublishSkillPackageRequest {
         package_dir,
         name: options.name,
     })?;
@@ -58,7 +60,7 @@ pub(super) async fn skill_publish(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn skill_import(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn skill_import(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_skill_import_args(args)?;
     if options.help {
         print_skill_import_help();
@@ -66,21 +68,21 @@ pub(super) async fn skill_import(args: Vec<OsString>) -> VerletResult<()> {
     }
     let skill_dir = options
         .skill_dir
-        .ok_or_else(|| usage_error("skill import requires <dir>"))?;
+        .ok_or_else(|| crate::cli::usage_error("skill import requires <dir>"))?;
     let skill_registry_root = skill_registry_root(options.registry_root);
     let blob_registry_root = options
         .blob_registry_root
-        .unwrap_or_else(default_blob_registry_root);
-    let plan = SkillImportPlan::from_directory(&skill_dir, options.name.as_deref())?;
+        .unwrap_or_else(crate::default_blob_registry_root);
+    let plan = crate::SkillImportPlan::from_directory(&skill_dir, options.name.as_deref())?;
 
     let record_path = if options.dry_run {
         println!("dry-run {}", plan.package.name);
         None
     } else {
-        let skill_registry = LocalSkillRegistry::new(&skill_registry_root);
+        let skill_registry = crate::LocalSkillRegistry::new(&skill_registry_root);
         let published = plan.publish(
             &skill_registry,
-            &LocalBlobRegistry::new(&blob_registry_root),
+            &crate::LocalBlobRegistry::new(&blob_registry_root),
         )?;
         println!("published {}", published.skill.name);
         Some(skill_registry.record_path(&published.skill.name)?)
@@ -116,23 +118,25 @@ pub(super) async fn skill_import(args: Vec<OsString>) -> VerletResult<()> {
 
 #[derive(Debug)]
 pub(super) struct SkillPublishArgs {
-    package_dir: Option<PathBuf>,
+    package_dir: Option<std::path::PathBuf>,
     name: Option<String>,
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct SkillImportArgs {
-    skill_dir: Option<PathBuf>,
+    skill_dir: Option<std::path::PathBuf>,
     name: Option<String>,
-    registry_root: Option<PathBuf>,
-    blob_registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
+    blob_registry_root: Option<std::path::PathBuf>,
     dry_run: bool,
     help: bool,
 }
 
-pub(super) fn parse_skill_publish_args(args: Vec<OsString>) -> VerletResult<SkillPublishArgs> {
+pub(super) fn parse_skill_publish_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<SkillPublishArgs> {
     let mut package_dir = None;
     let mut name = None;
     let mut registry_root = None;
@@ -141,20 +145,29 @@ pub(super) fn parse_skill_publish_args(args: Vec<OsString>) -> VerletResult<Skil
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--name" => name = Some(required_string_value(&mut iter, "--name")?),
+            "--name" => {
+                name = Some(crate::cli::tool::required_string_value(
+                    &mut iter, "--name",
+                )?)
+            }
             "--registry-root" => {
-                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+                registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--registry-root",
+                )?)
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown skill publish argument {other:?}"
                 )));
             }
             _ => {
                 if package_dir.is_some() {
-                    return Err(usage_error("skill publish accepts exactly one <dir>"));
+                    return Err(crate::cli::usage_error(
+                        "skill publish accepts exactly one <dir>",
+                    ));
                 }
-                package_dir = Some(PathBuf::from(arg));
+                package_dir = Some(std::path::PathBuf::from(arg));
             }
         }
     }
@@ -166,7 +179,9 @@ pub(super) fn parse_skill_publish_args(args: Vec<OsString>) -> VerletResult<Skil
     })
 }
 
-pub(super) fn parse_skill_import_args(args: Vec<OsString>) -> VerletResult<SkillImportArgs> {
+pub(super) fn parse_skill_import_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<SkillImportArgs> {
     let mut skill_dir = None;
     let mut name = None;
     let mut registry_root = None;
@@ -177,24 +192,36 @@ pub(super) fn parse_skill_import_args(args: Vec<OsString>) -> VerletResult<Skill
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--name" => name = Some(required_string_value(&mut iter, "--name")?),
+            "--name" => {
+                name = Some(crate::cli::tool::required_string_value(
+                    &mut iter, "--name",
+                )?)
+            }
             "--registry-root" => {
-                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+                registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--registry-root",
+                )?)
             }
             "--blob-registry-root" => {
-                blob_registry_root = Some(required_path_value(&mut iter, "--blob-registry-root")?)
+                blob_registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--blob-registry-root",
+                )?)
             }
             "--dry-run" => dry_run = true,
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown skill import argument {other:?}"
                 )));
             }
             _ => {
                 if skill_dir.is_some() {
-                    return Err(usage_error("skill import accepts exactly one <dir>"));
+                    return Err(crate::cli::usage_error(
+                        "skill import accepts exactly one <dir>",
+                    ));
                 }
-                skill_dir = Some(PathBuf::from(arg));
+                skill_dir = Some(std::path::PathBuf::from(arg));
             }
         }
     }
@@ -208,11 +235,11 @@ pub(super) fn parse_skill_import_args(args: Vec<OsString>) -> VerletResult<Skill
     })
 }
 
-pub(super) fn skill_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
+pub(super) fn skill_registry_root(registry_root: Option<std::path::PathBuf>) -> std::path::PathBuf {
     registry_root.unwrap_or_else(|| {
-        let legacy = PathBuf::from(concat!(".", "cool", "dis/skills"));
-        if Path::new(".verlet").exists() || !legacy.exists() {
-            PathBuf::from(".verlet/skills")
+        let legacy = std::path::PathBuf::from(concat!(".", "cool", "dis/skills"));
+        if std::path::Path::new(".verlet").exists() || !legacy.exists() {
+            std::path::PathBuf::from(".verlet/skills")
         } else {
             eprintln!(
                 "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",

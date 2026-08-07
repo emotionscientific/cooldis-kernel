@@ -4,19 +4,6 @@
 //! but their artifact bytes are the canonical serialized interface contract and
 //! execution is dispatched back into kernel code by record and operation name.
 
-use super::operation_store::PublishInterfaceOperationRequest;
-use super::tool_package::TOOL_MANUAL_SCHEMA_VERSION;
-use crate::{
-    LocalOperationRegistry, PublishedOperationRecord, PublishedOperationSource,
-    ToolCommandContract, ToolInterfaceContract, ToolManualExitStatus, ToolOperationInterface,
-    ToolOperationManual, ToolPackageIdentity, ToolRuntimeContract, VerletError, VerletResult,
-    WasmOperationDefinition, WasmOperationEventKind, WasmOperationManifest, WasmOperationMode,
-    WasmOperationValueKind, wasm_sha256,
-};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-
 pub const VERLET_THREADS_PACKAGE: &str = "cooldis-threads";
 pub const VERLET_SCHEDULE_PACKAGE: &str = "cooldis-schedule";
 pub const VERLET_PROCESS_PACKAGE: &str = "cooldis-process";
@@ -50,15 +37,15 @@ pub const KERNEL_RUNTIME_KIND: &str = "kernel";
 pub const OPERATION_METADATA_RUNTIME_KIND: &str = "cooldis.runtime.kind";
 
 pub fn ensure_verlet_threads_published(
-    registry_root: Option<&Path>,
-) -> VerletResult<Option<PublishedOperationRecord>> {
+    registry_root: Option<&std::path::Path>,
+) -> crate::VerletResult<Option<crate::PublishedOperationRecord>> {
     let Some(registry_root) = registry_root else {
         eprintln!(
             "verlet app-server: no operation registry root configured; skipping cooldis-threads kernel package"
         );
         return Ok(None);
     };
-    let registry = LocalOperationRegistry::new(registry_root);
+    let registry = crate::LocalOperationRegistry::new(registry_root);
     let package = verlet_threads_kernel_package();
     let expected_hash = package.interface_hash()?;
     if let Ok(existing) = registry.load_record(VERLET_THREADS_PACKAGE)
@@ -67,32 +54,34 @@ pub fn ensure_verlet_threads_published(
         return Ok(Some(existing));
     }
     Ok(registry
-        .publish_interface_record(PublishInterfaceOperationRequest {
-            name: VERLET_THREADS_PACKAGE.to_string(),
-            source: PublishedOperationSource::Kernel {
-                package: VERLET_THREADS_PACKAGE.to_string(),
+        .publish_interface_record(
+            crate::operations::operation_store::PublishInterfaceOperationRequest {
+                name: VERLET_THREADS_PACKAGE.to_string(),
+                source: crate::PublishedOperationSource::Kernel {
+                    package: VERLET_THREADS_PACKAGE.to_string(),
+                },
+                manifest: package.manifest,
+                interface: package.interface,
+                capability_grants: package.capability_grants,
+                metadata: std::collections::BTreeMap::from([(
+                    OPERATION_METADATA_RUNTIME_KIND.to_string(),
+                    serde_json::Value::String(KERNEL_RUNTIME_KIND.to_string()),
+                )]),
             },
-            manifest: package.manifest,
-            interface: package.interface,
-            capability_grants: package.capability_grants,
-            metadata: BTreeMap::from([(
-                OPERATION_METADATA_RUNTIME_KIND.to_string(),
-                Value::String(KERNEL_RUNTIME_KIND.to_string()),
-            )]),
-        })
+        )
         .map(Some)?)
 }
 
 pub fn ensure_verlet_schedule_published(
-    registry_root: Option<&Path>,
-) -> VerletResult<Option<PublishedOperationRecord>> {
+    registry_root: Option<&std::path::Path>,
+) -> crate::VerletResult<Option<crate::PublishedOperationRecord>> {
     let Some(registry_root) = registry_root else {
         eprintln!(
             "verlet app-server: no operation registry root configured; skipping cooldis-schedule kernel package"
         );
         return Ok(None);
     };
-    let registry = LocalOperationRegistry::new(registry_root);
+    let registry = crate::LocalOperationRegistry::new(registry_root);
     let package = verlet_schedule_kernel_package();
     let expected_hash = package.interface_hash()?;
     if let Ok(existing) = registry.load_record(VERLET_SCHEDULE_PACKAGE)
@@ -101,32 +90,34 @@ pub fn ensure_verlet_schedule_published(
         return Ok(Some(existing));
     }
     Ok(registry
-        .publish_interface_record(PublishInterfaceOperationRequest {
-            name: VERLET_SCHEDULE_PACKAGE.to_string(),
-            source: PublishedOperationSource::Kernel {
-                package: VERLET_SCHEDULE_PACKAGE.to_string(),
+        .publish_interface_record(
+            crate::operations::operation_store::PublishInterfaceOperationRequest {
+                name: VERLET_SCHEDULE_PACKAGE.to_string(),
+                source: crate::PublishedOperationSource::Kernel {
+                    package: VERLET_SCHEDULE_PACKAGE.to_string(),
+                },
+                manifest: package.manifest,
+                interface: package.interface,
+                capability_grants: package.capability_grants,
+                metadata: std::collections::BTreeMap::from([(
+                    OPERATION_METADATA_RUNTIME_KIND.to_string(),
+                    serde_json::Value::String(KERNEL_RUNTIME_KIND.to_string()),
+                )]),
             },
-            manifest: package.manifest,
-            interface: package.interface,
-            capability_grants: package.capability_grants,
-            metadata: BTreeMap::from([(
-                OPERATION_METADATA_RUNTIME_KIND.to_string(),
-                Value::String(KERNEL_RUNTIME_KIND.to_string()),
-            )]),
-        })
+        )
         .map(Some)?)
 }
 
 pub fn ensure_verlet_process_published(
-    registry_root: Option<&Path>,
-) -> VerletResult<Option<PublishedOperationRecord>> {
+    registry_root: Option<&std::path::Path>,
+) -> crate::VerletResult<Option<crate::PublishedOperationRecord>> {
     let Some(registry_root) = registry_root else {
         eprintln!(
             "verlet app-server: no operation registry root configured; skipping cooldis-process kernel package"
         );
         return Ok(None);
     };
-    let registry = LocalOperationRegistry::new(registry_root);
+    let registry = crate::LocalOperationRegistry::new(registry_root);
     let package = verlet_process_kernel_package();
     let expected_hash = package.interface_hash()?;
     if let Ok(existing) = registry.load_record(VERLET_PROCESS_PACKAGE)
@@ -135,32 +126,34 @@ pub fn ensure_verlet_process_published(
         return Ok(Some(existing));
     }
     Ok(registry
-        .publish_interface_record(PublishInterfaceOperationRequest {
-            name: VERLET_PROCESS_PACKAGE.to_string(),
-            source: PublishedOperationSource::Kernel {
-                package: VERLET_PROCESS_PACKAGE.to_string(),
+        .publish_interface_record(
+            crate::operations::operation_store::PublishInterfaceOperationRequest {
+                name: VERLET_PROCESS_PACKAGE.to_string(),
+                source: crate::PublishedOperationSource::Kernel {
+                    package: VERLET_PROCESS_PACKAGE.to_string(),
+                },
+                manifest: package.manifest,
+                interface: package.interface,
+                capability_grants: package.capability_grants,
+                metadata: std::collections::BTreeMap::from([(
+                    OPERATION_METADATA_RUNTIME_KIND.to_string(),
+                    serde_json::Value::String(KERNEL_RUNTIME_KIND.to_string()),
+                )]),
             },
-            manifest: package.manifest,
-            interface: package.interface,
-            capability_grants: package.capability_grants,
-            metadata: BTreeMap::from([(
-                OPERATION_METADATA_RUNTIME_KIND.to_string(),
-                Value::String(KERNEL_RUNTIME_KIND.to_string()),
-            )]),
-        })
+        )
         .map(Some)?)
 }
 
 pub fn ensure_verlet_notify_published(
-    registry_root: Option<&Path>,
-) -> VerletResult<Option<PublishedOperationRecord>> {
+    registry_root: Option<&std::path::Path>,
+) -> crate::VerletResult<Option<crate::PublishedOperationRecord>> {
     let Some(registry_root) = registry_root else {
         eprintln!(
             "verlet app-server: no operation registry root configured; skipping cooldis-notify kernel package"
         );
         return Ok(None);
     };
-    let registry = LocalOperationRegistry::new(registry_root);
+    let registry = crate::LocalOperationRegistry::new(registry_root);
     let package = verlet_notify_kernel_package();
     let expected_hash = package.interface_hash()?;
     if let Ok(existing) = registry.load_record(VERLET_NOTIFY_PACKAGE)
@@ -169,51 +162,53 @@ pub fn ensure_verlet_notify_published(
         return Ok(Some(existing));
     }
     Ok(registry
-        .publish_interface_record(PublishInterfaceOperationRequest {
-            name: VERLET_NOTIFY_PACKAGE.to_string(),
-            source: PublishedOperationSource::Kernel {
-                package: VERLET_NOTIFY_PACKAGE.to_string(),
+        .publish_interface_record(
+            crate::operations::operation_store::PublishInterfaceOperationRequest {
+                name: VERLET_NOTIFY_PACKAGE.to_string(),
+                source: crate::PublishedOperationSource::Kernel {
+                    package: VERLET_NOTIFY_PACKAGE.to_string(),
+                },
+                manifest: package.manifest,
+                interface: package.interface,
+                capability_grants: package.capability_grants,
+                metadata: std::collections::BTreeMap::from([(
+                    OPERATION_METADATA_RUNTIME_KIND.to_string(),
+                    serde_json::Value::String(KERNEL_RUNTIME_KIND.to_string()),
+                )]),
             },
-            manifest: package.manifest,
-            interface: package.interface,
-            capability_grants: package.capability_grants,
-            metadata: BTreeMap::from([(
-                OPERATION_METADATA_RUNTIME_KIND.to_string(),
-                Value::String(KERNEL_RUNTIME_KIND.to_string()),
-            )]),
-        })
+        )
         .map(Some)?)
 }
 
 pub struct KernelPackageDefinition {
-    pub manifest: WasmOperationManifest,
-    pub interface: ToolInterfaceContract,
-    pub capability_grants: BTreeSet<String>,
+    pub manifest: crate::WasmOperationManifest,
+    pub interface: crate::ToolInterfaceContract,
+    pub capability_grants: std::collections::BTreeSet<String>,
 }
 
 impl KernelPackageDefinition {
-    fn interface_hash(&self) -> VerletResult<String> {
+    fn interface_hash(&self) -> crate::VerletResult<String> {
         let bytes = serde_json::to_vec(&self.interface).map_err(|err| {
-            VerletError::RuntimeFactory(format!("failed to encode kernel interface: {err}"))
+            crate::VerletError::RuntimeFactory(format!("failed to encode kernel interface: {err}"))
         })?;
-        Ok(wasm_sha256(&bytes))
+        Ok(crate::wasm_sha256(&bytes))
     }
 }
 
 pub fn verlet_threads_kernel_package() -> KernelPackageDefinition {
     let specs = thread_operation_specs();
-    let manifest = WasmOperationManifest {
+    let manifest = crate::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
         operations: specs
             .iter()
             .enumerate()
-            .map(|(index, spec)| WasmOperationDefinition {
+            .map(|(index, spec)| crate::WasmOperationDefinition {
                 id: (index + 1) as u32,
                 name: spec.name.to_string(),
-                input: WasmOperationValueKind::Json,
-                output: WasmOperationValueKind::Json,
-                events: WasmOperationEventKind::None,
-                mode: WasmOperationMode::Sync,
+                input: crate::WasmOperationValueKind::Json,
+                output: crate::WasmOperationValueKind::Json,
+                events: crate::WasmOperationEventKind::None,
+                mode: crate::WasmOperationMode::Sync,
                 required_capabilities: spec
                     .capabilities
                     .iter()
@@ -222,7 +217,7 @@ pub fn verlet_threads_kernel_package() -> KernelPackageDefinition {
             })
             .collect(),
     };
-    let identity = ToolPackageIdentity {
+    let identity = crate::ToolPackageIdentity {
         name: VERLET_THREADS_PACKAGE.to_string(),
         version: Some("1.0.0".to_string()),
         description: Some(
@@ -230,7 +225,7 @@ pub fn verlet_threads_kernel_package() -> KernelPackageDefinition {
         ),
         owner: Some("verlet".to_string()),
     };
-    let runtime = ToolRuntimeContract {
+    let runtime = crate::ToolRuntimeContract {
         kind: KERNEL_RUNTIME_KIND.to_string(),
         state: None,
         module_path: None,
@@ -247,21 +242,21 @@ pub fn verlet_threads_kernel_package() -> KernelPackageDefinition {
                 .capabilities
                 .iter()
                 .map(|capability| (*capability).to_string())
-                .collect::<BTreeSet<_>>();
-            ToolOperationInterface {
+                .collect::<std::collections::BTreeSet<_>>();
+            crate::ToolOperationInterface {
                 name: spec.name.to_string(),
                 description: Some(spec.summary.to_string()),
                 input_schema: (spec.input_schema)(),
                 output_schema: (spec.output_schema)(),
                 required_capabilities: required_capabilities.clone(),
-                command: Some(ToolCommandContract {
+                command: Some(crate::ToolCommandContract {
                     name: spec.name.to_string(),
                     stdin: Some("json".to_string()),
                     stdout: Some("json".to_string()),
                 }),
                 mcp: None,
-                manual: Some(ToolOperationManual {
-                    schema_version: TOOL_MANUAL_SCHEMA_VERSION,
+                manual: Some(crate::ToolOperationManual {
+                    schema_version: crate::operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION,
                     tool_name: VERLET_THREADS_PACKAGE.to_string(),
                     operation_name: spec.name.to_string(),
                     summary: spec.summary.to_string(),
@@ -283,7 +278,7 @@ pub fn verlet_threads_kernel_package() -> KernelPackageDefinition {
         .collect();
     KernelPackageDefinition {
         manifest,
-        interface: ToolInterfaceContract {
+        interface: crate::ToolInterfaceContract {
             schema_version: crate::TOOL_PACKAGE_SCHEMA_VERSION,
             identity,
             runtime,
@@ -296,18 +291,18 @@ pub fn verlet_threads_kernel_package() -> KernelPackageDefinition {
 
 pub fn verlet_schedule_kernel_package() -> KernelPackageDefinition {
     let specs = schedule_operation_specs();
-    let manifest = WasmOperationManifest {
+    let manifest = crate::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
         operations: specs
             .iter()
             .enumerate()
-            .map(|(index, spec)| WasmOperationDefinition {
+            .map(|(index, spec)| crate::WasmOperationDefinition {
                 id: (index + 1) as u32,
                 name: spec.name.to_string(),
-                input: WasmOperationValueKind::Json,
-                output: WasmOperationValueKind::Json,
-                events: WasmOperationEventKind::None,
-                mode: WasmOperationMode::Sync,
+                input: crate::WasmOperationValueKind::Json,
+                output: crate::WasmOperationValueKind::Json,
+                events: crate::WasmOperationEventKind::None,
+                mode: crate::WasmOperationMode::Sync,
                 required_capabilities: spec
                     .capabilities
                     .iter()
@@ -316,7 +311,7 @@ pub fn verlet_schedule_kernel_package() -> KernelPackageDefinition {
             })
             .collect(),
     };
-    let identity = ToolPackageIdentity {
+    let identity = crate::ToolPackageIdentity {
         name: VERLET_SCHEDULE_PACKAGE.to_string(),
         version: Some("1.0.0".to_string()),
         description: Some(
@@ -324,7 +319,7 @@ pub fn verlet_schedule_kernel_package() -> KernelPackageDefinition {
         ),
         owner: Some("verlet".to_string()),
     };
-    let runtime = ToolRuntimeContract {
+    let runtime = crate::ToolRuntimeContract {
         kind: KERNEL_RUNTIME_KIND.to_string(),
         state: None,
         module_path: None,
@@ -341,21 +336,21 @@ pub fn verlet_schedule_kernel_package() -> KernelPackageDefinition {
                 .capabilities
                 .iter()
                 .map(|capability| (*capability).to_string())
-                .collect::<BTreeSet<_>>();
-            ToolOperationInterface {
+                .collect::<std::collections::BTreeSet<_>>();
+            crate::ToolOperationInterface {
                 name: spec.name.to_string(),
                 description: Some(spec.summary.to_string()),
                 input_schema: (spec.input_schema)(),
                 output_schema: (spec.output_schema)(),
                 required_capabilities: required_capabilities.clone(),
-                command: Some(ToolCommandContract {
+                command: Some(crate::ToolCommandContract {
                     name: spec.name.to_string(),
                     stdin: Some("json".to_string()),
                     stdout: Some("json".to_string()),
                 }),
                 mcp: None,
-                manual: Some(ToolOperationManual {
-                    schema_version: TOOL_MANUAL_SCHEMA_VERSION,
+                manual: Some(crate::ToolOperationManual {
+                    schema_version: crate::operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION,
                     tool_name: VERLET_SCHEDULE_PACKAGE.to_string(),
                     operation_name: spec.name.to_string(),
                     summary: spec.summary.to_string(),
@@ -377,7 +372,7 @@ pub fn verlet_schedule_kernel_package() -> KernelPackageDefinition {
         .collect();
     KernelPackageDefinition {
         manifest,
-        interface: ToolInterfaceContract {
+        interface: crate::ToolInterfaceContract {
             schema_version: crate::TOOL_PACKAGE_SCHEMA_VERSION,
             identity,
             runtime,
@@ -390,18 +385,18 @@ pub fn verlet_schedule_kernel_package() -> KernelPackageDefinition {
 
 pub fn verlet_process_kernel_package() -> KernelPackageDefinition {
     let specs = process_operation_specs();
-    let manifest = WasmOperationManifest {
+    let manifest = crate::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
         operations: specs
             .iter()
             .enumerate()
-            .map(|(index, spec)| WasmOperationDefinition {
+            .map(|(index, spec)| crate::WasmOperationDefinition {
                 id: (index + 1) as u32,
                 name: spec.name.to_string(),
-                input: WasmOperationValueKind::Json,
-                output: WasmOperationValueKind::Json,
-                events: WasmOperationEventKind::None,
-                mode: WasmOperationMode::Sync,
+                input: crate::WasmOperationValueKind::Json,
+                output: crate::WasmOperationValueKind::Json,
+                events: crate::WasmOperationEventKind::None,
+                mode: crate::WasmOperationMode::Sync,
                 required_capabilities: spec
                     .capabilities
                     .iter()
@@ -410,7 +405,7 @@ pub fn verlet_process_kernel_package() -> KernelPackageDefinition {
             })
             .collect(),
     };
-    let identity = ToolPackageIdentity {
+    let identity = crate::ToolPackageIdentity {
         name: VERLET_PROCESS_PACKAGE.to_string(),
         version: Some("1.0.0".to_string()),
         description: Some(
@@ -418,7 +413,7 @@ pub fn verlet_process_kernel_package() -> KernelPackageDefinition {
         ),
         owner: Some("verlet".to_string()),
     };
-    let runtime = ToolRuntimeContract {
+    let runtime = crate::ToolRuntimeContract {
         kind: KERNEL_RUNTIME_KIND.to_string(),
         state: None,
         module_path: None,
@@ -435,21 +430,21 @@ pub fn verlet_process_kernel_package() -> KernelPackageDefinition {
                 .capabilities
                 .iter()
                 .map(|capability| (*capability).to_string())
-                .collect::<BTreeSet<_>>();
-            ToolOperationInterface {
+                .collect::<std::collections::BTreeSet<_>>();
+            crate::ToolOperationInterface {
                 name: spec.name.to_string(),
                 description: Some(spec.summary.to_string()),
                 input_schema: (spec.input_schema)(),
                 output_schema: process_snapshot_output_schema(spec.receipt_operation),
                 required_capabilities: required_capabilities.clone(),
-                command: Some(ToolCommandContract {
+                command: Some(crate::ToolCommandContract {
                     name: spec.name.to_string(),
                     stdin: Some("json".to_string()),
                     stdout: Some("json".to_string()),
                 }),
                 mcp: None,
-                manual: Some(ToolOperationManual {
-                    schema_version: TOOL_MANUAL_SCHEMA_VERSION,
+                manual: Some(crate::ToolOperationManual {
+                    schema_version: crate::operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION,
                     tool_name: VERLET_PROCESS_PACKAGE.to_string(),
                     operation_name: spec.name.to_string(),
                     summary: spec.summary.to_string(),
@@ -473,7 +468,7 @@ pub fn verlet_process_kernel_package() -> KernelPackageDefinition {
         .collect();
     KernelPackageDefinition {
         manifest,
-        interface: ToolInterfaceContract {
+        interface: crate::ToolInterfaceContract {
             schema_version: crate::TOOL_PACKAGE_SCHEMA_VERSION,
             identity,
             runtime,
@@ -486,18 +481,18 @@ pub fn verlet_process_kernel_package() -> KernelPackageDefinition {
 
 pub fn verlet_notify_kernel_package() -> KernelPackageDefinition {
     let specs = notify_operation_specs();
-    let manifest = WasmOperationManifest {
+    let manifest = crate::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
         operations: specs
             .iter()
             .enumerate()
-            .map(|(index, spec)| WasmOperationDefinition {
+            .map(|(index, spec)| crate::WasmOperationDefinition {
                 id: (index + 1) as u32,
                 name: spec.name.to_string(),
-                input: WasmOperationValueKind::Json,
-                output: WasmOperationValueKind::Json,
-                events: WasmOperationEventKind::None,
-                mode: WasmOperationMode::Sync,
+                input: crate::WasmOperationValueKind::Json,
+                output: crate::WasmOperationValueKind::Json,
+                events: crate::WasmOperationEventKind::None,
+                mode: crate::WasmOperationMode::Sync,
                 required_capabilities: spec
                     .capabilities
                     .iter()
@@ -506,7 +501,7 @@ pub fn verlet_notify_kernel_package() -> KernelPackageDefinition {
             })
             .collect(),
     };
-    let identity = ToolPackageIdentity {
+    let identity = crate::ToolPackageIdentity {
         name: VERLET_NOTIFY_PACKAGE.to_string(),
         version: Some("1.0.0".to_string()),
         description: Some(
@@ -515,7 +510,7 @@ pub fn verlet_notify_kernel_package() -> KernelPackageDefinition {
         ),
         owner: Some("verlet".to_string()),
     };
-    let runtime = ToolRuntimeContract {
+    let runtime = crate::ToolRuntimeContract {
         kind: KERNEL_RUNTIME_KIND.to_string(),
         state: None,
         module_path: None,
@@ -532,21 +527,21 @@ pub fn verlet_notify_kernel_package() -> KernelPackageDefinition {
                 .capabilities
                 .iter()
                 .map(|capability| (*capability).to_string())
-                .collect::<BTreeSet<_>>();
-            ToolOperationInterface {
+                .collect::<std::collections::BTreeSet<_>>();
+            crate::ToolOperationInterface {
                 name: spec.name.to_string(),
                 description: Some(spec.summary.to_string()),
                 input_schema: (spec.input_schema)(),
                 output_schema: notify_receipt_output_schema(spec.receipt_operation),
                 required_capabilities: required_capabilities.clone(),
-                command: Some(ToolCommandContract {
+                command: Some(crate::ToolCommandContract {
                     name: spec.name.to_string(),
                     stdin: Some("json".to_string()),
                     stdout: Some("json".to_string()),
                 }),
                 mcp: None,
-                manual: Some(ToolOperationManual {
-                    schema_version: TOOL_MANUAL_SCHEMA_VERSION,
+                manual: Some(crate::ToolOperationManual {
+                    schema_version: crate::operations::tool_package::TOOL_MANUAL_SCHEMA_VERSION,
                     tool_name: VERLET_NOTIFY_PACKAGE.to_string(),
                     operation_name: spec.name.to_string(),
                     summary: spec.summary.to_string(),
@@ -570,7 +565,7 @@ pub fn verlet_notify_kernel_package() -> KernelPackageDefinition {
         .collect();
     KernelPackageDefinition {
         manifest,
-        interface: ToolInterfaceContract {
+        interface: crate::ToolInterfaceContract {
             schema_version: crate::TOOL_PACKAGE_SCHEMA_VERSION,
             identity,
             runtime,
@@ -585,23 +580,23 @@ struct ThreadOperationSpec {
     name: &'static str,
     summary: &'static str,
     capabilities: &'static [&'static str],
-    input_schema: fn() -> Value,
-    output_schema: fn() -> Value,
+    input_schema: fn() -> serde_json::Value,
+    output_schema: fn() -> serde_json::Value,
 }
 
 struct ScheduleOperationSpec {
     name: &'static str,
     summary: &'static str,
     capabilities: &'static [&'static str],
-    input_schema: fn() -> Value,
-    output_schema: fn() -> Value,
+    input_schema: fn() -> serde_json::Value,
+    output_schema: fn() -> serde_json::Value,
 }
 
 struct ProcessOperationSpec {
     name: &'static str,
     summary: &'static str,
     capabilities: &'static [&'static str],
-    input_schema: fn() -> Value,
+    input_schema: fn() -> serde_json::Value,
     receipt_operation: &'static str,
 }
 
@@ -609,7 +604,7 @@ struct NotifyOperationSpec {
     name: &'static str,
     summary: &'static str,
     capabilities: &'static [&'static str],
-    input_schema: fn() -> Value,
+    input_schema: fn() -> serde_json::Value,
     receipt_operation: &'static str,
 }
 
@@ -712,9 +707,9 @@ fn process_operation_specs() -> Vec<ProcessOperationSpec> {
     ]
 }
 
-fn thread_spawn_input_schema() -> Value {
+fn thread_spawn_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "task_name": string_schema("Stable task name for the child thread."),
             "message": string_schema("Initial user message submitted to the child thread."),
             "agent_ref": string_schema("Optional published agent reference for the child thread.")
@@ -723,9 +718,9 @@ fn thread_spawn_input_schema() -> Value {
     )
 }
 
-fn mandate_start_input_schema() -> Value {
+fn mandate_start_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "thread_id": string_schema("Optional target Verlet thread id; omitted means the calling thread."),
             "schedule": schedule_schema(),
             "max_occurrences": {
@@ -740,9 +735,9 @@ fn mandate_start_input_schema() -> Value {
     )
 }
 
-fn mandate_revoke_input_schema() -> Value {
+fn mandate_revoke_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "thread_id": string_schema("Optional target Verlet thread id; omitted means the calling thread."),
             "mandate_event_id": string_schema("Event id returned by mandate_start.")
         }),
@@ -750,9 +745,9 @@ fn mandate_revoke_input_schema() -> Value {
     )
 }
 
-fn mandate_list_input_schema() -> Value {
+fn mandate_list_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "thread_id": string_schema("Optional target Verlet thread id; omitted means the calling thread.")
         }),
         &[],
@@ -778,9 +773,9 @@ fn notify_operation_specs() -> Vec<NotifyOperationSpec> {
     ]
 }
 
-fn process_exec_input_schema() -> Value {
+fn process_exec_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "command": {
                 "type": "array",
                 "description": "Command argv to execute. The first item is the executable.",
@@ -811,9 +806,9 @@ fn process_exec_input_schema() -> Value {
     )
 }
 
-fn notify_preview_input_schema() -> Value {
+fn notify_preview_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "channel": string_schema("Logical channel family or adapter name."),
             "subject": string_schema("Short notification subject."),
             "body": string_schema("Notification body."),
@@ -823,9 +818,9 @@ fn notify_preview_input_schema() -> Value {
     )
 }
 
-fn channel_emit_input_schema() -> Value {
+fn channel_emit_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "channel": string_schema("Logical channel family or adapter name."),
             "message": string_schema("Channel message body."),
             "thread_id": string_schema("Optional Verlet thread id associated with the egress intent.")
@@ -834,9 +829,9 @@ fn channel_emit_input_schema() -> Value {
     )
 }
 
-fn process_handle_input_schema() -> Value {
+fn process_handle_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "process_id": string_schema("Verlet process id."),
             "yield_time_ms": {
                 "type": "integer",
@@ -851,9 +846,9 @@ fn process_handle_input_schema() -> Value {
     )
 }
 
-fn process_write_input_schema() -> Value {
+fn process_write_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "process_id": string_schema("Verlet process id."),
             "delta_base64": string_schema("Base64 encoded stdin bytes."),
             "yield_time_ms": {
@@ -869,9 +864,9 @@ fn process_write_input_schema() -> Value {
     )
 }
 
-fn process_terminate_input_schema() -> Value {
+fn process_terminate_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "process_id": string_schema("Verlet process id."),
             "reason": string_schema("Human-readable termination reason."),
             "yield_time_ms": {
@@ -883,9 +878,9 @@ fn process_terminate_input_schema() -> Value {
     )
 }
 
-fn target_message_input_schema() -> Value {
+fn target_message_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "task_name": string_schema("Parent-scoped task name of the child thread."),
             "message": string_schema("User message to submit.")
         }),
@@ -893,9 +888,9 @@ fn target_message_input_schema() -> Value {
     )
 }
 
-fn wait_input_schema() -> Value {
+fn wait_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "task_name": string_schema("Parent-scoped task name of the child thread."),
             "timeout_ms": {
                 "type": "integer",
@@ -906,27 +901,27 @@ fn wait_input_schema() -> Value {
     )
 }
 
-fn required_task_target_input_schema() -> Value {
+fn required_task_target_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "task_name": string_schema("Parent-scoped task name of the child thread.")
         }),
         &["task_name"],
     )
 }
 
-fn cancel_input_schema() -> Value {
+fn cancel_input_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "task_name": string_schema("Parent-scoped task name of the child thread.")
         }),
         &["task_name"],
     )
 }
 
-fn process_snapshot_output_schema(operation: &str) -> Value {
+fn process_snapshot_output_schema(operation: &str) -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "operation": {
                 "type": "string",
                 "enum": [operation],
@@ -966,9 +961,9 @@ fn process_snapshot_output_schema(operation: &str) -> Value {
     )
 }
 
-fn mandate_start_output_schema() -> Value {
+fn mandate_start_output_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "operation": {
                 "type": "string",
                 "enum": ["cooldis.mandate_start"],
@@ -997,9 +992,9 @@ fn mandate_start_output_schema() -> Value {
     )
 }
 
-fn mandate_revoke_output_schema() -> Value {
+fn mandate_revoke_output_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "operation": {
                 "type": "string",
                 "enum": ["cooldis.mandate_revoke"],
@@ -1023,9 +1018,9 @@ fn mandate_revoke_output_schema() -> Value {
     )
 }
 
-fn mandate_list_output_schema() -> Value {
+fn mandate_list_output_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "operation": {
                 "type": "string",
                 "enum": ["cooldis.mandate_list"],
@@ -1044,9 +1039,9 @@ fn mandate_list_output_schema() -> Value {
     )
 }
 
-fn notify_receipt_output_schema(operation: &str) -> Value {
+fn notify_receipt_output_schema(operation: &str) -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "operation": {
                 "type": "string",
                 "enum": [operation],
@@ -1082,29 +1077,29 @@ fn notify_receipt_output_schema(operation: &str) -> Value {
     )
 }
 
-fn spawn_output_schema() -> Value {
+fn spawn_output_schema() -> serde_json::Value {
     task_handle_output_schema("Current child thread status.")
 }
 
-fn submit_output_schema() -> Value {
+fn submit_output_schema() -> serde_json::Value {
     task_handle_output_schema("Current target thread status.")
 }
 
-fn wait_output_schema() -> Value {
+fn wait_output_schema() -> serde_json::Value {
     task_handle_output_schema("Current target thread status after waiting.")
 }
 
-fn status_output_schema() -> Value {
+fn status_output_schema() -> serde_json::Value {
     task_handle_output_schema("Current target thread status.")
 }
 
-fn lifecycle_output_schema() -> Value {
+fn lifecycle_output_schema() -> serde_json::Value {
     task_handle_output_schema("Current target thread lifecycle status.")
 }
 
-fn task_handle_output_schema(status_description: &str) -> Value {
+fn task_handle_output_schema(status_description: &str) -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "operation": string_schema("Receipt operation name."),
             "task_name": string_schema("Parent-scoped task name of the child thread."),
             "status": thread_status_schema(status_description)
@@ -1113,18 +1108,18 @@ fn task_handle_output_schema(status_description: &str) -> Value {
     )
 }
 
-fn schedule_schema() -> Value {
+fn schedule_schema() -> serde_json::Value {
     object_schema(
-        json!({
+        serde_json::json!({
             "cron": object_schema(
-                json!({
+                serde_json::json!({
                     "expr": string_schema("Cron expression."),
                     "tz": string_schema("IANA timezone name.")
                 }),
                 &["expr", "tz"]
             ),
             "interval": object_schema(
-                json!({
+                serde_json::json!({
                     "every_ms": {
                         "type": "integer",
                         "description": "Interval in milliseconds; minimum is 60000."
@@ -1133,7 +1128,7 @@ fn schedule_schema() -> Value {
                 &["every_ms"]
             ),
             "at": object_schema(
-                json!({
+                serde_json::json!({
                     "when": string_schema("RFC3339 timestamp.")
                 }),
                 &["when"]
@@ -1143,16 +1138,16 @@ fn schedule_schema() -> Value {
     )
 }
 
-fn catch_up_schema() -> Value {
-    json!({
+fn catch_up_schema() -> serde_json::Value {
+    serde_json::json!({
         "type": "string",
         "enum": ["coalesce_missed", "skip_missed"],
         "description": "How missed occurrences are handled."
     })
 }
 
-fn object_schema(properties: Value, required: &[&str]) -> Value {
-    json!({
+fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    serde_json::json!({
         "type": "object",
         "properties": properties,
         "required": required,
@@ -1160,15 +1155,15 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
     })
 }
 
-fn string_schema(description: &str) -> Value {
-    json!({
+fn string_schema(description: &str) -> serde_json::Value {
+    serde_json::json!({
         "type": "string",
         "description": description
     })
 }
 
-fn thread_status_schema(description: &str) -> Value {
-    json!({
+fn thread_status_schema(description: &str) -> serde_json::Value {
+    serde_json::json!({
         "type": "string",
         "enum": [
             "starting",
@@ -1182,8 +1177,8 @@ fn thread_status_schema(description: &str) -> Value {
     })
 }
 
-fn process_status_schema(description: &str) -> Value {
-    json!({
+fn process_status_schema(description: &str) -> serde_json::Value {
+    serde_json::json!({
         "type": "string",
         "enum": [
             "running",
@@ -1196,25 +1191,25 @@ fn process_status_schema(description: &str) -> Value {
     })
 }
 
-fn manual_exit_status() -> Vec<ToolManualExitStatus> {
+fn manual_exit_status() -> Vec<crate::ToolManualExitStatus> {
     vec![
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 0,
             meaning: "operation succeeded".to_string(),
         },
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 1,
             meaning: "operation failed at runtime".to_string(),
         },
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 2,
             meaning: "caller supplied invalid input or arguments".to_string(),
         },
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 126,
             meaning: "capability or policy denied execution".to_string(),
         },
-        ToolManualExitStatus {
+        crate::ToolManualExitStatus {
             code: 127,
             meaning: "tool or operation was not found".to_string(),
         },

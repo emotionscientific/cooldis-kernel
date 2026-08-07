@@ -7,32 +7,16 @@
 //! cleanup. Expired running entries are always cancelled in place so their
 //! final backend event remains observable before either cleanup policy runs.
 
-use crate::{
-    ExecutionDeadline, VerletProcessBackend, VerletProcessError, VerletProcessEvent,
-    VerletProcessEventKind, VerletProcessExitStatus, VerletProcessHandle, VerletProcessId,
-    VerletProcessOutput, VerletProcessResult, VerletProcessTerminalState, process_error,
-};
-use async_trait::async_trait;
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
-use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
-const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 const DEFAULT_MAX_PROCESSES: usize = 64;
-const DEFAULT_YIELD_TIME: Duration = Duration::from_millis(10);
+const DEFAULT_YIELD_TIME: std::time::Duration = std::time::Duration::from_millis(10);
 
 #[derive(Clone, Debug)]
 pub struct AsyncExecutionManagerConfig {
-    pub idle_timeout: Duration,
+    pub idle_timeout: std::time::Duration,
     pub max_processes: usize,
 }
 
@@ -47,23 +31,25 @@ impl Default for AsyncExecutionManagerConfig {
 
 #[derive(Clone)]
 pub struct AsyncExecutionManager {
-    inner: Arc<AsyncExecutionManagerInner>,
+    inner: std::sync::Arc<AsyncExecutionManagerInner>,
 }
 
 struct AsyncExecutionManagerInner {
     config: AsyncExecutionManagerConfig,
-    entries: Mutex<HashMap<VerletProcessId, ProcessEntry>>,
+    entries: tokio::sync::Mutex<
+        std::collections::HashMap<crate::process::VerletProcessId, ProcessEntry>,
+    >,
 }
 
 struct ProcessEntry {
-    process: VerletProcessHandle,
+    process: crate::process::VerletProcessHandle,
     owner: AsyncProcessOwner,
-    stdin: Option<mpsc::Sender<Vec<u8>>>,
-    cancellation: CancellationToken,
-    join: JoinHandle<VerletProcessResult<()>>,
-    deadline: ExecutionDeadline,
-    idle_timeout: Duration,
-    last_used: Instant,
+    stdin: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    cancellation: tokio_util::sync::CancellationToken,
+    join: tokio::task::JoinHandle<crate::VerletProcessResult<()>>,
+    deadline: crate::execution::ExecutionDeadline,
+    idle_timeout: std::time::Duration,
+    last_used: tokio::time::Instant,
     termination_reason: Option<String>,
     retain_terminal_until_acknowledged: bool,
 }
@@ -87,28 +73,30 @@ impl AsyncProcessOwner {
 
 #[derive(Clone, Debug)]
 pub struct AsyncProcessStartRequest {
-    pub process_id: Option<VerletProcessId>,
+    pub process_id: Option<crate::process::VerletProcessId>,
     pub owner: AsyncProcessOwner,
     pub invocation: LiveProcessInvocation,
-    pub deadline: ExecutionDeadline,
-    pub idle_timeout: Option<Duration>,
+    pub deadline: crate::execution::ExecutionDeadline,
+    pub idle_timeout: Option<std::time::Duration>,
     pub output_cap_bytes: usize,
-    pub yield_time: Duration,
+    pub yield_time: std::time::Duration,
     pub retain_terminal_until_acknowledged: bool,
 }
 
 impl AsyncProcessStartRequest {
-    pub fn host_command(command: Vec<String>, cwd: PathBuf) -> Self {
+    pub fn host_command(command: Vec<String>, cwd: std::path::PathBuf) -> Self {
         Self {
             process_id: None,
             owner: AsyncProcessOwner::default(),
             invocation: LiveProcessInvocation::HostCommand {
                 command,
                 cwd,
-                env: BTreeMap::new(),
+                env: std::collections::BTreeMap::new(),
                 pipe_stdin: false,
             },
-            deadline: ExecutionDeadline::from_now(Duration::from_secs(30)),
+            deadline: crate::execution::ExecutionDeadline::from_now(
+                std::time::Duration::from_secs(30),
+            ),
             idle_timeout: None,
             output_cap_bytes: 1024 * 1024,
             yield_time: DEFAULT_YIELD_TIME,
@@ -123,7 +111,9 @@ impl AsyncProcessStartRequest {
             invocation: LiveProcessInvocation::VirtualBashScript {
                 script: script.into(),
             },
-            deadline: ExecutionDeadline::from_now(Duration::from_secs(30)),
+            deadline: crate::execution::ExecutionDeadline::from_now(
+                std::time::Duration::from_secs(30),
+            ),
             idle_timeout: None,
             output_cap_bytes: 1024 * 1024,
             yield_time: DEFAULT_YIELD_TIME,
@@ -136,17 +126,17 @@ impl AsyncProcessStartRequest {
         self
     }
 
-    pub fn with_process_id(mut self, process_id: VerletProcessId) -> Self {
+    pub fn with_process_id(mut self, process_id: crate::process::VerletProcessId) -> Self {
         self.process_id = Some(process_id);
         self
     }
 
-    pub fn with_deadline(mut self, deadline: ExecutionDeadline) -> Self {
+    pub fn with_deadline(mut self, deadline: crate::execution::ExecutionDeadline) -> Self {
         self.deadline = deadline;
         self
     }
 
-    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+    pub fn with_idle_timeout(mut self, idle_timeout: std::time::Duration) -> Self {
         self.idle_timeout = Some(idle_timeout);
         self
     }
@@ -156,7 +146,7 @@ impl AsyncProcessStartRequest {
         self
     }
 
-    pub fn with_yield_time(mut self, yield_time: Duration) -> Self {
+    pub fn with_yield_time(mut self, yield_time: std::time::Duration) -> Self {
         self.yield_time = yield_time;
         self
     }
@@ -168,7 +158,7 @@ impl AsyncProcessStartRequest {
         self
     }
 
-    pub fn with_env(mut self, env: BTreeMap<String, Option<String>>) -> Self {
+    pub fn with_env(mut self, env: std::collections::BTreeMap<String, Option<String>>) -> Self {
         if let LiveProcessInvocation::HostCommand { env: host_env, .. } = &mut self.invocation {
             *host_env = env;
         }
@@ -191,8 +181,8 @@ impl AsyncProcessStartRequest {
 pub enum LiveProcessInvocation {
     HostCommand {
         command: Vec<String>,
-        cwd: PathBuf,
-        env: BTreeMap<String, Option<String>>,
+        cwd: std::path::PathBuf,
+        env: std::collections::BTreeMap<String, Option<String>>,
         pipe_stdin: bool,
     },
     VirtualBashScript {
@@ -219,26 +209,26 @@ impl LiveProcessInvocation {
 #[derive(Clone, Debug)]
 pub struct LiveProcessStartRequest {
     pub invocation: LiveProcessInvocation,
-    pub deadline: ExecutionDeadline,
+    pub deadline: crate::execution::ExecutionDeadline,
     pub output_cap_bytes: usize,
 }
 
 #[derive(Debug)]
 pub struct LiveProcessSpawn {
-    pub stdin: Option<mpsc::Sender<Vec<u8>>>,
-    pub join: JoinHandle<VerletProcessResult<()>>,
+    pub stdin: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    pub join: tokio::task::JoinHandle<crate::VerletProcessResult<()>>,
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait LiveProcessBackend: Send + Sync + 'static {
-    fn backend_kind(&self) -> VerletProcessBackend;
+    fn backend_kind(&self) -> crate::process::VerletProcessBackend;
 
     async fn start(
         &self,
         request: LiveProcessStartRequest,
-        process: VerletProcessHandle,
-        cancellation: CancellationToken,
-    ) -> VerletProcessResult<LiveProcessSpawn>;
+        process: crate::process::VerletProcessHandle,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> crate::VerletProcessResult<LiveProcessSpawn>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -248,8 +238,8 @@ pub struct AsyncProcessOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AsyncProcessSnapshot {
-    pub process_id: Option<VerletProcessId>,
-    pub backend: VerletProcessBackend,
+    pub process_id: Option<crate::process::VerletProcessId>,
+    pub backend: crate::process::VerletProcessBackend,
     pub label: String,
     pub status: ProcessSnapshotStatus,
     pub exit_code: Option<i32>,
@@ -257,7 +247,7 @@ pub struct AsyncProcessSnapshot {
     pub stderr: Vec<u8>,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
-    pub events: Vec<VerletProcessEvent>,
+    pub events: Vec<crate::process::VerletProcessEvent>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -284,30 +274,30 @@ impl ProcessSnapshotStatus {
 impl AsyncExecutionManager {
     pub fn new(config: AsyncExecutionManagerConfig) -> Self {
         Self {
-            inner: Arc::new(AsyncExecutionManagerInner {
+            inner: std::sync::Arc::new(AsyncExecutionManagerInner {
                 config,
-                entries: Mutex::new(HashMap::new()),
+                entries: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             }),
         }
     }
 
     pub async fn start(
         &self,
-        backend: Arc<dyn LiveProcessBackend>,
+        backend: std::sync::Arc<dyn LiveProcessBackend>,
         request: AsyncProcessStartRequest,
-    ) -> VerletProcessResult<AsyncProcessOutcome> {
-        self.start_cancellable(backend, request, CancellationToken::new())
+    ) -> crate::VerletProcessResult<AsyncProcessOutcome> {
+        self.start_cancellable(backend, request, tokio_util::sync::CancellationToken::new())
             .await
     }
 
     pub async fn start_cancellable(
         &self,
-        backend: Arc<dyn LiveProcessBackend>,
+        backend: std::sync::Arc<dyn LiveProcessBackend>,
         request: AsyncProcessStartRequest,
-        cancellation: CancellationToken,
-    ) -> VerletProcessResult<AsyncProcessOutcome> {
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> crate::VerletProcessResult<AsyncProcessOutcome> {
         self.cleanup_expired().await;
-        let process = VerletProcessHandle::with_process_id(
+        let process = crate::process::VerletProcessHandle::with_process_id(
             request.process_id.unwrap_or_default(),
             backend.backend_kind(),
             request.invocation.label(),
@@ -329,7 +319,7 @@ impl AsyncExecutionManager {
             let mut entries = self.inner.entries.lock().await;
             if entries.len() >= self.inner.config.max_processes {
                 cancellation.cancel();
-                return Err(process_error("async process limit reached"));
+                return Err(crate::process_error("async process limit reached"));
             }
             entries.insert(
                 process_id,
@@ -343,7 +333,7 @@ impl AsyncExecutionManager {
                     idle_timeout: request
                         .idle_timeout
                         .unwrap_or(self.inner.config.idle_timeout),
-                    last_used: Instant::now(),
+                    last_used: tokio::time::Instant::now(),
                     termination_reason: None,
                     retain_terminal_until_acknowledged: request.retain_terminal_until_acknowledged,
                 },
@@ -356,10 +346,10 @@ impl AsyncExecutionManager {
 
     pub async fn poll(
         &self,
-        process_id: VerletProcessId,
-        yield_time: Duration,
+        process_id: crate::process::VerletProcessId,
+        yield_time: std::time::Duration,
         max_output_bytes: usize,
-    ) -> VerletProcessResult<AsyncProcessOutcome> {
+    ) -> crate::VerletProcessResult<AsyncProcessOutcome> {
         self.touch(process_id).await?;
         self.wait_for_snapshot(process_id, yield_time, max_output_bytes)
             .await
@@ -367,19 +357,19 @@ impl AsyncExecutionManager {
 
     pub async fn write(
         &self,
-        process_id: VerletProcessId,
+        process_id: crate::process::VerletProcessId,
         bytes: Vec<u8>,
-        yield_time: Duration,
+        yield_time: std::time::Duration,
         max_output_bytes: usize,
-    ) -> VerletProcessResult<AsyncProcessOutcome> {
+    ) -> crate::VerletProcessResult<AsyncProcessOutcome> {
         let stdin = {
             let mut entries = self.inner.entries.lock().await;
-            let entry = entries
-                .get_mut(&process_id)
-                .ok_or_else(|| process_error(format!("process {process_id} was not found")))?;
-            entry.last_used = Instant::now();
+            let entry = entries.get_mut(&process_id).ok_or_else(|| {
+                crate::process_error(format!("process {process_id} was not found"))
+            })?;
+            entry.last_used = tokio::time::Instant::now();
             entry.stdin.clone().ok_or_else(|| {
-                process_error(format!(
+                crate::process_error(format!(
                     "process {process_id} does not support stdin writes"
                 ))
             })?
@@ -387,24 +377,24 @@ impl AsyncExecutionManager {
         stdin
             .send(bytes)
             .await
-            .map_err(|_| process_error(format!("process {process_id} stdin is closed")))?;
+            .map_err(|_| crate::process_error(format!("process {process_id} stdin is closed")))?;
         self.wait_for_snapshot(process_id, yield_time, max_output_bytes)
             .await
     }
 
     pub async fn terminate(
         &self,
-        process_id: VerletProcessId,
+        process_id: crate::process::VerletProcessId,
         reason: impl Into<String>,
-        yield_time: Duration,
+        yield_time: std::time::Duration,
         max_output_bytes: usize,
-    ) -> VerletProcessResult<AsyncProcessOutcome> {
+    ) -> crate::VerletProcessResult<AsyncProcessOutcome> {
         let cancellation = {
             let mut entries = self.inner.entries.lock().await;
-            let entry = entries
-                .get_mut(&process_id)
-                .ok_or_else(|| process_error(format!("process {process_id} was not found")))?;
-            entry.last_used = Instant::now();
+            let entry = entries.get_mut(&process_id).ok_or_else(|| {
+                crate::process_error(format!("process {process_id} was not found"))
+            })?;
+            entry.last_used = tokio::time::Instant::now();
             entry.termination_reason = Some(reason.into());
             entry.cancellation.clone()
         };
@@ -415,27 +405,29 @@ impl AsyncExecutionManager {
 
     pub async fn subscribe(
         &self,
-        process_id: VerletProcessId,
-    ) -> VerletProcessResult<tokio::sync::broadcast::Receiver<VerletProcessEvent>> {
+        process_id: crate::process::VerletProcessId,
+    ) -> crate::VerletProcessResult<
+        tokio::sync::broadcast::Receiver<crate::process::VerletProcessEvent>,
+    > {
         let entries = self.inner.entries.lock().await;
         entries
             .get(&process_id)
             .map(|entry| entry.process.subscribe())
-            .ok_or_else(|| process_error(format!("process {process_id} was not found")))
+            .ok_or_else(|| crate::process_error(format!("process {process_id} was not found")))
     }
 
     /// Returns the current fold of a live registry entry without consuming
     /// terminal state. Owning surfaces use this for dispatch-id retries.
     pub async fn snapshot(
         &self,
-        process_id: VerletProcessId,
+        process_id: crate::process::VerletProcessId,
         max_output_bytes: usize,
-    ) -> VerletProcessResult<AsyncProcessOutcome> {
+    ) -> crate::VerletProcessResult<AsyncProcessOutcome> {
         let (process, termination_reason) = {
             let entries = self.inner.entries.lock().await;
-            let entry = entries
-                .get(&process_id)
-                .ok_or_else(|| process_error(format!("process {process_id} was not found")))?;
+            let entry = entries.get(&process_id).ok_or_else(|| {
+                crate::process_error(format!("process {process_id} was not found"))
+            })?;
             (entry.process.clone(), entry.termination_reason.clone())
         };
         let mut snapshot = snapshot_from_process(&process, max_output_bytes);
@@ -448,14 +440,14 @@ impl AsyncExecutionManager {
     /// entries fail closed and remain registered.
     pub async fn acknowledge_terminal(
         &self,
-        process_id: VerletProcessId,
-    ) -> VerletProcessResult<bool> {
+        process_id: crate::process::VerletProcessId,
+    ) -> crate::VerletProcessResult<bool> {
         let mut entries = self.inner.entries.lock().await;
         let Some(entry) = entries.get(&process_id) else {
             return Ok(false);
         };
         if entry.process.output().terminal.is_none() {
-            return Err(process_error(format!(
+            return Err(crate::process_error(format!(
                 "process {process_id} is not terminal"
             )));
         }
@@ -463,21 +455,24 @@ impl AsyncExecutionManager {
         Ok(true)
     }
 
-    async fn touch(&self, process_id: VerletProcessId) -> VerletProcessResult<()> {
+    async fn touch(
+        &self,
+        process_id: crate::process::VerletProcessId,
+    ) -> crate::VerletProcessResult<()> {
         let mut entries = self.inner.entries.lock().await;
         let entry = entries
             .get_mut(&process_id)
-            .ok_or_else(|| process_error(format!("process {process_id} was not found")))?;
-        entry.last_used = Instant::now();
+            .ok_or_else(|| crate::process_error(format!("process {process_id} was not found")))?;
+        entry.last_used = tokio::time::Instant::now();
         Ok(())
     }
 
     async fn wait_for_snapshot(
         &self,
-        process_id: VerletProcessId,
-        yield_time: Duration,
+        process_id: crate::process::VerletProcessId,
+        yield_time: std::time::Duration,
         max_output_bytes: usize,
-    ) -> VerletProcessResult<AsyncProcessOutcome> {
+    ) -> crate::VerletProcessResult<AsyncProcessOutcome> {
         let (process, retain_terminal_until_acknowledged) = {
             let entries = self.inner.entries.lock().await;
             entries
@@ -488,10 +483,12 @@ impl AsyncExecutionManager {
                         entry.retain_terminal_until_acknowledged,
                     )
                 })
-                .ok_or_else(|| process_error(format!("process {process_id} was not found")))?
+                .ok_or_else(|| {
+                    crate::process_error(format!("process {process_id} was not found"))
+                })?
         };
         let mut events = process.subscribe();
-        let deadline = Instant::now() + yield_time;
+        let deadline = tokio::time::Instant::now() + yield_time;
         loop {
             let mut snapshot = snapshot_from_process(&process, max_output_bytes);
             let termination_reason = self
@@ -502,7 +499,9 @@ impl AsyncExecutionManager {
                 .get(&process_id)
                 .and_then(|entry| entry.termination_reason.clone());
             apply_termination_reason(&mut snapshot, termination_reason.as_deref());
-            if snapshot.status != ProcessSnapshotStatus::Running || Instant::now() >= deadline {
+            if snapshot.status != ProcessSnapshotStatus::Running
+                || tokio::time::Instant::now() >= deadline
+            {
                 if snapshot.status != ProcessSnapshotStatus::Running
                     && !retain_terminal_until_acknowledged
                 {
@@ -510,7 +509,7 @@ impl AsyncExecutionManager {
                 }
                 return Ok(AsyncProcessOutcome { snapshot });
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Ok(AsyncProcessOutcome { snapshot });
             }
@@ -519,7 +518,7 @@ impl AsyncExecutionManager {
     }
 
     async fn cleanup_expired(&self) {
-        let now = Instant::now();
+        let now = tokio::time::Instant::now();
         let mut remove = Vec::new();
         let entries = self.inner.entries.lock().await;
         for (process_id, entry) in entries.iter() {
@@ -555,18 +554,18 @@ impl Default for AsyncExecutionManager {
 #[derive(Clone, Debug, Default)]
 pub struct HostBashLiveBackend;
 
-#[async_trait]
+#[async_trait::async_trait]
 impl LiveProcessBackend for HostBashLiveBackend {
-    fn backend_kind(&self) -> VerletProcessBackend {
-        VerletProcessBackend::HostBash
+    fn backend_kind(&self) -> crate::process::VerletProcessBackend {
+        crate::process::VerletProcessBackend::HostBash
     }
 
     async fn start(
         &self,
         request: LiveProcessStartRequest,
-        process: VerletProcessHandle,
-        cancellation: CancellationToken,
-    ) -> VerletProcessResult<LiveProcessSpawn> {
+        process: crate::process::VerletProcessHandle,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> crate::VerletProcessResult<LiveProcessSpawn> {
         let LiveProcessInvocation::HostCommand {
             command,
             cwd,
@@ -574,23 +573,27 @@ impl LiveProcessBackend for HostBashLiveBackend {
             pipe_stdin,
         } = request.invocation
         else {
-            return Err(process_error("host bash backend requires a host command"));
+            return Err(crate::process_error(
+                "host bash backend requires a host command",
+            ));
         };
         if command.is_empty() {
-            return Err(process_error("host command requires a non-empty argv"));
+            return Err(crate::process_error(
+                "host command requires a non-empty argv",
+            ));
         }
 
-        let mut child_command = Command::new(&command[0]);
+        let mut child_command = tokio::process::Command::new(&command[0]);
         child_command
             .args(&command[1..])
             .current_dir(cwd)
             .stdin(if pipe_stdin {
-                Stdio::piped()
+                std::process::Stdio::piped()
             } else {
-                Stdio::null()
+                std::process::Stdio::null()
             })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         for (key, value) in env {
             if let Some(value) = value {
@@ -609,18 +612,18 @@ impl LiveProcessBackend for HostBashLiveBackend {
             });
         }
 
-        let mut child = child_command.spawn().map_err(process_error)?;
+        let mut child = child_command.spawn().map_err(crate::process_error)?;
         #[cfg(unix)]
         let process_group_guard = ProcessGroupKillGuard::new(child.id());
-        process.record(VerletProcessEventKind::Started {
+        process.record(crate::process::VerletProcessEventKind::Started {
             command: Some(command.join(" ")),
         });
         let child_id = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let stdin = child.stdin.take();
-        let stdout_cap = Arc::new(StdMutex::new(StreamCapState::default()));
-        let stderr_cap = Arc::new(StdMutex::new(StreamCapState::default()));
+        let stdout_cap = std::sync::Arc::new(std::sync::Mutex::new(StreamCapState::default()));
+        let stderr_cap = std::sync::Arc::new(std::sync::Mutex::new(StreamCapState::default()));
         let stdout_task = stdout.map(|stdout| {
             spawn_reader(
                 stdout,
@@ -640,14 +643,18 @@ impl LiveProcessBackend for HostBashLiveBackend {
             )
         });
         let (stdin_tx, stdin_task) = if let Some(mut stdin) = stdin {
-            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
-            let task: JoinHandle<VerletProcessResult<()>> = tokio::spawn(async move {
-                while let Some(bytes) = rx.recv().await {
-                    stdin.write_all(&bytes).await.map_err(process_error)?;
-                    stdin.flush().await.map_err(process_error)?;
-                }
-                Ok::<(), VerletProcessError>(())
-            });
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+            let task: tokio::task::JoinHandle<crate::VerletProcessResult<()>> =
+                tokio::spawn(async move {
+                    while let Some(bytes) = rx.recv().await {
+                        stdin
+                            .write_all(&bytes)
+                            .await
+                            .map_err(crate::process_error)?;
+                        stdin.flush().await.map_err(crate::process_error)?;
+                    }
+                    Ok::<(), crate::VerletProcessError>(())
+                });
             (Some(tx), Some(task))
         } else {
             (None, None)
@@ -666,11 +673,17 @@ impl LiveProcessBackend for HostBashLiveBackend {
             )
             .await;
             #[cfg(unix)]
-            if matches!(&terminal, VerletProcessEventKind::Completed { .. }) {
+            if matches!(
+                &terminal,
+                crate::process::VerletProcessEventKind::Completed { .. }
+            ) {
                 process_group_guard.disarm_if_group_gone();
             }
             let mut readers_drained = false;
-            if matches!(&terminal, VerletProcessEventKind::Completed { .. }) {
+            if matches!(
+                &terminal,
+                crate::process::VerletProcessEventKind::Completed { .. }
+            ) {
                 let drain_readers = async {
                     if let Some(task) = &mut stdout_task {
                         let _ = task.await;
@@ -687,13 +700,13 @@ impl LiveProcessBackend for HostBashLiveBackend {
                     }
                     _ = cancellation.cancelled() => {
                         terminate_reaped_process_group(child_id).await;
-                        VerletProcessEventKind::Cancelled {
+                        crate::process::VerletProcessEventKind::Cancelled {
                             reason: "process terminated".to_string(),
                         }
                     }
                     _ = tokio::time::sleep(request.deadline.remaining()) => {
                         terminate_reaped_process_group(child_id).await;
-                        VerletProcessEventKind::TimedOut {
+                        crate::process::VerletProcessEventKind::TimedOut {
                             timeout_ms: Some(request.deadline.timeout_ms()),
                             message: format!(
                                 "process timed out after {}ms",
@@ -741,13 +754,13 @@ enum ProcessStream {
 
 fn spawn_reader<R>(
     mut reader: R,
-    process: VerletProcessHandle,
+    process: crate::process::VerletProcessHandle,
     stream: ProcessStream,
     max_output_bytes: usize,
-    state: Arc<StdMutex<StreamCapState>>,
-) -> JoinHandle<()>
+    state: std::sync::Arc<std::sync::Mutex<StreamCapState>>,
+) -> tokio::task::JoinHandle<()>
 where
-    R: AsyncRead + Unpin + Send + 'static,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
         let mut buffer = [0_u8; 8192];
@@ -764,17 +777,17 @@ where
 }
 
 fn record_capped_stream_bytes(
-    process: &VerletProcessHandle,
+    process: &crate::process::VerletProcessHandle,
     stream: ProcessStream,
     bytes: &[u8],
     max_output_bytes: usize,
-    state: &Arc<StdMutex<StreamCapState>>,
+    state: &std::sync::Arc<std::sync::Mutex<StreamCapState>>,
 ) {
     let mut state = state.lock().unwrap();
     if state.written >= max_output_bytes {
         if !state.truncated {
             state.truncated = true;
-            process.record(VerletProcessEventKind::OutputTruncated {
+            process.record(crate::process::VerletProcessEventKind::OutputTruncated {
                 stdout: matches!(stream, ProcessStream::Stdout),
                 stderr: matches!(stream, ProcessStream::Stderr),
             });
@@ -787,17 +800,17 @@ fn record_capped_stream_bytes(
         let payload = bytes[..take].to_vec();
         match stream {
             ProcessStream::Stdout => {
-                process.record(VerletProcessEventKind::Stdout { bytes: payload })
+                process.record(crate::process::VerletProcessEventKind::Stdout { bytes: payload })
             }
             ProcessStream::Stderr => {
-                process.record(VerletProcessEventKind::Stderr { bytes: payload })
+                process.record(crate::process::VerletProcessEventKind::Stderr { bytes: payload })
             }
         };
         state.written += take;
     }
     if take < bytes.len() && !state.truncated {
         state.truncated = true;
-        process.record(VerletProcessEventKind::OutputTruncated {
+        process.record(crate::process::VerletProcessEventKind::OutputTruncated {
             stdout: matches!(stream, ProcessStream::Stdout),
             stderr: matches!(stream, ProcessStream::Stderr),
         });
@@ -807,33 +820,33 @@ fn record_capped_stream_bytes(
 async fn wait_for_host_child(
     child: &mut tokio::process::Child,
     child_id: Option<u32>,
-    deadline: ExecutionDeadline,
-    cancellation: CancellationToken,
-) -> VerletProcessEventKind {
+    deadline: crate::execution::ExecutionDeadline,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> crate::process::VerletProcessEventKind {
     let timeout = tokio::time::sleep(deadline.remaining());
     tokio::pin!(timeout);
     tokio::select! {
         status = child.wait() => match status {
-            Ok(status) => VerletProcessEventKind::Completed {
-                status: VerletProcessExitStatus {
+            Ok(status) => crate::process::VerletProcessEventKind::Completed {
+                status: crate::process::VerletProcessExitStatus {
                     code: status.code(),
                     success: status.success(),
                 },
             },
-            Err(err) => VerletProcessEventKind::Failed {
+            Err(err) => crate::process::VerletProcessEventKind::Failed {
                 code: "wait_failed".to_string(),
                 message: err.to_string(),
             },
         },
         _ = cancellation.cancelled() => {
             terminate_child(child, child_id).await;
-            VerletProcessEventKind::Cancelled {
+            crate::process::VerletProcessEventKind::Cancelled {
                 reason: "process terminated".to_string(),
             }
         }
         _ = &mut timeout => {
             terminate_child(child, child_id).await;
-            VerletProcessEventKind::TimedOut {
+            crate::process::VerletProcessEventKind::TimedOut {
                 timeout_ms: Some(deadline.timeout_ms()),
                 message: format!("process timed out after {}ms", deadline.timeout_ms()),
             }
@@ -847,7 +860,7 @@ async fn terminate_child(child: &mut tokio::process::Child, child_id: Option<u32
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGTERM);
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGKILL);
         }
@@ -865,7 +878,7 @@ async fn terminate_reaped_process_group(child_id: Option<u32>) {
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGTERM);
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         unsafe {
             libc::killpg(child_id as libc::pid_t, libc::SIGKILL);
         }
@@ -891,7 +904,7 @@ async fn reap_adopted_process_group(process_group: libc::pid_t) {
         if unsafe { libc::killpg(process_group, 0) } == -1 {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -936,7 +949,7 @@ impl Drop for ProcessGroupKillGuard {
 }
 
 fn snapshot_from_process(
-    process: &VerletProcessHandle,
+    process: &crate::process::VerletProcessHandle,
     max_output_bytes: usize,
 ) -> AsyncProcessSnapshot {
     let output = process.output();
@@ -967,25 +980,33 @@ fn apply_termination_reason(snapshot: &mut AsyncProcessSnapshot, reason: Option<
     let Some(reason) = reason else {
         return;
     };
-    if let Some(event) = snapshot
-        .events
-        .iter_mut()
-        .rev()
-        .find(|event| matches!(event.kind, VerletProcessEventKind::Cancelled { .. }))
-    {
-        event.kind = VerletProcessEventKind::Cancelled {
+    if let Some(event) = snapshot.events.iter_mut().rev().find(|event| {
+        matches!(
+            event.kind,
+            crate::process::VerletProcessEventKind::Cancelled { .. }
+        )
+    }) {
+        event.kind = crate::process::VerletProcessEventKind::Cancelled {
             reason: reason.to_string(),
         };
     }
 }
 
-fn snapshot_status(output: &VerletProcessOutput) -> ProcessSnapshotStatus {
+fn snapshot_status(output: &crate::process::VerletProcessOutput) -> ProcessSnapshotStatus {
     match &output.terminal {
         None => ProcessSnapshotStatus::Running,
-        Some(VerletProcessTerminalState::Completed { .. }) => ProcessSnapshotStatus::Completed,
-        Some(VerletProcessTerminalState::Failed { .. }) => ProcessSnapshotStatus::Failed,
-        Some(VerletProcessTerminalState::TimedOut { .. }) => ProcessSnapshotStatus::TimedOut,
-        Some(VerletProcessTerminalState::Cancelled { .. }) => ProcessSnapshotStatus::Cancelled,
+        Some(crate::process::VerletProcessTerminalState::Completed { .. }) => {
+            ProcessSnapshotStatus::Completed
+        }
+        Some(crate::process::VerletProcessTerminalState::Failed { .. }) => {
+            ProcessSnapshotStatus::Failed
+        }
+        Some(crate::process::VerletProcessTerminalState::TimedOut { .. }) => {
+            ProcessSnapshotStatus::TimedOut
+        }
+        Some(crate::process::VerletProcessTerminalState::Cancelled { .. }) => {
+            ProcessSnapshotStatus::Cancelled
+        }
     }
 }
 
@@ -997,8 +1018,8 @@ fn cap_snapshot_bytes(mut bytes: Vec<u8>, max_output_bytes: usize) -> (Vec<u8>, 
     (bytes, true)
 }
 
-impl From<VerletProcessError> for std::io::Error {
-    fn from(err: VerletProcessError) -> Self {
+impl From<crate::VerletProcessError> for std::io::Error {
+    fn from(err: crate::VerletProcessError) -> Self {
         std::io::Error::other(err.to_string())
     }
 }

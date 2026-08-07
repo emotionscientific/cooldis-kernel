@@ -1,18 +1,19 @@
-use super::kernel_test::EventRecord;
-use serde::Serialize;
-use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
-
 #[derive(Clone, Debug)]
 enum TypedTranscriptItem {
-    Event { label: String, value: Value },
-    Receipt { label: String, value: Value },
+    Event {
+        label: String,
+        value: serde_json::Value,
+    },
+    Receipt {
+        label: String,
+        value: serde_json::Value,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TypedTranscript {
     items: Vec<TypedTranscriptItem>,
-    preserved_ids: BTreeSet<String>,
+    preserved_ids: std::collections::BTreeSet<String>,
 }
 
 impl TypedTranscript {
@@ -24,14 +25,14 @@ impl TypedTranscript {
         self.preserved_ids.insert(id.into());
     }
 
-    pub fn push_event(&mut self, label: impl Into<String>, event: &EventRecord) {
+    pub fn push_event(&mut self, label: impl Into<String>, event: &verlet::EventRecord) {
         self.items.push(TypedTranscriptItem::Event {
             label: label.into(),
             value: serde_json::to_value(event).expect("event transcript serialization"),
         });
     }
 
-    pub fn push_receipt<T: Serialize>(&mut self, label: impl Into<String>, receipt: &T) {
+    pub fn push_receipt<T: serde::Serialize>(&mut self, label: impl Into<String>, receipt: &T) {
         self.items.push(TypedTranscriptItem::Receipt {
             label: label.into(),
             value: serde_json::to_value(receipt).expect("receipt transcript serialization"),
@@ -71,14 +72,14 @@ impl TypedTranscriptItem {
         }
     }
 
-    fn value(&self) -> &Value {
+    fn value(&self) -> &serde_json::Value {
         match self {
             Self::Event { value, .. } | Self::Receipt { value, .. } => value,
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct NormalizedTranscript {
     pub items: Vec<NormalizedTranscriptItem>,
 }
@@ -89,45 +90,45 @@ impl NormalizedTranscript {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct NormalizedTranscriptItem {
     pub kind: String,
     pub label: String,
-    pub value: Value,
+    pub value: serde_json::Value,
 }
 
 struct AliasTable<'a> {
-    aliases: BTreeMap<String, String>,
-    counts: BTreeMap<&'static str, usize>,
-    preserved_ids: &'a BTreeSet<String>,
+    aliases: std::collections::BTreeMap<String, String>,
+    counts: std::collections::BTreeMap<&'static str, usize>,
+    preserved_ids: &'a std::collections::BTreeSet<String>,
 }
 
 impl<'a> AliasTable<'a> {
-    fn new(preserved_ids: &'a BTreeSet<String>) -> Self {
+    fn new(preserved_ids: &'a std::collections::BTreeSet<String>) -> Self {
         Self {
-            aliases: BTreeMap::new(),
-            counts: BTreeMap::new(),
+            aliases: std::collections::BTreeMap::new(),
+            counts: std::collections::BTreeMap::new(),
             preserved_ids,
         }
     }
 
-    fn collect(&mut self, value: &Value) {
+    fn collect(&mut self, value: &serde_json::Value) {
         self.collect_at(value, None);
     }
 
-    fn collect_at(&mut self, value: &Value, key: Option<&str>) {
+    fn collect_at(&mut self, value: &serde_json::Value, key: Option<&str>) {
         match value {
-            Value::Object(object) => {
+            serde_json::Value::Object(object) => {
                 for (key, value) in object {
                     self.collect_at(value, Some(key));
                 }
             }
-            Value::Array(values) => {
+            serde_json::Value::Array(values) => {
                 for value in values {
                     self.collect_at(value, key);
                 }
             }
-            Value::String(id)
+            serde_json::Value::String(id)
                 if key.is_some_and(is_id_key)
                     && !id.is_empty()
                     && !self.preserved_ids.contains(id) =>
@@ -143,27 +144,29 @@ impl<'a> AliasTable<'a> {
         }
     }
 
-    fn normalize(&self, value: &Value, key: Option<&str>) -> Value {
+    fn normalize(&self, value: &serde_json::Value, key: Option<&str>) -> serde_json::Value {
         if key.is_some_and(is_timestamp_key) {
-            return Value::String("$timestamp".to_string());
+            return serde_json::Value::String("$timestamp".to_string());
         }
         if key.is_some_and(is_duration_key) {
-            return Value::String("$duration".to_string());
+            return serde_json::Value::String("$duration".to_string());
         }
         match value {
-            Value::Object(object) => Value::Object(
+            serde_json::Value::Object(object) => serde_json::Value::Object(
                 object
                     .iter()
                     .map(|(key, value)| (key.clone(), self.normalize(value, Some(key))))
-                    .collect::<Map<_, _>>(),
+                    .collect::<serde_json::Map<_, _>>(),
             ),
-            Value::Array(values) => Value::Array(
+            serde_json::Value::Array(values) => serde_json::Value::Array(
                 values
                     .iter()
                     .map(|value| self.normalize(value, key))
                     .collect(),
             ),
-            Value::String(text) => Value::String(self.normalize_string(text)),
+            serde_json::Value::String(text) => {
+                serde_json::Value::String(self.normalize_string(text))
+            }
             _ => value.clone(),
         }
     }

@@ -1,21 +1,18 @@
-use crate::{CouplingRole, EventKind};
-use serde::{Deserialize, Serialize};
-
 pub const COUPLING_TEMPLATE_CATALOG_SCHEMA_V1: &str = "cooldis.coupling.template_catalog/1";
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingTemplateCatalogV1 {
     pub schema: String,
     pub templates: Vec<CouplingTemplateV1>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingTemplateV1 {
     pub id: String,
     pub maturity: CouplingTemplateMaturity,
-    pub role: CouplingRole,
+    pub role: crate::CouplingRole,
     pub runtime_executable: bool,
-    pub trigger_kinds: Vec<EventKind>,
+    pub trigger_kinds: Vec<crate::EventKind>,
     pub source: CouplingTemplateStreamPattern,
     pub sink: CouplingTemplateStreamPattern,
     pub must_have: bool,
@@ -23,7 +20,7 @@ pub struct CouplingTemplateV1 {
     pub summary: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CouplingTemplateMaturity {
     KernelBacked,
@@ -31,10 +28,10 @@ pub enum CouplingTemplateMaturity {
     ReferenceOnly,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingTemplateStreamPattern {
     pub stream: String,
-    pub kinds: Vec<EventKind>,
+    pub kinds: Vec<crate::EventKind>,
 }
 
 pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
@@ -44,12 +41,15 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::queue.task",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Controller,
-                &[EventKind::TurnSubmitted],
+                crate::CouplingRole::Controller,
+                &[crate::EventKind::TurnSubmitted],
                 "thread",
-                &[EventKind::TurnSubmitted],
+                &[crate::EventKind::TurnSubmitted],
                 "control",
-                &[EventKind::TurnWaiting, EventKind::CouplingRunCompleted],
+                &[
+                    crate::EventKind::TurnWaiting,
+                    crate::EventKind::CouplingRunCompleted,
+                ],
                 true,
                 false,
                 "Turn an event into durable queued work with a later completion fact.",
@@ -57,15 +57,18 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::queue.completion_callback",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Controller,
+                crate::CouplingRole::Controller,
                 &[
-                    EventKind::CouplingRunCompleted,
-                    EventKind::ToolCallCompleted,
+                    crate::EventKind::CouplingRunCompleted,
+                    crate::EventKind::ToolCallCompleted,
                 ],
                 "control",
-                &[EventKind::CouplingRunCompleted],
+                &[crate::EventKind::CouplingRunCompleted],
                 "control",
-                &[EventKind::TurnContinueRequested, EventKind::LoopCompleted],
+                &[
+                    crate::EventKind::TurnContinueRequested,
+                    crate::EventKind::LoopCompleted,
+                ],
                 true,
                 false,
                 "React to completed queued work by continuing, notifying, or closing the loop.",
@@ -73,14 +76,14 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::context.spill",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Projection,
-                &[EventKind::ContextCompileCompleted],
+                crate::CouplingRole::Projection,
+                &[crate::EventKind::ContextCompileCompleted],
                 "thread",
-                &[EventKind::ContextCompileCompleted],
+                &[crate::EventKind::ContextCompileCompleted],
                 "derived:context",
                 &[
-                    EventKind::ContextSummaryCompleted,
-                    EventKind::ContextReadPlanSet,
+                    crate::EventKind::ContextSummaryCompleted,
+                    crate::EventKind::ContextReadPlanSet,
                 ],
                 true,
                 false,
@@ -89,12 +92,12 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::context.truncate",
                 CouplingTemplateMaturity::KernelBacked,
-                CouplingRole::Controller,
-                &[EventKind::ContextCompileCompleted],
+                crate::CouplingRole::Controller,
+                &[crate::EventKind::ContextCompileCompleted],
                 "thread",
-                &[EventKind::ContextCompileCompleted],
+                &[crate::EventKind::ContextCompileCompleted],
                 "control",
-                &[EventKind::ContextReadPlanSet],
+                &[crate::EventKind::ContextReadPlanSet],
                 false,
                 false,
                 "Select a bounded read plan when the context budget requires dropping raw ranges.",
@@ -102,14 +105,20 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::context.summarize",
                 CouplingTemplateMaturity::KernelBacked,
-                CouplingRole::Projection,
-                &[EventKind::ContextCompileCompleted, EventKind::TurnCompleted],
+                crate::CouplingRole::Projection,
+                &[
+                    crate::EventKind::ContextCompileCompleted,
+                    crate::EventKind::TurnCompleted,
+                ],
                 "thread",
-                &[EventKind::SessionEntryAppended, EventKind::TurnCompleted],
+                &[
+                    crate::EventKind::SessionEntryAppended,
+                    crate::EventKind::TurnCompleted,
+                ],
                 "derived:context",
                 &[
-                    EventKind::ContextSummaryCompleted,
-                    EventKind::ContextReadPlanSet,
+                    crate::EventKind::ContextSummaryCompleted,
+                    crate::EventKind::ContextReadPlanSet,
                 ],
                 false,
                 false,
@@ -118,12 +127,18 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::memory.extract",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Projection,
-                &[EventKind::TurnCompleted, EventKind::ToolCallCompleted],
+                crate::CouplingRole::Projection,
+                &[
+                    crate::EventKind::TurnCompleted,
+                    crate::EventKind::ToolCallCompleted,
+                ],
                 "thread",
-                &[EventKind::TurnCompleted, EventKind::ToolCallCompleted],
+                &[
+                    crate::EventKind::TurnCompleted,
+                    crate::EventKind::ToolCallCompleted,
+                ],
                 "derived:memory",
-                &[EventKind::ContextSummaryCompleted],
+                &[crate::EventKind::ContextSummaryCompleted],
                 false,
                 false,
                 "Extract durable memory facts from completed turns or tool results.",
@@ -131,12 +146,15 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::memory.recall",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Projection,
-                &[EventKind::TurnSubmitted, EventKind::ContextCompileCompleted],
+                crate::CouplingRole::Projection,
+                &[
+                    crate::EventKind::TurnSubmitted,
+                    crate::EventKind::ContextCompileCompleted,
+                ],
                 "derived:memory",
-                &[EventKind::ContextSummaryCompleted],
+                &[crate::EventKind::ContextSummaryCompleted],
                 "derived:context",
-                &[EventKind::ContextReadPlanSet],
+                &[crate::EventKind::ContextReadPlanSet],
                 false,
                 false,
                 "Select memory facts for future context assembly without making memory a primitive.",
@@ -144,12 +162,15 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::permission.approval_gate",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Controller,
-                &[EventKind::ToolCallRequested],
+                crate::CouplingRole::Controller,
+                &[crate::EventKind::ToolCallRequested],
                 "thread",
-                &[EventKind::ToolCallRequested],
+                &[crate::EventKind::ToolCallRequested],
                 "control",
-                &[EventKind::ApprovalRequested, EventKind::ToolCallSuspended],
+                &[
+                    crate::EventKind::ApprovalRequested,
+                    crate::EventKind::ToolCallSuspended,
+                ],
                 false,
                 false,
                 "Suspend a tool call behind an abstract approval fact; channel-specific HITL delivery remains deferred.",
@@ -157,12 +178,15 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::permission.tool_gate",
                 CouplingTemplateMaturity::KernelBacked,
-                CouplingRole::Controller,
-                &[EventKind::ToolCallRequested],
+                crate::CouplingRole::Controller,
+                &[crate::EventKind::ToolCallRequested],
                 "thread",
-                &[EventKind::ToolCallRequested],
+                &[crate::EventKind::ToolCallRequested],
                 "control",
-                &[EventKind::ToolCallDecision, EventKind::ToolCallSuspended],
+                &[
+                    crate::EventKind::ToolCallDecision,
+                    crate::EventKind::ToolCallSuspended,
+                ],
                 false,
                 false,
                 "Allow, deny, or suspend tool calls through durable control-stream facts.",
@@ -170,14 +194,17 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::prompt.steer",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Controller,
-                &[EventKind::TurnCompleted, EventKind::ApprovalResolved],
+                crate::CouplingRole::Controller,
+                &[
+                    crate::EventKind::TurnCompleted,
+                    crate::EventKind::ApprovalResolved,
+                ],
                 "thread",
-                &[EventKind::TurnCompleted],
+                &[crate::EventKind::TurnCompleted],
                 "control",
                 &[
-                    EventKind::TurnContinueRequested,
-                    EventKind::ContextReadPlanSet,
+                    crate::EventKind::TurnContinueRequested,
+                    crate::EventKind::ContextReadPlanSet,
                 ],
                 false,
                 false,
@@ -186,18 +213,18 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::prompt.dynamic_instructions",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Projection,
+                crate::CouplingRole::Projection,
                 &[
-                    EventKind::ManifestBindCompleted,
-                    EventKind::ContextCompileCompleted,
+                    crate::EventKind::ManifestBindCompleted,
+                    crate::EventKind::ContextCompileCompleted,
                 ],
                 "thread",
                 &[
-                    EventKind::ManifestBindCompleted,
-                    EventKind::ContextCompileCompleted,
+                    crate::EventKind::ManifestBindCompleted,
+                    crate::EventKind::ContextCompileCompleted,
                 ],
                 "derived:context",
-                &[EventKind::ContextReadPlanSet],
+                &[crate::EventKind::ContextReadPlanSet],
                 false,
                 false,
                 "Select versioned instruction material for future context assembly.",
@@ -205,12 +232,15 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::io.channel_ingress",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Controller,
-                &[EventKind::TurnSubmitted],
+                crate::CouplingRole::Controller,
+                &[crate::EventKind::TurnSubmitted],
                 "thread",
-                &[EventKind::TurnSubmitted],
+                &[crate::EventKind::TurnSubmitted],
                 "control",
-                &[EventKind::TurnWaiting, EventKind::TurnContinueRequested],
+                &[
+                    crate::EventKind::TurnWaiting,
+                    crate::EventKind::TurnContinueRequested,
+                ],
                 false,
                 true,
                 "Map channel ingress into durable turn/control facts with channel authority outside the kernel.",
@@ -218,14 +248,17 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::io.channel_egress",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Controller,
-                &[EventKind::TurnCompleted, EventKind::LoopCompleted],
+                crate::CouplingRole::Controller,
+                &[
+                    crate::EventKind::TurnCompleted,
+                    crate::EventKind::LoopCompleted,
+                ],
                 "thread",
-                &[EventKind::TurnCompleted],
+                &[crate::EventKind::TurnCompleted],
                 "control",
                 &[
-                    EventKind::CouplingRunCompleted,
-                    EventKind::CouplingRunFailed,
+                    crate::EventKind::CouplingRunCompleted,
+                    crate::EventKind::CouplingRunFailed,
                 ],
                 false,
                 true,
@@ -234,18 +267,18 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::schedule.cron",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Controller,
-                &[EventKind::TimerFired],
+                crate::CouplingRole::Controller,
+                &[crate::EventKind::TimerFired],
                 "control",
                 &[
-                    EventKind::MandateStarted,
-                    EventKind::MandateRevoked,
-                    EventKind::TimerFired,
+                    crate::EventKind::MandateStarted,
+                    crate::EventKind::MandateRevoked,
+                    crate::EventKind::TimerFired,
                 ],
                 "control",
                 &[
-                    EventKind::TurnContinueRequested,
-                    EventKind::LoopBudgetExhausted,
+                    crate::EventKind::TurnContinueRequested,
+                    crate::EventKind::LoopBudgetExhausted,
                 ],
                 false,
                 false,
@@ -254,15 +287,21 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::supervisor.spawn",
                 CouplingTemplateMaturity::KernelBacked,
-                CouplingRole::Controller,
-                &[EventKind::TurnSubmitted, EventKind::ToolCallRequested],
+                crate::CouplingRole::Controller,
+                &[
+                    crate::EventKind::TurnSubmitted,
+                    crate::EventKind::ToolCallRequested,
+                ],
                 "thread",
-                &[EventKind::TurnSubmitted, EventKind::ToolCallRequested],
+                &[
+                    crate::EventKind::TurnSubmitted,
+                    crate::EventKind::ToolCallRequested,
+                ],
                 "control",
                 &[
-                    EventKind::ThreadSpawnRequested,
-                    EventKind::TurnWaiting,
-                    EventKind::CouplingRunCompleted,
+                    crate::EventKind::ThreadSpawnRequested,
+                    crate::EventKind::TurnWaiting,
+                    crate::EventKind::CouplingRunCompleted,
                 ],
                 false,
                 false,
@@ -271,12 +310,18 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::supervisor.child_completion",
                 CouplingTemplateMaturity::KernelBacked,
-                CouplingRole::Controller,
-                &[EventKind::TurnCompleted, EventKind::CouplingRunCompleted],
+                crate::CouplingRole::Controller,
+                &[
+                    crate::EventKind::TurnCompleted,
+                    crate::EventKind::CouplingRunCompleted,
+                ],
                 "thread",
-                &[EventKind::TurnCompleted],
+                &[crate::EventKind::TurnCompleted],
                 "control",
-                &[EventKind::TurnContinueRequested, EventKind::LoopCompleted],
+                &[
+                    crate::EventKind::TurnContinueRequested,
+                    crate::EventKind::LoopCompleted,
+                ],
                 false,
                 false,
                 "Join child thread completion back into a parent continuation or terminal fact.",
@@ -284,14 +329,17 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::retry.with_budget",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Controller,
-                &[EventKind::CouplingRunFailed, EventKind::ToolCallCompleted],
+                crate::CouplingRole::Controller,
+                &[
+                    crate::EventKind::CouplingRunFailed,
+                    crate::EventKind::ToolCallCompleted,
+                ],
                 "control",
-                &[EventKind::CouplingRunFailed],
+                &[crate::EventKind::CouplingRunFailed],
                 "control",
                 &[
-                    EventKind::TurnContinueRequested,
-                    EventKind::LoopBudgetExhausted,
+                    crate::EventKind::TurnContinueRequested,
+                    crate::EventKind::LoopBudgetExhausted,
                 ],
                 false,
                 false,
@@ -300,12 +348,18 @@ pub fn coupling_template_catalog_v1() -> CouplingTemplateCatalogV1 {
             template(
                 "std::failure.deadletter",
                 CouplingTemplateMaturity::ReferenceOnly,
-                CouplingRole::Projection,
-                &[EventKind::CouplingRunFailed, EventKind::LoopBlocked],
+                crate::CouplingRole::Projection,
+                &[
+                    crate::EventKind::CouplingRunFailed,
+                    crate::EventKind::LoopBlocked,
+                ],
                 "control",
-                &[EventKind::CouplingRunFailed, EventKind::LoopBlocked],
+                &[
+                    crate::EventKind::CouplingRunFailed,
+                    crate::EventKind::LoopBlocked,
+                ],
                 "derived:deadletter",
-                &[EventKind::CouplingRunFailed],
+                &[crate::EventKind::CouplingRunFailed],
                 false,
                 false,
                 "Project exhausted or blocked work into a durable deadletter stream for inspection.",
@@ -340,12 +394,12 @@ pub fn coupling_template_ids_v1() -> Vec<&'static str> {
 fn template(
     id: &str,
     maturity: CouplingTemplateMaturity,
-    role: CouplingRole,
-    trigger_kinds: &[EventKind],
+    role: crate::CouplingRole,
+    trigger_kinds: &[crate::EventKind],
     source_stream: &str,
-    source_kinds: &[EventKind],
+    source_kinds: &[crate::EventKind],
     sink_stream: &str,
-    sink_kinds: &[EventKind],
+    sink_kinds: &[crate::EventKind],
     must_have: bool,
     channel_decision_required: bool,
     summary: &str,
@@ -394,20 +448,27 @@ fn coupling_template_runtime_executable(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::collections::BTreeSet;
 
     #[test]
     fn coupling_template_catalog_freezes_v1_ids_and_kernel_vocabulary() {
-        let catalog = coupling_template_catalog_v1();
-        assert_eq!(catalog.schema, COUPLING_TEMPLATE_CATALOG_SCHEMA_V1);
+        let catalog = crate::agent::coupling_templates::coupling_template_catalog_v1();
+        assert_eq!(
+            catalog.schema,
+            crate::agent::coupling_templates::COUPLING_TEMPLATE_CATALOG_SCHEMA_V1
+        );
         let ids = catalog
             .templates
             .iter()
             .map(|template| template.id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(ids, coupling_template_ids_v1());
-        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+        assert_eq!(
+            ids,
+            crate::agent::coupling_templates::coupling_template_ids_v1()
+        );
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            ids.len()
+        );
         let runtime_executable = catalog
             .templates
             .iter()
@@ -444,8 +505,8 @@ mod tests {
                 assert!(!template.channel_decision_required, "{}", template.id);
             }
             match template.role {
-                CouplingRole::Controller => assert_eq!(template.sink.stream, "control"),
-                CouplingRole::Projection => {
+                crate::CouplingRole::Controller => assert_eq!(template.sink.stream, "control"),
+                crate::CouplingRole::Projection => {
                     assert!(
                         template.sink.stream.starts_with("derived:"),
                         "{}",
@@ -454,7 +515,10 @@ mod tests {
                 }
             }
             if template.channel_decision_required {
-                assert_ne!(template.maturity, CouplingTemplateMaturity::KernelBacked);
+                assert_ne!(
+                    template.maturity,
+                    crate::agent::coupling_templates::CouplingTemplateMaturity::KernelBacked
+                );
             }
         }
     }

@@ -1,17 +1,5 @@
-use reqwest::StatusCode;
-use serde_json::Value;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::timeout;
-use verlet::{
-    AgentLoopConfig, AgentLoopFactory, AnthropicBedrockMessagesAdapter, AnthropicMessagesAdapter,
-    CanonicalContent, CanonicalMessage, OpenAIReasoningSummary, OpenAIResponsesAdapter,
-    ProviderApi, ProviderClient, ProviderEndpoint, ProviderHttpClient, ProviderRequest,
-    ProviderStreamEvent, ProviderWireAdapter, RuntimeHost, ThreadCoordinates, ThreadEvent,
-    ThreadTopology,
-};
+use verlet::ProviderClient as _;
+use verlet::ProviderWireAdapter as _;
 
 const DEFAULT_ENV_FILE: &str = ".env";
 
@@ -31,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = SmokeConfig::load()?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(60))
         .build()?;
 
     let openai = smoke_openai(&client, &config).await?;
@@ -112,8 +100,8 @@ impl BedrockSmokeConfig {
             .or_else(|_| {
                 verlet_runtime_contracts::env_compat::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
             })
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_ENV_FILE));
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_ENV_FILE));
         let file_env = read_env_file_if_exists(&env_file)?;
         let region = env_or_file("AWS_BEDROCK_REGION", &file_env)
             .or_else(|| env_or_file("AWS_REGION", &file_env))
@@ -144,8 +132,8 @@ impl BedrockSmokeConfig {
 impl SmokeConfig {
     fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let env_file = verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_ENV_FILE));
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_ENV_FILE));
         let file_env = read_env_file_if_exists(&env_file)?;
 
         let gateway_base_url = env_or_file("VERLET_BIFROST_URL", &file_env)
@@ -229,17 +217,17 @@ async fn smoke_openai(
     client: &reqwest::Client,
     config: &SmokeConfig,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
-    let adapter = OpenAIResponsesAdapter {
+    let adapter = verlet::OpenAIResponsesAdapter {
         include_encrypted_reasoning: false,
-        reasoning_summary: OpenAIReasoningSummary::Auto,
+        reasoning_summary: verlet::OpenAIReasoningSummary::Auto,
     };
-    let mut request = ProviderRequest::new(
-        ProviderApi::OpenAIResponses,
+    let mut request = verlet::ProviderRequest::new(
+        verlet::ProviderApi::OpenAIResponses,
         "openai",
         config.openai.model.clone(),
     );
     request.max_tokens = 32;
-    request.messages = vec![CanonicalMessage::user_text(
+    request.messages = vec![verlet::CanonicalMessage::user_text(
         "Reply with exactly COOL_OPENAI_OK and no other text.",
     )];
     let body = adapter.build_request_body(&request)?;
@@ -266,17 +254,17 @@ async fn smoke_openai_stream(
     client: &reqwest::Client,
     config: &SmokeConfig,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
-    let adapter = OpenAIResponsesAdapter {
+    let adapter = verlet::OpenAIResponsesAdapter {
         include_encrypted_reasoning: false,
-        reasoning_summary: OpenAIReasoningSummary::Auto,
+        reasoning_summary: verlet::OpenAIReasoningSummary::Auto,
     };
-    let mut request = ProviderRequest::new(
-        ProviderApi::OpenAIResponses,
+    let mut request = verlet::ProviderRequest::new(
+        verlet::ProviderApi::OpenAIResponses,
         "openai",
         config.openai.model.clone(),
     );
     request.max_tokens = 32;
-    request.messages = vec![CanonicalMessage::user_text(
+    request.messages = vec![verlet::CanonicalMessage::user_text(
         "Reply with exactly COOL_OPENAI_STREAM_OK and no other text.",
     )];
     let body = adapter.build_stream_request_body(&request)?;
@@ -304,14 +292,14 @@ async fn smoke_anthropic(
     client: &reqwest::Client,
     config: &SmokeConfig,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
-    let adapter = AnthropicMessagesAdapter;
-    let mut request = ProviderRequest::new(
-        ProviderApi::AnthropicMessages,
+    let adapter = verlet::AnthropicMessagesAdapter;
+    let mut request = verlet::ProviderRequest::new(
+        verlet::ProviderApi::AnthropicMessages,
         "anthropic",
         config.anthropic.model.clone(),
     );
     request.max_tokens = 32;
-    request.messages = vec![CanonicalMessage::user_text(
+    request.messages = vec![verlet::CanonicalMessage::user_text(
         "Reply with exactly COOL_ANTHROPIC_OK and no other text.",
     )];
     let body = adapter.build_request_body(&request)?;
@@ -339,14 +327,14 @@ async fn smoke_anthropic_stream(
     client: &reqwest::Client,
     config: &SmokeConfig,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
-    let adapter = AnthropicMessagesAdapter;
-    let mut request = ProviderRequest::new(
-        ProviderApi::AnthropicMessages,
+    let adapter = verlet::AnthropicMessagesAdapter;
+    let mut request = verlet::ProviderRequest::new(
+        verlet::ProviderApi::AnthropicMessages,
         "anthropic",
         config.anthropic.model.clone(),
     );
     request.max_tokens = 32;
-    request.messages = vec![CanonicalMessage::user_text(
+    request.messages = vec![verlet::CanonicalMessage::user_text(
         "Reply with exactly COOL_ANTHROPIC_STREAM_OK and no other text.",
     )];
     let body = adapter.build_stream_request_body(&request)?;
@@ -374,9 +362,10 @@ async fn smoke_anthropic_stream(
 async fn smoke_anthropic_bedrock_stream(
     config: &BedrockSmokeConfig,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
-    let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(AnthropicBedrockMessagesAdapter);
+    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet::AnthropicBedrockMessagesAdapter);
     let endpoint = if let Some(base_url) = &config.base_url {
-        ProviderEndpoint::anthropic_bedrock_with_base_url(
+        verlet::ProviderEndpoint::anthropic_bedrock_with_base_url(
             base_url,
             &config.region,
             &config.model,
@@ -385,7 +374,7 @@ async fn smoke_anthropic_bedrock_stream(
             config.session_token.clone(),
         )
     } else {
-        ProviderEndpoint::anthropic_bedrock(
+        verlet::ProviderEndpoint::anthropic_bedrock(
             &config.region,
             &config.model,
             config.access_key_id.clone(),
@@ -393,14 +382,14 @@ async fn smoke_anthropic_bedrock_stream(
             config.session_token.clone(),
         )
     };
-    let client = ProviderHttpClient::new(endpoint, adapter)?;
-    let mut request = ProviderRequest::new(
-        ProviderApi::AnthropicMessages,
+    let client = verlet::ProviderHttpClient::new(endpoint, adapter)?;
+    let mut request = verlet::ProviderRequest::new(
+        verlet::ProviderApi::AnthropicMessages,
         "anthropic_bedrock",
         config.model.clone(),
     );
     request.max_tokens = 32;
-    request.messages = vec![CanonicalMessage::user_text(
+    request.messages = vec![verlet::CanonicalMessage::user_text(
         "Reply with exactly COOL_BEDROCK_STREAM_OK and no other text.",
     )];
 
@@ -424,22 +413,29 @@ async fn smoke_anthropic_bedrock_stream(
 async fn smoke_canonical_openai_runtime(
     config: &SmokeConfig,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
-    let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(OpenAIResponsesAdapter {
-        include_encrypted_reasoning: false,
-        reasoning_summary: OpenAIReasoningSummary::Auto,
-    });
-    let client = Arc::new(ProviderHttpClient::new(
-        ProviderEndpoint::openai_responses(&config.openai.base_url, config.openai.api_key.clone()),
+    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet::OpenAIResponsesAdapter {
+            include_encrypted_reasoning: false,
+            reasoning_summary: verlet::OpenAIReasoningSummary::Auto,
+        });
+    let client = std::sync::Arc::new(verlet::ProviderHttpClient::new(
+        verlet::ProviderEndpoint::openai_responses(
+            &config.openai.base_url,
+            config.openai.api_key.clone(),
+        ),
         adapter,
     )?);
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::OpenAIResponses,
+    let mut runtime_config = verlet::AgentLoopConfig::new(
+        verlet::ProviderApi::OpenAIResponses,
         "openai",
         config.openai.model.clone(),
     );
     runtime_config.max_tokens = 32;
     runtime_config.stream = true;
-    let host = RuntimeHost::new(Arc::new(AgentLoopFactory::new(runtime_config, client)));
+    let host = verlet::RuntimeHost::new(std::sync::Arc::new(verlet::AgentLoopFactory::new(
+        runtime_config,
+        client,
+    )));
     run_canonical_runtime_smoke(
         host,
         "canonical_openai",
@@ -452,22 +448,26 @@ async fn smoke_canonical_openai_runtime(
 async fn smoke_canonical_anthropic_runtime(
     config: &SmokeConfig,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
-    let adapter: Arc<dyn ProviderWireAdapter> = Arc::new(AnthropicMessagesAdapter);
-    let client = Arc::new(ProviderHttpClient::new(
-        ProviderEndpoint::anthropic_messages(
+    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet::AnthropicMessagesAdapter);
+    let client = std::sync::Arc::new(verlet::ProviderHttpClient::new(
+        verlet::ProviderEndpoint::anthropic_messages(
             &config.anthropic.base_url,
             config.anthropic.api_key.clone(),
         ),
         adapter,
     )?);
-    let mut runtime_config = AgentLoopConfig::new(
-        ProviderApi::AnthropicMessages,
+    let mut runtime_config = verlet::AgentLoopConfig::new(
+        verlet::ProviderApi::AnthropicMessages,
         "anthropic",
         config.anthropic.model.clone(),
     );
     runtime_config.max_tokens = 32;
     runtime_config.stream = true;
-    let host = RuntimeHost::new(Arc::new(AgentLoopFactory::new(runtime_config, client)));
+    let host = verlet::RuntimeHost::new(std::sync::Arc::new(verlet::AgentLoopFactory::new(
+        runtime_config,
+        client,
+    )));
     run_canonical_runtime_smoke(
         host,
         "canonical_anthropic",
@@ -478,15 +478,15 @@ async fn smoke_canonical_anthropic_runtime(
 }
 
 async fn run_canonical_runtime_smoke(
-    host: RuntimeHost,
+    host: verlet::RuntimeHost,
     session_id: &str,
     prompt: &str,
     model: String,
 ) -> Result<SmokeResult, Box<dyn std::error::Error>> {
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("smoke_tenant", "smoke_user", session_id),
-            ThreadTopology::root(),
+            verlet::ThreadCoordinates::new("smoke_tenant", "smoke_user", session_id),
+            verlet::ThreadTopology::root(),
         )
         .await?;
     let mut events = thread.subscribe_events();
@@ -515,13 +515,14 @@ async fn run_canonical_runtime_smoke(
 }
 
 async fn next_output(
-    events: &mut tokio::sync::broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     loop {
-        let event = timeout(Duration::from_secs(60), events.recv()).await??;
+        let event =
+            tokio::time::timeout(std::time::Duration::from_secs(60), events.recv()).await??;
         match event {
-            ThreadEvent::Output { text, .. } => return Ok(text),
-            ThreadEvent::Failed { message, .. } => return Err(message.into()),
+            verlet::ThreadEvent::Output { text, .. } => return Ok(text),
+            verlet::ThreadEvent::Failed { message, .. } => return Err(message.into()),
             _ => {}
         }
     }
@@ -529,7 +530,7 @@ async fn next_output(
 
 async fn read_success_json(
     response: reqwest::Response,
-) -> Result<Value, Box<dyn std::error::Error>> {
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let text = read_success_text(response).await?;
     Ok(serde_json::from_str(&text)?)
 }
@@ -539,7 +540,7 @@ async fn read_success_text(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let status = response.status();
     let text = response.text().await?;
-    if status != StatusCode::OK {
+    if status != reqwest::StatusCode::OK {
         return Err(format!("HTTP {status}: {}", compact(&text)).into());
     }
     Ok(text)
@@ -555,13 +556,13 @@ fn endpoint_url(base_url: &str, endpoint: &str) -> String {
 }
 
 fn read_env_file_if_exists(
-    path: &PathBuf,
-) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    path: &std::path::PathBuf,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok(std::collections::HashMap::new());
     }
     let text = std::fs::read_to_string(path)?;
-    let mut env = HashMap::new();
+    let mut env = std::collections::HashMap::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -575,7 +576,7 @@ fn read_env_file_if_exists(
     Ok(env)
 }
 
-fn env_or_file(key: &str, file_env: &HashMap<String, String>) -> Option<String> {
+fn env_or_file(key: &str, file_env: &std::collections::HashMap<String, String>) -> Option<String> {
     verlet_runtime_contracts::env_compat::var(key)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -605,79 +606,85 @@ fn unquote(value: &str) -> String {
         .to_string()
 }
 
-fn content_text(content: &[CanonicalContent]) -> String {
+fn content_text(content: &[verlet::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet::CanonicalContent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("")
 }
 
-fn stream_text(events: &[ProviderStreamEvent]) -> String {
+fn stream_text(events: &[verlet::ProviderStreamEvent]) -> String {
     events
         .iter()
         .filter_map(|event| match event {
-            ProviderStreamEvent::TextDelta { text } => Some(text.as_str()),
+            verlet::ProviderStreamEvent::TextDelta { text } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("")
 }
 
-fn stream_error(events: &[ProviderStreamEvent]) -> Option<&str> {
+fn stream_error(events: &[verlet::ProviderStreamEvent]) -> Option<&str> {
     events.iter().find_map(|event| match event {
-        ProviderStreamEvent::Error { message } => Some(message.as_str()),
+        verlet::ProviderStreamEvent::Error { message } => Some(message.as_str()),
         _ => None,
     })
 }
 
-fn stream_event_summary(events: &[ProviderStreamEvent]) -> String {
+fn stream_event_summary(events: &[verlet::ProviderStreamEvent]) -> String {
     if events.is_empty() {
         return "no_events".to_string();
     }
     events
         .iter()
         .map(|event| match event {
-            ProviderStreamEvent::TextDelta { text } => format!("text_delta(len={})", text.len()),
-            ProviderStreamEvent::ThinkingDelta { text } => {
+            verlet::ProviderStreamEvent::TextDelta { text } => {
+                format!("text_delta(len={})", text.len())
+            }
+            verlet::ProviderStreamEvent::ThinkingDelta { text } => {
                 format!("thinking_delta(len={})", text.len())
             }
-            ProviderStreamEvent::ToolCallDelta {
+            verlet::ProviderStreamEvent::ToolCallDelta {
                 arguments_delta, ..
             } => {
                 format!("tool_call_delta(args_len={})", arguments_delta.len())
             }
-            ProviderStreamEvent::Content { content } => match content {
-                CanonicalContent::Text { text, .. } => format!("content_text(len={})", text.len()),
-                CanonicalContent::Thinking { text, .. } => {
+            verlet::ProviderStreamEvent::Content { content } => match content {
+                verlet::CanonicalContent::Text { text, .. } => {
+                    format!("content_text(len={})", text.len())
+                }
+                verlet::CanonicalContent::Thinking { text, .. } => {
                     format!("content_thinking(len={})", text.len())
                 }
-                CanonicalContent::Image { .. } => "content_image".to_string(),
-                CanonicalContent::ToolCall { .. } => "content_tool_call".to_string(),
+                verlet::CanonicalContent::Image { .. } => "content_image".to_string(),
+                verlet::CanonicalContent::ToolCall { .. } => "content_tool_call".to_string(),
             },
-            ProviderStreamEvent::Usage { usage } => format!(
+            verlet::ProviderStreamEvent::Usage { usage } => format!(
                 "usage(in={},out={},cache_create={},cache_read={})",
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.cache_creation_input_tokens,
                 usage.cache_read_input_tokens
             ),
-            ProviderStreamEvent::Done { stop_reason } => format!("done({stop_reason:?})"),
-            ProviderStreamEvent::Error { message } => format!("error(len={})", message.len()),
+            verlet::ProviderStreamEvent::Done { stop_reason } => format!("done({stop_reason:?})"),
+            verlet::ProviderStreamEvent::Error { message } => {
+                format!("error(len={})", message.len())
+            }
         })
         .collect::<Vec<_>>()
         .join(",")
 }
 
-fn stream_stop_reason(events: &[ProviderStreamEvent]) -> verlet::CanonicalStopReason {
+fn stream_stop_reason(events: &[verlet::ProviderStreamEvent]) -> verlet::CanonicalStopReason {
     events
         .iter()
         .rev()
         .find_map(|event| match event {
-            ProviderStreamEvent::Done { stop_reason } => Some(*stop_reason),
+            verlet::ProviderStreamEvent::Done { stop_reason } => Some(*stop_reason),
             _ => None,
         })
         .unwrap_or(verlet::CanonicalStopReason::EndTurn)

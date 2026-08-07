@@ -1,34 +1,4 @@
-use super::context_read_plan::{
-    context_compile_payload_v1, context_read_plan_set_payload_v1, context_source_ranges,
-    context_source_streams, context_summary_completed_payload_v1,
-    is_instruction_context_read_plan_event, is_recall_context_read_plan_event,
-    primary_context_source_range, render_instruction_context, render_recall_context,
-    session_context_source_cut_for_entries,
-};
-use super::runtime_utils::unix_timestamp_ms;
-use super::turn::{TurnWatchdogHandle, TurnWatchdogToken};
-use super::{ProcessHandleIngressSink, RuntimeKernelControl, TurnInput, VerletError, VerletResult};
-use crate::agent::manifest_bind::BoundCouplingSet;
-use crate::kernel::coupling_executor_registry::{
-    CouplingExecutorRegistry, registered_coupling_executor_supports_template,
-};
-use crate::kernel::coupling_scheduler::CouplingScheduler;
-use crate::kernel::history::{
-    CONTEXT_READ_PLAN_SCHEMA_V1, CanonicalMessage, EventKind, EventProvenance, EventRecord,
-    EventRecordId, EventSequence, EventStreamId, HistoryError, NewEventRecord,
-    NewObservationRecord, ObservationProvenance, ObservationRecord, RuntimeStore, SessionContext,
-    SessionContextSourceCut, SessionEntry, SessionEntryId, SessionEntryKind, ThreadJoinedPayload,
-    ThreadTerminalState,
-};
-use crate::kernel::process_handle_dispatch::ProcessHandleDispatcher;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use verlet_runtime_contracts::{ThreadContext, ThreadCoordinates};
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeExecutionPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_timeout_ms: Option<u64>,
@@ -71,19 +41,21 @@ impl RuntimeExecutionPolicy {
 
 #[derive(Clone)]
 pub struct RuntimeServices {
-    runtime_store: Arc<dyn RuntimeStore>,
+    runtime_store: std::sync::Arc<dyn crate::kernel::history::RuntimeStore>,
     execution_policy: RuntimeExecutionPolicy,
-    kernel_control: Option<RuntimeKernelControl>,
-    process_handle_ingress: Option<Arc<dyn ProcessHandleIngressSink>>,
-    process_handle_dispatcher: Option<ProcessHandleDispatcher>,
-    bound_coupling_set: Option<BoundCouplingSet>,
-    operation_registry_root: Option<PathBuf>,
-    turn_watchdog_sequence: Arc<AtomicU64>,
+    kernel_control: Option<crate::kernel::runtime_host::RuntimeKernelControl>,
+    process_handle_ingress:
+        Option<std::sync::Arc<dyn crate::kernel::runtime_host::ProcessHandleIngressSink>>,
+    process_handle_dispatcher:
+        Option<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
+    bound_coupling_set: Option<crate::agent::manifest_bind::BoundCouplingSet>,
+    operation_registry_root: Option<std::path::PathBuf>,
+    turn_watchdog_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RuntimeServices {
     pub fn new(
-        runtime_store: Arc<dyn RuntimeStore>,
+        runtime_store: std::sync::Arc<dyn crate::kernel::history::RuntimeStore>,
         execution_policy: RuntimeExecutionPolicy,
     ) -> Self {
         Self {
@@ -94,18 +66,21 @@ impl RuntimeServices {
             process_handle_dispatcher: None,
             bound_coupling_set: None,
             operation_registry_root: None,
-            turn_watchdog_sequence: Arc::new(AtomicU64::new(0)),
+            turn_watchdog_sequence: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
-    pub fn with_kernel_control(mut self, kernel_control: RuntimeKernelControl) -> Self {
+    pub fn with_kernel_control(
+        mut self,
+        kernel_control: crate::kernel::runtime_host::RuntimeKernelControl,
+    ) -> Self {
         self.kernel_control = Some(kernel_control);
         self
     }
 
     pub(crate) fn with_process_handle_dispatcher(
         mut self,
-        dispatcher: Option<ProcessHandleDispatcher>,
+        dispatcher: Option<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
     ) -> Self {
         self.process_handle_dispatcher = dispatcher;
         self
@@ -113,86 +88,96 @@ impl RuntimeServices {
 
     pub fn with_process_handle_ingress(
         mut self,
-        sink: Option<Arc<dyn ProcessHandleIngressSink>>,
+        sink: Option<std::sync::Arc<dyn crate::kernel::runtime_host::ProcessHandleIngressSink>>,
     ) -> Self {
         self.process_handle_ingress = sink;
         self
     }
 
-    pub fn process_handle_ingress(&self) -> Option<Arc<dyn ProcessHandleIngressSink>> {
+    pub fn process_handle_ingress(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::kernel::runtime_host::ProcessHandleIngressSink>> {
         self.process_handle_ingress.clone()
     }
 
-    pub(crate) fn process_handle_dispatcher(&self) -> Option<ProcessHandleDispatcher> {
+    pub(crate) fn process_handle_dispatcher(
+        &self,
+    ) -> Option<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher> {
         self.process_handle_dispatcher.clone()
     }
 
-    pub fn with_bound_coupling_set(mut self, coupling_set: BoundCouplingSet) -> Self {
+    pub fn with_bound_coupling_set(
+        mut self,
+        coupling_set: crate::agent::manifest_bind::BoundCouplingSet,
+    ) -> Self {
         self.bound_coupling_set = Some(coupling_set);
         self
     }
 
-    pub fn with_operation_registry_root(mut self, root: impl Into<PathBuf>) -> Self {
+    pub fn with_operation_registry_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
         self.operation_registry_root = Some(root.into());
         self
     }
 
-    pub fn runtime_store(&self) -> Arc<dyn RuntimeStore> {
-        Arc::clone(&self.runtime_store)
+    pub fn runtime_store(&self) -> std::sync::Arc<dyn crate::kernel::history::RuntimeStore> {
+        std::sync::Arc::clone(&self.runtime_store)
     }
 
     pub fn execution_policy(&self) -> &RuntimeExecutionPolicy {
         &self.execution_policy
     }
 
-    pub fn kernel_control(&self) -> Option<RuntimeKernelControl> {
+    pub fn kernel_control(&self) -> Option<crate::kernel::runtime_host::RuntimeKernelControl> {
         self.kernel_control.clone()
     }
 
-    pub(super) fn register_turn_watchdog(&self, input: &mut TurnInput) -> TurnWatchdogHandle {
+    pub(super) fn register_turn_watchdog(
+        &self,
+        input: &mut crate::kernel::runtime_host::TurnInput,
+    ) -> crate::kernel::runtime_host::turn::TurnWatchdogHandle {
         let token_id = self
             .turn_watchdog_sequence
-            .fetch_add(1, Ordering::SeqCst)
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .wrapping_add(1);
-        let (token, handle) = TurnWatchdogToken::new(token_id);
+        let (token, handle) = crate::kernel::runtime_host::turn::TurnWatchdogToken::new(token_id);
         input.set_turn_watchdog(token);
         handle
     }
 
     pub async fn append_session_entry(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-    ) -> VerletResult<SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<crate::kernel::history::SessionEntryId>,
+        kind: crate::kernel::history::SessionEntryKind,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionEntry> {
         self.runtime_store
             .append(coordinates, parent_entry_id, kind)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))
     }
 
     pub async fn append_session_entry_with_provenance(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-        provenance: EventProvenance,
-    ) -> VerletResult<SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<crate::kernel::history::SessionEntryId>,
+        kind: crate::kernel::history::SessionEntryKind,
+        provenance: crate::kernel::history::EventProvenance,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionEntry> {
         self.runtime_store
             .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))
     }
 
     pub async fn append_agent_loop_session_entry(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-        source_event_ids: Vec<EventRecordId>,
-    ) -> VerletResult<SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<crate::kernel::history::SessionEntryId>,
+        kind: crate::kernel::history::SessionEntryKind,
+        source_event_ids: Vec<crate::kernel::history::EventRecordId>,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionEntry> {
         if source_event_ids.is_empty() {
-            return Err(VerletError::History(
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "agent-loop session entry requires source_event_ids".to_string(),
             ));
         }
@@ -200,12 +185,14 @@ impl RuntimeServices {
             coordinates,
             parent_entry_id,
             kind,
-            EventProvenance {
-                source_streams: vec![EventStreamId::for_thread(coordinates)],
+            crate::kernel::history::EventProvenance {
+                source_streams: vec![crate::kernel::history::EventStreamId::for_thread(
+                    coordinates,
+                )],
                 source_event_ids,
                 discharged_by: Some("propagator:agent-loop".to_string()),
                 function: Some("session_entry_append/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::kernel::history::EventProvenance::default()
             },
         )
         .await
@@ -213,14 +200,14 @@ impl RuntimeServices {
 
     pub async fn append_user_message(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         input: impl Into<String>,
-    ) -> VerletResult<SessionEntry> {
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionEntry> {
         self.append_session_entry(
             coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text(input.into()),
+            crate::kernel::history::SessionEntryKind::Message {
+                message: crate::kernel::history::CanonicalMessage::user_text(input.into()),
             },
         )
         .await
@@ -228,48 +215,55 @@ impl RuntimeServices {
 
     pub async fn append_user_turn_input(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
-        input: &TurnInput,
-    ) -> VerletResult<SessionEntry> {
+        input: &crate::kernel::runtime_host::TurnInput,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionEntry> {
         input.start_turn_watchdog();
         self.runtime_store
             .append_turn_input(
                 coordinates,
                 turn_id,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::User {
+                crate::kernel::history::SessionEntryKind::Message {
+                    message: crate::kernel::history::CanonicalMessage::User {
                         content: input.canonical_content(),
-                        timestamp_ms: unix_timestamp_ms() as i64,
+                        timestamp_ms: crate::kernel::runtime_host::runtime_utils::unix_timestamp_ms(
+                        ) as i64,
                     },
                 },
             )
             .await
-            .map_err(|err| VerletError::History(err.to_string()))
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))
     }
 
     pub async fn append_thread_event(
         &self,
-        coordinates: &ThreadCoordinates,
-        record: NewEventRecord,
-    ) -> VerletResult<EventRecord> {
-        self.append_event(&EventStreamId::for_thread(coordinates), record)
-            .await
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        record: crate::kernel::history::NewEventRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
+        self.append_event(
+            &crate::kernel::history::EventStreamId::for_thread(coordinates),
+            record,
+        )
+        .await
     }
 
     pub(crate) async fn append_thread_events(
         &self,
-        coordinates: &ThreadCoordinates,
-        records: Vec<NewEventRecord>,
-    ) -> VerletResult<Vec<EventRecord>> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        records: Vec<crate::kernel::history::NewEventRecord>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
         let expected = records.len();
         let appended = self
             .runtime_store
-            .append_events(&EventStreamId::for_thread(coordinates), records)
+            .append_events(
+                &crate::kernel::history::EventStreamId::for_thread(coordinates),
+                records,
+            )
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         if appended.len() != expected {
-            return Err(VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "event batch append returned {} of {expected} records",
                 appended.len()
             )));
@@ -280,11 +274,14 @@ impl RuntimeServices {
 
     pub async fn append_control_event(
         &self,
-        coordinates: &ThreadCoordinates,
-        record: NewEventRecord,
-    ) -> VerletResult<EventRecord> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        record: crate::kernel::history::NewEventRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
         self.append_event(
-            &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+            &crate::kernel::history::EventStreamId::new(format!(
+                "control:{}",
+                coordinates.thread_id
+            )),
             record,
         )
         .await
@@ -292,27 +289,30 @@ impl RuntimeServices {
 
     pub async fn append_thread_joined_event_if_spawned(
         &self,
-        context: &ThreadContext,
-        terminal_state: ThreadTerminalState,
+        context: &verlet_runtime_contracts::ThreadContext,
+        terminal_state: crate::kernel::history::ThreadTerminalState,
         result_digest: Option<String>,
-        source_event_id: Option<EventRecordId>,
-    ) -> VerletResult<Option<EventRecord>> {
+        source_event_id: Option<crate::kernel::history::EventRecordId>,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<crate::kernel::history::EventRecord>>
+    {
         let Some(parent_thread_id) = context.parent_thread_id else {
             return Ok(None);
         };
         let mut parent_coordinates = context.coordinates.clone();
         parent_coordinates.thread_id = parent_thread_id;
-        let parent_control_stream =
-            EventStreamId::new(format!("control:{}", parent_coordinates.thread_id));
+        let parent_control_stream = crate::kernel::history::EventStreamId::new(format!(
+            "control:{}",
+            parent_coordinates.thread_id
+        ));
         let control_events = self
             .runtime_store
             .read_events(&parent_control_stream, None)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         let child_thread_id = context.coordinates.thread_id.to_string();
         let Some(spawned) = control_events
             .iter()
-            .filter(|event| event.kind == EventKind::ThreadSpawned)
+            .filter(|event| event.kind == crate::kernel::history::EventKind::ThreadSpawned)
             .filter(|event| {
                 event
                     .payload
@@ -325,8 +325,12 @@ impl RuntimeServices {
         else {
             return Ok(None);
         };
-        let source_event = source_event_id
-            .map(|event_id| (EventStreamId::for_thread(&context.coordinates), event_id));
+        let source_event = source_event_id.map(|event_id| {
+            (
+                crate::kernel::history::EventStreamId::for_thread(&context.coordinates),
+                event_id,
+            )
+        });
         let joined = append_thread_joined_first_wins(
             self.runtime_store.as_ref(),
             parent_coordinates,
@@ -345,22 +349,29 @@ impl RuntimeServices {
 
     async fn append_event(
         &self,
-        stream_id: &EventStreamId,
-        record: NewEventRecord,
-    ) -> VerletResult<EventRecord> {
+        stream_id: &crate::kernel::history::EventStreamId,
+        record: crate::kernel::history::NewEventRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
         let appended = self
             .runtime_store
             .append_events(stream_id, vec![record])
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
             .into_iter()
             .next()
-            .ok_or_else(|| VerletError::History("event append returned no record".to_string()))?;
+            .ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::History(
+                    "event append returned no record".to_string(),
+                )
+            })?;
         self.run_bound_couplings(vec![appended.clone()]).await?;
         Ok(appended)
     }
 
-    async fn run_bound_couplings(&self, appended: Vec<EventRecord>) -> VerletResult<()> {
+    async fn run_bound_couplings(
+        &self,
+        appended: Vec<crate::kernel::history::EventRecord>,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if appended.is_empty() {
             return Ok(());
         }
@@ -370,7 +381,7 @@ impl RuntimeServices {
         let executable_couplings = coupling_set
             .couplings
             .iter()
-            .filter(|coupling| registered_coupling_executor_supports_template(&coupling.id))
+            .filter(|coupling| crate::kernel::coupling_executor_registry::registered_coupling_executor_supports_template(&coupling.id))
             .cloned()
             .collect::<Vec<_>>();
         if executable_couplings.is_empty() {
@@ -386,11 +397,16 @@ impl RuntimeServices {
                     .map(|expiries| (coupling.id.clone(), expiries))
             })
             .collect();
-        let executor = CouplingExecutorRegistry::new(self.operation_registry_root.clone());
-        let scheduler = CouplingScheduler::new(self.runtime_store.as_ref(), &executor);
+        let executor = crate::kernel::coupling_executor_registry::CouplingExecutorRegistry::new(
+            self.operation_registry_root.clone(),
+        );
+        let scheduler = crate::kernel::coupling_scheduler::CouplingScheduler::new(
+            self.runtime_store.as_ref(),
+            &executor,
+        );
         scheduler
             .run_batch(
-                &BoundCouplingSet::new_with_grant_expiries(
+                &crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
                     coupling_set.snapshot_id.clone(),
                     executable_couplings,
                     grant_expiries,
@@ -403,57 +419,59 @@ impl RuntimeServices {
 
     pub async fn build_session_context(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> VerletResult<SessionContext> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionContext> {
         self.runtime_store
             .build_context(coordinates)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))
     }
 
     pub async fn build_recall_read_plan_contexts(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> VerletResult<Vec<String>> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<String>> {
         self.build_context_read_plan_contexts(
             coordinates,
-            is_recall_context_read_plan_event,
+            crate::kernel::runtime_host::context_read_plan::is_recall_context_read_plan_event,
             "memory_checkpoint",
             "memory context",
-            render_recall_context,
+            crate::kernel::runtime_host::context_read_plan::render_recall_context,
         )
         .await
     }
 
     pub async fn build_instruction_read_plan_contexts(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> VerletResult<Vec<String>> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<String>> {
         self.build_context_read_plan_contexts(
             coordinates,
-            is_instruction_context_read_plan_event,
+            crate::kernel::runtime_host::context_read_plan::is_instruction_context_read_plan_event,
             "instruction_checkpoint",
             "instruction context",
-            render_instruction_context,
+            crate::kernel::runtime_host::context_read_plan::render_instruction_context,
         )
         .await
     }
 
     async fn build_context_read_plan_contexts(
         &self,
-        coordinates: &ThreadCoordinates,
-        event_filter: fn(&EventRecord) -> bool,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        event_filter: fn(&crate::kernel::history::EventRecord) -> bool,
         event_role: &str,
         label: &str,
         render: fn(&[String]) -> String,
-    ) -> VerletResult<Vec<String>> {
-        let derived_context_stream =
-            EventStreamId::new(format!("derived:context:{}", coordinates.thread_id));
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<String>> {
+        let derived_context_stream = crate::kernel::history::EventStreamId::new(format!(
+            "derived:context:{}",
+            coordinates.thread_id
+        ));
         let events = self
             .runtime_store
             .read_events(&derived_context_stream, None)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         let Some(read_plan_event) = events
             .into_iter()
             .filter(event_filter)
@@ -462,14 +480,14 @@ impl RuntimeServices {
             return Ok(Vec::new());
         };
         let Some(read_plan) = read_plan_event.payload.get("read_plan") else {
-            return Err(VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "{label} read plan is missing read_plan"
             )));
         };
         if read_plan.get("schema").and_then(|value| value.as_str())
-            != Some(CONTEXT_READ_PLAN_SCHEMA_V1)
+            != Some(crate::kernel::history::CONTEXT_READ_PLAN_SCHEMA_V1)
         {
-            return Err(VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "{label} read plan has unsupported schema"
             )));
         }
@@ -477,13 +495,19 @@ impl RuntimeServices {
             .get("source_stream")
             .and_then(|value| value.as_str())
             .ok_or_else(|| {
-                VerletError::History(format!("{label} read plan is missing source_stream"))
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "{label} read plan is missing source_stream"
+                ))
             })?;
         let entries = read_plan
             .get("entries")
             .and_then(|value| value.as_array())
-            .ok_or_else(|| VerletError::History(format!("{label} read plan is missing entries")))?;
-        let mut seen_event_ids = BTreeSet::new();
+            .ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "{label} read plan is missing entries"
+                ))
+            })?;
+        let mut seen_event_ids = std::collections::BTreeSet::new();
         let mut texts = Vec::new();
         for entry in entries {
             if entry.get("kind").and_then(|value| value.as_str()) != Some("event_ref") {
@@ -496,7 +520,9 @@ impl RuntimeServices {
                 .get("event_id")
                 .and_then(|value| value.as_str())
                 .ok_or_else(|| {
-                    VerletError::History(format!("{label} read plan event_ref is missing event_id"))
+                    crate::kernel::runtime_host::VerletError::History(format!(
+                        "{label} read plan event_ref is missing event_id"
+                    ))
                 })?;
             if !seen_event_ids.insert(event_id.to_string()) {
                 continue;
@@ -507,19 +533,24 @@ impl RuntimeServices {
                 .unwrap_or(source_stream);
             let source_events = self
                 .runtime_store
-                .read_events(&EventStreamId::new(stream_id.to_string()), None)
+                .read_events(
+                    &crate::kernel::history::EventStreamId::new(stream_id.to_string()),
+                    None,
+                )
                 .await
-                .map_err(|err| VerletError::History(err.to_string()))?;
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(err.to_string())
+                })?;
             let event = source_events
                 .iter()
                 .find(|event| event.id.to_string() == event_id)
                 .ok_or_else(|| {
-                    VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "{label} read plan referenced missing event {event_id}"
                     ))
                 })?;
-            if event.kind != EventKind::ContextSummaryCompleted {
-                return Err(VerletError::History(format!(
+            if event.kind != crate::kernel::history::EventKind::ContextSummaryCompleted {
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
                     "{label} read plan referenced non-summary event {event_id}"
                 )));
             }
@@ -529,7 +560,7 @@ impl RuntimeServices {
                 .and_then(|value| value.as_str())
                 .filter(|text| !text.trim().is_empty())
                 .ok_or_else(|| {
-                    VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "{label} read plan referenced summary event {event_id} without text"
                     ))
                 })?;
@@ -543,11 +574,15 @@ impl RuntimeServices {
 
     pub async fn record_context_compile_receipt(
         &self,
-        coordinates: &ThreadCoordinates,
-        session_entries: &[SessionEntry],
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        session_entries: &[crate::kernel::history::SessionEntry],
         payload: serde_json::Value,
-    ) -> VerletResult<ObservationRecord> {
-        let fallback_cut = session_context_source_cut_for_entries(coordinates, session_entries);
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::ObservationRecord> {
+        let fallback_cut =
+            crate::kernel::runtime_host::context_read_plan::session_context_source_cut_for_entries(
+                coordinates,
+                session_entries,
+            );
         self.record_context_compile_receipt_with_source_cuts(
             coordinates,
             session_entries,
@@ -559,130 +594,166 @@ impl RuntimeServices {
 
     pub async fn record_context_compile_receipt_with_source_cuts(
         &self,
-        coordinates: &ThreadCoordinates,
-        session_entries: &[SessionEntry],
-        source_cuts: &[SessionContextSourceCut],
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        session_entries: &[crate::kernel::history::SessionEntry],
+        source_cuts: &[crate::kernel::history::SessionContextSourceCut],
         payload: serde_json::Value,
-    ) -> VerletResult<ObservationRecord> {
-        let stream_id = EventStreamId::for_thread(coordinates);
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::ObservationRecord> {
+        let stream_id = crate::kernel::history::EventStreamId::for_thread(coordinates);
         let source_cuts = if source_cuts.is_empty() {
-            session_context_source_cut_for_entries(coordinates, session_entries)
+            crate::kernel::runtime_host::context_read_plan::session_context_source_cut_for_entries(
+                coordinates,
+                session_entries,
+            )
         } else {
             source_cuts.to_vec()
         };
-        let source_ranges =
-            context_source_ranges(self.runtime_store.as_ref(), &source_cuts).await?;
-        let source_range = primary_context_source_range(&stream_id, &source_ranges);
-        let source_streams = context_source_streams(&source_cuts, &stream_id);
-        let payload =
-            context_compile_payload_v1(payload, &stream_id, &source_ranges, &source_streams);
-        let event_provenance = EventProvenance {
+        let source_ranges = crate::kernel::runtime_host::context_read_plan::context_source_ranges(
+            self.runtime_store.as_ref(),
+            &source_cuts,
+        )
+        .await?;
+        let source_range =
+            crate::kernel::runtime_host::context_read_plan::primary_context_source_range(
+                &stream_id,
+                &source_ranges,
+            );
+        let source_streams = crate::kernel::runtime_host::context_read_plan::context_source_streams(
+            &source_cuts,
+            &stream_id,
+        );
+        let payload = crate::kernel::runtime_host::context_read_plan::context_compile_payload_v1(
+            payload,
+            &stream_id,
+            &source_ranges,
+            &source_streams,
+        );
+        let event_provenance = crate::kernel::history::EventProvenance {
             source_streams: source_streams.clone(),
             source_range: source_range.clone(),
             source_ranges: source_ranges.clone(),
             discharged_by: Some("projection:context-compiler".to_string()),
             function: Some("naive_assembly/v1".to_string()),
-            ..EventProvenance::default()
+            ..crate::kernel::history::EventProvenance::default()
         };
         let compile_event = self
             .append_thread_event(
                 coordinates,
-                NewEventRecord::discharged(
+                crate::kernel::history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    EventKind::ContextCompileCompleted,
+                    crate::kernel::history::EventKind::ContextCompileCompleted,
                     payload.clone(),
                     event_provenance,
                 ),
             )
             .await?;
-        let observation =
-            NewObservationRecord::new("compiled_context_receipt", coordinates.clone(), payload)
-                .with_provenance(ObservationProvenance {
-                    source_streams,
-                    source_event_ids: vec![compile_event.id],
-                    source_range,
-                    source_ranges,
-                    derivation_strategy: "naive_assembly".to_string(),
-                    derivation_version: "v1".to_string(),
-                });
+        let observation = crate::kernel::history::NewObservationRecord::new(
+            "compiled_context_receipt",
+            coordinates.clone(),
+            payload,
+        )
+        .with_provenance(crate::kernel::history::ObservationProvenance {
+            source_streams,
+            source_event_ids: vec![compile_event.id],
+            source_range,
+            source_ranges,
+            derivation_strategy: "naive_assembly".to_string(),
+            derivation_version: "v1".to_string(),
+        });
         self.runtime_store
             .append_observation(observation)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))
     }
 
     pub async fn record_context_summary_checkpoint(
         &self,
-        coordinates: &ThreadCoordinates,
-        session_entries: &[SessionEntry],
-        source_cuts: &[SessionContextSourceCut],
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        session_entries: &[crate::kernel::history::SessionEntry],
+        source_cuts: &[crate::kernel::history::SessionContextSourceCut],
         summary: &str,
-    ) -> VerletResult<(EventRecord, EventRecord)> {
-        let stream_id = EventStreamId::for_thread(coordinates);
+    ) -> crate::kernel::runtime_host::VerletResult<(
+        crate::kernel::history::EventRecord,
+        crate::kernel::history::EventRecord,
+    )> {
+        let stream_id = crate::kernel::history::EventStreamId::for_thread(coordinates);
         let source_cuts = if source_cuts.is_empty() {
-            session_context_source_cut_for_entries(coordinates, session_entries)
+            crate::kernel::runtime_host::context_read_plan::session_context_source_cut_for_entries(
+                coordinates,
+                session_entries,
+            )
         } else {
             source_cuts.to_vec()
         };
-        let source_ranges =
-            context_source_ranges(self.runtime_store.as_ref(), &source_cuts).await?;
-        let source_range = primary_context_source_range(&stream_id, &source_ranges);
-        let source_streams = context_source_streams(&source_cuts, &stream_id);
+        let source_ranges = crate::kernel::runtime_host::context_read_plan::context_source_ranges(
+            self.runtime_store.as_ref(),
+            &source_cuts,
+        )
+        .await?;
+        let source_range =
+            crate::kernel::runtime_host::context_read_plan::primary_context_source_range(
+                &stream_id,
+                &source_ranges,
+            );
+        let source_streams = crate::kernel::runtime_host::context_read_plan::context_source_streams(
+            &source_cuts,
+            &stream_id,
+        );
         let summary_event = self
             .runtime_store
             .append_events(
                 &stream_id,
-                vec![NewEventRecord::discharged(
+                vec![crate::kernel::history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    EventKind::ContextSummaryCompleted,
-                    context_summary_completed_payload_v1(summary, &source_ranges),
-                    EventProvenance {
+                    crate::kernel::history::EventKind::ContextSummaryCompleted,
+                    crate::kernel::runtime_host::context_read_plan::context_summary_completed_payload_v1(summary, &source_ranges),
+                    crate::kernel::history::EventProvenance {
                         source_streams: source_streams.clone(),
                         source_range: source_range.clone(),
                         source_ranges: source_ranges.clone(),
                         discharged_by: Some("projection:context-summarizer".to_string()),
                         function: Some("context_summary/v1".to_string()),
-                        ..EventProvenance::default()
+                        ..crate::kernel::history::EventProvenance::default()
                     },
                 )],
             )
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
             .into_iter()
             .next()
             .ok_or_else(|| {
-                VerletError::History("context summary event append returned no record".to_string())
+                crate::kernel::runtime_host::VerletError::History("context summary event append returned no record".to_string())
             })?;
         let read_plan_event = self
             .runtime_store
             .append_events(
                 &stream_id,
-                vec![NewEventRecord::discharged(
+                vec![crate::kernel::history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    EventKind::ContextReadPlanSet,
-                    context_read_plan_set_payload_v1(
+                    crate::kernel::history::EventKind::ContextReadPlanSet,
+                    crate::kernel::runtime_host::context_read_plan::context_read_plan_set_payload_v1(
                         "history.default",
                         &stream_id,
                         summary_event.id,
                         &source_ranges,
                     ),
-                    EventProvenance {
+                    crate::kernel::history::EventProvenance {
                         source_streams: vec![stream_id.clone()],
                         source_event_ids: vec![summary_event.id],
                         source_range,
                         source_ranges,
                         discharged_by: Some("controller:context-budget".to_string()),
                         function: Some("context_read_plan/v1".to_string()),
-                        ..EventProvenance::default()
+                        ..crate::kernel::history::EventProvenance::default()
                     },
                 )],
             )
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
             .into_iter()
             .next()
             .ok_or_else(|| {
-                VerletError::History(
+                crate::kernel::runtime_host::VerletError::History(
                     "context read plan event append returned no record".to_string(),
                 )
             })?;
@@ -693,7 +764,7 @@ impl RuntimeServices {
 /// Result of the fenced first-join-wins append shared by live lifecycle code
 /// and startup recovery.
 pub(crate) struct ThreadJoinAppend {
-    pub(crate) record: EventRecord,
+    pub(crate) record: crate::kernel::history::EventRecord,
     pub(crate) appended: bool,
 }
 
@@ -703,31 +774,40 @@ pub(crate) struct ThreadJoinAppend {
 /// live retry can never append behind recovery.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_thread_joined_first_wins(
-    store: &dyn RuntimeStore,
-    parent_coordinates: ThreadCoordinates,
-    child_coordinates: ThreadCoordinates,
-    spawned_event_id: EventRecordId,
-    terminal_state: ThreadTerminalState,
+    store: &dyn crate::kernel::history::RuntimeStore,
+    parent_coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    child_coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    spawned_event_id: crate::kernel::history::EventRecordId,
+    terminal_state: crate::kernel::history::ThreadTerminalState,
     result_digest: Option<String>,
     reason: Option<String>,
-    source_event: Option<(EventStreamId, EventRecordId)>,
+    source_event: Option<(
+        crate::kernel::history::EventStreamId,
+        crate::kernel::history::EventRecordId,
+    )>,
     discharged_by: &str,
     function: &str,
-) -> VerletResult<ThreadJoinAppend> {
-    let parent_control_stream =
-        EventStreamId::new(format!("control:{}", parent_coordinates.thread_id));
+) -> crate::kernel::runtime_host::VerletResult<ThreadJoinAppend> {
+    let parent_control_stream = crate::kernel::history::EventStreamId::new(format!(
+        "control:{}",
+        parent_coordinates.thread_id
+    ));
     let spawned_event_id_text = spawned_event_id.to_string();
-    let mut payload = serde_json::to_value(ThreadJoinedPayload {
+    let mut payload = serde_json::to_value(crate::kernel::history::ThreadJoinedPayload {
         child_thread_id: child_coordinates.thread_id,
         spawned_event_id,
         terminal_state,
         result_digest,
     })
-    .map_err(|err| VerletError::History(format!("thread.joined payload codec failed: {err}")))?;
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "thread.joined payload codec failed: {err}"
+        ))
+    })?;
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(EventKind::ThreadJoined.payload_schema_id()),
+            serde_json::json!(crate::kernel::history::EventKind::ThreadJoined.payload_schema_id()),
         );
         if let Some(reason) = reason {
             object.insert("reason".to_string(), serde_json::json!(reason));
@@ -737,20 +817,22 @@ pub(crate) async fn append_thread_joined_first_wins(
         .map(|(stream_id, event_id)| (vec![stream_id], vec![event_id]))
         .unwrap_or_else(|| {
             (
-                vec![EventStreamId::for_thread(&child_coordinates)],
+                vec![crate::kernel::history::EventStreamId::for_thread(
+                    &child_coordinates,
+                )],
                 Vec::new(),
             )
         });
-    let record = NewEventRecord::discharged(
+    let record = crate::kernel::history::NewEventRecord::discharged(
         parent_coordinates,
-        EventKind::ThreadJoined,
+        crate::kernel::history::EventKind::ThreadJoined,
         payload,
-        EventProvenance {
+        crate::kernel::history::EventProvenance {
             source_streams,
             source_event_ids,
             discharged_by: Some(discharged_by.to_string()),
             function: Some(function.to_string()),
-            ..EventProvenance::default()
+            ..crate::kernel::history::EventProvenance::default()
         },
     );
 
@@ -758,16 +840,16 @@ pub(crate) async fn append_thread_joined_first_wins(
         let events = store
             .read_events(&parent_control_stream, None)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         for existing in events
             .iter()
-            .filter(|event| event.kind == EventKind::ThreadJoined)
+            .filter(|event| event.kind == crate::kernel::history::EventKind::ThreadJoined)
         {
-            let existing_payload = serde_json::from_value::<ThreadJoinedPayload>(
-                existing.payload.clone(),
-            )
+            let existing_payload = serde_json::from_value::<
+                crate::kernel::history::ThreadJoinedPayload,
+            >(existing.payload.clone())
             .map_err(|err| {
-                VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "existing thread.joined {} payload is malformed: {err}",
                     existing.id
                 ))
@@ -781,8 +863,8 @@ pub(crate) async fn append_thread_joined_first_wins(
         }
         let expected_next_sequence = events
             .last()
-            .map(|event| EventSequence::new(event.sequence.get() + 1))
-            .unwrap_or_else(|| EventSequence::new(1));
+            .map(|event| crate::kernel::history::EventSequence::new(event.sequence.get() + 1))
+            .unwrap_or_else(|| crate::kernel::history::EventSequence::new(1));
         match store
             .append_events_fenced(
                 &parent_control_stream,
@@ -792,13 +874,13 @@ pub(crate) async fn append_thread_joined_first_wins(
             .await
         {
             Ok(appended) => {
-                let expected = EventRecord::from_new(
+                let expected = crate::kernel::history::EventRecord::from_new(
                     parent_control_stream.clone(),
                     expected_next_sequence,
                     record.clone(),
                 );
                 if appended.len() != 1 || appended[0] != expected {
-                    return Err(VerletError::History(format!(
+                    return Err(crate::kernel::runtime_host::VerletError::History(format!(
                         "thread.joined fenced append returned {} unexpected record(s)",
                         appended.len()
                     )));
@@ -808,8 +890,12 @@ pub(crate) async fn append_thread_joined_first_wins(
                     appended: true,
                 });
             }
-            Err(HistoryError::AppendFenceConflict { .. }) => continue,
-            Err(err) => return Err(VerletError::History(err.to_string())),
+            Err(crate::kernel::history::HistoryError::AppendFenceConflict { .. }) => continue,
+            Err(err) => {
+                return Err(crate::kernel::runtime_host::VerletError::History(
+                    err.to_string(),
+                ));
+            }
         }
     }
 }
