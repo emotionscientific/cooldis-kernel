@@ -9,23 +9,25 @@ pub mod env_compat;
 pub mod handle;
 pub mod schema;
 
-pub use handle::*;
-pub use schema::*;
+pub use handle::{
+    DispatchId, HANDLE_DISPATCH_CONTENT_KIND, HANDLE_OUTCOME_CONTENT_KIND, HandleDispatchEnvelope,
+    HandleId, HandleKind, HandleTerminalEnvelope, HandleTerminalOutcome,
+};
+pub use schema::{
+    JsonSchemaResult, JsonSchemaValidationError, MAX_JSON_SCHEMA_SUBSET_DEPTH, SchemaRegistry,
+    validate_json_schema_subset, validate_json_value_against_schema,
+};
 
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use uuid::Uuid;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct ThreadId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ThreadId(uuid::Uuid);
 
 impl ThreadId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 
     pub fn parse_str(value: &str) -> Result<Self, uuid::Error> {
-        Uuid::parse_str(value).map(Self)
+        uuid::Uuid::parse_str(value).map(Self)
     }
 }
 
@@ -41,15 +43,15 @@ impl std::fmt::Display for ThreadId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct ThreadSignalId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ThreadSignalId(uuid::Uuid);
 
 impl ThreadSignalId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
 }
@@ -66,20 +68,20 @@ impl std::fmt::Display for ThreadSignalId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct ThreadCheckpointId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ThreadCheckpointId(uuid::Uuid);
 
 impl ThreadCheckpointId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
 
     pub fn parse_str(value: &str) -> Result<Self, uuid::Error> {
-        Uuid::parse_str(value).map(Self)
+        uuid::Uuid::parse_str(value).map(Self)
     }
 }
 
@@ -95,15 +97,15 @@ impl std::fmt::Display for ThreadCheckpointId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct RuntimeEventId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeEventId(uuid::Uuid);
 
 impl RuntimeEventId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
 }
@@ -120,7 +122,7 @@ impl std::fmt::Display for RuntimeEventId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ThreadCoordinates {
     pub tenant_id: String,
     pub user_id: String,
@@ -151,14 +153,14 @@ impl ThreadCoordinates {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ThreadScope {
     pub tenant_id: String,
     pub user_id: String,
     pub session_id: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThreadInitiationSource {
     Root,
@@ -177,7 +179,7 @@ impl Default for ThreadInitiationSource {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThreadLineage {
     Root,
@@ -194,7 +196,7 @@ impl Default for ThreadLineage {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadSpawnAttribution {
     pub source_thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,7 +207,7 @@ pub struct ThreadSpawnAttribution {
     pub prompt_ref: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadTopology {
     #[serde(default)]
     pub initiation: ThreadInitiationSource,
@@ -318,14 +320,14 @@ impl ThreadTopology {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadContext {
     pub coordinates: ThreadCoordinates,
     pub parent_thread_id: Option<ThreadId>,
     #[serde(default)]
     pub topology: ThreadTopology,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl ThreadContext {
@@ -334,13 +336,13 @@ impl ThreadContext {
     }
 
     pub fn with_topology(coordinates: ThreadCoordinates, topology: ThreadTopology) -> Self {
-        Self::with_topology_and_metadata(coordinates, topology, BTreeMap::new())
+        Self::with_topology_and_metadata(coordinates, topology, std::collections::BTreeMap::new())
     }
 
     pub fn with_topology_and_metadata(
         coordinates: ThreadCoordinates,
         topology: ThreadTopology,
-        metadata: BTreeMap<String, String>,
+        metadata: std::collections::BTreeMap<String, String>,
     ) -> Self {
         Self {
             parent_thread_id: topology.compatibility_parent_thread_id(),
@@ -351,7 +353,7 @@ impl ThreadContext {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnBudget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<usize>,
@@ -369,7 +371,7 @@ impl TurnBudget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadLifecycleStatus {
     Starting,
@@ -380,7 +382,7 @@ pub enum ThreadLifecycleStatus {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadSignalKind {
     InterruptCancel,
@@ -393,12 +395,12 @@ pub enum ThreadSignalKind {
     Failed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadSignal {
     pub id: ThreadSignalId,
     pub coordinates: ThreadCoordinates,
     pub kind: ThreadSignalKind,
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
     pub created_at_ms: u64,
 }
 
@@ -408,7 +410,7 @@ impl ThreadSignal {
             id: ThreadSignalId::new(),
             coordinates,
             kind,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
             created_at_ms: unix_timestamp_ms(),
         }
     }
@@ -467,13 +469,13 @@ impl ThreadSignal {
         signal
     }
 
-    pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+    pub fn with_metadata(mut self, metadata: std::collections::BTreeMap<String, String>) -> Self {
         self.metadata.extend(metadata);
         self
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadLifecycleRecord {
     pub coordinates: ThreadCoordinates,
     pub parent_thread_id: Option<ThreadId>,
@@ -484,14 +486,14 @@ pub struct ThreadLifecycleRecord {
     pub latest_checkpoint_id: Option<ThreadCheckpointId>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl ThreadLifecycleRecord {
     pub fn new(
         context: &ThreadContext,
         status: ThreadLifecycleStatus,
-        metadata: BTreeMap<String, String>,
+        metadata: std::collections::BTreeMap<String, String>,
     ) -> Self {
         let now = unix_timestamp_ms();
         Self {
@@ -508,7 +510,7 @@ impl ThreadLifecycleRecord {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeTerminalState {
     Completed,
@@ -518,7 +520,7 @@ pub enum RuntimeTerminalState {
     TimedOut,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -526,7 +528,7 @@ pub struct RuntimeUsage {
     pub cache_read_input_tokens: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeModelRequestMode {
     Complete,
@@ -542,7 +544,7 @@ impl RuntimeModelRequestMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeModelRequestPurpose {
     Turn,
@@ -558,7 +560,7 @@ impl RuntimeModelRequestPurpose {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeModelRequestErrorClass {
     Cancelled,
@@ -569,14 +571,14 @@ pub enum RuntimeModelRequestErrorClass {
     StreamAssembly,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimePermissionDecision {
     Allow,
     Deny,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeApprovalDecision {
     Approved,
@@ -584,7 +586,7 @@ pub enum RuntimeApprovalDecision {
     Cancelled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeToolLogLevel {
     Debug,
@@ -593,7 +595,7 @@ pub enum RuntimeToolLogLevel {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadInteractionKind {
     PromptSubmitted,
@@ -602,7 +604,7 @@ pub enum ThreadInteractionKind {
     ControlRequested,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnSubmissionMode {
     #[default]
@@ -621,7 +623,7 @@ impl TurnSubmissionMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadStatus {
     Starting,
@@ -654,12 +656,12 @@ fn unix_timestamp_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn topology_serializes_existing_snake_case_shape() {
-        let source_thread_id = ThreadId::parse_str("018f9fe0-35a7-7a80-8f65-12e7e0b20b52").unwrap();
-        let topology = ThreadTopology::spawned_from(source_thread_id);
+        let source_thread_id =
+            crate::ThreadId::parse_str("018f9fe0-35a7-7a80-8f65-12e7e0b20b52").unwrap();
+        let topology = crate::ThreadTopology::spawned_from(source_thread_id);
 
         let json = serde_json::to_value(topology).unwrap();
 
@@ -682,8 +684,8 @@ mod tests {
     #[test]
     fn status_conversion_stays_stable() {
         assert_eq!(
-            ThreadLifecycleStatus::from(ThreadStatus::Cancelling),
-            ThreadLifecycleStatus::Cancelling
+            crate::ThreadLifecycleStatus::from(crate::ThreadStatus::Cancelling),
+            crate::ThreadLifecycleStatus::Cancelling
         );
     }
 }

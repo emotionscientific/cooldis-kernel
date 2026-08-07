@@ -1,8 +1,6 @@
 //! The `blob` subcommand family.
 
-use super::*;
-
-pub(super) async fn run_blob(mut args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_blob(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -18,19 +16,23 @@ pub(super) async fn run_blob(mut args: Vec<OsString>) -> VerletResult<()> {
     {
         match subcommand.to_string_lossy().as_ref() {
             "publish" => print_blob_publish_help(),
-            other => return Err(usage_error(format!("unknown blob subcommand {other:?}"))),
+            other => {
+                return Err(crate::cli::usage_error(format!(
+                    "unknown blob subcommand {other:?}"
+                )));
+            }
         }
         return Ok(());
     }
     match subcommand.to_string_lossy().as_ref() {
         "publish" => blob_publish(args).await,
-        _ => Err(usage_error(format!(
+        _ => Err(crate::cli::usage_error(format!(
             "unknown blob subcommand {subcommand:?}"
         ))),
     }
 }
 
-pub(super) async fn blob_publish(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn blob_publish(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_blob_publish_args(args)?;
     if options.help {
         print_blob_publish_help();
@@ -38,11 +40,11 @@ pub(super) async fn blob_publish(args: Vec<OsString>) -> VerletResult<()> {
     }
     let file = options
         .file
-        .ok_or_else(|| usage_error("blob publish requires <file>"))?;
+        .ok_or_else(|| crate::cli::usage_error("blob publish requires <file>"))?;
     let registry_root = options
         .registry_root
-        .unwrap_or_else(default_blob_registry_root);
-    let registry = LocalBlobRegistry::new(registry_root);
+        .unwrap_or_else(crate::default_blob_registry_root);
+    let registry = crate::LocalBlobRegistry::new(registry_root);
     let record = registry.publish_file(&file, options.name.as_deref())?;
     println!("published blob");
     println!("artifact {}", record.artifact_hash);
@@ -59,13 +61,15 @@ pub(super) async fn blob_publish(args: Vec<OsString>) -> VerletResult<()> {
 
 #[derive(Debug)]
 pub(super) struct BlobPublishArgs {
-    file: Option<PathBuf>,
+    file: Option<std::path::PathBuf>,
     name: Option<String>,
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
-pub(super) fn parse_blob_publish_args(args: Vec<OsString>) -> VerletResult<BlobPublishArgs> {
+pub(super) fn parse_blob_publish_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<BlobPublishArgs> {
     let mut file = None;
     let mut name = None;
     let mut registry_root = None;
@@ -74,20 +78,29 @@ pub(super) fn parse_blob_publish_args(args: Vec<OsString>) -> VerletResult<BlobP
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--name" => name = Some(required_string_value(&mut iter, "--name")?),
+            "--name" => {
+                name = Some(crate::cli::tool::required_string_value(
+                    &mut iter, "--name",
+                )?)
+            }
             "--registry-root" => {
-                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+                registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--registry-root",
+                )?)
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown blob publish argument {other:?}"
                 )));
             }
             _ => {
                 if file.is_some() {
-                    return Err(usage_error("blob publish accepts exactly one <file>"));
+                    return Err(crate::cli::usage_error(
+                        "blob publish accepts exactly one <file>",
+                    ));
                 }
-                file = Some(PathBuf::from(arg));
+                file = Some(std::path::PathBuf::from(arg));
             }
         }
     }

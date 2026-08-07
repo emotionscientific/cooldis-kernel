@@ -1,8 +1,5 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use std::mem;
-use std::ptr;
-
 const ABORT_TRIPWIRE_MESSAGE: &[u8] =
     b"\n\nverlet test abort tripwire: caught SIGABRT in lib test binary\n";
 
@@ -19,11 +16,11 @@ static VERLET_TEST_ABORT_TRIPWIRE_INIT: extern "C" fn() = init_abort_tripwire;
 
 extern "C" fn init_abort_tripwire() {
     unsafe {
-        let mut action: libc::sigaction = mem::zeroed();
+        let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = handle_sigabrt as *const () as usize;
         action.sa_flags = libc::SA_NODEFER;
         libc::sigemptyset(&mut action.sa_mask);
-        libc::sigaction(libc::SIGABRT, &action, ptr::null_mut());
+        libc::sigaction(libc::SIGABRT, &action, std::ptr::null_mut());
     }
 }
 
@@ -39,11 +36,11 @@ unsafe extern "C" fn handle_sigabrt(_signal: libc::c_int) {
 
 unsafe fn restore_default_sigabrt() {
     unsafe {
-        let mut action: libc::sigaction = mem::zeroed();
+        let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = libc::SIG_DFL;
         action.sa_flags = 0;
         libc::sigemptyset(&mut action.sa_mask);
-        libc::sigaction(libc::SIGABRT, &action, ptr::null_mut());
+        libc::sigaction(libc::SIGABRT, &action, std::ptr::null_mut());
     }
 }
 

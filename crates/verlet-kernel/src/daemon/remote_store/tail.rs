@@ -13,12 +13,7 @@
 //! after each pull before folding the new revision — otherwise the tail
 //! reads a stale tail forever while records sit committed behind it.
 
-use crate::{
-    EventRecord, EventStore, EventStreamId, SqliteSessionStore, StreamCursorV1, VerletError,
-    VerletResult,
-};
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use crate::EventStore as _;
 
 /// Durable tail position over one child stream.
 ///
@@ -26,17 +21,17 @@ use serde::{Deserialize, Serialize};
 /// beginning of the stream. A non-`None` cursor is verified against the
 /// stream on every poll (the [`StreamCursorV1`] replay law), so a rewound
 /// or diverged stream fails loudly instead of silently re-folding.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteStreamTailCursor {
-    pub stream_id: EventStreamId,
+    pub stream_id: crate::EventStreamId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<StreamCursorV1>,
+    pub cursor: Option<crate::StreamCursorV1>,
 }
 
 /// One page of newly visible records plus the advanced cursor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteStreamTailPage {
-    pub records: Vec<EventRecord>,
+    pub records: Vec<crate::EventRecord>,
     pub next: RemoteStreamTailCursor,
 }
 
@@ -46,12 +41,15 @@ pub struct RemoteStreamTailPage {
 /// error isolation (one poisoned stream must not wedge the lane), and
 /// consumers stay idempotent because everything downstream dedupes on
 /// dispatch identity — a re-poll after a crash re-presents records safely.
-#[async_trait]
+#[async_trait::async_trait]
 pub trait RemoteStreamTail: Send + Sync {
     /// Records newly visible past `position`, oldest first, with the
     /// cursor to poll from next. An empty page returns the cursor
     /// unchanged.
-    async fn poll(&self, position: &RemoteStreamTailCursor) -> VerletResult<RemoteStreamTailPage>;
+    async fn poll(
+        &self,
+        position: &RemoteStreamTailCursor,
+    ) -> crate::VerletResult<RemoteStreamTailPage>;
 }
 
 /// Parent-local SQLite tail.
@@ -62,11 +60,11 @@ pub trait RemoteStreamTail: Send + Sync {
 /// snapshot.
 #[derive(Clone)]
 pub struct SqliteRemoteStreamTail {
-    store: SqliteSessionStore,
+    store: crate::SqliteSessionStore,
 }
 
 impl SqliteRemoteStreamTail {
-    pub fn new(store: SqliteSessionStore) -> Self {
+    pub fn new(store: crate::SqliteSessionStore) -> Self {
         Self { store }
     }
 }
@@ -78,9 +76,12 @@ impl std::fmt::Debug for SqliteRemoteStreamTail {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl RemoteStreamTail for SqliteRemoteStreamTail {
-    async fn poll(&self, position: &RemoteStreamTailCursor) -> VerletResult<RemoteStreamTailPage> {
+    async fn poll(
+        &self,
+        position: &RemoteStreamTailCursor,
+    ) -> crate::VerletResult<RemoteStreamTailPage> {
         let records = match position.cursor.as_ref() {
             Some(cursor) => {
                 self.store
@@ -89,7 +90,7 @@ impl RemoteStreamTail for SqliteRemoteStreamTail {
             }
             None => self.store.read_events(&position.stream_id, None).await,
         }
-        .map_err(|error| VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::VerletError::History(error.to_string()))?;
         let next = records
             .last()
             .map(|record| RemoteStreamTailCursor {

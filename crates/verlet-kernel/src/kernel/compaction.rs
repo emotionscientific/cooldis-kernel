@@ -1,10 +1,8 @@
-use crate::{CanonicalContent, CanonicalMessage};
-use serde::{Deserialize, Serialize};
 pub use verlet_history::{
     COMPACTION_SUMMARY_PREFIX, compaction_summary_message, render_compaction_summary,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionTrigger {
     Manual,
@@ -26,7 +24,7 @@ impl std::fmt::Display for CompactionTrigger {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompactionPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_max_context_text_bytes: Option<usize>,
@@ -50,7 +48,7 @@ impl CompactionPolicy {
     }
 }
 
-pub fn deterministic_compaction_summary(messages: &[CanonicalMessage]) -> String {
+pub fn deterministic_compaction_summary(messages: &[crate::CanonicalMessage]) -> String {
     let mut pieces = messages
         .iter()
         .filter_map(message_text)
@@ -66,22 +64,23 @@ pub fn deterministic_compaction_summary(messages: &[CanonicalMessage]) -> String
     pieces.join("\n")
 }
 
-fn message_text(message: &CanonicalMessage) -> Option<String> {
+fn message_text(message: &crate::CanonicalMessage) -> Option<String> {
     match message {
-        CanonicalMessage::User { content, .. }
-        | CanonicalMessage::Assistant { content, .. }
-        | CanonicalMessage::ToolResult { content, .. } => content_text(content),
+        crate::CanonicalMessage::User { content, .. }
+        | crate::CanonicalMessage::Assistant { content, .. }
+        | crate::CanonicalMessage::ToolResult { content, .. } => content_text(content),
     }
 }
 
-fn content_text(content: &[CanonicalContent]) -> Option<String> {
+fn content_text(content: &[crate::CanonicalContent]) -> Option<String> {
     let chunks = content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } | CanonicalContent::Thinking { text, .. } => {
-                Some(text.as_str())
+            crate::CanonicalContent::Text { text, .. }
+            | crate::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
+            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {
+                None
             }
-            CanonicalContent::Image { .. } | CanonicalContent::ToolCall { .. } => None,
         })
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();

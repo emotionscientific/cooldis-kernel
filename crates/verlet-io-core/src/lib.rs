@@ -17,12 +17,6 @@
 //! bridge is responsible for mapping [`ThreadAddress`] and [`AdmissionDecision`]
 //! onto concrete `ThreadCoordinates`, `TurnInput`, and runtime event types.
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
-use uuid::Uuid;
-
 pub type IoResult<T> = Result<T, IoError>;
 
 #[derive(Debug, thiserror::Error)]
@@ -41,12 +35,12 @@ pub enum IoError {
     Bridge(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoSource {
     pub protocol: String,
     pub instance_id: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl IoSource {
@@ -54,7 +48,7 @@ impl IoSource {
         Self {
             protocol: protocol.into(),
             instance_id: instance_id.into(),
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -68,7 +62,7 @@ impl IoSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationKind {
     Direct,
@@ -78,7 +72,7 @@ pub enum ConversationKind {
     System,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoConversation {
     pub external_conversation_id: String,
     pub kind: ConversationKind,
@@ -86,8 +80,8 @@ pub struct IoConversation {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl IoConversation {
@@ -97,7 +91,7 @@ impl IoConversation {
             kind,
             title: None,
             external_thread_id: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -121,15 +115,15 @@ impl IoConversation {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoActor {
     pub external_actor_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default)]
     pub is_bot: bool,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl IoActor {
@@ -138,7 +132,7 @@ impl IoActor {
             external_actor_id: external_actor_id.into(),
             display_name: None,
             is_bot: false,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -153,7 +147,7 @@ impl IoActor {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoDedupeKey {
     pub scope: String,
     pub key: String,
@@ -180,7 +174,7 @@ impl IoDedupeKey {
 /// (ADR 0007). The envelope's internal id names our receipt of the event;
 /// this names the event as the external system knows it, which is what
 /// redelivery dedupes on.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoDelivery {
     /// A Telegram update id, a webhook delivery id, a queue message id, or a
     /// scheduler occurrence ("{mandate_event_id}:{occurrence_index}").
@@ -188,8 +182,8 @@ pub struct IoDelivery {
     /// Redelivery attempt ordinal when the external system reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl IoDelivery {
@@ -197,7 +191,7 @@ impl IoDelivery {
         Self {
             delivery_id: delivery_id.into(),
             attempt: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -212,7 +206,7 @@ impl IoDelivery {
 /// construction; protocol adapters leave it unset and the daemon stamps it
 /// during resolution from the route binding. `envelope.actor` remains
 /// external provenance and is never itself the principal.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoPrincipal {
     pub tenant_id: String,
     pub principal_id: String,
@@ -235,7 +229,7 @@ impl IoPrincipal {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IngressContent {
     Text {
@@ -276,7 +270,7 @@ impl IngressContent {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoAttachment {
     pub id: String,
     pub media_type: String,
@@ -286,8 +280,8 @@ pub struct IoAttachment {
     pub uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl IoAttachment {
@@ -298,7 +292,7 @@ impl IoAttachment {
             name: None,
             uri: None,
             size_bytes: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -313,7 +307,7 @@ impl IoAttachment {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IngressEnvelope {
     pub id: String,
     pub source: IoSource,
@@ -336,8 +330,8 @@ pub struct IngressEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<IoPrincipal>,
     pub received_at_ms: u64,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl IngressEnvelope {
@@ -358,7 +352,7 @@ impl IngressEnvelope {
             delivery: None,
             principal: None,
             received_at_ms,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -447,7 +441,7 @@ impl IngressEnvelope {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadAddress {
     pub tenant_id: String,
     pub user_id: String,
@@ -480,12 +474,12 @@ impl ThreadAddress {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderPolicy {
     pub provider: String,
     pub model: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl ProviderPolicy {
@@ -493,12 +487,12 @@ impl ProviderPolicy {
         Self {
             provider: provider.into(),
             model: model.into(),
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedIoTarget {
     pub address: ThreadAddress,
     #[serde(default)]
@@ -507,8 +501,8 @@ pub struct ResolvedIoTarget {
     pub parent_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_policy: Option<ProviderPolicy>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl ResolvedIoTarget {
@@ -518,7 +512,7 @@ impl ResolvedIoTarget {
             create_thread_if_missing: true,
             parent_thread_id: None,
             provider_policy: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -528,15 +522,15 @@ impl ResolvedIoTarget {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoTurnInput {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<IoAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_policy: Option<ProviderPolicy>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl IoTurnInput {
@@ -545,7 +539,7 @@ impl IoTurnInput {
             text: text.into(),
             attachments: Vec::new(),
             provider_policy: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -559,7 +553,7 @@ impl IoTurnInput {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdmissionMode {
     Queue,
@@ -570,7 +564,7 @@ pub enum AdmissionMode {
     Reject,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AdmissionDecision {
     Queue {
@@ -643,7 +637,7 @@ impl AdmissionDecision {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IngressState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
@@ -651,11 +645,11 @@ pub struct IngressState {
     pub pending_count: usize,
     #[serde(default)]
     pub dedupe_seen: bool,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IngressAck {
     pub envelope_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -685,14 +679,14 @@ impl IngressAck {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoTarget {
     pub source: IoSource,
     pub conversation: IoConversation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<IoActor>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl IoTarget {
@@ -701,12 +695,12 @@ impl IoTarget {
             source: envelope.source.clone(),
             conversation: envelope.conversation.clone(),
             actor: envelope.actor.clone(),
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EgressKind {
     AssistantDelta {
@@ -731,7 +725,7 @@ pub enum EgressKind {
     PlatformAction {
         action: String,
         #[serde(default)]
-        payload: JsonValue,
+        payload: serde_json::Value,
     },
     Silence {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -754,7 +748,7 @@ impl EgressKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EgressEnvelope {
     pub id: String,
     pub target: IoTarget,
@@ -764,8 +758,8 @@ pub struct EgressEnvelope {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<IoAttachment>,
     pub created_at_ms: u64,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl EgressEnvelope {
@@ -777,7 +771,7 @@ impl EgressEnvelope {
             kind,
             attachments: Vec::new(),
             created_at_ms,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -788,7 +782,7 @@ impl EgressEnvelope {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryReceipt {
     pub egress_id: String,
     pub delivered: bool,
@@ -796,8 +790,8 @@ pub struct DeliveryReceipt {
     pub external_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl DeliveryReceipt {
@@ -807,7 +801,7 @@ impl DeliveryReceipt {
             delivered: true,
             external_message_id: Some(external_message_id.into()),
             error: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -817,12 +811,12 @@ impl DeliveryReceipt {
             delivered: false,
             external_message_id: None,
             error: Some(error.into()),
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoProtocolCapabilities {
     #[serde(default)]
     pub ingress: bool,
@@ -842,14 +836,14 @@ pub trait IoProtocolAdapter: Send + Sync {
     fn capabilities(&self) -> IoProtocolCapabilities;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait IngressSink: Send + Sync {
     async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck>;
 }
 
 /// Controls whether an ingress adapter must persist events before the kernel
 /// sees them.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IngressPersistenceMode {
     /// Persist inbound envelopes through an [`IngressQueueStore`] before a
@@ -878,7 +872,7 @@ impl IngressPersistenceMode {
 /// webhook and managed-service ingress. Local/dev routes can opt into
 /// [`IngressPersistenceMode::BestEffortDirect`] when losing in-flight messages
 /// is acceptable and avoiding queue storage growth matters more.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IngressPersistenceConfig {
     #[serde(default)]
     pub mode: IngressPersistenceMode,
@@ -921,7 +915,7 @@ impl IngressPersistenceConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LeasedIngressEnvelope {
     pub message_id: String,
     pub envelope: IngressEnvelope,
@@ -929,8 +923,8 @@ pub struct LeasedIngressEnvelope {
     pub attempt: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_owner: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl LeasedIngressEnvelope {
@@ -940,12 +934,12 @@ impl LeasedIngressEnvelope {
             envelope,
             attempt: 0,
             lease_owner: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait IngressQueueStore: IngressSink {
     async fn lease_ingress(
         &self,
@@ -961,22 +955,22 @@ pub trait IngressQueueStore: IngressSink {
     async fn retry_ingress(&self, message_id: &str, reason: &str) -> IoResult<()>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait IngressAdapter: IoProtocolAdapter {
     async fn start(&self, sink: &dyn IngressSink) -> IoResult<()>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait EgressAdapter: IoProtocolAdapter {
     async fn deliver(&self, envelope: EgressEnvelope) -> IoResult<DeliveryReceipt>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait IoResolver: Send + Sync {
     async fn resolve(&self, envelope: &IngressEnvelope) -> IoResult<ResolvedIoTarget>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait AdmissionPolicy: Send + Sync {
     async fn decide(
         &self,
@@ -986,7 +980,7 @@ pub trait AdmissionPolicy: Send + Sync {
     ) -> IoResult<AdmissionDecision>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait KernelIoBridge: Send + Sync {
     async fn apply(
         &self,
@@ -996,7 +990,7 @@ pub trait KernelIoBridge: Send + Sync {
     ) -> IoResult<KernelIoReceipt>;
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KernelIoReceipt {
     pub envelope_id: String,
     pub target: ResolvedIoTarget,
@@ -1040,7 +1034,7 @@ impl KernelIoReceipt {
 }
 
 fn new_io_id(prefix: &str) -> String {
-    format!("{prefix}_{}", Uuid::now_v7().simple())
+    format!("{prefix}_{}", uuid::Uuid::now_v7().simple())
 }
 
 fn default_visibility_timeout_secs() -> u32 {
@@ -1049,28 +1043,27 @@ fn default_visibility_timeout_secs() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
-    fn telegram_like_envelope() -> IngressEnvelope {
-        let source = IoSource::new("telegram.bot", "main");
-        IngressEnvelope::new(
+    fn telegram_like_envelope() -> crate::IngressEnvelope {
+        let source = crate::IoSource::new("telegram.bot", "main");
+        crate::IngressEnvelope::new(
             source.clone(),
-            IoConversation::new("telegram:chat:123", ConversationKind::Direct),
-            IngressContent::text("hello from telegram"),
+            crate::IoConversation::new("telegram:chat:123", crate::ConversationKind::Direct),
+            crate::IngressContent::text("hello from telegram"),
             1_777_000_000_000,
         )
-        .with_actor(IoActor::new("telegram:user:42").with_display_name("Ada"))
-        .with_dedupe_key(IoDedupeKey::for_source(&source, "update:999"))
+        .with_actor(crate::IoActor::new("telegram:user:42").with_display_name("Ada"))
+        .with_dedupe_key(crate::IoDedupeKey::for_source(&source, "update:999"))
     }
 
-    fn attributed_envelope() -> IngressEnvelope {
+    fn attributed_envelope() -> crate::IngressEnvelope {
         telegram_like_envelope()
-            .with_delivery(IoDelivery::new("update:999").with_attempt(2))
-            .with_principal(IoPrincipal::new("tenant-a", "user-a", "route:main"))
+            .with_delivery(crate::IoDelivery::new("update:999").with_attempt(2))
+            .with_principal(crate::IoPrincipal::new("tenant-a", "user-a", "route:main"))
     }
 
-    fn attributed_target(tenant_id: &str) -> ResolvedIoTarget {
-        ResolvedIoTarget::new(ThreadAddress::new(tenant_id, "user-a", "session-a"))
+    fn attributed_target(tenant_id: &str) -> crate::ResolvedIoTarget {
+        crate::ResolvedIoTarget::new(crate::ThreadAddress::new(tenant_id, "user-a", "session-a"))
     }
 
     #[test]
@@ -1080,7 +1073,7 @@ mod tests {
             explicit
                 .effective_dedupe_key()
                 .as_ref()
-                .map(IoDedupeKey::stable_key),
+                .map(crate::IoDedupeKey::stable_key),
             Some("telegram.bot:main:update:999".to_string())
         );
 
@@ -1090,7 +1083,7 @@ mod tests {
             derived
                 .effective_dedupe_key()
                 .as_ref()
-                .map(IoDedupeKey::stable_key),
+                .map(crate::IoDedupeKey::stable_key),
             Some("telegram.bot:main:update:999".to_string())
         );
     }
@@ -1100,41 +1093,42 @@ mod tests {
         let legacy = telegram_like_envelope();
         assert!(matches!(
             legacy.require_witnessed(),
-            Err(IoError::InvalidEnvelope(message)) if message == "delivery is required"
+            Err(crate::IoError::InvalidEnvelope(message)) if message == "delivery is required"
         ));
 
-        let empty = legacy.with_delivery(IoDelivery::new(""));
+        let empty = legacy.with_delivery(crate::IoDelivery::new(""));
         assert!(matches!(
             empty.require_witnessed(),
-            Err(IoError::InvalidEnvelope(message))
+            Err(crate::IoError::InvalidEnvelope(message))
                 if message == "delivery.delivery_id cannot be empty"
         ));
 
-        let source = IoSource::new("external.test", "main");
-        let witnessed = IngressEnvelope::new(
+        let source = crate::IoSource::new("external.test", "main");
+        let witnessed = crate::IngressEnvelope::new(
             source,
-            IoConversation::new("conversation", ConversationKind::Direct),
-            IngressContent::text("hello"),
+            crate::IoConversation::new("conversation", crate::ConversationKind::Direct),
+            crate::IngressContent::text("hello"),
             1,
         )
-        .with_delivery(IoDelivery::new("delivery-1"));
+        .with_delivery(crate::IoDelivery::new("delivery-1"));
         assert!(witnessed.require_witnessed().is_ok());
     }
 
     #[test]
     fn attributed_validation_pins_absence_and_tenant_mismatch_errors() {
         let target = attributed_target("tenant-a");
-        let unattributed = telegram_like_envelope().with_delivery(IoDelivery::new("update:999"));
+        let unattributed =
+            telegram_like_envelope().with_delivery(crate::IoDelivery::new("update:999"));
         assert!(matches!(
             unattributed.require_attributed(&target),
-            Err(IoError::InvalidEnvelope(message)) if message == "principal is required"
+            Err(crate::IoError::InvalidEnvelope(message)) if message == "principal is required"
         ));
 
         let mismatched = attributed_envelope();
         let target = attributed_target("tenant-b");
         assert!(matches!(
             mismatched.require_attributed(&target),
-            Err(IoError::InvalidEnvelope(message))
+            Err(crate::IoError::InvalidEnvelope(message))
                 if message
                     == "principal tenant \"tenant-a\" does not match resolved target tenant \"tenant-b\""
         ));
@@ -1152,7 +1146,10 @@ mod tests {
 
         assert_eq!(envelope.content.text_projection(), "hello from telegram");
         assert_eq!(
-            envelope.dedupe_key.as_ref().map(IoDedupeKey::stable_key),
+            envelope
+                .dedupe_key
+                .as_ref()
+                .map(crate::IoDedupeKey::stable_key),
             Some("telegram.bot:main:update:999".to_string())
         );
         assert_eq!(envelope.conversation.stable_key(), "telegram:chat:123");
@@ -1168,7 +1165,7 @@ mod tests {
         assert_eq!(value["content"]["type"], "text");
         assert_eq!(value["dedupe_key"]["scope"], "telegram.bot:main");
 
-        let roundtrip: IngressEnvelope = serde_json::from_value(value).unwrap();
+        let roundtrip: crate::IngressEnvelope = serde_json::from_value(value).unwrap();
         assert_eq!(roundtrip, envelope);
     }
 
@@ -1177,7 +1174,7 @@ mod tests {
         let legacy_value = serde_json::to_value(telegram_like_envelope()).unwrap();
         assert!(legacy_value.get("delivery").is_none());
         assert!(legacy_value.get("principal").is_none());
-        let legacy: IngressEnvelope = serde_json::from_value(legacy_value).unwrap();
+        let legacy: crate::IngressEnvelope = serde_json::from_value(legacy_value).unwrap();
         assert_eq!(legacy.delivery, None);
         assert_eq!(legacy.principal, None);
 
@@ -1188,43 +1185,44 @@ mod tests {
         assert_eq!(value["principal"]["tenant_id"], "tenant-a");
         assert_eq!(value["principal"]["principal_id"], "user-a");
         assert_eq!(value["principal"]["via"], "route:main");
-        let roundtrip: IngressEnvelope = serde_json::from_value(value).unwrap();
+        let roundtrip: crate::IngressEnvelope = serde_json::from_value(value).unwrap();
         assert_eq!(roundtrip, attributed);
     }
 
     #[test]
     fn admission_decision_names_queue_steer_interrupt_modes() {
-        let input = IoTurnInput::text("hello");
+        let input = crate::IoTurnInput::text("hello");
         assert_eq!(
-            AdmissionDecision::queue("turn-1", input.clone()).mode(),
-            AdmissionMode::Queue
+            crate::AdmissionDecision::queue("turn-1", input.clone()).mode(),
+            crate::AdmissionMode::Queue
         );
         assert_eq!(
-            AdmissionDecision::steer("turn-2", Some("turn-1".to_string()), input.clone()).mode(),
-            AdmissionMode::Steer
+            crate::AdmissionDecision::steer("turn-2", Some("turn-1".to_string()), input.clone())
+                .mode(),
+            crate::AdmissionMode::Steer
         );
         assert_eq!(
-            AdmissionDecision::Interrupt {
+            crate::AdmissionDecision::Interrupt {
                 reason: "replace active turn".to_string(),
                 replacement_turn_id: Some("turn-3".to_string()),
                 replacement: Some(input),
             }
             .mode(),
-            AdmissionMode::Interrupt
+            crate::AdmissionMode::Interrupt
         );
     }
 
     #[test]
     fn target_and_turn_input_keep_provider_policy_protocol_neutral() {
         let envelope = telegram_like_envelope().with_metadata("external_message_id", "555");
-        let target = ResolvedIoTarget::new(ThreadAddress::new(
+        let target = crate::ResolvedIoTarget::new(crate::ThreadAddress::new(
             "local",
             "telegram-user-42",
             "telegram-chat-123",
         ))
-        .with_provider_policy(ProviderPolicy::new("bifrost", "openai/gpt-5.5"));
+        .with_provider_policy(crate::ProviderPolicy::new("bifrost", "openai/gpt-5.5"));
 
-        let input = IoTurnInput::from_envelope(&envelope, &target);
+        let input = crate::IoTurnInput::from_envelope(&envelope, &target);
 
         assert_eq!(
             target.address.scope_key(),
@@ -1233,7 +1231,7 @@ mod tests {
         assert_eq!(input.text, "hello from telegram");
         assert_eq!(
             input.provider_policy,
-            Some(ProviderPolicy::new("bifrost", "openai/gpt-5.5"))
+            Some(crate::ProviderPolicy::new("bifrost", "openai/gpt-5.5"))
         );
         assert_eq!(
             input
@@ -1247,9 +1245,9 @@ mod tests {
     #[test]
     fn egress_envelope_replies_to_source_conversation() {
         let ingress = telegram_like_envelope();
-        let egress = EgressEnvelope::for_ingress(
+        let egress = crate::EgressEnvelope::for_ingress(
             &ingress,
-            EgressKind::AssistantMessage {
+            crate::EgressKind::AssistantMessage {
                 text: "hello back".to_string(),
             },
             1_777_000_000_123,
@@ -1268,7 +1266,7 @@ mod tests {
 
     #[test]
     fn egress_kind_round_trips_platform_action_and_silence() {
-        let action = EgressKind::PlatformAction {
+        let action = crate::EgressKind::PlatformAction {
             action: "reaction".to_string(),
             payload: serde_json::json!({
                 "message_id": 555,
@@ -1280,11 +1278,11 @@ mod tests {
         assert_eq!(value["action"], "reaction");
         assert_eq!(value["payload"]["emoji"], "👍");
 
-        let roundtrip: EgressKind = serde_json::from_value(value).unwrap();
+        let roundtrip: crate::EgressKind = serde_json::from_value(value).unwrap();
         assert_eq!(roundtrip, action);
         assert_eq!(roundtrip.visible_text(), None);
 
-        let silence = EgressKind::Silence {
+        let silence = crate::EgressKind::Silence {
             reason: Some("agent_declined".to_string()),
         };
         let value = serde_json::to_value(&silence).unwrap();
@@ -1295,14 +1293,14 @@ mod tests {
 
     #[test]
     fn ingress_persistence_config_makes_lossy_direct_mode_explicit() {
-        let durable = IngressPersistenceConfig::durable_queue("verlet-ingress")
+        let durable = crate::IngressPersistenceConfig::durable_queue("verlet-ingress")
             .with_visibility_timeout_secs(45);
         assert!(durable.mode.requires_queue());
         assert!(!durable.mode.can_lose_inflight_on_restart());
         assert_eq!(durable.queue_name.as_deref(), Some("verlet-ingress"));
         assert_eq!(durable.visibility_timeout_secs, 45);
 
-        let direct = IngressPersistenceConfig::best_effort_direct();
+        let direct = crate::IngressPersistenceConfig::best_effort_direct();
         assert!(!direct.mode.requires_queue());
         assert!(direct.mode.can_lose_inflight_on_restart());
         assert_eq!(direct.queue_name, None);
@@ -1314,15 +1312,15 @@ mod tests {
     #[test]
     fn kernel_receipt_extracts_submission_identity_from_decision() {
         let envelope = attributed_envelope();
-        let target = ResolvedIoTarget::new(
-            ThreadAddress::new("tenant-a", "user-a", "session").with_thread_id("thread-1"),
+        let target = crate::ResolvedIoTarget::new(
+            crate::ThreadAddress::new("tenant-a", "user-a", "session").with_thread_id("thread-1"),
         );
-        let decision = AdmissionDecision::queue("turn-1", IoTurnInput::text("hello"));
+        let decision = crate::AdmissionDecision::queue("turn-1", crate::IoTurnInput::text("hello"));
 
-        let receipt = KernelIoReceipt::new(&envelope, target, &decision);
+        let receipt = crate::KernelIoReceipt::new(&envelope, target, &decision);
 
         assert_eq!(receipt.envelope_id, envelope.id);
-        assert_eq!(receipt.mode, AdmissionMode::Queue);
+        assert_eq!(receipt.mode, crate::AdmissionMode::Queue);
         assert_eq!(receipt.thread_id.as_deref(), Some("thread-1"));
         assert_eq!(receipt.turn_id.as_deref(), Some("turn-1"));
         assert_eq!(receipt.principal, envelope.principal);
@@ -1332,23 +1330,27 @@ mod tests {
     fn kernel_receipts_copy_principal_for_every_admitted_runtime_mode() {
         let envelope = attributed_envelope();
         let target = attributed_target("tenant-a");
-        let input = IoTurnInput::text("hello");
+        let input = crate::IoTurnInput::text("hello");
         let decisions = [
-            AdmissionDecision::queue("turn-queue", input.clone()),
-            AdmissionDecision::steer("turn-steer", Some("active".to_string()), input.clone()),
-            AdmissionDecision::Interrupt {
+            crate::AdmissionDecision::queue("turn-queue", input.clone()),
+            crate::AdmissionDecision::steer(
+                "turn-steer",
+                Some("active".to_string()),
+                input.clone(),
+            ),
+            crate::AdmissionDecision::Interrupt {
                 reason: "replace".to_string(),
                 replacement_turn_id: Some("turn-interrupt".to_string()),
                 replacement: Some(input.clone()),
             },
-            AdmissionDecision::Fork {
+            crate::AdmissionDecision::Fork {
                 child_key: "child-fork".to_string(),
                 input,
             },
         ];
 
         for decision in decisions {
-            let receipt = KernelIoReceipt::new(&envelope, target.clone(), &decision);
+            let receipt = crate::KernelIoReceipt::new(&envelope, target.clone(), &decision);
             assert_eq!(
                 receipt.principal,
                 envelope.principal,

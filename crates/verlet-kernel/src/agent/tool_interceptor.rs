@@ -1,56 +1,44 @@
-use crate::{
-    AgentToolRouter, CanonicalContent, CanonicalMessage, HookHandlerSpec, HookMutationWitness,
-    HookPipeline, HookRunRecord, PostToolUseHookRequest, PreToolUseHookRequest,
-    ToolInvocationCancellation, TurnContext, TurnContextSnapshot, VerletResult,
-};
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::future::{Future, ready};
-use std::sync::Arc;
-use std::time::Instant;
-
 #[derive(Clone)]
 pub struct ToolExecutionInterceptor {
-    tool_router: Arc<AgentToolRouter>,
-    hook_pipeline: Option<Arc<HookPipeline>>,
-    permission_gate: Arc<dyn ToolPermissionGate>,
+    tool_router: std::sync::Arc<crate::AgentToolRouter>,
+    hook_pipeline: Option<std::sync::Arc<crate::HookPipeline>>,
+    permission_gate: std::sync::Arc<dyn ToolPermissionGate>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ToolExecutionRequest<'a> {
-    pub turn_context: &'a TurnContext,
+    pub turn_context: &'a crate::TurnContext,
     pub call_id: String,
     pub tool_name: String,
-    pub arguments: Value,
+    pub arguments: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolExecutionOutcome {
-    pub result: CanonicalMessage,
-    pub hook_records: Vec<HookRunRecord>,
+    pub result: crate::CanonicalMessage,
+    pub hook_records: Vec<crate::HookRunRecord>,
     pub pre_model_contexts: Vec<String>,
     pub post_model_contexts: Vec<String>,
     pub permission_decision: Option<ToolPermissionDecision>,
     pub duration_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolPermissionRequest {
-    pub turn_context: TurnContextSnapshot,
+    pub turn_context: crate::TurnContextSnapshot,
     pub call_id: String,
     pub tool_name: String,
-    pub arguments: Value,
+    pub arguments: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum ToolPermissionDecision {
     Allow,
     Deny { reason: String },
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ToolPermissionGate: Send + Sync + 'static {
     async fn check(&self, request: ToolPermissionRequest) -> ToolPermissionDecision;
 }
@@ -58,7 +46,7 @@ pub trait ToolPermissionGate: Send + Sync + 'static {
 #[derive(Clone, Default)]
 pub struct AllowAllToolPermissionGate;
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ToolPermissionGate for AllowAllToolPermissionGate {
     async fn check(&self, _request: ToolPermissionRequest) -> ToolPermissionDecision {
         ToolPermissionDecision::Allow
@@ -66,20 +54,26 @@ impl ToolPermissionGate for AllowAllToolPermissionGate {
 }
 
 impl ToolExecutionInterceptor {
-    pub fn new(tool_router: Arc<AgentToolRouter>) -> Self {
+    pub fn new(tool_router: std::sync::Arc<crate::AgentToolRouter>) -> Self {
         Self {
             tool_router,
             hook_pipeline: None,
-            permission_gate: Arc::new(AllowAllToolPermissionGate),
+            permission_gate: std::sync::Arc::new(AllowAllToolPermissionGate),
         }
     }
 
-    pub fn with_hook_pipeline(mut self, hook_pipeline: Option<Arc<HookPipeline>>) -> Self {
+    pub fn with_hook_pipeline(
+        mut self,
+        hook_pipeline: Option<std::sync::Arc<crate::HookPipeline>>,
+    ) -> Self {
         self.hook_pipeline = hook_pipeline;
         self
     }
 
-    pub fn with_permission_gate(mut self, permission_gate: Arc<dyn ToolPermissionGate>) -> Self {
+    pub fn with_permission_gate(
+        mut self,
+        permission_gate: std::sync::Arc<dyn ToolPermissionGate>,
+    ) -> Self {
         self.permission_gate = permission_gate;
         self
     }
@@ -87,25 +81,25 @@ impl ToolExecutionInterceptor {
     pub async fn execute(
         &self,
         request: ToolExecutionRequest<'_>,
-        on_hook_started: impl FnMut(&HookHandlerSpec),
-    ) -> VerletResult<ToolExecutionOutcome> {
-        self.execute_with_witnessing(request, on_hook_started, |_| ready(Ok(())))
+        on_hook_started: impl FnMut(&crate::HookHandlerSpec),
+    ) -> crate::VerletResult<ToolExecutionOutcome> {
+        self.execute_with_witnessing(request, on_hook_started, |_| std::future::ready(Ok(())))
             .await
     }
 
     pub async fn execute_with_witnessing<W, Fut>(
         &self,
         request: ToolExecutionRequest<'_>,
-        on_hook_started: impl FnMut(&HookHandlerSpec),
+        on_hook_started: impl FnMut(&crate::HookHandlerSpec),
         witness_hook_mutations: W,
-    ) -> VerletResult<ToolExecutionOutcome>
+    ) -> crate::VerletResult<ToolExecutionOutcome>
     where
-        W: FnMut(Vec<HookMutationWitness>) -> Fut,
-        Fut: Future<Output = VerletResult<()>>,
+        W: FnMut(Vec<crate::HookMutationWitness>) -> Fut,
+        Fut: std::future::Future<Output = crate::VerletResult<()>>,
     {
         self.execute_with_witnessing_cancellable(
             request,
-            ToolInvocationCancellation::never(),
+            crate::ToolInvocationCancellation::never(),
             on_hook_started,
             witness_hook_mutations,
         )
@@ -115,15 +109,15 @@ impl ToolExecutionInterceptor {
     pub async fn execute_with_witnessing_cancellable<W, Fut>(
         &self,
         request: ToolExecutionRequest<'_>,
-        cancellation: ToolInvocationCancellation,
-        mut on_hook_started: impl FnMut(&HookHandlerSpec),
+        cancellation: crate::ToolInvocationCancellation,
+        mut on_hook_started: impl FnMut(&crate::HookHandlerSpec),
         mut witness_hook_mutations: W,
-    ) -> VerletResult<ToolExecutionOutcome>
+    ) -> crate::VerletResult<ToolExecutionOutcome>
     where
-        W: FnMut(Vec<HookMutationWitness>) -> Fut,
-        Fut: Future<Output = VerletResult<()>>,
+        W: FnMut(Vec<crate::HookMutationWitness>) -> Fut,
+        Fut: std::future::Future<Output = crate::VerletResult<()>>,
     {
-        let started_at = Instant::now();
+        let started_at = std::time::Instant::now();
         let mut hook_records = Vec::new();
         let mut pre_model_contexts = Vec::new();
         let mut post_model_contexts = Vec::new();
@@ -133,7 +127,7 @@ impl ToolExecutionInterceptor {
         if let Some(hook_pipeline) = &self.hook_pipeline {
             let outcome = hook_pipeline
                 .run_pre_tool_use(
-                    PreToolUseHookRequest {
+                    crate::PreToolUseHookRequest {
                         turn_context: request.turn_context.snapshot(),
                         call_id: request.call_id.clone(),
                         tool_name: request.tool_name.clone(),
@@ -152,7 +146,7 @@ impl ToolExecutionInterceptor {
                     .block_reason
                     .unwrap_or_else(|| "PreToolUse hook blocked tool execution".to_string());
                 return Ok(ToolExecutionOutcome {
-                    result: CanonicalMessage::tool_result(
+                    result: crate::CanonicalMessage::tool_result(
                         request.call_id,
                         request.tool_name,
                         reason,
@@ -188,7 +182,7 @@ impl ToolExecutionInterceptor {
                     reason: reason.clone(),
                 });
                 return Ok(ToolExecutionOutcome {
-                    result: CanonicalMessage::tool_result(
+                    result: crate::CanonicalMessage::tool_result(
                         request.call_id,
                         request.tool_name,
                         reason,
@@ -220,7 +214,7 @@ impl ToolExecutionInterceptor {
         if success && let Some(hook_pipeline) = &self.hook_pipeline {
             let outcome = hook_pipeline
                 .run_post_tool_use(
-                    PostToolUseHookRequest {
+                    crate::PostToolUseHookRequest {
                         turn_context: request.turn_context.snapshot(),
                         call_id: request.call_id.clone(),
                         tool_name: request.tool_name.clone(),
@@ -255,33 +249,33 @@ impl ToolExecutionInterceptor {
     }
 }
 
-fn elapsed_ms(started_at: Instant) -> u64 {
+fn elapsed_ms(started_at: std::time::Instant) -> u64 {
     started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn tool_result_success(message: &CanonicalMessage) -> bool {
+fn tool_result_success(message: &crate::CanonicalMessage) -> bool {
     match message {
-        CanonicalMessage::ToolResult { is_error, .. } => !is_error,
+        crate::CanonicalMessage::ToolResult { is_error, .. } => !is_error,
         _ => false,
     }
 }
 
 fn replace_tool_result_output(
-    message: CanonicalMessage,
+    message: crate::CanonicalMessage,
     replacement_output: String,
-) -> CanonicalMessage {
+) -> crate::CanonicalMessage {
     match message {
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             tool_call_id,
             tool_name,
             is_error,
             cache_control,
             timestamp_ms,
             ..
-        } => CanonicalMessage::ToolResult {
+        } => crate::CanonicalMessage::ToolResult {
             tool_call_id,
             tool_name,
-            content: vec![CanonicalContent::text(replacement_output)],
+            content: vec![crate::CanonicalContent::text(replacement_output)],
             is_error,
             cache_control,
             timestamp_ms,
@@ -290,14 +284,14 @@ fn replace_tool_result_output(
     }
 }
 
-fn text_from_message(message: &CanonicalMessage) -> String {
+fn text_from_message(message: &crate::CanonicalMessage) -> String {
     match message {
-        CanonicalMessage::Assistant { content, .. }
-        | CanonicalMessage::ToolResult { content, .. }
-        | CanonicalMessage::User { content, .. } => content
+        crate::CanonicalMessage::Assistant { content, .. }
+        | crate::CanonicalMessage::ToolResult { content, .. }
+        | crate::CanonicalMessage::User { content, .. } => content
             .iter()
             .filter_map(|content| match content {
-                CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()

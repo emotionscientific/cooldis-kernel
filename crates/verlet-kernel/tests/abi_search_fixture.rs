@@ -1,17 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use uuid::Uuid;
-use verlet::{
-    AgentToolRouter, BashkitExecutionHarness, CanonicalContent, CanonicalMessage,
-    LocalOperationRegistry, LocalPluginCatalog, OperationRegistration, OperationRegistry,
-    PublishOperationRequest, PublishedOperationSource, SecretSourceKind, SqliteSecretStore,
-    VirtualBashRuntimeConfig, WasmRuntimeArtifact,
-};
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 const SEARCH_FIXTURE_TEMPLATE: &str = include_str!("fixtures/search_operation.wat.tpl");
 
@@ -32,11 +20,11 @@ async fn search_style_http_operation_registers_and_invokes_through_registry() {
     let http_grant = format!("net.http.private:POST:{base_url}");
     let wasm = wat::parse_str(render_search_fixture(&url, &http_grant))
         .expect("Example Search WAT fixture should compile to wasm");
-    let registry = OperationRegistry::new();
+    let registry = verlet::OperationRegistry::new();
 
     registry
         .register(
-            OperationRegistration::new("search", WasmRuntimeArtifact::bytes(wasm))
+            verlet::OperationRegistration::new("search", verlet::WasmRuntimeArtifact::bytes(wasm))
                 .with_capability_grant(http_grant)
                 .with_capability_grant("secret:EXAMPLE_API_KEY")
                 .with_secret("EXAMPLE_API_KEY", "fixture-secret")
@@ -77,11 +65,11 @@ async fn search_style_http_operation_runs_through_shell_command() {
     let http_grant = format!("net.http.private:POST:{base_url}");
     let wasm = wat::parse_str(render_search_fixture(&url, &http_grant))
         .expect("Example Search WAT fixture should compile to wasm");
-    let registry = Arc::new(OperationRegistry::new());
+    let registry = std::sync::Arc::new(verlet::OperationRegistry::new());
 
     registry
         .register(
-            OperationRegistration::new("search", WasmRuntimeArtifact::bytes(wasm))
+            verlet::OperationRegistration::new("search", verlet::WasmRuntimeArtifact::bytes(wasm))
                 .with_capability_grant(http_grant.clone())
                 .with_capability_grant("secret:EXAMPLE_API_KEY")
                 .with_secret("EXAMPLE_API_KEY", "fixture-secret")
@@ -91,11 +79,11 @@ async fn search_style_http_operation_runs_through_shell_command() {
         .await
         .unwrap();
 
-    let config = VirtualBashRuntimeConfig::default()
+    let config = verlet::VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry)
         .with_capability_grant(http_grant)
         .with_capability_grant("secret:EXAMPLE_API_KEY");
-    let mut harness = BashkitExecutionHarness::new(config).await.unwrap();
+    let mut harness = verlet::BashkitExecutionHarness::new(config).await.unwrap();
     let output = harness
         .execute(r#"command -v search && search '{"query":"verlet wasm"}'"#)
         .await
@@ -128,46 +116,46 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
     let root = temp_dir("published-search-secret");
     let registry_root = root.join("operations");
     let artifact_path = root.join("search.wasm");
-    fs::write(&artifact_path, wasm).unwrap();
-    let registry = LocalOperationRegistry::new(&registry_root);
+    std::fs::write(&artifact_path, wasm).unwrap();
+    let registry = verlet::LocalOperationRegistry::new(&registry_root);
     let record = registry
-        .publish_artifact(PublishOperationRequest {
+        .publish_artifact(verlet::PublishOperationRequest {
             name: "search".to_string(),
             artifact_path: artifact_path.clone(),
-            source: PublishedOperationSource::Wasm {
+            source: verlet::PublishedOperationSource::Wasm {
                 bin_path: artifact_path,
             },
             interface: None,
-            capability_grants: BTreeSet::from([
+            capability_grants: std::collections::BTreeSet::from([
                 http_grant.clone(),
                 "secret:EXAMPLE_API_KEY".to_string(),
             ]),
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         })
         .await
         .unwrap();
-    let secret_store = SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
+    let secret_store = verlet::SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
         .await
         .unwrap();
     secret_store
         .set_secret(
             "EXAMPLE_API_KEY",
             "fixture-secret",
-            SecretSourceKind::Env,
+            verlet::SecretSourceKind::Env,
             Some("EXAMPLE_API_KEY".to_string()),
         )
         .await
         .unwrap();
 
-    let catalog = LocalPluginCatalog::load_records_with_secret_resolver(
+    let catalog = verlet::LocalPluginCatalog::load_records_with_secret_resolver(
         &registry_root,
         vec![record],
         Vec::new(),
-        Arc::new(secret_store),
+        std::sync::Arc::new(secret_store),
     )
     .await
     .unwrap();
-    let router = AgentToolRouter::new(catalog.operation_registry())
+    let router = verlet::AgentToolRouter::new(catalog.operation_registry())
         .with_capability_grants([http_grant, "secret:EXAMPLE_API_KEY".to_string()]);
     let definitions = router.tool_definitions().await;
     assert!(
@@ -187,14 +175,14 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
 
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult {
+        verlet::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
         } if tool_result_text(&content).contains("Verlet runtime")
     ));
     server.await.unwrap();
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn render_search_fixture(url: &str, http_grant: &str) -> String {
@@ -235,8 +223,8 @@ async fn spawn_http_server(
     status: u16,
     response_body: &'static str,
     request_contains: Vec<&'static str>,
-) -> (String, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
     let handle = tokio::spawn(async move {
@@ -282,22 +270,22 @@ async fn spawn_http_server(
     (base_url, handle)
 }
 
-fn tool_result_text(content: &[CanonicalContent]) -> String {
+fn tool_result_text(content: &[verlet::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(text.as_str()),
-            CanonicalContent::Thinking { .. }
-            | CanonicalContent::Image { .. }
-            | CanonicalContent::ToolCall { .. } => None,
+            verlet::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet::CanonicalContent::Thinking { .. }
+            | verlet::CanonicalContent::Image { .. }
+            | verlet::CanonicalContent::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn temp_dir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("verlet-search-{label}-{}", Uuid::now_v7()));
-    fs::create_dir_all(&path).unwrap();
+fn temp_dir(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("verlet-search-{label}-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&path).unwrap();
     path
 }
 

@@ -1,24 +1,12 @@
-use crate::kernel::control_decision::{
-    MandateCatchUpPolicy, MandateRevokedPayload, MandateSchedulePayload, MandateStartedPayload,
-    MandateSubject,
-};
-use crate::kernel::history::{EventKind, EventRecord, EventRecordId, EventStore, NewEventRecord};
-use crate::{VerletError, VerletResult, control_stream_id};
-use chrono::{DateTime, Utc};
-use croner::Cron;
-use std::collections::{BTreeMap, BTreeSet};
-use std::str::FromStr;
-use uuid::Uuid;
-use verlet_runtime_contracts::ThreadCoordinates;
-
+use std::str::FromStr as _;
 pub const MIN_MANDATE_INTERVAL_MS: u64 = 60_000;
 const SCHEDULE_SNAPSHOT_ID: &str = "schedule.v1";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MandateStartRequest {
-    pub schedule: MandateSchedulePayload,
+    pub schedule: crate::kernel::control_decision::MandateSchedulePayload,
     pub max_occurrences: Option<u32>,
-    pub catch_up: Option<MandateCatchUpPolicy>,
+    pub catch_up: Option<crate::kernel::control_decision::MandateCatchUpPolicy>,
     pub input_template: Option<String>,
     pub snapshot_id: Option<String>,
     pub expires_at: Option<String>,
@@ -26,14 +14,14 @@ pub struct MandateStartRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MandateStartReceipt {
-    pub event: EventRecord,
-    pub payload: MandateStartedPayload,
+    pub event: crate::kernel::history::EventRecord,
+    pub payload: crate::kernel::control_decision::MandateStartedPayload,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveMandate {
-    pub event: EventRecord,
-    pub payload: MandateStartedPayload,
+    pub event: crate::kernel::history::EventRecord,
+    pub payload: crate::kernel::control_decision::MandateStartedPayload,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,16 +42,18 @@ impl MandateRevokeStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MandateRevokeReceipt {
     pub status: MandateRevokeStatus,
-    pub start_event: EventRecord,
-    pub revoke_event: EventRecord,
-    pub payload: MandateRevokedPayload,
+    pub start_event: crate::kernel::history::EventRecord,
+    pub revoke_event: crate::kernel::history::EventRecord,
+    pub payload: crate::kernel::control_decision::MandateRevokedPayload,
 }
 
-pub fn parse_mandate_event_id(value: &str) -> VerletResult<EventRecordId> {
-    Uuid::parse_str(value)
-        .map(EventRecordId::from_uuid)
+pub fn parse_mandate_event_id(
+    value: &str,
+) -> crate::VerletResult<crate::kernel::history::EventRecordId> {
+    uuid::Uuid::parse_str(value)
+        .map(crate::kernel::history::EventRecordId::from_uuid)
         .map_err(|err| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "mandate_event_id is not a valid event id: {err}"
             ))
         })
@@ -71,8 +61,8 @@ pub fn parse_mandate_event_id(value: &str) -> VerletResult<EventRecordId> {
 
 pub fn validate_mandate_start_request(
     request: &MandateStartRequest,
-    now: DateTime<Utc>,
-) -> VerletResult<()> {
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::VerletResult<()> {
     let catch_up = request.catch_up.unwrap_or_default();
     validate_schedule(&request.schedule, catch_up, now)?;
     let _ = mandate_expiry_ms(request.expires_at.as_deref(), now)?;
@@ -80,21 +70,21 @@ pub fn validate_mandate_start_request(
 }
 
 pub async fn start_mandate(
-    store: &dyn EventStore,
-    coordinates: &ThreadCoordinates,
+    store: &dyn crate::kernel::history::EventStore,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     request: MandateStartRequest,
-    now: DateTime<Utc>,
-) -> VerletResult<MandateStartReceipt> {
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::VerletResult<MandateStartReceipt> {
     validate_mandate_start_request(&request, now)?;
     let catch_up = request.catch_up.unwrap_or_default();
     let expires_at_ms = mandate_expiry_ms(request.expires_at.as_deref(), now)?;
     let thread_id = coordinates.thread_id.to_string();
-    let payload = MandateStartedPayload {
-        subject: MandateSubject {
+    let payload = crate::kernel::control_decision::MandateStartedPayload {
+        subject: crate::kernel::control_decision::MandateSubject {
             thread_id: Some(thread_id.clone()),
             loop_id: None,
         },
-        mandate_id: format!("mandate-{}", Uuid::now_v7()),
+        mandate_id: format!("mandate-{}", uuid::Uuid::now_v7()),
         snapshot_id: request
             .snapshot_id
             .filter(|snapshot_id| !snapshot_id.trim().is_empty())
@@ -109,38 +99,41 @@ pub async fn start_mandate(
     };
     let mut appended = store
         .append_events(
-            &control_stream_id(coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::control_stream_id(coordinates),
+            vec![crate::kernel::history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::MandateStarted,
+                crate::kernel::history::EventKind::MandateStarted,
                 serde_json::to_value(&payload).map_err(json_error)?,
             )],
         )
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
-    let event = appended
-        .pop()
-        .ok_or_else(|| VerletError::History("mandate.start appended no event".to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+    let event = appended.pop().ok_or_else(|| {
+        crate::VerletError::History("mandate.start appended no event".to_string())
+    })?;
     Ok(MandateStartReceipt { event, payload })
 }
 
-fn mandate_expiry_ms(expires_at: Option<&str>, now: DateTime<Utc>) -> VerletResult<Option<i64>> {
+fn mandate_expiry_ms(
+    expires_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::VerletResult<Option<i64>> {
     let Some(expires_at) = expires_at else {
         return Ok(None);
     };
-    let parsed = DateTime::parse_from_rfc3339(expires_at).map_err(|err| {
-        VerletError::RuntimeExecution(format!(
+    let parsed = chrono::DateTime::parse_from_rfc3339(expires_at).map_err(|err| {
+        crate::VerletError::RuntimeExecution(format!(
             "mandate expiry {expires_at:?} must be an RFC3339 UTC instant: {err}"
         ))
     })?;
     if parsed.offset().local_minus_utc() != 0 {
-        return Err(VerletError::RuntimeExecution(format!(
+        return Err(crate::VerletError::RuntimeExecution(format!(
             "mandate expiry {expires_at:?} must be an RFC3339 UTC instant"
         )));
     }
-    let parsed = parsed.with_timezone(&Utc);
+    let parsed = parsed.with_timezone(&chrono::Utc);
     if now > parsed {
-        return Err(VerletError::RuntimeExecution(format!(
+        return Err(crate::VerletError::RuntimeExecution(format!(
             "mandate expiry {expires_at} is already expired"
         )));
     }
@@ -148,28 +141,28 @@ fn mandate_expiry_ms(expires_at: Option<&str>, now: DateTime<Utc>) -> VerletResu
 }
 
 pub async fn list_active_mandates(
-    store: &dyn EventStore,
-    coordinates: &ThreadCoordinates,
-) -> VerletResult<Vec<ActiveMandate>> {
+    store: &dyn crate::kernel::history::EventStore,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> crate::VerletResult<Vec<ActiveMandate>> {
     let events = store
-        .read_events(&control_stream_id(coordinates), None)
+        .read_events(&crate::control_stream_id(coordinates), None)
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
     active_mandates_from_events(coordinates, &events)
 }
 
 pub async fn revoke_mandate(
-    store: &dyn EventStore,
-    coordinates: &ThreadCoordinates,
-    mandate_event_id: EventRecordId,
-) -> VerletResult<MandateRevokeReceipt> {
+    store: &dyn crate::kernel::history::EventStore,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    mandate_event_id: crate::kernel::history::EventRecordId,
+) -> crate::VerletResult<MandateRevokeReceipt> {
     let events = store
-        .read_events(&control_stream_id(coordinates), None)
+        .read_events(&crate::control_stream_id(coordinates), None)
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
     let (start_event, start_payload) = mandate_start_event(coordinates, &events, mandate_event_id)?
         .ok_or_else(|| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "mandate event {mandate_event_id} is not active for thread {}",
                 coordinates.thread_id
             ))
@@ -185,7 +178,7 @@ pub async fn revoke_mandate(
         });
     }
 
-    let payload = MandateRevokedPayload {
+    let payload = crate::kernel::control_decision::MandateRevokedPayload {
         subject: start_payload.subject.clone(),
         mandate_id: start_payload.mandate_id.clone(),
         mandate_event_id: Some(mandate_event_id.to_string()),
@@ -194,18 +187,18 @@ pub async fn revoke_mandate(
     };
     let mut appended = store
         .append_events(
-            &control_stream_id(coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::control_stream_id(coordinates),
+            vec![crate::kernel::history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::MandateRevoked,
+                crate::kernel::history::EventKind::MandateRevoked,
                 serde_json::to_value(&payload).map_err(json_error)?,
             )],
         )
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
-    let revoke_event = appended
-        .pop()
-        .ok_or_else(|| VerletError::History("mandate.revoke appended no event".to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+    let revoke_event = appended.pop().ok_or_else(|| {
+        crate::VerletError::History("mandate.revoke appended no event".to_string())
+    })?;
     Ok(MandateRevokeReceipt {
         status: MandateRevokeStatus::Revoked,
         start_event,
@@ -215,21 +208,21 @@ pub async fn revoke_mandate(
 }
 
 fn active_mandates_from_events(
-    coordinates: &ThreadCoordinates,
-    events: &[EventRecord],
-) -> VerletResult<Vec<ActiveMandate>> {
-    let mut started = BTreeMap::new();
-    let mut revoked_event_ids = BTreeSet::new();
-    let mut revoked_mandate_ids = BTreeSet::new();
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    events: &[crate::kernel::history::EventRecord],
+) -> crate::VerletResult<Vec<ActiveMandate>> {
+    let mut started = std::collections::BTreeMap::new();
+    let mut revoked_event_ids = std::collections::BTreeSet::new();
+    let mut revoked_mandate_ids = std::collections::BTreeSet::new();
     for event in events {
         match event.kind {
-            EventKind::MandateStarted => {
+            crate::kernel::history::EventKind::MandateStarted => {
                 let payload = decode_started(event)?;
                 if mandate_targets_thread(&payload, coordinates) {
                     started.insert(event.id.to_string(), (event.clone(), payload));
                 }
             }
-            EventKind::MandateRevoked => {
+            crate::kernel::history::EventKind::MandateRevoked => {
                 let payload = decode_revoked(event)?;
                 if revoked_targets_thread(&payload, coordinates) {
                     if let Some(mandate_event_id) = payload.mandate_event_id {
@@ -258,12 +251,19 @@ fn active_mandates_from_events(
 }
 
 fn mandate_start_event(
-    coordinates: &ThreadCoordinates,
-    events: &[EventRecord],
-    mandate_event_id: EventRecordId,
-) -> VerletResult<Option<(EventRecord, MandateStartedPayload)>> {
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    events: &[crate::kernel::history::EventRecord],
+    mandate_event_id: crate::kernel::history::EventRecordId,
+) -> crate::VerletResult<
+    Option<(
+        crate::kernel::history::EventRecord,
+        crate::kernel::control_decision::MandateStartedPayload,
+    )>,
+> {
     for event in events {
-        if event.id != mandate_event_id || event.kind != EventKind::MandateStarted {
+        if event.id != mandate_event_id
+            || event.kind != crate::kernel::history::EventKind::MandateStarted
+        {
             continue;
         }
         let payload = decode_started(event)?;
@@ -275,12 +275,17 @@ fn mandate_start_event(
 }
 
 fn mandate_revoked_event(
-    events: &[EventRecord],
-    mandate_event_id: EventRecordId,
-    started: &MandateStartedPayload,
-) -> VerletResult<Option<(EventRecord, MandateRevokedPayload)>> {
+    events: &[crate::kernel::history::EventRecord],
+    mandate_event_id: crate::kernel::history::EventRecordId,
+    started: &crate::kernel::control_decision::MandateStartedPayload,
+) -> crate::VerletResult<
+    Option<(
+        crate::kernel::history::EventRecord,
+        crate::kernel::control_decision::MandateRevokedPayload,
+    )>,
+> {
     for event in events {
-        if event.kind != EventKind::MandateRevoked {
+        if event.kind != crate::kernel::history::EventKind::MandateRevoked {
             continue;
         }
         let payload = decode_revoked(event)?;
@@ -298,8 +303,8 @@ fn mandate_revoked_event(
 }
 
 fn mandate_targets_thread(
-    payload: &MandateStartedPayload,
-    coordinates: &ThreadCoordinates,
+    payload: &crate::kernel::control_decision::MandateStartedPayload,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
 ) -> bool {
     let thread_id = coordinates.thread_id.to_string();
     payload
@@ -312,8 +317,8 @@ fn mandate_targets_thread(
 }
 
 fn revoked_targets_thread(
-    payload: &MandateRevokedPayload,
-    coordinates: &ThreadCoordinates,
+    payload: &crate::kernel::control_decision::MandateRevokedPayload,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
 ) -> bool {
     let thread_id = coordinates.thread_id.to_string();
     payload
@@ -325,49 +330,51 @@ fn revoked_targets_thread(
 }
 
 fn validate_schedule(
-    schedule: &MandateSchedulePayload,
-    catch_up: MandateCatchUpPolicy,
-    now: DateTime<Utc>,
-) -> VerletResult<()> {
+    schedule: &crate::kernel::control_decision::MandateSchedulePayload,
+    catch_up: crate::kernel::control_decision::MandateCatchUpPolicy,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::VerletResult<()> {
     match schedule {
-        MandateSchedulePayload::Cron { expr, tz } => {
-            let cron = Cron::from_str(expr).map_err(|err| {
-                VerletError::RuntimeExecution(format!("malformed cron expression: {err}"))
+        crate::kernel::control_decision::MandateSchedulePayload::Cron { expr, tz } => {
+            let cron = croner::Cron::from_str(expr).map_err(|err| {
+                crate::VerletError::RuntimeExecution(format!("malformed cron expression: {err}"))
             })?;
             let timezone = tz.parse::<chrono_tz::Tz>().map_err(|err| {
-                VerletError::RuntimeExecution(format!("unknown IANA timezone {tz:?}: {err}"))
+                crate::VerletError::RuntimeExecution(format!("unknown IANA timezone {tz:?}: {err}"))
             })?;
             let first = cron_next(&cron, timezone, now)?;
             let second = cron.find_next_occurrence(&first, false).map_err(|err| {
-                VerletError::RuntimeExecution(format!(
+                crate::VerletError::RuntimeExecution(format!(
                     "cron expression could not produce a second occurrence: {err}"
                 ))
             })?;
             if second.signed_duration_since(first).num_milliseconds()
                 < MIN_MANDATE_INTERVAL_MS as i64
             {
-                return Err(VerletError::RuntimeExecution(format!(
+                return Err(crate::VerletError::RuntimeExecution(format!(
                     "cron schedules must have a minimum interval of {MIN_MANDATE_INTERVAL_MS}ms"
                 )));
             }
         }
-        MandateSchedulePayload::Interval { every_ms } => {
+        crate::kernel::control_decision::MandateSchedulePayload::Interval { every_ms } => {
             if *every_ms < MIN_MANDATE_INTERVAL_MS {
-                return Err(VerletError::RuntimeExecution(format!(
+                return Err(crate::VerletError::RuntimeExecution(format!(
                     "interval schedules must be at least {MIN_MANDATE_INTERVAL_MS}ms"
                 )));
             }
         }
-        MandateSchedulePayload::At { when } => {
-            let when = DateTime::parse_from_rfc3339(when)
+        crate::kernel::control_decision::MandateSchedulePayload::At { when } => {
+            let when = chrono::DateTime::parse_from_rfc3339(when)
                 .map_err(|err| {
-                    VerletError::RuntimeExecution(format!(
+                    crate::VerletError::RuntimeExecution(format!(
                         "at schedule requires RFC3339 when: {err}"
                     ))
                 })?
-                .with_timezone(&Utc);
-            if when < now && catch_up != MandateCatchUpPolicy::CoalesceMissed {
-                return Err(VerletError::RuntimeExecution(
+                .with_timezone(&chrono::Utc);
+            if when < now
+                && catch_up != crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed
+            {
+                return Err(crate::VerletError::RuntimeExecution(
                     "at schedule is in the past; use catch_up = coalesce_missed to witness a missed occurrence"
                         .to_string(),
                 ));
@@ -378,46 +385,51 @@ fn validate_schedule(
 }
 
 fn cron_next(
-    cron: &Cron,
+    cron: &croner::Cron,
     timezone: chrono_tz::Tz,
-    now: DateTime<Utc>,
-) -> VerletResult<DateTime<chrono_tz::Tz>> {
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::VerletResult<chrono::DateTime<chrono_tz::Tz>> {
     cron.find_next_occurrence(&now.with_timezone(&timezone), false)
         .map_err(|err| {
-            VerletError::RuntimeExecution(format!(
+            crate::VerletError::RuntimeExecution(format!(
                 "cron expression could not produce an occurrence: {err}"
             ))
         })
 }
 
-fn decode_started(event: &EventRecord) -> VerletResult<MandateStartedPayload> {
-    serde_json::from_value(event.payload.clone())
-        .map_err(|err| VerletError::History(format!("mandate.started payload is invalid: {err}")))
+fn decode_started(
+    event: &crate::kernel::history::EventRecord,
+) -> crate::VerletResult<crate::kernel::control_decision::MandateStartedPayload> {
+    serde_json::from_value(event.payload.clone()).map_err(|err| {
+        crate::VerletError::History(format!("mandate.started payload is invalid: {err}"))
+    })
 }
 
-fn decode_revoked(event: &EventRecord) -> VerletResult<MandateRevokedPayload> {
-    serde_json::from_value(event.payload.clone())
-        .map_err(|err| VerletError::History(format!("mandate.revoked payload is invalid: {err}")))
+fn decode_revoked(
+    event: &crate::kernel::history::EventRecord,
+) -> crate::VerletResult<crate::kernel::control_decision::MandateRevokedPayload> {
+    serde_json::from_value(event.payload.clone()).map_err(|err| {
+        crate::VerletError::History(format!("mandate.revoked payload is invalid: {err}"))
+    })
 }
 
-fn json_error(err: serde_json::Error) -> VerletError {
-    VerletError::RuntimeFactory(format!("mandate payload JSON codec failed: {err}"))
+fn json_error(err: serde_json::Error) -> crate::VerletError {
+    crate::VerletError::RuntimeFactory(format!("mandate payload JSON codec failed: {err}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::kernel::history::InMemorySessionStore;
-    use chrono::{TimeZone, Utc};
+    use crate::kernel::history::EventStore as _;
+    use chrono::TimeZone as _;
 
-    fn now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap()
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap()
     }
 
     #[test]
     fn mandate_validation_rejects_bad_schedule_inputs() {
-        let malformed_cron = MandateStartRequest {
-            schedule: MandateSchedulePayload::Cron {
+        let malformed_cron = crate::kernel::mandate_lifecycle::MandateStartRequest {
+            schedule: crate::kernel::control_decision::MandateSchedulePayload::Cron {
                 expr: "not cron".to_string(),
                 tz: "UTC".to_string(),
             },
@@ -427,10 +439,16 @@ mod tests {
             snapshot_id: None,
             expires_at: None,
         };
-        assert!(validate_mandate_start_request(&malformed_cron, now()).is_err());
+        assert!(
+            crate::kernel::mandate_lifecycle::validate_mandate_start_request(
+                &malformed_cron,
+                now()
+            )
+            .is_err()
+        );
 
-        let unknown_tz = MandateStartRequest {
-            schedule: MandateSchedulePayload::Cron {
+        let unknown_tz = crate::kernel::mandate_lifecycle::MandateStartRequest {
+            schedule: crate::kernel::control_decision::MandateSchedulePayload::Cron {
                 expr: "0 * * * * *".to_string(),
                 tz: "Mars/Olympus".to_string(),
             },
@@ -440,20 +458,31 @@ mod tests {
             snapshot_id: None,
             expires_at: None,
         };
-        assert!(validate_mandate_start_request(&unknown_tz, now()).is_err());
+        assert!(
+            crate::kernel::mandate_lifecycle::validate_mandate_start_request(&unknown_tz, now())
+                .is_err()
+        );
 
-        let short_interval = MandateStartRequest {
-            schedule: MandateSchedulePayload::Interval { every_ms: 59_999 },
+        let short_interval = crate::kernel::mandate_lifecycle::MandateStartRequest {
+            schedule: crate::kernel::control_decision::MandateSchedulePayload::Interval {
+                every_ms: 59_999,
+            },
             max_occurrences: None,
             catch_up: None,
             input_template: None,
             snapshot_id: None,
             expires_at: None,
         };
-        assert!(validate_mandate_start_request(&short_interval, now()).is_err());
+        assert!(
+            crate::kernel::mandate_lifecycle::validate_mandate_start_request(
+                &short_interval,
+                now()
+            )
+            .is_err()
+        );
 
-        let sub_minute_cron = MandateStartRequest {
-            schedule: MandateSchedulePayload::Cron {
+        let sub_minute_cron = crate::kernel::mandate_lifecycle::MandateStartRequest {
+            schedule: crate::kernel::control_decision::MandateSchedulePayload::Cron {
                 expr: "* * * * * *".to_string(),
                 tz: "UTC".to_string(),
             },
@@ -463,46 +492,57 @@ mod tests {
             snapshot_id: None,
             expires_at: None,
         };
-        assert!(validate_mandate_start_request(&sub_minute_cron, now()).is_err());
+        assert!(
+            crate::kernel::mandate_lifecycle::validate_mandate_start_request(
+                &sub_minute_cron,
+                now()
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn at_schedule_past_requires_coalesce_catch_up() {
-        let past = MandateSchedulePayload::At {
+        let past = crate::kernel::control_decision::MandateSchedulePayload::At {
             when: "2026-07-04T11:59:00Z".to_string(),
         };
-        let skip = MandateStartRequest {
+        let skip = crate::kernel::mandate_lifecycle::MandateStartRequest {
             schedule: past.clone(),
             max_occurrences: None,
-            catch_up: Some(MandateCatchUpPolicy::SkipMissed),
+            catch_up: Some(crate::kernel::control_decision::MandateCatchUpPolicy::SkipMissed),
             input_template: None,
             snapshot_id: None,
             expires_at: None,
         };
-        assert!(validate_mandate_start_request(&skip, now()).is_err());
+        assert!(
+            crate::kernel::mandate_lifecycle::validate_mandate_start_request(&skip, now()).is_err()
+        );
 
-        let coalesce = MandateStartRequest {
+        let coalesce = crate::kernel::mandate_lifecycle::MandateStartRequest {
             schedule: past,
             max_occurrences: None,
-            catch_up: Some(MandateCatchUpPolicy::CoalesceMissed),
+            catch_up: Some(crate::kernel::control_decision::MandateCatchUpPolicy::CoalesceMissed),
             input_template: None,
             snapshot_id: None,
             expires_at: None,
         };
-        validate_mandate_start_request(&coalesce, now()).unwrap();
+        crate::kernel::mandate_lifecycle::validate_mandate_start_request(&coalesce, now()).unwrap();
     }
 
     #[tokio::test]
     async fn mandate_lifecycle_folds_started_minus_revoked() {
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let receipt = start_mandate(
+        let store = crate::kernel::history::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let receipt = crate::kernel::mandate_lifecycle::start_mandate(
             &store,
             &coordinates,
-            MandateStartRequest {
-                schedule: MandateSchedulePayload::Interval { every_ms: 60_000 },
+            crate::kernel::mandate_lifecycle::MandateStartRequest {
+                schedule: crate::kernel::control_decision::MandateSchedulePayload::Interval {
+                    every_ms: 60_000,
+                },
                 max_occurrences: Some(2),
-                catch_up: Some(MandateCatchUpPolicy::SkipMissed),
+                catch_up: Some(crate::kernel::control_decision::MandateCatchUpPolicy::SkipMissed),
                 input_template: Some("continue".to_string()),
                 snapshot_id: Some("snapshot-a".to_string()),
                 expires_at: Some("2026-07-04T12:05:00Z".to_string()),
@@ -511,26 +551,48 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(receipt.event.kind, EventKind::MandateStarted);
+        assert_eq!(
+            receipt.event.kind,
+            crate::kernel::history::EventKind::MandateStarted
+        );
         assert_eq!(receipt.payload.schedule.is_some(), true);
         assert_eq!(receipt.payload.expires_at_ms, Some(1_783_166_700_000));
 
-        let active = list_active_mandates(&store, &coordinates).await.unwrap();
+        let active = crate::kernel::mandate_lifecycle::list_active_mandates(&store, &coordinates)
+            .await
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].event.id, receipt.event.id);
 
-        let revoked = revoke_mandate(&store, &coordinates, receipt.event.id)
-            .await
-            .unwrap();
-        assert_eq!(revoked.status, MandateRevokeStatus::Revoked);
-        assert_eq!(revoked.revoke_event.kind, EventKind::MandateRevoked);
-
-        let second = revoke_mandate(&store, &coordinates, receipt.event.id)
-            .await
-            .unwrap();
-        assert_eq!(second.status, MandateRevokeStatus::AlreadyRevoked);
+        let revoked = crate::kernel::mandate_lifecycle::revoke_mandate(
+            &store,
+            &coordinates,
+            receipt.event.id,
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            list_active_mandates(&store, &coordinates)
+            revoked.status,
+            crate::kernel::mandate_lifecycle::MandateRevokeStatus::Revoked
+        );
+        assert_eq!(
+            revoked.revoke_event.kind,
+            crate::kernel::history::EventKind::MandateRevoked
+        );
+
+        let second = crate::kernel::mandate_lifecycle::revoke_mandate(
+            &store,
+            &coordinates,
+            receipt.event.id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            second.status,
+            crate::kernel::mandate_lifecycle::MandateRevokeStatus::AlreadyRevoked
+        );
+        assert_eq!(
+            crate::kernel::mandate_lifecycle::list_active_mandates(&store, &coordinates)
                 .await
                 .unwrap()
                 .len(),
@@ -540,13 +602,16 @@ mod tests {
 
     #[tokio::test]
     async fn mandate_start_rejects_an_already_expired_expiry() {
-        let store = InMemorySessionStore::default();
-        let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-        let err = start_mandate(
+        let store = crate::kernel::history::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let err = crate::kernel::mandate_lifecycle::start_mandate(
             &store,
             &coordinates,
-            MandateStartRequest {
-                schedule: MandateSchedulePayload::Interval { every_ms: 60_000 },
+            crate::kernel::mandate_lifecycle::MandateStartRequest {
+                schedule: crate::kernel::control_decision::MandateSchedulePayload::Interval {
+                    every_ms: 60_000,
+                },
                 max_occurrences: None,
                 catch_up: None,
                 input_template: None,
@@ -562,7 +627,7 @@ mod tests {
         assert!(err.to_string().contains("2026-07-04T11:59:59Z"));
         assert!(
             store
-                .read_events(&control_stream_id(&coordinates), None)
+                .read_events(&crate::control_stream_id(&coordinates), None)
                 .await
                 .unwrap()
                 .is_empty()

@@ -1,22 +1,22 @@
-use super::*;
-use futures_util::StreamExt;
+use crate::bridge::CapabilityBridge as _;
+use futures_util::StreamExt as _;
 
 #[test]
 fn capability_descriptor_tracks_supported_operations() {
-    let capability = CapabilityDescriptor::new(
-        UNIX_NAMESPACE,
-        BridgeBackendKind::LocalDaemon,
-        [UNIX_EXEC_OPERATION, "process.cancel"],
+    let capability = crate::bridge::CapabilityDescriptor::new(
+        crate::bridge::UNIX_NAMESPACE,
+        crate::bridge::BridgeBackendKind::LocalDaemon,
+        [crate::bridge::UNIX_EXEC_OPERATION, "process.cancel"],
     );
 
-    assert!(capability.supports(UNIX_EXEC_OPERATION));
+    assert!(capability.supports(crate::bridge::UNIX_EXEC_OPERATION));
     assert!(!capability.supports("computer.observe"));
 }
 
 #[test]
 fn bridge_scope_preserves_thread_coordinates() {
-    let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-    let scope = BridgeScope::from_thread(&coordinates);
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+    let scope = crate::bridge::BridgeScope::from_thread(&coordinates);
 
     assert_eq!(scope.tenant_id, "tenant");
     assert_eq!(scope.user_id, "user");
@@ -26,26 +26,27 @@ fn bridge_scope_preserves_thread_coordinates() {
 
 #[tokio::test]
 async fn rejecting_bridge_returns_terminal_failure_event() {
-    let bridge = RejectingCapabilityBridge::new(BridgeCapabilities::new(
-        "rejecting",
-        BridgeBackendKind::InProcess,
-    ));
-    let scope = BridgeScope::new("tenant", "user", "session", None);
+    let bridge =
+        crate::bridge::RejectingCapabilityBridge::new(crate::bridge::BridgeCapabilities::new(
+            "rejecting",
+            crate::bridge::BridgeBackendKind::InProcess,
+        ));
+    let scope = crate::bridge::BridgeScope::new("tenant", "user", "session", None);
     let session = bridge
-        .open_session(OpenBridgeSessionRequest {
+        .open_session(crate::bridge::OpenBridgeSessionRequest {
             scope: scope.clone(),
-            requested_capabilities: vec![CapabilityGrant::new(
-                UNIX_NAMESPACE,
-                [UNIX_EXEC_OPERATION],
+            requested_capabilities: vec![crate::bridge::CapabilityGrant::new(
+                crate::bridge::UNIX_NAMESPACE,
+                [crate::bridge::UNIX_EXEC_OPERATION],
             )],
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         })
         .await
         .unwrap();
-    let request = OperationRequest::unix_exec(
+    let request = crate::bridge::OperationRequest::unix_exec(
         session.session_id,
         scope,
-        UnixExecPayload::new("echo hi", "/workspace"),
+        crate::bridge::UnixExecPayload::new("echo hi", "/workspace"),
     );
     let operation_id = request.operation_id;
 
@@ -56,7 +57,7 @@ async fn rejecting_bridge_returns_terminal_failure_event() {
     assert!(event.is_terminal());
     assert!(matches!(
         event,
-        OperationEvent::Failed {
+        crate::bridge::OperationEvent::Failed {
             code,
             ..
         } if code == "capability_unavailable"

@@ -1,18 +1,18 @@
-use std::path::PathBuf;
-use std::process::{Command, Output};
-
 const DEPRECATION: &str = concat!(
     "warning: cool",
     "dis is deprecated; use verlet (compatibility will be removed in v0.4.0)\n"
 );
 
-fn run(path: &PathBuf, argument: &str) -> Output {
-    Command::new(path).arg(argument).output().unwrap()
+fn run(path: &std::path::PathBuf, argument: &str) -> std::process::Output {
+    std::process::Command::new(path)
+        .arg(argument)
+        .output()
+        .unwrap()
 }
 
 #[test]
 fn legacy_binary_matches_verlet_help_and_version_with_one_warning() {
-    let canonical = PathBuf::from(env!("CARGO_BIN_EXE_verlet"));
+    let canonical = std::path::PathBuf::from(env!("CARGO_BIN_EXE_verlet"));
     let legacy = canonical.with_file_name(format!(
         "{}{}",
         concat!("cool", "dis"),

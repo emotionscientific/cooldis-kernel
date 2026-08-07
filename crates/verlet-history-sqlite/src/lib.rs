@@ -1,83 +1,63 @@
-use async_trait::async_trait;
-use std::collections::HashSet;
-use std::future::Future;
-use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::{Mutex, MutexGuard};
-use verlet_history::{
-    EventKind, EventOrigin, EventProvenance, EventRecord, EventRecordId, EventSequence, EventStore,
-    EventStreamId, HistoryError, HistoryResult, NewEventRecord, NewObservationRecord,
-    ObservationId, ObservationRecord, ObservationStore, STREAM_RECORD_SCHEMA_V1, SessionContext,
-    SessionContextSourceCut, SessionEntry, SessionEntryId, SessionEntryKind, SessionStore,
-    ThreadBaseRef, ThreadBranchSelectedPayload, ThreadForkReason, append_model_visible_messages,
-    codec_error, coordinates_with_thread_id, decode_entry, parse_event_origin, parse_thread_id,
-    parse_uuid, session_entry_event, session_entry_event_with_provenance,
-    session_entry_is_user_authored, storage_error, strip_thread_start_identity_entries,
-    validate_entry_coordinates, validate_new_event, validate_thread_base_ref,
-};
-use verlet_runtime_contracts::{ThreadCheckpointId, ThreadCoordinates, ThreadId};
-use verlet_sqlite::{
-    Connection, Db, DbConfig, IntoParams, Row, TransactionBehavior, ensure_column, params,
-};
-
 #[derive(Clone)]
 pub struct SqliteSessionStore {
-    inner: Db,
-    writer: Arc<Mutex<()>>,
+    inner: verlet_sqlite::Db,
+    writer: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 async fn cancellation_safe<T>(
-    future: impl Future<Output = HistoryResult<T>> + Send + 'static,
-) -> HistoryResult<T>
+    future: impl std::future::Future<Output = verlet_history::HistoryResult<T>> + Send + 'static,
+) -> verlet_history::HistoryResult<T>
 where
     T: Send + 'static,
 {
     tokio::spawn(future).await.map_err(|error| {
-        HistoryError::Storage(format!("sqlite transaction task failed: {error}"))
+        verlet_history::HistoryError::Storage(format!("sqlite transaction task failed: {error}"))
     })?
 }
 
 impl SqliteSessionStore {
-    pub async fn open(path: impl AsRef<Path>) -> HistoryResult<Self> {
-        let inner = Db::open(path, DbConfig::default())
+    pub async fn open(path: impl AsRef<std::path::Path>) -> verlet_history::HistoryResult<Self> {
+        let inner = verlet_sqlite::Db::open(path, verlet_sqlite::DbConfig::default())
             .await
-            .map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
         Self::from_db(inner).await
     }
 
-    pub async fn open_read_only(path: impl AsRef<Path>) -> HistoryResult<Self> {
-        let inner = Db::open(
+    pub async fn open_read_only(
+        path: impl AsRef<std::path::Path>,
+    ) -> verlet_history::HistoryResult<Self> {
+        let inner = verlet_sqlite::Db::open(
             path,
-            DbConfig {
+            verlet_sqlite::DbConfig {
                 read_only: true,
-                ..DbConfig::default()
+                ..verlet_sqlite::DbConfig::default()
             },
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
         Ok(Self {
             inner,
-            writer: Arc::new(Mutex::new(())),
+            writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
-    pub async fn in_memory() -> HistoryResult<Self> {
-        let inner = Db::in_memory(DbConfig::default())
+    pub async fn in_memory() -> verlet_history::HistoryResult<Self> {
+        let inner = verlet_sqlite::Db::in_memory(verlet_sqlite::DbConfig::default())
             .await
-            .map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
         Self::from_db(inner).await
     }
 
     /// Build the store over an engine-owner handle supplied by the caller.
     ///
-    /// The DST scenario lane uses this with a [`Db`] opened through
+    /// The DST scenario lane uses this with a [`verlet_sqlite::Db`] opened through
     /// `Db::open_with_io`; the store remains unaware of the concrete engine IO
     /// trait and applies the same schema initialization as [`Self::open`].
-    pub async fn from_db(inner: Db) -> HistoryResult<Self> {
+    pub async fn from_db(inner: verlet_sqlite::Db) -> verlet_history::HistoryResult<Self> {
         cancellation_safe(async move {
             let store = Self {
                 inner,
-                writer: Arc::new(Mutex::new(())),
+                writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             };
             {
                 let _writer = store.write_guard().await;
@@ -89,8 +69,11 @@ impl SqliteSessionStore {
         .await
     }
 
-    async fn connect(&self) -> HistoryResult<Connection> {
-        self.inner.connect().await.map_err(storage_error)
+    async fn connect(&self) -> verlet_history::HistoryResult<verlet_sqlite::Connection> {
+        self.inner
+            .connect()
+            .await
+            .map_err(verlet_history::storage_error)
     }
 
     /// Admit one history mutation at a time across every clone of this store.
@@ -102,11 +85,11 @@ impl SqliteSessionStore {
     /// keeps its existing immediate transaction and commit boundary; this gate
     /// changes concurrency only, not durability or journal ordering.
     #[doc(hidden)]
-    pub async fn daemon_write_guard(&self) -> MutexGuard<'_, ()> {
+    pub async fn daemon_write_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.writer.lock().await
     }
 
-    async fn write_guard(&self) -> MutexGuard<'_, ()> {
+    async fn write_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.daemon_write_guard().await
     }
 
@@ -118,7 +101,7 @@ impl SqliteSessionStore {
     /// `verlet-sqlite` and use [`Self::append_events_fenced_in_transaction`]
     /// rather than duplicating the event schema.
     #[doc(hidden)]
-    pub fn sqlite_database(&self) -> Db {
+    pub fn sqlite_database(&self) -> verlet_sqlite::Db {
         self.inner.clone()
     }
 
@@ -139,14 +122,14 @@ impl SqliteSessionStore {
     #[doc(hidden)]
     pub async fn append_events_fenced_in_transaction(
         &self,
-        transaction: &Connection,
-        stream_id: &EventStreamId,
-        expected_next_sequence: EventSequence,
-        records: Vec<NewEventRecord>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        transaction: &verlet_sqlite::Connection,
+        stream_id: &verlet_history::EventStreamId,
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let actual_next_sequence = sqlite_next_event_sequence(transaction, stream_id).await?;
         if actual_next_sequence != expected_next_sequence.get() {
-            return Err(HistoryError::AppendFenceConflict {
+            return Err(verlet_history::HistoryError::AppendFenceConflict {
                 stream_id: stream_id.clone(),
                 expected_next_sequence: expected_next_sequence.get(),
                 actual_next_sequence,
@@ -159,7 +142,9 @@ impl SqliteSessionStore {
         Ok(appended)
     }
 
-    pub async fn list_control_stream_coordinates(&self) -> HistoryResult<Vec<ThreadCoordinates>> {
+    pub async fn list_control_stream_coordinates(
+        &self,
+    ) -> verlet_history::HistoryResult<Vec<verlet_runtime_contracts::ThreadCoordinates>> {
         let connection = self.connect().await?;
         let mut rows = connection
             .query(
@@ -170,20 +155,26 @@ impl SqliteSessionStore {
                 (),
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
         let mut coordinates = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            coordinates.push(ThreadCoordinates {
-                tenant_id: row.get(0).map_err(storage_error)?,
-                user_id: row.get(1).map_err(storage_error)?,
-                session_id: row.get(2).map_err(storage_error)?,
-                thread_id: parse_thread_id(&row.get::<String>(3).map_err(storage_error)?)?,
+        while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
+            coordinates.push(verlet_runtime_contracts::ThreadCoordinates {
+                tenant_id: row.get(0).map_err(verlet_history::storage_error)?,
+                user_id: row.get(1).map_err(verlet_history::storage_error)?,
+                session_id: row.get(2).map_err(verlet_history::storage_error)?,
+                thread_id: verlet_history::parse_thread_id(
+                    &row.get::<String>(3)
+                        .map_err(verlet_history::storage_error)?,
+                )?,
             });
         }
         Ok(coordinates)
     }
 
-    pub async fn list_thread_events(&self, thread_id: ThreadId) -> HistoryResult<Vec<EventRecord>> {
+    pub async fn list_thread_events(
+        &self,
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let connection = self.connect().await?;
         let mut rows = connection
             .query(
@@ -193,47 +184,47 @@ impl SqliteSessionStore {
                  FROM event_records
                  WHERE thread_id = ?1
                  ORDER BY rowid",
-                params![thread_id.to_string()],
+                verlet_sqlite::params![thread_id.to_string()],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
         let mut events = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
+        while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
             events.push(sqlite_event_from_row(&row)?);
         }
         Ok(events)
     }
 }
 
-#[async_trait]
-impl SessionStore for SqliteSessionStore {
+#[async_trait::async_trait]
+impl verlet_history::SessionStore for SqliteSessionStore {
     async fn append(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         self.append_inner(coordinates, parent_entry_id, kind, None)
             .await
     }
 
     async fn append_with_provenance(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-        provenance: EventProvenance,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+        provenance: verlet_history::EventProvenance,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         self.append_inner(coordinates, parent_entry_id, kind, Some(provenance))
             .await
     }
 
     async fn append_turn_input(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
-        kind: SessionEntryKind,
-    ) -> HistoryResult<SessionEntry> {
+        kind: verlet_history::SessionEntryKind,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         let store = self.clone();
         let coordinates = coordinates.clone();
         let turn_id = turn_id.to_string();
@@ -243,46 +234,51 @@ impl SessionStore for SqliteSessionStore {
             let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             let thread_id = coordinates.thread_id.to_string();
             let existing = sqlite_optional_string(
                 &tx,
                 "SELECT entry_json FROM session_entries WHERE thread_id = ?1 AND turn_id = ?2",
-                params![thread_id.clone(), turn_id],
+                verlet_sqlite::params![thread_id.clone(), turn_id],
             )
             .await?
-            .map(|json| decode_entry(&json))
+            .map(|json| verlet_history::decode_entry(&json))
             .transpose()?;
             if let Some(existing) = existing {
-                validate_entry_coordinates(coordinates, &existing)?;
+                verlet_history::validate_entry_coordinates(coordinates, &existing)?;
                 if !verlet_history::turn_input_kinds_match(&existing.kind, &kind) {
-                    return Err(HistoryError::Storage(format!(
+                    return Err(verlet_history::HistoryError::Storage(format!(
                         "turn {turn_id} input does not match its persisted session entry"
                     )));
                 }
-                tx.commit().await.map_err(storage_error)?;
+                tx.commit().await.map_err(verlet_history::storage_error)?;
                 return Ok(existing);
             }
             let parent_entry_id = sqlite_active_leaf_entry(&tx, &thread_id)
                 .await?
                 .map(|entry| {
-                    validate_entry_coordinates(coordinates, &entry)?;
+                    verlet_history::validate_entry_coordinates(coordinates, &entry)?;
                     Ok(entry.entry_id)
                 })
                 .transpose()?;
-            let entry = SessionEntry::for_turn(coordinates.clone(), parent_entry_id, turn_id, kind);
+            let entry = verlet_history::SessionEntry::for_turn(
+                coordinates.clone(),
+                parent_entry_id,
+                turn_id,
+                kind,
+            );
             sqlite_insert_entry(&tx, &entry).await?;
             tx.execute(
                 "INSERT INTO active_leaves (thread_id, entry_id)
              VALUES (?1, ?2)
              ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
-                params![thread_id, entry.entry_id.to_string()],
+                verlet_sqlite::params![thread_id, entry.entry_id.to_string()],
             )
             .await
-            .map_err(storage_error)?;
-            tx.commit().await.map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
+            tx.commit().await.map_err(verlet_history::storage_error)?;
             Ok(entry)
         })
         .await
@@ -290,14 +286,14 @@ impl SessionStore for SqliteSessionStore {
 
     async fn active_leaf(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<Option<SessionEntryId>> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntryId>> {
         let connection = self.connect().await?;
         let thread_id = coordinates.thread_id.to_string();
         sqlite_active_leaf_entry(&connection, &thread_id)
             .await?
             .map(|entry| {
-                validate_entry_coordinates(coordinates, &entry)?;
+                verlet_history::validate_entry_coordinates(coordinates, &entry)?;
                 Ok(entry.entry_id)
             })
             .transpose()
@@ -305,9 +301,9 @@ impl SessionStore for SqliteSessionStore {
 
     async fn select_branch(
         &self,
-        coordinates: &ThreadCoordinates,
-        leaf_entry_id: Option<SessionEntryId>,
-    ) -> HistoryResult<()> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        leaf_entry_id: Option<verlet_history::SessionEntryId>,
+    ) -> verlet_history::HistoryResult<()> {
         let store = self.clone();
         let coordinates = coordinates.clone();
         cancellation_safe(async move {
@@ -315,32 +311,32 @@ impl SessionStore for SqliteSessionStore {
             let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             let thread_id = coordinates.thread_id.to_string();
             let prior_entry_id = sqlite_active_leaf_entry(&tx, &thread_id)
                 .await?
                 .map(|entry| {
-                    validate_entry_coordinates(coordinates, &entry)?;
+                    verlet_history::validate_entry_coordinates(coordinates, &entry)?;
                     Ok(entry.entry_id)
                 })
                 .transpose()?;
             if let Some(leaf_entry_id) = leaf_entry_id {
                 sqlite_branch_path(&tx, coordinates, leaf_entry_id).await?;
             }
-            let payload = serde_json::to_value(ThreadBranchSelectedPayload {
+            let payload = serde_json::to_value(verlet_history::ThreadBranchSelectedPayload {
                 thread_id: coordinates.thread_id,
                 selected_entry_id: leaf_entry_id,
                 prior_entry_id,
             })
-            .map_err(codec_error)?;
+            .map_err(verlet_history::codec_error)?;
             sqlite_insert_event(
                 &tx,
-                &EventStreamId::for_thread(coordinates),
-                NewEventRecord::witnessed(
+                &verlet_history::EventStreamId::for_thread(coordinates),
+                verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::ThreadBranchSelected,
+                    verlet_history::EventKind::ThreadBranchSelected,
                     payload,
                 ),
             )
@@ -351,21 +347,21 @@ impl SessionStore for SqliteSessionStore {
                         "INSERT INTO active_leaves (thread_id, entry_id)
                      VALUES (?1, ?2)
                      ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
-                        params![thread_id, leaf_entry_id.to_string()],
+                        verlet_sqlite::params![thread_id, leaf_entry_id.to_string()],
                     )
                     .await
-                    .map_err(storage_error)?;
+                    .map_err(verlet_history::storage_error)?;
                 }
                 None => {
                     tx.execute(
                         "DELETE FROM active_leaves WHERE thread_id = ?1",
-                        params![thread_id],
+                        verlet_sqlite::params![thread_id],
                     )
                     .await
-                    .map_err(storage_error)?;
+                    .map_err(verlet_history::storage_error)?;
                 }
             }
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(verlet_history::storage_error)?;
             Ok(())
         })
         .await
@@ -373,18 +369,25 @@ impl SessionStore for SqliteSessionStore {
 
     async fn build_context(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<SessionContext> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionContext> {
         let connection = self.connect().await?;
-        sqlite_build_context(&connection, coordinates, None, false, &mut HashSet::new()).await
+        sqlite_build_context(
+            &connection,
+            coordinates,
+            None,
+            false,
+            &mut std::collections::HashSet::new(),
+        )
+        .await
     }
 
     async fn clone_branch(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        source_leaf: Option<SessionEntryId>,
-        target_coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<Option<SessionEntryId>> {
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        source_leaf: Option<verlet_history::SessionEntryId>,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntryId>> {
         let store = self.clone();
         let source_coordinates = source_coordinates.clone();
         let target_coordinates = target_coordinates.clone();
@@ -394,30 +397,30 @@ impl SessionStore for SqliteSessionStore {
             let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             tx.execute(
                 "DELETE FROM thread_bases WHERE child_thread_id = ?1",
-                params![target_coordinates.thread_id.to_string()],
+                verlet_sqlite::params![target_coordinates.thread_id.to_string()],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
             let Some(source_leaf) = source_leaf else {
                 tx.execute(
                     "DELETE FROM active_leaves WHERE thread_id = ?1",
-                    params![target_coordinates.thread_id.to_string()],
+                    verlet_sqlite::params![target_coordinates.thread_id.to_string()],
                 )
                 .await
-                .map_err(storage_error)?;
-                tx.commit().await.map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
+                tx.commit().await.map_err(verlet_history::storage_error)?;
                 return Ok(None);
             };
             let entries = sqlite_branch_path(&tx, source_coordinates, source_leaf).await?;
             let mut parent_entry_id = None;
             let mut latest_entry_id = None;
             for source_entry in entries {
-                let entry = SessionEntry::new(
+                let entry = verlet_history::SessionEntry::new(
                     target_coordinates.clone(),
                     parent_entry_id,
                     source_entry.kind.clone(),
@@ -431,15 +434,15 @@ impl SessionStore for SqliteSessionStore {
                     "INSERT INTO active_leaves (thread_id, entry_id)
                  VALUES (?1, ?2)
                  ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
-                    params![
+                    verlet_sqlite::params![
                         target_coordinates.thread_id.to_string(),
                         entry_id.to_string()
                     ],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             }
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(verlet_history::storage_error)?;
             Ok(latest_entry_id)
         })
         .await
@@ -447,11 +450,11 @@ impl SessionStore for SqliteSessionStore {
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        target_coordinates: &ThreadCoordinates,
-        base: ThreadBaseRef,
-    ) -> HistoryResult<()> {
-        validate_thread_base_ref(source_coordinates, target_coordinates, &base)?;
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        base: verlet_history::ThreadBaseRef,
+    ) -> verlet_history::HistoryResult<()> {
+        verlet_history::validate_thread_base_ref(source_coordinates, target_coordinates, &base)?;
         let store = self.clone();
         let source_coordinates = source_coordinates.clone();
         let target_coordinates = target_coordinates.clone();
@@ -461,9 +464,9 @@ impl SessionStore for SqliteSessionStore {
             let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             validate_sqlite_base_cycle(
                 &tx,
                 target_coordinates.thread_id,
@@ -476,18 +479,18 @@ impl SessionStore for SqliteSessionStore {
                     source_coordinates,
                     Some(parent_leaf),
                     false,
-                    &mut HashSet::new(),
+                    &mut std::collections::HashSet::new(),
                 )
                 .await?;
             }
             tx.execute(
                 "DELETE FROM active_leaves WHERE thread_id = ?1",
-                params![target_coordinates.thread_id.to_string()],
+                verlet_sqlite::params![target_coordinates.thread_id.to_string()],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
             sqlite_insert_thread_base(&tx, &base).await?;
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(verlet_history::storage_error)?;
             Ok(())
         })
         .await
@@ -497,11 +500,11 @@ impl SessionStore for SqliteSessionStore {
 impl SqliteSessionStore {
     async fn append_inner(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-        provenance: Option<EventProvenance>,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+        provenance: Option<verlet_history::EventProvenance>,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         let store = self.clone();
         let coordinates = coordinates.clone();
         cancellation_safe(async move {
@@ -509,54 +512,55 @@ impl SqliteSessionStore {
             let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             let thread_id = coordinates.thread_id.to_string();
             let parent_entry_id = match parent_entry_id {
                 Some(parent) => {
                     let parent_entry = sqlite_load_entry(&tx, &thread_id, parent)
                         .await?
-                        .ok_or(HistoryError::EntryNotFound(parent))?;
-                    validate_entry_coordinates(coordinates, &parent_entry)?;
+                        .ok_or(verlet_history::HistoryError::EntryNotFound(parent))?;
+                    verlet_history::validate_entry_coordinates(coordinates, &parent_entry)?;
                     Some(parent)
                 }
                 None => sqlite_active_leaf_entry(&tx, &thread_id)
                     .await?
                     .map(|entry| {
-                        validate_entry_coordinates(coordinates, &entry)?;
+                        verlet_history::validate_entry_coordinates(coordinates, &entry)?;
                         Ok(entry.entry_id)
                     })
                     .transpose()?,
             };
 
-            let entry = SessionEntry::new(coordinates.clone(), parent_entry_id, kind);
+            let entry =
+                verlet_history::SessionEntry::new(coordinates.clone(), parent_entry_id, kind);
             sqlite_insert_entry_with_optional_provenance(&tx, &entry, provenance).await?;
             tx.execute(
                 "INSERT INTO active_leaves (thread_id, entry_id)
              VALUES (?1, ?2)
              ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
-                params![
+                verlet_sqlite::params![
                     entry.coordinates.thread_id.to_string(),
                     entry.entry_id.to_string()
                 ],
             )
             .await
-            .map_err(storage_error)?;
-            tx.commit().await.map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
+            tx.commit().await.map_err(verlet_history::storage_error)?;
             Ok(entry)
         })
         .await
     }
 }
 
-#[async_trait]
-impl EventStore for SqliteSessionStore {
+#[async_trait::async_trait]
+impl verlet_history::EventStore for SqliteSessionStore {
     async fn append_events(
         &self,
-        stream_id: &EventStreamId,
-        records: Vec<NewEventRecord>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let store = self.clone();
         let stream_id = stream_id.clone();
         cancellation_safe(async move {
@@ -564,14 +568,14 @@ impl EventStore for SqliteSessionStore {
             let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             let mut appended = Vec::with_capacity(records.len());
             for record in records {
                 appended.push(sqlite_insert_event(&tx, stream_id, record).await?);
             }
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(verlet_history::storage_error)?;
             Ok(appended)
         })
         .await
@@ -579,10 +583,10 @@ impl EventStore for SqliteSessionStore {
 
     async fn append_events_fenced(
         &self,
-        stream_id: &EventStreamId,
-        expected_next_sequence: EventSequence,
-        records: Vec<NewEventRecord>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let store = self.clone();
         let stream_id = stream_id.clone();
         cancellation_safe(async move {
@@ -590,9 +594,9 @@ impl EventStore for SqliteSessionStore {
             let _writer = store.write_guard().await;
             let mut connection = store.connect().await?;
             let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             let appended = store
                 .append_events_fenced_in_transaction(
                     &tx,
@@ -601,7 +605,7 @@ impl EventStore for SqliteSessionStore {
                     records,
                 )
                 .await?;
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(verlet_history::storage_error)?;
             Ok(appended)
         })
         .await
@@ -609,20 +613,20 @@ impl EventStore for SqliteSessionStore {
 
     async fn read_events(
         &self,
-        stream_id: &EventStreamId,
-        from_sequence: Option<EventSequence>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        from_sequence: Option<verlet_history::EventSequence>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let connection = self.connect().await?;
         sqlite_read_events(&connection, stream_id, from_sequence).await
     }
 }
 
-#[async_trait]
-impl ObservationStore for SqliteSessionStore {
+#[async_trait::async_trait]
+impl verlet_history::ObservationStore for SqliteSessionStore {
     async fn append_observation(
         &self,
-        record: NewObservationRecord,
-    ) -> HistoryResult<ObservationRecord> {
+        record: verlet_history::NewObservationRecord,
+    ) -> verlet_history::HistoryResult<verlet_history::ObservationRecord> {
         let store = self.clone();
         cancellation_safe(async move {
             let _writer = store.write_guard().await;
@@ -634,15 +638,17 @@ impl ObservationStore for SqliteSessionStore {
 
     async fn list_observations(
         &self,
-        scope: &ThreadCoordinates,
+        scope: &verlet_runtime_contracts::ThreadCoordinates,
         kind: Option<&str>,
-    ) -> HistoryResult<Vec<ObservationRecord>> {
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::ObservationRecord>> {
         let connection = self.connect().await?;
         sqlite_list_observations(&connection, scope, kind).await
     }
 }
 
-async fn init_sqlite_schema(connection: &mut Connection) -> HistoryResult<()> {
+async fn init_sqlite_schema(
+    connection: &mut verlet_sqlite::Connection,
+) -> verlet_history::HistoryResult<()> {
     connection
         .execute_batch(
             r#"
@@ -727,14 +733,14 @@ async fn init_sqlite_schema(connection: &mut Connection) -> HistoryResult<()> {
             "#,
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     let migration = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
         .await
-        .map_err(storage_error)?;
-    ensure_column(&migration, "session_entries", "turn_id", "turn_id TEXT")
+        .map_err(verlet_history::storage_error)?;
+    verlet_sqlite::ensure_column(&migration, "session_entries", "turn_id", "turn_id TEXT")
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     migration
         .execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_turn
@@ -743,44 +749,50 @@ async fn init_sqlite_schema(connection: &mut Connection) -> HistoryResult<()> {
             (),
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     sqlite_migrate_event_records_schema(&migration).await?;
-    migration.commit().await.map_err(storage_error)?;
+    migration
+        .commit()
+        .await
+        .map_err(verlet_history::storage_error)?;
     sqlite_rebuild_active_leaves_from_events(connection).await
 }
 
 async fn sqlite_rebuild_active_leaves_from_events(
-    connection: &mut Connection,
-) -> HistoryResult<()> {
+    connection: &mut verlet_sqlite::Connection,
+) -> verlet_history::HistoryResult<()> {
     let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
         .await
-        .map_err(storage_error)?;
-    let mut selected_threads = HashSet::new();
+        .map_err(verlet_history::storage_error)?;
+    let mut selected_threads = std::collections::HashSet::new();
     {
         let mut rows = tx
             .query(
                 "SELECT DISTINCT thread_id
                  FROM event_records
                  WHERE kind = ?1",
-                params![EventKind::ThreadBranchSelected.as_str()],
+                verlet_sqlite::params![verlet_history::EventKind::ThreadBranchSelected.as_str()],
             )
             .await
-            .map_err(storage_error)?;
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            selected_threads.insert(row.get::<String>(0).map_err(storage_error)?);
+            .map_err(verlet_history::storage_error)?;
+        while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
+            selected_threads.insert(
+                row.get::<String>(0)
+                    .map_err(verlet_history::storage_error)?,
+            );
         }
     }
     if selected_threads.is_empty() {
-        return tx.commit().await.map_err(storage_error);
+        return tx.commit().await.map_err(verlet_history::storage_error);
     }
     for thread_id in &selected_threads {
         tx.execute(
             "DELETE FROM active_leaves WHERE thread_id = ?1",
-            params![thread_id.as_str()],
+            verlet_sqlite::params![thread_id.as_str()],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     }
 
     let mut journal_entries = Vec::new();
@@ -791,18 +803,21 @@ async fn sqlite_rebuild_active_leaves_from_events(
                  FROM event_records
                  WHERE kind IN (?1, ?2)
                  ORDER BY rowid",
-                params![
-                    EventKind::SessionEntryAppended.as_str(),
-                    EventKind::ThreadBranchSelected.as_str(),
+                verlet_sqlite::params![
+                    verlet_history::EventKind::SessionEntryAppended.as_str(),
+                    verlet_history::EventKind::ThreadBranchSelected.as_str(),
                 ],
             )
             .await
-            .map_err(storage_error)?;
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            .map_err(verlet_history::storage_error)?;
+        while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
             journal_entries.push((
-                row.get::<String>(0).map_err(storage_error)?,
-                row.get::<String>(1).map_err(storage_error)?,
-                row.get::<String>(2).map_err(storage_error)?,
+                row.get::<String>(0)
+                    .map_err(verlet_history::storage_error)?,
+                row.get::<String>(1)
+                    .map_err(verlet_history::storage_error)?,
+                row.get::<String>(2)
+                    .map_err(verlet_history::storage_error)?,
             ));
         }
     }
@@ -811,11 +826,12 @@ async fn sqlite_rebuild_active_leaves_from_events(
         if !selected_threads.contains(&stored_thread_id) {
             continue;
         }
-        let selected_entry_id = if kind == EventKind::ThreadBranchSelected.as_str() {
-            let payload: ThreadBranchSelectedPayload =
-                serde_json::from_str(&payload_json).map_err(codec_error)?;
+        let selected_entry_id = if kind == verlet_history::EventKind::ThreadBranchSelected.as_str()
+        {
+            let payload: verlet_history::ThreadBranchSelectedPayload =
+                serde_json::from_str(&payload_json).map_err(verlet_history::codec_error)?;
             if payload.thread_id.to_string() != stored_thread_id {
-                return Err(HistoryError::Codec(format!(
+                return Err(verlet_history::HistoryError::Codec(format!(
                     "thread.branch.selected payload thread {} does not match event thread {stored_thread_id}",
                     payload.thread_id
                 )));
@@ -823,8 +839,9 @@ async fn sqlite_rebuild_active_leaves_from_events(
             payload.selected_entry_id
         } else {
             let payload: serde_json::Value =
-                serde_json::from_str(&payload_json).map_err(codec_error)?;
-            serde_json::from_value(payload["entry_id"].clone()).map_err(codec_error)?
+                serde_json::from_str(&payload_json).map_err(verlet_history::codec_error)?;
+            serde_json::from_value(payload["entry_id"].clone())
+                .map_err(verlet_history::codec_error)?
         };
         match selected_entry_id {
             Some(entry_id) => {
@@ -832,77 +849,79 @@ async fn sqlite_rebuild_active_leaves_from_events(
                     .await?
                     .is_none()
                 {
-                    return Err(HistoryError::EntryNotFound(entry_id));
+                    return Err(verlet_history::HistoryError::EntryNotFound(entry_id));
                 }
                 tx.execute(
                     "INSERT INTO active_leaves (thread_id, entry_id)
                          VALUES (?1, ?2)
                          ON CONFLICT(thread_id) DO UPDATE SET entry_id = excluded.entry_id",
-                    params![stored_thread_id, entry_id.to_string()],
+                    verlet_sqlite::params![stored_thread_id, entry_id.to_string()],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             }
             None => {
                 tx.execute(
                     "DELETE FROM active_leaves WHERE thread_id = ?1",
-                    params![stored_thread_id],
+                    verlet_sqlite::params![stored_thread_id],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
             }
         }
     }
-    tx.commit().await.map_err(storage_error)
+    tx.commit().await.map_err(verlet_history::storage_error)
 }
 
 /// Migrates legacy event rows honestly: reconstructed provenance names this
 /// migration and does not impersonate the runtime component that may have
 /// produced the original unversioned row.
-async fn sqlite_migrate_event_records_schema(connection: &Connection) -> HistoryResult<()> {
+async fn sqlite_migrate_event_records_schema(
+    connection: &verlet_sqlite::Connection,
+) -> verlet_history::HistoryResult<()> {
     let mut added_identity_column = false;
     let mut added_origin_column = false;
     let had_schema = sqlite_table_has_column(connection, "event_records", "schema").await?;
-    ensure_column(
+    verlet_sqlite::ensure_column(
         connection,
         "event_records",
         "schema",
         "schema TEXT NOT NULL DEFAULT 'cooldis.stream.record/1'",
     )
     .await
-    .map_err(storage_error)?;
+    .map_err(verlet_history::storage_error)?;
     added_identity_column |= !had_schema;
     let had_payload_schema =
         sqlite_table_has_column(connection, "event_records", "payload_schema").await?;
-    ensure_column(
+    verlet_sqlite::ensure_column(
         connection,
         "event_records",
         "payload_schema",
         "payload_schema TEXT NOT NULL DEFAULT ''",
     )
     .await
-    .map_err(storage_error)?;
+    .map_err(verlet_history::storage_error)?;
     added_identity_column |= !had_payload_schema;
     let had_origin = sqlite_table_has_column(connection, "event_records", "origin").await?;
-    ensure_column(
+    verlet_sqlite::ensure_column(
         connection,
         "event_records",
         "origin",
         "origin TEXT NOT NULL DEFAULT 'witnessed'",
     )
     .await
-    .map_err(storage_error)?;
+    .map_err(verlet_history::storage_error)?;
     added_origin_column |= !had_origin;
     let had_provenance =
         sqlite_table_has_column(connection, "event_records", "provenance_json").await?;
-    ensure_column(
+    verlet_sqlite::ensure_column(
         connection,
         "event_records",
         "provenance_json",
         "provenance_json TEXT NOT NULL DEFAULT '{}'",
     )
     .await
-    .map_err(storage_error)?;
+    .map_err(verlet_history::storage_error)?;
     added_origin_column |= !had_provenance;
     if added_identity_column {
         let mut identity_rows = Vec::new();
@@ -913,17 +932,19 @@ async fn sqlite_migrate_event_records_schema(connection: &Connection) -> History
                     (),
                 )
                 .await
-                .map_err(storage_error)?;
-            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                .map_err(verlet_history::storage_error)?;
+            while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
                 identity_rows.push((
-                    row.get::<String>(0).map_err(storage_error)?,
-                    row.get::<String>(1).map_err(storage_error)?,
+                    row.get::<String>(0)
+                        .map_err(verlet_history::storage_error)?,
+                    row.get::<String>(1)
+                        .map_err(verlet_history::storage_error)?,
                 ));
             }
         }
         for (event_id, kind) in identity_rows {
             let payload_schema = kind
-                .parse::<EventKind>()
+                .parse::<verlet_history::EventKind>()
                 .map(|kind| kind.payload_schema_id().to_string())
                 .unwrap_or_default();
             connection
@@ -932,10 +953,14 @@ async fn sqlite_migrate_event_records_schema(connection: &Connection) -> History
                      SET schema = ?2,
                          payload_schema = ?3
                      WHERE event_id = ?1",
-                    params![event_id, STREAM_RECORD_SCHEMA_V1, payload_schema],
+                    verlet_sqlite::params![
+                        event_id,
+                        verlet_history::STREAM_RECORD_SCHEMA_V1,
+                        payload_schema
+                    ],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(verlet_history::storage_error)?;
         }
     }
     if !added_origin_column {
@@ -952,71 +977,78 @@ async fn sqlite_migrate_event_records_schema(connection: &Connection) -> History
                  FROM event_records
                  WHERE kind IN (?1, ?2)
                  ORDER BY stream_id, sequence",
-                params![
-                    EventKind::SessionEntryAppended.as_str(),
-                    EventKind::ContextCompileCompleted.as_str(),
+                verlet_sqlite::params![
+                    verlet_history::EventKind::SessionEntryAppended.as_str(),
+                    verlet_history::EventKind::ContextCompileCompleted.as_str(),
                 ],
             )
             .await
-            .map_err(storage_error)?;
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            .map_err(verlet_history::storage_error)?;
+        while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
             rows_to_backfill.push((
-                row.get::<String>(0).map_err(storage_error)?,
-                row.get::<String>(1).map_err(storage_error)?,
-                row.get::<String>(2).map_err(storage_error)?,
-                row.get::<String>(3).map_err(storage_error)?,
+                row.get::<String>(0)
+                    .map_err(verlet_history::storage_error)?,
+                row.get::<String>(1)
+                    .map_err(verlet_history::storage_error)?,
+                row.get::<String>(2)
+                    .map_err(verlet_history::storage_error)?,
+                row.get::<String>(3)
+                    .map_err(verlet_history::storage_error)?,
             ));
         }
     }
 
     for (event_id, _stream_id, kind, payload_json) in rows_to_backfill {
-        let (origin, provenance) = if kind == EventKind::SessionEntryAppended.as_str() {
-            match serde_json::from_str::<SessionEntry>(&payload_json) {
-                Ok(entry) if session_entry_is_user_authored(&entry.kind) => {
-                    (EventOrigin::Witnessed, EventProvenance::default())
+        let (origin, provenance) =
+            if kind == verlet_history::EventKind::SessionEntryAppended.as_str() {
+                match serde_json::from_str::<verlet_history::SessionEntry>(&payload_json) {
+                    Ok(entry) if verlet_history::session_entry_is_user_authored(&entry.kind) => (
+                        verlet_history::EventOrigin::Witnessed,
+                        verlet_history::EventProvenance::default(),
+                    ),
+                    _ => (
+                        verlet_history::EventOrigin::Discharged,
+                        verlet_history::EventProvenance {
+                            discharged_by: Some(ORIGIN_BACKFILL_MIGRATION.to_string()),
+                            ..verlet_history::EventProvenance::default()
+                        },
+                    ),
                 }
-                _ => (
-                    EventOrigin::Discharged,
-                    EventProvenance {
+            } else {
+                (
+                    verlet_history::EventOrigin::Discharged,
+                    verlet_history::EventProvenance {
                         discharged_by: Some(ORIGIN_BACKFILL_MIGRATION.to_string()),
-                        ..EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
-                ),
-            }
-        } else {
-            (
-                EventOrigin::Discharged,
-                EventProvenance {
-                    discharged_by: Some(ORIGIN_BACKFILL_MIGRATION.to_string()),
-                    ..EventProvenance::default()
-                },
-            )
-        };
-        let provenance_json = serde_json::to_string(&provenance).map_err(codec_error)?;
+                )
+            };
+        let provenance_json =
+            serde_json::to_string(&provenance).map_err(verlet_history::codec_error)?;
         connection
             .execute(
                 "UPDATE event_records
                  SET origin = ?1, provenance_json = ?2
                  WHERE event_id = ?3",
-                params![origin.as_str(), provenance_json, event_id],
+                verlet_sqlite::params![origin.as_str(), provenance_json, event_id],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(verlet_history::storage_error)?;
     }
     Ok(())
 }
 
 async fn sqlite_table_has_column(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     table: &str,
     column: &str,
-) -> HistoryResult<bool> {
+) -> verlet_history::HistoryResult<bool> {
     let mut rows = connection
         .query(format!("PRAGMA table_info({table})"), ())
         .await
-        .map_err(storage_error)?;
-    while let Some(row) = rows.next().await.map_err(storage_error)? {
-        let name: String = row.get(1).map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
+    while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
+        let name: String = row.get(1).map_err(verlet_history::storage_error)?;
         if name == column {
             return Ok(true);
         }
@@ -1025,58 +1057,68 @@ async fn sqlite_table_has_column(
 }
 
 async fn sqlite_optional_string(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     sql: &str,
-    params: impl IntoParams,
-) -> HistoryResult<Option<String>> {
-    let mut rows = connection.query(sql, params).await.map_err(storage_error)?;
+    params: impl verlet_sqlite::IntoParams,
+) -> verlet_history::HistoryResult<Option<String>> {
+    let mut rows = connection
+        .query(sql, params)
+        .await
+        .map_err(verlet_history::storage_error)?;
     rows.next()
         .await
-        .map_err(storage_error)?
-        .map(|row| row.get::<String>(0).map_err(storage_error))
+        .map_err(verlet_history::storage_error)?
+        .map(|row| row.get::<String>(0).map_err(verlet_history::storage_error))
         .transpose()
 }
 
 async fn sqlite_load_entry(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     thread_id: &str,
-    entry_id: SessionEntryId,
-) -> HistoryResult<Option<SessionEntry>> {
+    entry_id: verlet_history::SessionEntryId,
+) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntry>> {
     let entry_json = sqlite_optional_string(
         connection,
         "SELECT entry_json FROM session_entries WHERE thread_id = ?1 AND entry_id = ?2",
-        params![thread_id, entry_id.to_string()],
+        verlet_sqlite::params![thread_id, entry_id.to_string()],
     )
     .await?;
-    entry_json.map(|json| decode_entry(&json)).transpose()
+    entry_json
+        .map(|json| verlet_history::decode_entry(&json))
+        .transpose()
 }
 
 async fn sqlite_active_leaf_entry(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     thread_id: &str,
-) -> HistoryResult<Option<SessionEntry>> {
+) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntry>> {
     let entry_json = sqlite_optional_string(
         connection,
         "SELECT e.entry_json
              FROM active_leaves a
              JOIN session_entries e ON e.thread_id = a.thread_id AND e.entry_id = a.entry_id
              WHERE a.thread_id = ?1",
-        params![thread_id],
+        verlet_sqlite::params![thread_id],
     )
     .await?;
-    entry_json.map(|json| decode_entry(&json)).transpose()
+    entry_json
+        .map(|json| verlet_history::decode_entry(&json))
+        .transpose()
 }
 
-async fn sqlite_insert_entry(connection: &Connection, entry: &SessionEntry) -> HistoryResult<()> {
+async fn sqlite_insert_entry(
+    connection: &verlet_sqlite::Connection,
+    entry: &verlet_history::SessionEntry,
+) -> verlet_history::HistoryResult<()> {
     sqlite_insert_entry_with_optional_provenance(connection, entry, None).await
 }
 
 async fn sqlite_insert_entry_with_optional_provenance(
-    connection: &Connection,
-    entry: &SessionEntry,
-    provenance: Option<EventProvenance>,
-) -> HistoryResult<()> {
-    let entry_json = serde_json::to_string(entry).map_err(codec_error)?;
+    connection: &verlet_sqlite::Connection,
+    entry: &verlet_history::SessionEntry,
+    provenance: Option<verlet_history::EventProvenance>,
+) -> verlet_history::HistoryResult<()> {
+    let entry_json = serde_json::to_string(entry).map_err(verlet_history::codec_error)?;
     connection
         .execute(
             "INSERT INTO session_entries (
@@ -1090,7 +1132,7 @@ async fn sqlite_insert_entry_with_optional_provenance(
             created_at_ms,
             entry_json
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
+            verlet_sqlite::params![
                 entry.entry_id.to_string(),
                 entry.parent_entry_id.map(|id| id.to_string()),
                 entry.turn_id.as_deref(),
@@ -1103,13 +1145,15 @@ async fn sqlite_insert_entry_with_optional_provenance(
             ],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     sqlite_insert_event(
         connection,
-        &EventStreamId::for_thread(&entry.coordinates),
+        &verlet_history::EventStreamId::for_thread(&entry.coordinates),
         match provenance {
-            Some(provenance) => session_entry_event_with_provenance(entry, provenance),
-            None => session_entry_event(entry),
+            Some(provenance) => {
+                verlet_history::session_entry_event_with_provenance(entry, provenance)
+            }
+            None => verlet_history::session_entry_event(entry),
         },
     )
     .await?;
@@ -1117,36 +1161,44 @@ async fn sqlite_insert_entry_with_optional_provenance(
 }
 
 async fn sqlite_insert_event(
-    connection: &Connection,
-    stream_id: &EventStreamId,
-    record: NewEventRecord,
-) -> HistoryResult<EventRecord> {
-    validate_new_event(&record)?;
+    connection: &verlet_sqlite::Connection,
+    stream_id: &verlet_history::EventStreamId,
+    record: verlet_history::NewEventRecord,
+) -> verlet_history::HistoryResult<verlet_history::EventRecord> {
+    verlet_history::validate_new_event(&record)?;
     let event_id = record.id;
     let mut rows = connection
         .query(
             "SELECT EXISTS(SELECT 1 FROM event_records WHERE event_id = ?1)",
-            params![event_id.to_string()],
+            verlet_sqlite::params![event_id.to_string()],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     let event_id_exists = rows
         .next()
         .await
-        .map_err(storage_error)?
-        .ok_or_else(|| HistoryError::Storage("SELECT EXISTS returned no row".to_string()))?
+        .map_err(verlet_history::storage_error)?
+        .ok_or_else(|| {
+            verlet_history::HistoryError::Storage("SELECT EXISTS returned no row".to_string())
+        })?
         .get::<i64>(0)
-        .map_err(storage_error)?
+        .map_err(verlet_history::storage_error)?
         != 0;
     drop(rows);
     if event_id_exists {
-        return Err(HistoryError::DuplicateEventId(event_id));
+        return Err(verlet_history::HistoryError::DuplicateEventId(event_id));
     }
     let next_sequence = sqlite_next_event_sequence(connection, stream_id).await?;
-    let event = EventRecord::from_new(stream_id.clone(), EventSequence::new(next_sequence), record);
+    let event = verlet_history::EventRecord::from_new(
+        stream_id.clone(),
+        verlet_history::EventSequence::new(next_sequence),
+        record,
+    );
     event.validate_stream_record_v1()?;
-    let payload_json = serde_json::to_string(&event.payload).map_err(codec_error)?;
-    let provenance_json = serde_json::to_string(&event.provenance).map_err(codec_error)?;
+    let payload_json =
+        serde_json::to_string(&event.payload).map_err(verlet_history::codec_error)?;
+    let provenance_json =
+        serde_json::to_string(&event.provenance).map_err(verlet_history::codec_error)?;
     connection
         .execute(
             "INSERT INTO event_records (
@@ -1165,9 +1217,9 @@ async fn sqlite_insert_event(
             provenance_json,
             payload_json
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
+            verlet_sqlite::params![
                 event.id.to_string(),
-                STREAM_RECORD_SCHEMA_V1,
+                verlet_history::STREAM_RECORD_SCHEMA_V1,
                 event.kind.payload_schema_id(),
                 event.stream_id.as_str(),
                 event.sequence.get(),
@@ -1183,36 +1235,38 @@ async fn sqlite_insert_event(
             ],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     Ok(event)
 }
 
 async fn sqlite_next_event_sequence(
-    connection: &Connection,
-    stream_id: &EventStreamId,
-) -> HistoryResult<i64> {
+    connection: &verlet_sqlite::Connection,
+    stream_id: &verlet_history::EventStreamId,
+) -> verlet_history::HistoryResult<i64> {
     let mut rows = connection
         .query(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM event_records WHERE stream_id = ?1",
-            params![stream_id.as_str()],
+            verlet_sqlite::params![stream_id.as_str()],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     rows.next()
         .await
-        .map_err(storage_error)?
+        .map_err(verlet_history::storage_error)?
         .ok_or_else(|| {
-            HistoryError::Storage("next event sequence aggregate returned no row".to_string())
+            verlet_history::HistoryError::Storage(
+                "next event sequence aggregate returned no row".to_string(),
+            )
         })?
         .get::<i64>(0)
-        .map_err(storage_error)
+        .map_err(verlet_history::storage_error)
 }
 
 async fn sqlite_read_events(
-    connection: &Connection,
-    stream_id: &EventStreamId,
-    from_sequence: Option<EventSequence>,
-) -> HistoryResult<Vec<EventRecord>> {
+    connection: &verlet_sqlite::Connection,
+    stream_id: &verlet_history::EventStreamId,
+    from_sequence: Option<verlet_history::EventSequence>,
+) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
     let mut events = Vec::new();
     match from_sequence {
         Some(sequence) => {
@@ -1224,11 +1278,11 @@ async fn sqlite_read_events(
                      FROM event_records
                      WHERE stream_id = ?1 AND sequence >= ?2
                      ORDER BY sequence",
-                    params![stream_id.as_str(), sequence.get()],
+                    verlet_sqlite::params![stream_id.as_str(), sequence.get()],
                 )
                 .await
-                .map_err(storage_error)?;
-            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                .map_err(verlet_history::storage_error)?;
+            while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
                 events.push(sqlite_event_from_row(&row)?);
             }
         }
@@ -1241,11 +1295,11 @@ async fn sqlite_read_events(
                      FROM event_records
                      WHERE stream_id = ?1
                      ORDER BY sequence",
-                    params![stream_id.as_str()],
+                    verlet_sqlite::params![stream_id.as_str()],
                 )
                 .await
-                .map_err(storage_error)?;
-            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                .map_err(verlet_history::storage_error)?;
+            while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
                 events.push(sqlite_event_from_row(&row)?);
             }
         }
@@ -1253,53 +1307,65 @@ async fn sqlite_read_events(
     Ok(events)
 }
 
-fn sqlite_event_from_row(row: &Row) -> HistoryResult<EventRecord> {
-    let event_id: String = row.get(0).map_err(storage_error)?;
-    let schema: String = row.get(1).map_err(storage_error)?;
-    if schema != STREAM_RECORD_SCHEMA_V1 {
-        return Err(codec_error(format!(
+fn sqlite_event_from_row(
+    row: &verlet_sqlite::Row,
+) -> verlet_history::HistoryResult<verlet_history::EventRecord> {
+    let event_id: String = row.get(0).map_err(verlet_history::storage_error)?;
+    let schema: String = row.get(1).map_err(verlet_history::storage_error)?;
+    if schema != verlet_history::STREAM_RECORD_SCHEMA_V1 {
+        return Err(verlet_history::codec_error(format!(
             "event record {event_id} has unsupported stream schema {schema:?}"
         )));
     }
-    let payload_schema: String = row.get(2).map_err(storage_error)?;
-    let kind: String = row.get(10).map_err(storage_error)?;
-    let kind = kind.parse::<EventKind>()?;
+    let payload_schema: String = row.get(2).map_err(verlet_history::storage_error)?;
+    let kind: String = row.get(10).map_err(verlet_history::storage_error)?;
+    let kind = kind.parse::<verlet_history::EventKind>()?;
     let expected_payload_schema = kind.payload_schema_id();
     if payload_schema != expected_payload_schema {
-        return Err(codec_error(format!(
+        return Err(verlet_history::codec_error(format!(
             "event record {event_id} kind {kind} has payload_schema {payload_schema:?}, expected {expected_payload_schema:?}"
         )));
     }
-    let origin: String = row.get(11).map_err(storage_error)?;
-    let provenance_json: String = row.get(12).map_err(storage_error)?;
-    let payload_json: String = row.get(13).map_err(storage_error)?;
-    let event = EventRecord {
-        id: EventRecordId::from_uuid(parse_uuid(&event_id)?),
-        stream_id: EventStreamId::new(row.get::<String>(3).map_err(storage_error)?),
-        sequence: EventSequence::new(row.get(4).map_err(storage_error)?),
-        coordinates: ThreadCoordinates {
-            thread_id: parse_thread_id(&row.get::<String>(5).map_err(storage_error)?)?,
-            tenant_id: row.get(6).map_err(storage_error)?,
-            user_id: row.get(7).map_err(storage_error)?,
-            session_id: row.get(8).map_err(storage_error)?,
+    let origin: String = row.get(11).map_err(verlet_history::storage_error)?;
+    let provenance_json: String = row.get(12).map_err(verlet_history::storage_error)?;
+    let payload_json: String = row.get(13).map_err(verlet_history::storage_error)?;
+    let event = verlet_history::EventRecord {
+        id: verlet_history::EventRecordId::from_uuid(verlet_history::parse_uuid(&event_id)?),
+        stream_id: verlet_history::EventStreamId::new(
+            row.get::<String>(3)
+                .map_err(verlet_history::storage_error)?,
+        ),
+        sequence: verlet_history::EventSequence::new(
+            row.get(4).map_err(verlet_history::storage_error)?,
+        ),
+        coordinates: verlet_runtime_contracts::ThreadCoordinates {
+            thread_id: verlet_history::parse_thread_id(
+                &row.get::<String>(5)
+                    .map_err(verlet_history::storage_error)?,
+            )?,
+            tenant_id: row.get(6).map_err(verlet_history::storage_error)?,
+            user_id: row.get(7).map_err(verlet_history::storage_error)?,
+            session_id: row.get(8).map_err(verlet_history::storage_error)?,
         },
-        created_at_ms: row.get(9).map_err(storage_error)?,
+        created_at_ms: row.get(9).map_err(verlet_history::storage_error)?,
         kind,
-        origin: parse_event_origin(&origin)?,
-        provenance: serde_json::from_str(&provenance_json).map_err(codec_error)?,
-        payload: serde_json::from_str(&payload_json).map_err(codec_error)?,
+        origin: verlet_history::parse_event_origin(&origin)?,
+        provenance: serde_json::from_str(&provenance_json).map_err(verlet_history::codec_error)?,
+        payload: serde_json::from_str(&payload_json).map_err(verlet_history::codec_error)?,
     };
     event.validate_stream_record_v1()?;
     Ok(event)
 }
 
 async fn sqlite_insert_observation(
-    connection: &Connection,
-    record: NewObservationRecord,
-) -> HistoryResult<ObservationRecord> {
-    let record = ObservationRecord::from(record);
-    let payload_json = serde_json::to_string(&record.payload).map_err(codec_error)?;
-    let provenance_json = serde_json::to_string(&record.provenance).map_err(codec_error)?;
+    connection: &verlet_sqlite::Connection,
+    record: verlet_history::NewObservationRecord,
+) -> verlet_history::HistoryResult<verlet_history::ObservationRecord> {
+    let record = verlet_history::ObservationRecord::from(record);
+    let payload_json =
+        serde_json::to_string(&record.payload).map_err(verlet_history::codec_error)?;
+    let provenance_json =
+        serde_json::to_string(&record.provenance).map_err(verlet_history::codec_error)?;
     connection
         .execute(
             "INSERT INTO observation_records (
@@ -1315,7 +1381,7 @@ async fn sqlite_insert_observation(
                 supersedes_observation_id,
                 confidence
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
+            verlet_sqlite::params![
                 record.id.to_string(),
                 record.kind.as_str(),
                 record.scope.thread_id.to_string(),
@@ -1330,15 +1396,15 @@ async fn sqlite_insert_observation(
             ],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     Ok(record)
 }
 
 async fn sqlite_list_observations(
-    connection: &Connection,
-    scope: &ThreadCoordinates,
+    connection: &verlet_sqlite::Connection,
+    scope: &verlet_runtime_contracts::ThreadCoordinates,
     kind: Option<&str>,
-) -> HistoryResult<Vec<ObservationRecord>> {
+) -> verlet_history::HistoryResult<Vec<verlet_history::ObservationRecord>> {
     let mut observations = Vec::new();
     match kind {
         Some(kind) => {
@@ -1351,7 +1417,7 @@ async fn sqlite_list_observations(
                      WHERE tenant_id = ?1 AND user_id = ?2 AND session_id = ?3
                        AND thread_id = ?4 AND kind = ?5
                      ORDER BY created_at_ms, observation_id",
-                    params![
+                    verlet_sqlite::params![
                         scope.tenant_id.as_str(),
                         scope.user_id.as_str(),
                         scope.session_id.as_str(),
@@ -1360,8 +1426,8 @@ async fn sqlite_list_observations(
                     ],
                 )
                 .await
-                .map_err(storage_error)?;
-            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                .map_err(verlet_history::storage_error)?;
+            while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
                 observations.push(sqlite_observation_from_row(&row)?);
             }
         }
@@ -1375,7 +1441,7 @@ async fn sqlite_list_observations(
                      WHERE tenant_id = ?1 AND user_id = ?2 AND session_id = ?3
                        AND thread_id = ?4
                      ORDER BY created_at_ms, observation_id",
-                    params![
+                    verlet_sqlite::params![
                         scope.tenant_id.as_str(),
                         scope.user_id.as_str(),
                         scope.session_id.as_str(),
@@ -1383,8 +1449,8 @@ async fn sqlite_list_observations(
                     ],
                 )
                 .await
-                .map_err(storage_error)?;
-            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                .map_err(verlet_history::storage_error)?;
+            while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
                 observations.push(sqlite_observation_from_row(&row)?);
             }
         }
@@ -1392,43 +1458,48 @@ async fn sqlite_list_observations(
     Ok(observations)
 }
 
-fn sqlite_observation_from_row(row: &Row) -> HistoryResult<ObservationRecord> {
-    let observation_id: String = row.get(0).map_err(storage_error)?;
-    let payload_json: String = row.get(7).map_err(storage_error)?;
-    let provenance_json: String = row.get(8).map_err(storage_error)?;
-    let supersedes: Option<String> = row.get(9).map_err(storage_error)?;
-    Ok(ObservationRecord {
-        id: ObservationId::from_uuid(parse_uuid(&observation_id)?),
-        kind: row.get(1).map_err(storage_error)?,
-        scope: ThreadCoordinates {
-            thread_id: parse_thread_id(&row.get::<String>(2).map_err(storage_error)?)?,
-            tenant_id: row.get(3).map_err(storage_error)?,
-            user_id: row.get(4).map_err(storage_error)?,
-            session_id: row.get(5).map_err(storage_error)?,
+fn sqlite_observation_from_row(
+    row: &verlet_sqlite::Row,
+) -> verlet_history::HistoryResult<verlet_history::ObservationRecord> {
+    let observation_id: String = row.get(0).map_err(verlet_history::storage_error)?;
+    let payload_json: String = row.get(7).map_err(verlet_history::storage_error)?;
+    let provenance_json: String = row.get(8).map_err(verlet_history::storage_error)?;
+    let supersedes: Option<String> = row.get(9).map_err(verlet_history::storage_error)?;
+    Ok(verlet_history::ObservationRecord {
+        id: verlet_history::ObservationId::from_uuid(verlet_history::parse_uuid(&observation_id)?),
+        kind: row.get(1).map_err(verlet_history::storage_error)?,
+        scope: verlet_runtime_contracts::ThreadCoordinates {
+            thread_id: verlet_history::parse_thread_id(
+                &row.get::<String>(2)
+                    .map_err(verlet_history::storage_error)?,
+            )?,
+            tenant_id: row.get(3).map_err(verlet_history::storage_error)?,
+            user_id: row.get(4).map_err(verlet_history::storage_error)?,
+            session_id: row.get(5).map_err(verlet_history::storage_error)?,
         },
-        created_at_ms: row.get(6).map_err(storage_error)?,
-        payload: serde_json::from_str(&payload_json).map_err(codec_error)?,
-        provenance: serde_json::from_str(&provenance_json).map_err(codec_error)?,
+        created_at_ms: row.get(6).map_err(verlet_history::storage_error)?,
+        payload: serde_json::from_str(&payload_json).map_err(verlet_history::codec_error)?,
+        provenance: serde_json::from_str(&provenance_json).map_err(verlet_history::codec_error)?,
         supersedes: supersedes
-            .map(|id| parse_uuid(&id).map(ObservationId::from_uuid))
+            .map(|id| verlet_history::parse_uuid(&id).map(verlet_history::ObservationId::from_uuid))
             .transpose()?,
-        confidence: row.get(10).map_err(storage_error)?,
+        confidence: row.get(10).map_err(verlet_history::storage_error)?,
     })
 }
 
 async fn sqlite_branch_path(
-    connection: &Connection,
-    coordinates: &ThreadCoordinates,
-    leaf_entry_id: SessionEntryId,
-) -> HistoryResult<Vec<SessionEntry>> {
+    connection: &verlet_sqlite::Connection,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    leaf_entry_id: verlet_history::SessionEntryId,
+) -> verlet_history::HistoryResult<Vec<verlet_history::SessionEntry>> {
     let thread_id = coordinates.thread_id.to_string();
     let mut path = Vec::new();
     let mut cursor = Some(leaf_entry_id);
     while let Some(entry_id) = cursor {
         let entry = sqlite_load_entry(connection, &thread_id, entry_id)
             .await?
-            .ok_or(HistoryError::EntryNotFound(entry_id))?;
-        validate_entry_coordinates(coordinates, &entry)?;
+            .ok_or(verlet_history::HistoryError::EntryNotFound(entry_id))?;
+        verlet_history::validate_entry_coordinates(coordinates, &entry)?;
         cursor = entry.parent_entry_id;
         path.push(entry);
     }
@@ -1437,14 +1508,14 @@ async fn sqlite_branch_path(
 }
 
 async fn sqlite_build_context(
-    connection: &Connection,
-    coordinates: &ThreadCoordinates,
-    local_leaf_override: Option<SessionEntryId>,
+    connection: &verlet_sqlite::Connection,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    local_leaf_override: Option<verlet_history::SessionEntryId>,
     inherited: bool,
-    visiting: &mut HashSet<ThreadId>,
-) -> HistoryResult<SessionContext> {
+    visiting: &mut std::collections::HashSet<verlet_runtime_contracts::ThreadId>,
+) -> verlet_history::HistoryResult<verlet_history::SessionContext> {
     if !visiting.insert(coordinates.thread_id) {
-        return Err(HistoryError::ThreadBaseCycle {
+        return Err(verlet_history::HistoryError::ThreadBaseCycle {
             child_thread_id: coordinates.thread_id,
             ancestor_thread_id: coordinates.thread_id,
         });
@@ -1454,12 +1525,13 @@ async fn sqlite_build_context(
     let mut source_cuts = Vec::new();
     if let Some(base) = sqlite_load_thread_base(connection, coordinates.thread_id).await? {
         if base.child_thread_id != coordinates.thread_id {
-            return Err(HistoryError::Storage(format!(
+            return Err(verlet_history::HistoryError::Storage(format!(
                 "thread base child id {} does not match requested thread {}",
                 base.child_thread_id, coordinates.thread_id
             )));
         }
-        let parent_coordinates = coordinates_with_thread_id(coordinates, base.parent_thread_id);
+        let parent_coordinates =
+            verlet_history::coordinates_with_thread_id(coordinates, base.parent_thread_id);
         let parent_context = Box::pin(sqlite_build_context(
             connection,
             &parent_coordinates,
@@ -1482,9 +1554,9 @@ async fn sqlite_build_context(
     if let Some(local_leaf) = local_leaf {
         let local_path = sqlite_branch_path(connection, coordinates, local_leaf).await?;
         if !local_path.is_empty() {
-            source_cuts.push(SessionContextSourceCut {
+            source_cuts.push(verlet_history::SessionContextSourceCut {
                 coordinates: coordinates.clone(),
-                stream_id: EventStreamId::for_thread(coordinates),
+                stream_id: verlet_history::EventStreamId::for_thread(coordinates),
                 inherited,
                 entry_ids: local_path.iter().map(|entry| entry.entry_id).collect(),
             });
@@ -1493,10 +1565,10 @@ async fn sqlite_build_context(
     }
 
     visiting.remove(&coordinates.thread_id);
-    strip_thread_start_identity_entries(&mut entries, &mut source_cuts);
+    verlet_history::strip_thread_start_identity_entries(&mut entries, &mut source_cuts);
     let mut messages = Vec::new();
-    append_model_visible_messages(&entries, &mut messages);
-    Ok(SessionContext {
+    verlet_history::append_model_visible_messages(&entries, &mut messages);
+    Ok(verlet_history::SessionContext {
         entries,
         messages,
         source_cuts,
@@ -1504,9 +1576,9 @@ async fn sqlite_build_context(
 }
 
 async fn sqlite_insert_thread_base(
-    connection: &Connection,
-    base: &ThreadBaseRef,
-) -> HistoryResult<()> {
+    connection: &verlet_sqlite::Connection,
+    base: &verlet_history::ThreadBaseRef,
+) -> verlet_history::HistoryResult<()> {
     connection
         .execute(
             "INSERT INTO thread_bases (
@@ -1529,7 +1601,7 @@ async fn sqlite_insert_thread_base(
             parent_binding_snapshot_id = excluded.parent_binding_snapshot_id,
             reason = excluded.reason,
             created_at_ms = excluded.created_at_ms",
-            params![
+            verlet_sqlite::params![
                 base.child_thread_id.to_string(),
                 base.parent_thread_id.to_string(),
                 base.parent_checkpoint_id.map(|id| id.to_string()),
@@ -1543,14 +1615,14 @@ async fn sqlite_insert_thread_base(
             ],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     Ok(())
 }
 
 async fn sqlite_load_thread_base(
-    connection: &Connection,
-    child_thread_id: ThreadId,
-) -> HistoryResult<Option<ThreadBaseRef>> {
+    connection: &verlet_sqlite::Connection,
+    child_thread_id: verlet_runtime_contracts::ThreadId,
+) -> verlet_history::HistoryResult<Option<verlet_history::ThreadBaseRef>> {
     let mut rows = connection
         .query(
             "SELECT child_thread_id, parent_thread_id, parent_checkpoint_id,
@@ -1558,51 +1630,63 @@ async fn sqlite_load_thread_base(
                     parent_binding_snapshot_id, reason, created_at_ms
              FROM thread_bases
              WHERE child_thread_id = ?1",
-            params![child_thread_id.to_string()],
+            verlet_sqlite::params![child_thread_id.to_string()],
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(verlet_history::storage_error)?;
     rows.next()
         .await
-        .map_err(storage_error)?
+        .map_err(verlet_history::storage_error)?
         .map(|row| sqlite_thread_base_from_row(&row))
         .transpose()
 }
 
-fn sqlite_thread_base_from_row(row: &Row) -> HistoryResult<ThreadBaseRef> {
-    let child_thread_id: String = row.get(0).map_err(storage_error)?;
-    let parent_thread_id: String = row.get(1).map_err(storage_error)?;
-    let parent_checkpoint_id: Option<String> = row.get(2).map_err(storage_error)?;
-    let parent_leaf_entry_id: Option<String> = row.get(3).map_err(storage_error)?;
-    let parent_stream_to_sequence: Option<i64> = row.get(5).map_err(storage_error)?;
-    let reason: String = row.get(7).map_err(storage_error)?;
-    Ok(ThreadBaseRef {
-        child_thread_id: parse_thread_id(&child_thread_id)?,
-        parent_thread_id: parse_thread_id(&parent_thread_id)?,
+fn sqlite_thread_base_from_row(
+    row: &verlet_sqlite::Row,
+) -> verlet_history::HistoryResult<verlet_history::ThreadBaseRef> {
+    let child_thread_id: String = row.get(0).map_err(verlet_history::storage_error)?;
+    let parent_thread_id: String = row.get(1).map_err(verlet_history::storage_error)?;
+    let parent_checkpoint_id: Option<String> = row.get(2).map_err(verlet_history::storage_error)?;
+    let parent_leaf_entry_id: Option<String> = row.get(3).map_err(verlet_history::storage_error)?;
+    let parent_stream_to_sequence: Option<i64> =
+        row.get(5).map_err(verlet_history::storage_error)?;
+    let reason: String = row.get(7).map_err(verlet_history::storage_error)?;
+    Ok(verlet_history::ThreadBaseRef {
+        child_thread_id: verlet_history::parse_thread_id(&child_thread_id)?,
+        parent_thread_id: verlet_history::parse_thread_id(&parent_thread_id)?,
         parent_checkpoint_id: parent_checkpoint_id
-            .map(|id| ThreadCheckpointId::parse_str(&id).map_err(codec_error))
+            .map(|id| {
+                verlet_runtime_contracts::ThreadCheckpointId::parse_str(&id)
+                    .map_err(verlet_history::codec_error)
+            })
             .transpose()?,
         parent_leaf_entry_id: parent_leaf_entry_id
-            .map(|id| parse_uuid(&id).map(SessionEntryId::from_uuid))
+            .map(|id| {
+                verlet_history::parse_uuid(&id).map(verlet_history::SessionEntryId::from_uuid)
+            })
             .transpose()?,
-        parent_stream_id: EventStreamId::new(row.get::<String>(4).map_err(storage_error)?),
-        parent_stream_to_sequence: parent_stream_to_sequence.map(EventSequence::new),
-        parent_binding_snapshot_id: row.get(6).map_err(storage_error)?,
+        parent_stream_id: verlet_history::EventStreamId::new(
+            row.get::<String>(4)
+                .map_err(verlet_history::storage_error)?,
+        ),
+        parent_stream_to_sequence: parent_stream_to_sequence
+            .map(verlet_history::EventSequence::new),
+        parent_binding_snapshot_id: row.get(6).map_err(verlet_history::storage_error)?,
         reason: decode_thread_fork_reason(&reason)?,
-        created_at_ms: row.get(8).map_err(storage_error)?,
+        created_at_ms: row.get(8).map_err(verlet_history::storage_error)?,
     })
 }
 
 async fn validate_sqlite_base_cycle(
-    connection: &Connection,
-    child_thread_id: ThreadId,
-    parent_thread_id: ThreadId,
-) -> HistoryResult<()> {
+    connection: &verlet_sqlite::Connection,
+    child_thread_id: verlet_runtime_contracts::ThreadId,
+    parent_thread_id: verlet_runtime_contracts::ThreadId,
+) -> verlet_history::HistoryResult<()> {
     let mut cursor = Some(parent_thread_id);
-    let mut visited = HashSet::new();
+    let mut visited = std::collections::HashSet::new();
     while let Some(thread_id) = cursor {
         if thread_id == child_thread_id || !visited.insert(thread_id) {
-            return Err(HistoryError::ThreadBaseCycle {
+            return Err(verlet_history::HistoryError::ThreadBaseCycle {
                 child_thread_id,
                 ancestor_thread_id: thread_id,
             });
@@ -1614,15 +1698,22 @@ async fn validate_sqlite_base_cycle(
     Ok(())
 }
 
-fn encode_thread_fork_reason(reason: &ThreadForkReason) -> HistoryResult<String> {
-    let value = serde_json::to_value(reason).map_err(codec_error)?;
+fn encode_thread_fork_reason(
+    reason: &verlet_history::ThreadForkReason,
+) -> verlet_history::HistoryResult<String> {
+    let value = serde_json::to_value(reason).map_err(verlet_history::codec_error)?;
     value.as_str().map(str::to_string).ok_or_else(|| {
-        HistoryError::Codec("thread fork reason did not encode as string".to_string())
+        verlet_history::HistoryError::Codec(
+            "thread fork reason did not encode as string".to_string(),
+        )
     })
 }
 
-fn decode_thread_fork_reason(value: &str) -> HistoryResult<ThreadForkReason> {
-    serde_json::from_value(serde_json::Value::String(value.to_string())).map_err(codec_error)
+fn decode_thread_fork_reason(
+    value: &str,
+) -> verlet_history::HistoryResult<verlet_history::ThreadForkReason> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(verlet_history::codec_error)
 }
 
 #[cfg(test)]

@@ -9,160 +9,68 @@
 mod test_abort_tripwire;
 
 #[cfg(test)]
-pub(crate) use crate as kernel_test;
+extern crate self as verlet;
+
 #[cfg(test)]
 #[allow(dead_code)]
-#[path = "../tests/support/event_trace.rs"]
-mod event_trace_support;
-#[cfg(test)]
-#[path = "../tests/support/fault_plan.rs"]
-mod fault_plan;
-#[cfg(test)]
-#[path = "../tests/support/fault.rs"]
-mod fault_support;
-#[cfg(test)]
-#[path = "../tests/support/invariant_claims.rs"]
-mod invariant_claims;
-#[cfg(test)]
-pub(crate) use invariant_claims::*;
-#[cfg(test)]
-#[path = "../tests/support/invariant_forks.rs"]
-mod invariant_forks;
-#[cfg(test)]
-pub(crate) use invariant_forks::*;
-#[cfg(test)]
-#[path = "../tests/support/invariants.rs"]
-mod invariants_support;
-#[cfg(test)]
-pub(crate) use invariants_support::*;
-#[cfg(test)]
-#[path = "../tests/support/scenario.rs"]
-mod scenario_support;
-#[cfg(test)]
-#[path = "../tests/support/simulated_io.rs"]
-mod simulated_io;
-#[cfg(test)]
-pub(crate) use scenario_support::{InvariantViolation, ScenarioInvariant, ScenarioWorld};
-#[cfg(test)]
-#[allow(dead_code)]
-#[path = "../tests/support/scripted_provider.rs"]
-mod scripted_provider_support;
-#[cfg(test)]
-#[allow(dead_code)]
-#[path = "../tests/support/store_parity.rs"]
-mod store_parity_support;
-#[cfg(test)]
-#[allow(dead_code)]
-#[path = "../tests/support/transcript.rs"]
-mod transcript;
+#[path = "../tests/support/lib_mount.rs"]
+mod support;
+
 #[cfg(test)]
 pub(crate) mod test_support {
     #[allow(unused_imports)]
-    pub(crate) use super::event_trace_support::*;
+    pub(crate) use crate::support::event_trace::{
+        EventTrace, assert_event_order, collect_until_cancelled, collect_until_compaction,
+        collect_until_failed, collect_until_output, find_event_index, text_from_content,
+        text_from_message,
+    };
     #[allow(unused_imports)]
-    pub(crate) use super::fault_plan::*;
-    pub(crate) use super::fault_support::*;
+    pub(crate) use crate::support::fault::{
+        AppliedFaultPlan, FaultingIngressQueue, FaultingProviderClient, FaultingRuntimeStore,
+    };
     #[allow(unused_imports)]
-    pub(crate) use super::invariant_claims::*;
+    pub(crate) use crate::support::fault_plan::{
+        CRASH_CUT_REGISTRY, CUTS_V1, CrashCutHost, CrashCutRegistration, CrashCutSeam,
+        FAULT_VOCABULARY_VERSION, FaultComponent, FaultDirective, FaultPlan, FaultTiming,
+        Intensity, PROVIDER_OPERATIONS_V1, PlannedAction, QUEUE_OPERATIONS_V1, STORE_OPERATIONS_V1,
+        SplitMix64, crash_cut, run_crash_cut,
+    };
     #[allow(unused_imports)]
-    pub(crate) use super::invariant_forks::*;
+    pub(crate) use crate::support::invariant_claims::Inv6ClaimsSettle;
     #[allow(unused_imports)]
-    pub(crate) use super::invariants_support::*;
+    pub(crate) use crate::support::invariant_forks::{
+        INV7_ONE_CHILD_PER_FORK_CLAIM, INV8_RESERVED_BEFORE_CREATED, OneChildPerForkClaimInvariant,
+        ReservedBeforeCreatedInvariant, fork_invariants_v1,
+    };
     #[allow(unused_imports)]
-    pub(crate) use super::scenario_support::*;
+    pub(crate) use crate::support::invariants::{
+        BoundedQueueInvariant, INV1_REPLAY_EQUIVALENCE, INV2_UNIQUE_ACTIVE_TOPOLOGY,
+        INV3_BOUNDED_QUEUE, INV4_NO_DUPLICATE_PROJECTED_OUTPUT, INV5_TERMINAL_CONSISTENCY,
+        NoDuplicateProjectedOutputInvariant, ReplayEquivalenceInvariant,
+        TerminalConsistencyInvariant, UniqueActiveTopologyInvariant, invariant_set_v1,
+    };
     #[allow(unused_imports)]
-    pub(crate) use super::scripted_provider_support::*;
+    pub(crate) use crate::support::scenario::{
+        CorpusEntry, InvariantViolation, Scenario, ScenarioBounds, ScenarioFailure,
+        ScenarioInvariant, ScenarioOp, ScenarioWorld, StreamIoCrashReceipt, run_scenario,
+        run_stream_io_crash_scenario,
+    };
     #[allow(unused_imports)]
-    pub(crate) use super::simulated_io::*;
+    pub(crate) use crate::support::scripted_provider::{
+        ScriptedProviderClient, ScriptedProviderStep, provider_factory, response_text,
+        response_tool_call, response_tool_call_with_id, streaming_provider_factory,
+    };
     #[allow(unused_imports)]
-    pub(crate) use super::store_parity_support::*;
+    pub(crate) use crate::support::simulated_io::{
+        CrashSurvival, IO_LOCK, IO_OPEN, IO_READ, IO_REMOVE, IO_SYNC, IO_TRUNCATE, IO_UNLOCK,
+        IO_WRITE, IoFaultAction, IoFaultPlan, IoFaultRule, IoTranscriptEntry, SimulatedIo,
+    };
     #[allow(unused_imports)]
-    pub(crate) use super::transcript::*;
-}
-
-#[cfg(test)]
-async fn scenario_app_server(
-    config: adapters::app_server::VerletAppServerConfig,
-    runtime_factory: std::sync::Arc<dyn AgentRuntimeFactory>,
-    decorate: impl FnOnce(std::sync::Arc<dyn RuntimeStore>) -> std::sync::Arc<dyn RuntimeStore>
-    + Send
-    + 'static,
-) -> VerletResult<adapters::app_server::VerletAppServer> {
-    adapters::app_server::VerletAppServer::with_runtime_factory_and_session_store_decorator(
-        config,
-        runtime_factory,
-        decorate,
-    )
-    .await
-}
-
-#[cfg(test)]
-fn scenario_unit_harness() -> bool {
-    true
-}
-
-#[cfg(test)]
-async fn scenario_fork_with_id(
-    server: &adapters::app_server::VerletAppServer,
-    parent: &ThreadCoordinates,
-    child_thread_id: ThreadId,
-) -> VerletResult<ThreadCoordinates> {
-    let checkpoint = server
-        .supervisor()
-        .create_checkpoint_at(
-            parent,
-            None,
-            Some("scenario-fork".to_string()),
-            std::collections::BTreeMap::new(),
-        )
-        .await?;
-    let child = server
-        .supervisor()
-        .fork_thread_from_checkpoint_with_id_at(checkpoint, child_thread_id)
-        .await?;
-    Ok(child.context().coordinates.clone())
-}
-
-#[cfg(test)]
-async fn scenario_project_spawn_snapshot(
-    host: RuntimeHost,
-    coordinates: ThreadCoordinates,
-    barrier: std::sync::Arc<tokio::sync::Barrier>,
-) -> VerletResult<kernel::thread_spawn_projector::ThreadSpawnProjectionReceipt> {
-    host.load_thread_with_topology_and_metadata(
-        coordinates.clone(),
-        ThreadTopology::root(),
-        std::collections::BTreeMap::new(),
-    )
-    .await?;
-    kernel::thread_spawn_projector::ThreadSpawnProjector::new(host)
-        .with_snapshot_barrier(barrier)
-        .project_control_stream(&coordinates)
-        .await
-}
-
-#[cfg(test)]
-fn scenario_ingress_binding_barrier(
-    bridge: &daemon::daemon_io::VerletDaemonIoBridge,
-) -> std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>> {
-    bridge.ingress_binding_barrier()
-}
-
-#[cfg(test)]
-fn scenario_pause_after_ingress_claim(
-    bridge: &daemon::daemon_io::VerletDaemonIoBridge,
-) -> (
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
-    std::sync::Arc<tokio::sync::Notify>,
-) {
-    bridge.pause_after_ingress_claim()
-}
-
-#[cfg(test)]
-fn scenario_thread_load_root_barrier(
-    bridge: &daemon::daemon_io::VerletDaemonIoBridge,
-) -> std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>> {
-    bridge.thread_load_root_barrier()
+    pub(crate) use crate::support::store_parity::session_store_parity_transcript;
+    #[allow(unused_imports)]
+    pub(crate) use crate::support::transcript::{
+        NormalizedTranscript, NormalizedTranscriptItem, TypedTranscript,
+    };
 }
 
 pub mod adapters {

@@ -1,8 +1,3 @@
-use bashkit::FileSystem;
-use std::io::{Error as IoError, ErrorKind};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
 const ENVIRONMENT_ID_MARKER: &str = "*** Environment ID: ";
 const END_PATCH_MARKER: &str = "*** End Patch";
@@ -17,21 +12,21 @@ const EMPTY_CHANGE_CONTEXT_MARKER: &str = "@@";
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Hunk {
     AddFile {
-        path: PathBuf,
+        path: std::path::PathBuf,
         contents: String,
     },
     DeleteFile {
-        path: PathBuf,
+        path: std::path::PathBuf,
     },
     UpdateFile {
-        path: PathBuf,
-        move_path: Option<PathBuf>,
+        path: std::path::PathBuf,
+        move_path: Option<std::path::PathBuf>,
         chunks: Vec<UpdateFileChunk>,
     },
 }
 
 impl Hunk {
-    fn path(&self) -> &Path {
+    fn path(&self) -> &std::path::Path {
         match self {
             Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => path,
             Hunk::UpdateFile {
@@ -57,14 +52,14 @@ struct UpdateFileChunk {
 
 #[derive(Default)]
 struct AffectedPaths {
-    added: Vec<PathBuf>,
-    modified: Vec<PathBuf>,
-    deleted: Vec<PathBuf>,
+    added: Vec<std::path::PathBuf>,
+    modified: Vec<std::path::PathBuf>,
+    deleted: Vec<std::path::PathBuf>,
 }
 
 pub async fn apply_patch_to_bashkit(
-    fs: Arc<dyn FileSystem>,
-    cwd: &Path,
+    fs: std::sync::Arc<dyn bashkit::FileSystem>,
+    cwd: &std::path::Path,
     patch: &str,
 ) -> Result<String, String> {
     let hunks = parse_patch(patch)?;
@@ -230,7 +225,7 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), S
         }
         return Ok((
             Hunk::AddFile {
-                path: PathBuf::from(path),
+                path: std::path::PathBuf::from(path),
                 contents,
             },
             parsed_lines,
@@ -240,7 +235,7 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), S
     if let Some(path) = first_line.strip_prefix(DELETE_FILE_MARKER) {
         return Ok((
             Hunk::DeleteFile {
-                path: PathBuf::from(path),
+                path: std::path::PathBuf::from(path),
             },
             1,
         ));
@@ -281,14 +276,14 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), S
         if chunks.is_empty() {
             return Err(format!(
                 "Invalid patch hunk at line {line_number}: Update file hunk for path '{}' is empty",
-                Path::new(path).display()
+                std::path::Path::new(path).display()
             ));
         }
 
         return Ok((
             Hunk::UpdateFile {
-                path: PathBuf::from(path),
-                move_path: move_path.map(PathBuf::from),
+                path: std::path::PathBuf::from(path),
+                move_path: move_path.map(std::path::PathBuf::from),
                 chunks,
             },
             parsed_lines,
@@ -386,7 +381,7 @@ fn parse_update_file_chunk(
 }
 
 fn derive_new_contents_from_chunks(
-    path: &Path,
+    path: &std::path::Path,
     original_contents: &str,
     chunks: &[UpdateFileChunk],
 ) -> Result<String, String> {
@@ -408,7 +403,7 @@ fn derive_new_contents_from_chunks(
 
 fn compute_replacements(
     original_lines: &[String],
-    path: &Path,
+    path: &std::path::Path,
     chunks: &[UpdateFileChunk],
 ) -> Result<Vec<(usize, usize, Vec<String>)>, String> {
     let mut replacements = Vec::new();
@@ -554,22 +549,27 @@ fn normalize_punctuation(value: &str) -> String {
         .collect()
 }
 
-async fn ensure_not_directory(fs: &dyn FileSystem, path: &Path) -> bashkit::Result<()> {
+async fn ensure_not_directory(
+    fs: &dyn bashkit::FileSystem,
+    path: &std::path::Path,
+) -> bashkit::Result<()> {
     let metadata = fs.stat(path).await?;
     if metadata.file_type.is_dir() {
-        return Err(IoError::new(ErrorKind::InvalidInput, "path is a directory").into());
+        return Err(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is a directory").into(),
+        );
     }
     Ok(())
 }
 
 async fn write_file_with_missing_parent_retry(
-    fs: &dyn FileSystem,
-    path: &Path,
+    fs: &dyn bashkit::FileSystem,
+    path: &std::path::Path,
     contents: Vec<u8>,
 ) -> bashkit::Result<()> {
     match fs.write_file(path, &contents).await {
         Ok(()) => Ok(()),
-        Err(err) if error_kind(&err) == Some(ErrorKind::NotFound) => {
+        Err(err) if error_kind(&err) == Some(std::io::ErrorKind::NotFound) => {
             if let Some(parent) = path.parent() {
                 fs.mkdir(parent, true).await?;
             }
@@ -579,7 +579,10 @@ async fn write_file_with_missing_parent_retry(
     }
 }
 
-async fn read_text_file(fs: &dyn FileSystem, path: &Path) -> bashkit::Result<String> {
+async fn read_text_file(
+    fs: &dyn bashkit::FileSystem,
+    path: &std::path::Path,
+) -> bashkit::Result<String> {
     let bytes = fs.read_file(path).await?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
@@ -598,7 +601,7 @@ fn print_summary(affected: &AffectedPaths) -> String {
     out
 }
 
-fn resolve_virtual_path(cwd: &Path, path: &Path) -> PathBuf {
+fn resolve_virtual_path(cwd: &std::path::Path, path: &std::path::Path) -> std::path::PathBuf {
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -607,7 +610,7 @@ fn resolve_virtual_path(cwd: &Path, path: &Path) -> PathBuf {
     bashkit::normalize_path(&joined)
 }
 
-fn error_kind(err: &bashkit::Error) -> Option<ErrorKind> {
+fn error_kind(err: &bashkit::Error) -> Option<std::io::ErrorKind> {
     match err {
         bashkit::Error::Io(source) => Some(source.kind()),
         _ => None,

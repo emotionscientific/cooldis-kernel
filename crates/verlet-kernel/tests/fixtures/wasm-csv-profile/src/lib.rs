@@ -1,28 +1,22 @@
-use verlet_guest_sdk::{
-    OperationDefinition, OperationEventKind, OperationManifest, OperationMode, OperationValueKind,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_OK, Sink, Source, StatusCode, read_source,
-    write_sink,
-};
-use serde::{Deserialize, Serialize};
-
 const CSV_PROFILE_ID: u32 = 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __verlet_describe_module__(sink: u32) -> i32 {
-    let manifest = OperationManifest::new(vec![OperationDefinition {
-        id: CSV_PROFILE_ID,
-        name: "csv_profile".to_string(),
-        input: OperationValueKind::Json,
-        output: OperationValueKind::Json,
-        events: OperationEventKind::None,
-        mode: OperationMode::Sync,
-        required_capabilities: Vec::new(),
-    }]);
+    let manifest =
+        verlet_guest_sdk::OperationManifest::new(vec![verlet_guest_sdk::OperationDefinition {
+            id: CSV_PROFILE_ID,
+            name: "csv_profile".to_string(),
+            input: verlet_guest_sdk::OperationValueKind::Json,
+            output: verlet_guest_sdk::OperationValueKind::Json,
+            events: verlet_guest_sdk::OperationEventKind::None,
+            mode: verlet_guest_sdk::OperationMode::Sync,
+            required_capabilities: Vec::new(),
+        }]);
     let bytes = match manifest.to_json_vec() {
         Ok(bytes) => bytes,
-        Err(_) => return STATUS_INVALID_ARGUMENT,
+        Err(_) => return verlet_guest_sdk::STATUS_INVALID_ARGUMENT,
     };
-    status(write_sink(Sink(sink), &bytes).map(|_| ()))
+    status(verlet_guest_sdk::write_sink(verlet_guest_sdk::Sink(sink), &bytes).map(|_| ()))
 }
 
 #[unsafe(no_mangle)]
@@ -34,24 +28,27 @@ pub extern "C" fn __verlet_call_operation__(
     _events: u32,
 ) -> i32 {
     match operation {
-        CSV_PROFILE_ID => status(csv_profile(Source(source), Sink(output))),
-        _ => STATUS_NOT_FOUND,
+        CSV_PROFILE_ID => status(csv_profile(
+            verlet_guest_sdk::Source(source),
+            verlet_guest_sdk::Sink(output),
+        )),
+        _ => verlet_guest_sdk::STATUS_NOT_FOUND,
     }
 }
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct CsvProfileInput {
     csv: String,
     #[serde(default = "default_has_header")]
     has_header: bool,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct CsvProfileOutput {
     rows: usize,
     columns: Vec<ColumnProfile>,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct ColumnProfile {
     name: String,
     non_empty: usize,
@@ -106,9 +103,12 @@ impl ColumnAccumulator {
     }
 }
 
-fn csv_profile(source: Source, output: Sink) -> Result<(), StatusCode> {
-    let input: CsvProfileInput =
-        serde_json::from_slice(&read_all_source(source)?).map_err(|_| StatusCode::InvalidArgument)?;
+fn csv_profile(
+    source: verlet_guest_sdk::Source,
+    output: verlet_guest_sdk::Sink,
+) -> Result<(), verlet_guest_sdk::StatusCode> {
+    let input: CsvProfileInput = serde_json::from_slice(&read_all_source(source)?)
+        .map_err(|_| verlet_guest_sdk::StatusCode::InvalidArgument)?;
     let rows = parse_csv_rows(&input.csv);
     let Some(first_row) = rows.first() else {
         let empty = CsvProfileOutput {
@@ -126,7 +126,11 @@ fn csv_profile(source: Source, output: Sink) -> Result<(), StatusCode> {
             .map(|index| format!("column_{}", index + 1))
             .collect()
     };
-    let data_rows = if input.has_header { &rows[1..] } else { &rows[..] };
+    let data_rows = if input.has_header {
+        &rows[1..]
+    } else {
+        &rows[..]
+    };
     let mut columns = (0..column_count)
         .map(|_| ColumnAccumulator::default())
         .collect::<Vec<_>>();
@@ -169,11 +173,13 @@ fn parse_csv_rows(input: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn read_all_source(source: Source) -> Result<Vec<u8>, StatusCode> {
+fn read_all_source(
+    source: verlet_guest_sdk::Source,
+) -> Result<Vec<u8>, verlet_guest_sdk::StatusCode> {
     let mut output = Vec::new();
     let mut buffer = [0u8; 1024];
     loop {
-        let n = read_source(source, &mut buffer)?;
+        let n = verlet_guest_sdk::read_source(source, &mut buffer)?;
         if n == 0 {
             break;
         }
@@ -185,9 +191,13 @@ fn read_all_source(source: Source) -> Result<Vec<u8>, StatusCode> {
     Ok(output)
 }
 
-fn write_json(output: Sink, value: &impl Serialize) -> Result<(), StatusCode> {
-    let bytes = serde_json::to_vec(value).map_err(|_| StatusCode::InvalidArgument)?;
-    write_sink(output, &bytes)?;
+fn write_json(
+    output: verlet_guest_sdk::Sink,
+    value: &impl serde::Serialize,
+) -> Result<(), verlet_guest_sdk::StatusCode> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|_| verlet_guest_sdk::StatusCode::InvalidArgument)?;
+    verlet_guest_sdk::write_sink(output, &bytes)?;
     Ok(())
 }
 
@@ -195,9 +205,9 @@ fn default_has_header() -> bool {
     true
 }
 
-fn status(result: Result<(), StatusCode>) -> i32 {
+fn status(result: Result<(), verlet_guest_sdk::StatusCode>) -> i32 {
     match result {
-        Ok(()) => STATUS_OK,
+        Ok(()) => verlet_guest_sdk::STATUS_OK,
         Err(err) => err.as_raw(),
     }
 }

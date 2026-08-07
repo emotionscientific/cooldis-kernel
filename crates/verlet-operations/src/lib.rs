@@ -7,21 +7,38 @@ pub mod skill_import;
 pub mod skill_package;
 pub mod tool_package;
 
-pub use blob_store::*;
-pub use import_package::*;
-pub use openapi_plan::*;
-pub use operation_registry::*;
-pub use operation_store::*;
-pub use skill_import::*;
-pub use skill_package::*;
-pub use tool_package::*;
-
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
-use verlet_abi::{
-    AbiOperationContract, WasmOperationDefinition, WasmOperationEventKind, WasmOperationManifest,
-    WasmOperationMode, WasmOperationValueKind,
+pub use blob_store::{LocalBlobRegistry, PublishedBlobRecord, blob_hash_from_ref, blob_ref_uri};
+pub use import_package::{
+    IMPORT_BUILD_RECEIPT_KIND, IMPORT_BUILD_RECEIPT_SCHEMA_VERSION, IMPORT_PACKAGE_FILE_NAME,
+    ImportAuthDeclaration, ImportBuildReceipt, ImportOperationBuild, ImportOperationDeclaration,
+    ImportPackageIdentity, ImportPackageManifest, ImportPackageSource, ImportSpecDeclaration,
+};
+pub use openapi_plan::{
+    ImportedOperationPlan, OpenApiImportError, OperationImportPlan, OperationParameterLocation,
+    OperationParameterPlan, OperationRequestBodyPlan, OperationSecretHeaderPlan,
+};
+pub use operation_registry::{
+    KernelOperationDispatcher, KernelOperationRegistration, OperationRegistration,
+    OperationRegistry, filter_manifest_operations,
+};
+pub use operation_store::{
+    CapsuleBindingRecord, CapsuleBindingResolutionRequest, CapsuleBindingScope,
+    CapsuleBindingSnapshot, CapsuleBindingTarget, LocalOperationRegistry, OperationBlobStore,
+    PublishInterfaceOperationRequest, PublishOperationRequest, PublishedOperationBuild,
+    PublishedOperationRecord, PublishedOperationSource, validate_record_name, wasm_sha256,
+};
+pub use skill_import::{PublishedSkillImport, SkillImportAsset, SkillImportPlan};
+pub use skill_package::{
+    DeclaredSkillPackageRef, LocalSkillRegistry, PublishSkillPackageRequest,
+    PublishedSkillPackageRecord, SkillPackage, SkillPackageEntry, SkillPackageRef,
+};
+pub use tool_package::{
+    TOOL_BUILD_RECEIPT_KIND, TOOL_BUILD_RECEIPT_SCHEMA_VERSION, TOOL_MANUAL_SCHEMA_VERSION,
+    TOOL_PACKAGE_KIND, TOOL_PACKAGE_SCHEMA_VERSION, ToolBuildReceipt, ToolCommandContract,
+    ToolFixtureContract, ToolFixtureDeclaration, ToolFixtureRun, ToolInterfaceContract,
+    ToolManualExample, ToolManualExitStatus, ToolMcpContract, ToolOperationBuild,
+    ToolOperationDeclaration, ToolOperationInterface, ToolOperationManual, ToolPackageIdentity,
+    ToolPackageManifest, ToolPackageSource, ToolRuntimeContract,
 };
 
 pub type VerletResult<T> = Result<T, VerletOperationsError>;
@@ -45,12 +62,12 @@ impl From<verlet_wasm::VerletWasmError> for VerletOperationsError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RegisteredOperation {
     pub name: String,
-    pub manifest: WasmOperationManifest,
-    pub capability_grants: BTreeSet<String>,
-    pub metadata: BTreeMap<String, Value>,
+    pub manifest: verlet_abi::WasmOperationManifest,
+    pub capability_grants: std::collections::BTreeSet<String>,
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl RegisteredOperation {
@@ -59,7 +76,7 @@ impl RegisteredOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationProjectionSet {
     pub registered_name: String,
     pub operations: Vec<OperationProjection>,
@@ -79,25 +96,28 @@ impl OperationProjectionSet {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationProjection {
     pub registered_name: String,
     pub operation_name: String,
     pub operation_id: u32,
-    pub input: WasmOperationValueKind,
-    pub output: WasmOperationValueKind,
-    pub events: WasmOperationEventKind,
-    pub mode: WasmOperationMode,
+    pub input: verlet_abi::WasmOperationValueKind,
+    pub output: verlet_abi::WasmOperationValueKind,
+    pub events: verlet_abi::WasmOperationEventKind,
+    pub mode: verlet_abi::WasmOperationMode,
     pub cli: OperationCliProjection,
     pub process: OperationProcessProjection,
     pub http: OperationHttpProjection,
     pub llm_tool: OperationLlmToolProjection,
     pub mcp: OperationMcpProjection,
-    pub abi: AbiOperationContract,
+    pub abi: verlet_abi::AbiOperationContract,
 }
 
 impl OperationProjection {
-    fn from_operation(registered_name: &str, operation: &WasmOperationDefinition) -> Self {
+    fn from_operation(
+        registered_name: &str,
+        operation: &verlet_abi::WasmOperationDefinition,
+    ) -> Self {
         let tool_name = projection_tool_name(registered_name, &operation.name);
         Self {
             registered_name: registered_name.to_string(),
@@ -135,47 +155,47 @@ impl OperationProjection {
                 input: operation.input.clone(),
                 output: operation.output.clone(),
             },
-            abi: AbiOperationContract::from_operation(registered_name, operation),
+            abi: verlet_abi::AbiOperationContract::from_operation(registered_name, operation),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OperationCliProjection {
     pub command: String,
-    pub stdin: WasmOperationValueKind,
-    pub stdout: WasmOperationValueKind,
+    pub stdin: verlet_abi::WasmOperationValueKind,
+    pub stdout: verlet_abi::WasmOperationValueKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OperationProcessProjection {
     pub command: String,
-    pub stdin: WasmOperationValueKind,
-    pub stdout: WasmOperationValueKind,
-    pub stderr: WasmOperationEventKind,
+    pub stdin: verlet_abi::WasmOperationValueKind,
+    pub stdout: verlet_abi::WasmOperationValueKind,
+    pub stderr: verlet_abi::WasmOperationEventKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OperationHttpProjection {
     pub method: String,
     pub path: String,
-    pub request_body: WasmOperationValueKind,
-    pub response_body: WasmOperationValueKind,
-    pub event_stream: WasmOperationEventKind,
+    pub request_body: verlet_abi::WasmOperationValueKind,
+    pub response_body: verlet_abi::WasmOperationValueKind,
+    pub event_stream: verlet_abi::WasmOperationEventKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OperationLlmToolProjection {
     pub name: String,
-    pub input: WasmOperationValueKind,
-    pub output: WasmOperationValueKind,
+    pub input: verlet_abi::WasmOperationValueKind,
+    pub output: verlet_abi::WasmOperationValueKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OperationMcpProjection {
     pub tool_name: String,
-    pub input: WasmOperationValueKind,
-    pub output: WasmOperationValueKind,
+    pub input: verlet_abi::WasmOperationValueKind,
+    pub output: verlet_abi::WasmOperationValueKind,
 }
 
 pub fn projection_tool_name(registered_name: &str, operation_name: &str) -> String {
@@ -209,26 +229,24 @@ fn projection_tool_name_part(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn registered_operation_derives_all_projection_surfaces() {
-        let operation = RegisteredOperation {
+        let operation = crate::RegisteredOperation {
             name: "Example Search".to_string(),
-            manifest: WasmOperationManifest {
+            manifest: verlet_abi::WasmOperationManifest {
                 abi: "cooldis.operation/0.1".to_string(),
-                operations: vec![WasmOperationDefinition {
+                operations: vec![verlet_abi::WasmOperationDefinition {
                     id: 1,
                     name: "search".to_string(),
-                    input: WasmOperationValueKind::Bytes,
-                    output: WasmOperationValueKind::Bytes,
-                    events: WasmOperationEventKind::None,
-                    mode: WasmOperationMode::Sync,
+                    input: verlet_abi::WasmOperationValueKind::Bytes,
+                    output: verlet_abi::WasmOperationValueKind::Bytes,
+                    events: verlet_abi::WasmOperationEventKind::None,
+                    mode: verlet_abi::WasmOperationMode::Sync,
                     required_capabilities: Vec::new(),
                 }],
             },
-            capability_grants: BTreeSet::new(),
-            metadata: BTreeMap::new(),
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
         };
 
         let projections = operation.projections();
@@ -244,21 +262,24 @@ mod tests {
             projection.process.command,
             "verlet run Example Search search"
         );
-        assert_eq!(projection.process.stderr, WasmOperationEventKind::None);
+        assert_eq!(
+            projection.process.stderr,
+            verlet_abi::WasmOperationEventKind::None
+        );
         assert_eq!(projection.http.method, "POST");
         assert_eq!(projection.http.path, "/operations/Example Search/search");
         assert_eq!(projection.llm_tool.name, "example_search_search");
         assert_eq!(projection.mcp.tool_name, "example_search_search");
         assert_eq!(
-            projection_tool_name("http-fetch", "http_fetch"),
+            crate::projection_tool_name("http-fetch", "http_fetch"),
             "http_fetch"
         );
         assert_eq!(
-            projection_tool_name("document", "extract_text"),
+            crate::projection_tool_name("document", "extract_text"),
             "document_extract_text"
         );
-        assert_eq!(projection.input, WasmOperationValueKind::Bytes);
-        assert_eq!(projection.output, WasmOperationValueKind::Bytes);
+        assert_eq!(projection.input, verlet_abi::WasmOperationValueKind::Bytes);
+        assert_eq!(projection.output, verlet_abi::WasmOperationValueKind::Bytes);
         assert_eq!(projection.abi.registered_name, "Example Search");
         assert_eq!(projection.abi.operation_name, "search");
         assert_eq!(projection.abi.source_ports[0].name, "input");

@@ -1,18 +1,3 @@
-#[cfg(test)]
-use crate::AgentManifestWorkspaceMode;
-use crate::daemon::identity::{IdentityMode, PrincipalId, VerletDaemonIdentityConfig};
-use crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig;
-use crate::{
-    AgentManifestPlacementBinding, AgentManifestWorkspaceBinding, AgentRecordRef,
-    AppServerListenAddr, VerletError, VerletResult,
-};
-use regex::Regex;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use verlet_io_core::{IngressPersistenceConfig, IngressPersistenceMode};
-
 const DEFAULT_SQLITE_QUEUE_PATH: &str = ".verlet/queue/ingress.sqlite";
 const DEFAULT_SERVICE_LABEL: &str = "com.verlet.daemon";
 const DEFAULT_TELEGRAM_WEBHOOK_PATH: &str = "/telegram";
@@ -32,20 +17,20 @@ const ROUTE_POLICY_VALUES: &[&str] = &[
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedVerletDaemonConfig {
     pub config: VerletDaemonConfig,
-    pub path: Option<PathBuf>,
-    pub base_dir: PathBuf,
+    pub path: Option<std::path::PathBuf>,
+    pub base_dir: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerletProjectDiscovery {
-    pub root: PathBuf,
-    pub config_path: Option<PathBuf>,
+    pub root: std::path::PathBuf,
+    pub config_path: Option<std::path::PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletDaemonConfig {
     #[serde(default)]
-    pub identity: VerletDaemonIdentityConfig,
+    pub identity: crate::daemon::identity::VerletDaemonIdentityConfig,
     #[serde(default)]
     pub runtime: VerletRuntimeConfig,
     #[serde(default)]
@@ -59,7 +44,7 @@ pub struct VerletDaemonConfig {
     #[serde(default)]
     pub io: VerletIoConfig,
     #[serde(default)]
-    pub sync: VerletDaemonSyncConfig,
+    pub sync: crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig,
 }
 
 impl Default for VerletDaemonConfig {
@@ -72,19 +57,19 @@ impl Default for VerletDaemonConfig {
             operations: VerletDaemonOperationsConfig::default(),
             provider: VerletProviderConfig::default(),
             io: VerletIoConfig::default(),
-            sync: VerletDaemonSyncConfig::default(),
+            sync: crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default(),
         }
     }
 }
 
 impl VerletDaemonConfig {
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         let errors = self.validation_errors();
         if errors.is_empty() {
             return Ok(());
         }
 
-        Err(VerletError::RuntimeFactory(format!(
+        Err(crate::VerletError::RuntimeFactory(format!(
             "invalid Verlet daemon config:\n- {}",
             errors.join("\n- ")
         )))
@@ -136,10 +121,11 @@ impl VerletDaemonConfig {
         errors
     }
 
-    fn resolve_paths(&mut self, base: &Path) {
+    fn resolve_paths(&mut self, base: &std::path::Path) {
         self.app_server.resolve_paths(base);
         if let Some(listen) = self.sync.listen.as_deref()
-            && let Ok(AppServerListenAddr::Unix(path)) = AppServerListenAddr::parse(listen)
+            && let Ok(crate::AppServerListenAddr::Unix(path)) =
+                crate::AppServerListenAddr::parse(listen)
             && path.is_relative()
         {
             self.sync.listen = Some(unix_listen_url(resolve_config_path(base, path)));
@@ -164,42 +150,43 @@ impl VerletDaemonConfig {
     }
 }
 
-pub(crate) fn synthesized_local_daemon_identity_config() -> VerletDaemonIdentityConfig {
-    VerletDaemonIdentityConfig {
-        mode: IdentityMode::Local,
+pub(crate) fn synthesized_local_daemon_identity_config()
+-> crate::daemon::identity::VerletDaemonIdentityConfig {
+    crate::daemon::identity::VerletDaemonIdentityConfig {
+        mode: crate::daemon::identity::IdentityMode::Local,
         tenant_id: Some("cooldis_app_server".to_string()),
-        console_principal: Some(PrincipalId::new("local_user")),
+        console_principal: Some(crate::daemon::identity::PrincipalId::new("local_user")),
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_home: Option<PathBuf>,
+    pub runtime_home: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_home: Option<PathBuf>,
+    pub state_home: Option<std::path::PathBuf>,
     /// Default placement applied to manifest binds unless an operator bind
     /// surface supplies an override. Absent means local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placement: Option<AgentManifestPlacementBinding>,
+    pub placement: Option<crate::AgentManifestPlacementBinding>,
     /// Default host workspace binding applied to a manifest that declares a
     /// workspace requirement. Bind-time RPC input may override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<AgentManifestWorkspaceBinding>,
+    pub workspace: Option<crate::AgentManifestWorkspaceBinding>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletDaemonRegistriesConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operations: Option<PathBuf>,
+    pub operations: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agents: Option<PathBuf>,
+    pub agents: Option<std::path::PathBuf>,
 }
 
 impl VerletDaemonRegistriesConfig {
-    fn resolve_paths(&mut self, base: &Path) {
+    fn resolve_paths(&mut self, base: &std::path::Path) {
         if let Some(path) = self.operations.take() {
             self.operations = Some(resolve_config_path(base, path));
         }
@@ -209,7 +196,7 @@ impl VerletDaemonRegistriesConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletDaemonOperationsConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub global_operation_names: Vec<String>,
@@ -221,7 +208,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletDaemonAppServerConfig {
     #[serde(default = "default_app_server_listen")]
     pub listen: String,
@@ -236,12 +223,12 @@ impl Default for VerletDaemonAppServerConfig {
 }
 
 impl VerletDaemonAppServerConfig {
-    pub fn listen_addr(&self) -> VerletResult<AppServerListenAddr> {
-        AppServerListenAddr::parse(&self.listen)
+    pub fn listen_addr(&self) -> crate::VerletResult<crate::AppServerListenAddr> {
+        crate::AppServerListenAddr::parse(&self.listen)
     }
 
-    fn resolve_paths(&mut self, base: &Path) {
-        let Ok(AppServerListenAddr::Unix(path)) = self.listen_addr() else {
+    fn resolve_paths(&mut self, base: &std::path::Path) {
+        let Ok(crate::AppServerListenAddr::Unix(path)) = self.listen_addr() else {
             return;
         };
         if path.is_relative() {
@@ -250,7 +237,7 @@ impl VerletDaemonAppServerConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -275,7 +262,7 @@ pub struct VerletProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_file: Option<PathBuf>,
+    pub env_file: Option<std::path::PathBuf>,
 }
 
 impl VerletProviderConfig {
@@ -292,7 +279,7 @@ impl VerletProviderConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletIoConfig {
     #[serde(default)]
     pub ingress: VerletIngressConfig,
@@ -313,7 +300,7 @@ impl VerletIoConfig {
     fn validate(&self, errors: &mut Vec<String>) {
         self.ingress.validate("io.ingress", errors);
 
-        let mut route_ids = BTreeSet::new();
+        let mut route_ids = std::collections::BTreeSet::new();
         let mut clock_route_count = 0;
         for route in &self.routes {
             route.validate(errors);
@@ -329,7 +316,7 @@ impl VerletIoConfig {
         }
     }
 
-    fn resolve_paths(&mut self, base: &Path) {
+    fn resolve_paths(&mut self, base: &std::path::Path) {
         self.ingress.resolve_paths(base);
         for route in &mut self.routes {
             route.resolve_paths(base);
@@ -337,10 +324,10 @@ impl VerletIoConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletIngressConfig {
     #[serde(default)]
-    pub persistence: IngressPersistenceConfig,
+    pub persistence: verlet_io_core::IngressPersistenceConfig,
     #[serde(default)]
     pub queue: VerletQueueConfig,
 }
@@ -348,7 +335,7 @@ pub struct VerletIngressConfig {
 impl Default for VerletIngressConfig {
     fn default() -> Self {
         Self {
-            persistence: IngressPersistenceConfig::default(),
+            persistence: verlet_io_core::IngressPersistenceConfig::default(),
             queue: VerletQueueConfig::default(),
         }
     }
@@ -360,7 +347,7 @@ impl VerletIngressConfig {
         self.queue.validate(scope, errors);
     }
 
-    fn resolve_paths(&mut self, base: &Path) {
+    fn resolve_paths(&mut self, base: &std::path::Path) {
         self.queue.resolve_paths(base);
         if self.queue.dsn.is_none() && self.queue.sqlite_path.is_none() {
             self.queue.sqlite_path = Some(default_sqlite_queue_path_for_base(base));
@@ -381,12 +368,12 @@ impl VerletIngressConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletQueueConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsn: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sqlite_path: Option<PathBuf>,
+    pub sqlite_path: Option<std::path::PathBuf>,
 }
 
 impl Default for VerletQueueConfig {
@@ -408,14 +395,14 @@ impl VerletQueueConfig {
         }
     }
 
-    fn resolve_paths(&mut self, base: &Path) {
+    fn resolve_paths(&mut self, base: &std::path::Path) {
         if let Some(path) = self.sqlite_path.take() {
             self.sqlite_path = Some(resolve_config_path(base, path));
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletIoRouteConfig {
     pub id: String,
     pub kind: String,
@@ -424,7 +411,7 @@ pub struct VerletIoRouteConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_policies: Option<BTreeMap<String, String>>,
+    pub content_policies: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -441,8 +428,8 @@ pub struct VerletIoRouteConfig {
     pub egress_retry: VerletEgressRetryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram: Option<VerletTelegramRouteConfig>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl VerletIoRouteConfig {
@@ -461,7 +448,7 @@ impl VerletIoRouteConfig {
                     "io.routes.{}.agent_ref must be an agent:// ref",
                     self.id
                 ));
-            } else if let Err(err) = AgentRecordRef::parse(agent_ref) {
+            } else if let Err(err) = crate::AgentRecordRef::parse(agent_ref) {
                 errors.push(format!(
                     "io.routes.{}.agent_ref must be an agent:// ref: {err}",
                     self.id
@@ -507,7 +494,7 @@ impl VerletIoRouteConfig {
             let scope = format!("io.routes.{}.egress_projection[{index}]", self.id);
             if rule.pattern.trim().is_empty() {
                 errors.push(format!("{scope}.pattern cannot be empty"));
-            } else if let Err(err) = Regex::new(&rule.pattern) {
+            } else if let Err(err) = regex::Regex::new(&rule.pattern) {
                 errors.push(format!("{scope}.pattern invalid regex: {err}"));
             }
             if rule.action.trim().is_empty() {
@@ -550,7 +537,7 @@ impl VerletIoRouteConfig {
         }
     }
 
-    fn resolve_paths(&mut self, base: &Path) {
+    fn resolve_paths(&mut self, base: &std::path::Path) {
         if let Some(ingress) = &mut self.ingress {
             ingress.resolve_paths(base);
         }
@@ -567,7 +554,7 @@ fn validate_route_policy(scope: &str, field: &str, policy: &str, errors: &mut Ve
     ));
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletCoalesceBurstsConfig {
     pub window_ms: u64,
     pub max_batch: usize,
@@ -584,18 +571,18 @@ impl VerletCoalesceBurstsConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletEgressProjectionRuleConfig {
     pub pattern: String,
     pub action: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletTypingSimulationConfig {
     pub chars_per_second: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletEgressRetryConfig {
     #[serde(default = "default_egress_max_attempts")]
     pub max_attempts: u32,
@@ -618,7 +605,7 @@ impl Default for VerletEgressRetryConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletTelegramRouteConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
@@ -707,7 +694,7 @@ impl VerletTelegramRouteConfig {
         }
     }
 
-    pub fn secret_token_value(&self) -> VerletResult<Option<String>> {
+    pub fn secret_token_value(&self) -> crate::VerletResult<Option<String>> {
         resolve_optional_secret(
             "telegram secret_token",
             &self.secret_token,
@@ -715,7 +702,7 @@ impl VerletTelegramRouteConfig {
         )
     }
 
-    pub fn bot_token_value(&self) -> VerletResult<Option<String>> {
+    pub fn bot_token_value(&self) -> crate::VerletResult<Option<String>> {
         resolve_optional_secret("telegram bot_token", &self.bot_token, &self.bot_token_env)
     }
 }
@@ -727,11 +714,11 @@ pub enum VerletDaemonServiceTarget {
 }
 
 impl VerletDaemonServiceTarget {
-    pub fn parse(value: &str) -> VerletResult<Self> {
+    pub fn parse(value: &str) -> crate::VerletResult<Self> {
         match value {
             "launchd" | "macos" | "darwin" => Ok(Self::Launchd),
             "systemd" | "linux" => Ok(Self::Systemd),
-            other => Err(VerletError::RuntimeFactory(format!(
+            other => Err(crate::VerletError::RuntimeFactory(format!(
                 "unknown daemon service target {other:?}; expected launchd or systemd"
             ))),
         }
@@ -741,13 +728,13 @@ impl VerletDaemonServiceTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerletDaemonServiceSpec {
     pub label: String,
-    pub executable: PathBuf,
-    pub config_path: PathBuf,
-    pub working_directory: Option<PathBuf>,
+    pub executable: std::path::PathBuf,
+    pub config_path: std::path::PathBuf,
+    pub working_directory: Option<std::path::PathBuf>,
 }
 
 impl VerletDaemonServiceSpec {
-    pub fn new(executable: PathBuf, config_path: PathBuf) -> Self {
+    pub fn new(executable: std::path::PathBuf, config_path: std::path::PathBuf) -> Self {
         Self {
             label: DEFAULT_SERVICE_LABEL.to_string(),
             executable,
@@ -761,23 +748,25 @@ impl VerletDaemonServiceSpec {
         self
     }
 
-    pub fn with_working_directory(mut self, path: impl Into<PathBuf>) -> Self {
+    pub fn with_working_directory(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.working_directory = Some(path.into());
         self
     }
 }
 
-pub fn load_verlet_daemon_config(path: Option<&Path>) -> VerletResult<LoadedVerletDaemonConfig> {
+pub fn load_verlet_daemon_config(
+    path: Option<&std::path::Path>,
+) -> crate::VerletResult<LoadedVerletDaemonConfig> {
     match path {
         Some(path) => load_verlet_daemon_config_layers(
             &[path.to_path_buf()],
             path.parent()
-                .unwrap_or_else(|| Path::new("."))
+                .unwrap_or_else(|| std::path::Path::new("."))
                 .to_path_buf(),
         ),
         None => {
             let cwd = std::env::current_dir().map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "failed to read current working directory: {err}"
                 ))
             })?;
@@ -795,9 +784,9 @@ pub fn load_verlet_daemon_config(path: Option<&Path>) -> VerletResult<LoadedVerl
 }
 
 pub fn load_verlet_daemon_config_layers(
-    paths: &[PathBuf],
-    fallback_base_dir: PathBuf,
-) -> VerletResult<LoadedVerletDaemonConfig> {
+    paths: &[std::path::PathBuf],
+    fallback_base_dir: std::path::PathBuf,
+) -> crate::VerletResult<LoadedVerletDaemonConfig> {
     let mut config = VerletDaemonConfig::default();
     let mut loaded_path = None;
     let mut loaded_base_dir = fallback_base_dir;
@@ -807,7 +796,7 @@ pub fn load_verlet_daemon_config_layers(
         let text = read_config_text(path)?;
         let base_dir = path
             .parent()
-            .unwrap_or_else(|| Path::new("."))
+            .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let presence = daemon_config_presence(&text)?;
         let mut layer = decode_daemon_config(&text)?;
@@ -825,31 +814,35 @@ pub fn load_verlet_daemon_config_layers(
     })
 }
 
-pub fn default_verlet_daemon_socket_path() -> PathBuf {
+pub fn default_verlet_daemon_socket_path() -> std::path::PathBuf {
     default_daemon_socket_path_from_env(|key| crate::env_compat::var_os(key))
 }
 
-pub fn discover_verlet_daemon_config_path() -> VerletResult<Option<PathBuf>> {
+pub fn discover_verlet_daemon_config_path() -> crate::VerletResult<Option<std::path::PathBuf>> {
     let cwd = std::env::current_dir().map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to read current working directory: {err}"))
+        crate::VerletError::RuntimeFactory(format!(
+            "failed to read current working directory: {err}"
+        ))
     })?;
     discover_verlet_project(&cwd).map(|project| project.config_path)
 }
 
-pub fn discover_verlet_project(start: &Path) -> VerletResult<VerletProjectDiscovery> {
+pub fn discover_verlet_project(
+    start: &std::path::Path,
+) -> crate::VerletResult<VerletProjectDiscovery> {
     discover_verlet_project_with_warning(start, |warning| eprintln!("{warning}"))
 }
 
 fn discover_verlet_project_with_warning(
-    start: &Path,
+    start: &std::path::Path,
     mut warn: impl FnMut(&str),
-) -> VerletResult<VerletProjectDiscovery> {
+) -> crate::VerletResult<VerletProjectDiscovery> {
     let mut start = if start.is_absolute() {
         start.to_path_buf()
     } else {
         std::env::current_dir()
             .map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "failed to read current working directory: {err}"
                 ))
             })?
@@ -858,7 +851,7 @@ fn discover_verlet_project_with_warning(
     if start.is_file() {
         start = start
             .parent()
-            .unwrap_or_else(|| Path::new("/"))
+            .unwrap_or_else(|| std::path::Path::new("/"))
             .to_path_buf();
     }
 
@@ -973,9 +966,9 @@ struct ProviderPresence {
     env_file: bool,
 }
 
-fn daemon_config_presence(text: &str) -> VerletResult<DaemonConfigPresence> {
+fn daemon_config_presence(text: &str) -> crate::VerletResult<DaemonConfigPresence> {
     let root: toml::Table = toml::from_str(text).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to parse Verlet daemon config: {err}"))
+        crate::VerletError::RuntimeFactory(format!("failed to parse Verlet daemon config: {err}"))
     })?;
     let table = root
         .get("daemon")
@@ -1042,7 +1035,7 @@ fn merge_daemon_config_layer(
 ) {
     if presence.identity {
         config.identity = layer.identity;
-        if config.identity.mode == IdentityMode::Local {
+        if config.identity.mode == crate::daemon::identity::IdentityMode::Local {
             let defaults = synthesized_local_daemon_identity_config();
             if config.identity.tenant_id.is_none() {
                 config.identity.tenant_id = defaults.tenant_id;
@@ -1143,7 +1136,7 @@ pub fn render_verlet_daemon_service(
 pub fn verlet_daemon_service_file_name(
     target: VerletDaemonServiceTarget,
     label: &str,
-) -> VerletResult<String> {
+) -> crate::VerletResult<String> {
     validate_service_label(label)?;
     Ok(match target {
         VerletDaemonServiceTarget::Launchd => format!("{label}.plist"),
@@ -1154,23 +1147,23 @@ pub fn verlet_daemon_service_file_name(
 pub fn verlet_daemon_service_install_path(
     target: VerletDaemonServiceTarget,
     label: &str,
-) -> VerletResult<PathBuf> {
+) -> crate::VerletResult<std::path::PathBuf> {
     let home = crate::env_compat::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| VerletError::RuntimeFactory("HOME is not set".to_string()))?;
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| crate::VerletError::RuntimeFactory("HOME is not set".to_string()))?;
     verlet_daemon_service_install_path_for_home(target, label, &home)
 }
 
 pub fn verlet_daemon_service_install_path_for_home(
     target: VerletDaemonServiceTarget,
     label: &str,
-    home: &Path,
-) -> VerletResult<PathBuf> {
+    home: &std::path::Path,
+) -> crate::VerletResult<std::path::PathBuf> {
     let file_name = verlet_daemon_service_file_name(target, label)?;
     let dir = match target {
         VerletDaemonServiceTarget::Launchd => home.join("Library/LaunchAgents"),
         VerletDaemonServiceTarget::Systemd => crate::env_compat::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
+            .map(std::path::PathBuf::from)
             .unwrap_or_else(|| home.join(".config"))
             .join("systemd/user"),
     };
@@ -1180,18 +1173,18 @@ pub fn verlet_daemon_service_install_path_for_home(
 pub fn install_verlet_daemon_service(
     target: VerletDaemonServiceTarget,
     spec: &VerletDaemonServiceSpec,
-) -> VerletResult<PathBuf> {
+) -> crate::VerletResult<std::path::PathBuf> {
     let path = verlet_daemon_service_install_path(target, &spec.label)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to create service directory {}: {err}",
                 parent.display()
             ))
         })?;
     }
     std::fs::write(&path, render_verlet_daemon_service(target, spec)).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to write service file {}: {err}",
             path.display()
         ))
@@ -1202,13 +1195,13 @@ pub fn install_verlet_daemon_service(
 pub fn uninstall_verlet_daemon_service(
     target: VerletDaemonServiceTarget,
     label: &str,
-) -> VerletResult<Option<PathBuf>> {
+) -> crate::VerletResult<Option<std::path::PathBuf>> {
     let path = verlet_daemon_service_install_path(target, label)?;
     if !path.exists() {
         return Ok(None);
     }
     std::fs::remove_file(&path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to remove service file {}: {err}",
             path.display()
         ))
@@ -1216,8 +1209,8 @@ pub fn uninstall_verlet_daemon_service(
     Ok(Some(path))
 }
 
-fn decode_daemon_config(text: &str) -> VerletResult<VerletDaemonConfig> {
-    #[derive(Deserialize)]
+fn decode_daemon_config(text: &str) -> crate::VerletResult<VerletDaemonConfig> {
+    #[derive(serde::Deserialize)]
     struct RootConfig {
         daemon: Option<VerletDaemonConfig>,
     }
@@ -1230,27 +1223,27 @@ fn decode_daemon_config(text: &str) -> VerletResult<VerletDaemonConfig> {
     decode_config::<VerletDaemonConfig>(text)
 }
 
-fn decode_config<T: DeserializeOwned>(text: &str) -> VerletResult<T> {
+fn decode_config<T: serde::de::DeserializeOwned>(text: &str) -> crate::VerletResult<T> {
     toml::from_str(text)
-        .map_err(|err| VerletError::RuntimeFactory(format!("invalid TOML config: {err}")))
+        .map_err(|err| crate::VerletError::RuntimeFactory(format!("invalid TOML config: {err}")))
 }
 
-fn read_config_text(path: &Path) -> VerletResult<String> {
+fn read_config_text(path: &std::path::Path) -> crate::VerletResult<String> {
     std::fs::read_to_string(path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to read Verlet config {}: {err}",
             path.display()
         ))
     })
 }
 
-fn validate_config_extension(path: Option<&Path>) -> VerletResult<()> {
+fn validate_config_extension(path: Option<&std::path::Path>) -> crate::VerletResult<()> {
     match path
-        .and_then(Path::extension)
+        .and_then(std::path::Path::extension)
         .and_then(|extension| extension.to_str())
     {
         Some("toml") | None => Ok(()),
-        Some(other) => Err(VerletError::RuntimeFactory(format!(
+        Some(other) => Err(crate::VerletError::RuntimeFactory(format!(
             "unsupported Verlet config extension {other:?}; expected .toml"
         ))),
     }
@@ -1258,7 +1251,7 @@ fn validate_config_extension(path: Option<&Path>) -> VerletResult<()> {
 
 fn validate_persistence(
     scope: &str,
-    persistence: &IngressPersistenceConfig,
+    persistence: &verlet_io_core::IngressPersistenceConfig,
     errors: &mut Vec<String>,
 ) {
     if persistence.visibility_timeout_secs == 0 {
@@ -1266,7 +1259,7 @@ fn validate_persistence(
             "{scope}.persistence.visibility_timeout_secs must be greater than zero"
         ));
     }
-    if persistence.mode == IngressPersistenceMode::DurableQueue {
+    if persistence.mode == verlet_io_core::IngressPersistenceMode::DurableQueue {
         if persistence
             .queue_name
             .as_deref()
@@ -1281,7 +1274,7 @@ fn resolve_optional_secret(
     label: &str,
     literal: &Option<String>,
     env_name: &Option<String>,
-) -> VerletResult<Option<String>> {
+) -> crate::VerletResult<Option<String>> {
     if let Some(value) = literal {
         return Ok(Some(value.clone()));
     }
@@ -1289,7 +1282,9 @@ fn resolve_optional_secret(
         return Ok(None);
     };
     crate::env_compat::var(env_name).map(Some).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to read {label} from env {env_name}: {err}"))
+        crate::VerletError::RuntimeFactory(format!(
+            "failed to read {label} from env {env_name}: {err}"
+        ))
     })
 }
 
@@ -1384,12 +1379,12 @@ fn default_telegram_webhook_path() -> String {
     DEFAULT_TELEGRAM_WEBHOOK_PATH.to_string()
 }
 
-fn default_sqlite_queue_path() -> PathBuf {
-    default_sqlite_queue_path_for_base(Path::new("."))
+fn default_sqlite_queue_path() -> std::path::PathBuf {
+    default_sqlite_queue_path_for_base(std::path::Path::new("."))
 }
 
-fn default_sqlite_queue_path_for_base(base: &Path) -> PathBuf {
-    let canonical = resolve_config_path(base, PathBuf::from(DEFAULT_SQLITE_QUEUE_PATH));
+fn default_sqlite_queue_path_for_base(base: &std::path::Path) -> std::path::PathBuf {
+    let canonical = resolve_config_path(base, std::path::PathBuf::from(DEFAULT_SQLITE_QUEUE_PATH));
     let legacy_root = base.join(concat!(".", "cool", "dis"));
     if base.join(".verlet").exists() || !legacy_root.exists() {
         canonical
@@ -1403,21 +1398,23 @@ fn default_sqlite_queue_path_for_base(base: &Path) -> PathBuf {
     }
 }
 
-fn unix_listen_url(path: impl AsRef<Path>) -> String {
+fn unix_listen_url(path: impl AsRef<std::path::Path>) -> String {
     format!("unix://{}", path.as_ref().display())
 }
 
-fn default_daemon_socket_path_from_env(get_env: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+fn default_daemon_socket_path_from_env(
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
     if let Some(path) = crate::env_compat::var_os_with("VERLET_DAEMON_SOCKET", |name| get_env(name))
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(std::path::PathBuf::from)
     {
         return path;
     }
 
     if let Some(dir) = get_env("XDG_RUNTIME_DIR")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(std::path::PathBuf::from)
     {
         return existing_daemon_socket_path(
             dir.join("verlet/verlet.sock"),
@@ -1428,7 +1425,7 @@ fn default_daemon_socket_path_from_env(get_env: impl Fn(&str) -> Option<OsString
     if cfg!(target_os = "macos")
         && let Some(home) = get_env("HOME")
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
+            .map(std::path::PathBuf::from)
     {
         return existing_daemon_socket_path(
             home.join("Library/Application Support/verlet/run/verlet.sock"),
@@ -1443,7 +1440,7 @@ fn default_daemon_socket_path_from_env(get_env: impl Fn(&str) -> Option<OsString
 
     if let Some(dir) = get_env("XDG_STATE_HOME")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(std::path::PathBuf::from)
     {
         return existing_daemon_socket_path(
             dir.join("verlet/run/verlet.sock"),
@@ -1453,7 +1450,7 @@ fn default_daemon_socket_path_from_env(get_env: impl Fn(&str) -> Option<OsString
 
     if let Some(home) = get_env("HOME")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(std::path::PathBuf::from)
     {
         return existing_daemon_socket_path(
             home.join(".local/state/verlet/run/verlet.sock"),
@@ -1467,7 +1464,7 @@ fn default_daemon_socket_path_from_env(get_env: impl Fn(&str) -> Option<OsString
         .map(|value| sanitize_socket_path_component(&value))
         .unwrap_or_else(|| "user".to_string());
     let temp_dir = if cfg!(unix) {
-        PathBuf::from("/tmp")
+        std::path::PathBuf::from("/tmp")
     } else {
         std::env::temp_dir()
     };
@@ -1481,9 +1478,12 @@ fn default_daemon_socket_path_from_env(get_env: impl Fn(&str) -> Option<OsString
     )
 }
 
-fn existing_daemon_socket_path(canonical: PathBuf, legacy: PathBuf) -> PathBuf {
-    let canonical_root_exists = canonical.parent().is_some_and(Path::exists);
-    let legacy_root_exists = legacy.parent().is_some_and(Path::exists);
+fn existing_daemon_socket_path(
+    canonical: std::path::PathBuf,
+    legacy: std::path::PathBuf,
+) -> std::path::PathBuf {
+    let canonical_root_exists = canonical.parent().is_some_and(std::path::Path::exists);
+    let legacy_root_exists = legacy.parent().is_some_and(std::path::Path::exists);
     if canonical_root_exists || !legacy_root_exists {
         canonical
     } else {
@@ -1505,7 +1505,7 @@ fn sanitize_socket_path_component(value: &str) -> String {
         .collect()
 }
 
-fn resolve_config_path(base: &Path, path: PathBuf) -> PathBuf {
+fn resolve_config_path(base: &std::path::Path, path: std::path::PathBuf) -> std::path::PathBuf {
     if path.is_absolute() {
         path
     } else {
@@ -1533,9 +1533,9 @@ fn quote_systemd(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn validate_service_label(label: &str) -> VerletResult<()> {
+fn validate_service_label(label: &str) -> crate::VerletResult<()> {
     if label.trim().is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletError::RuntimeFactory(
             "daemon service label cannot be empty".to_string(),
         ));
     }
@@ -1543,7 +1543,7 @@ fn validate_service_label(label: &str) -> VerletResult<()> {
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "daemon service label {label:?} may only contain ASCII letters, numbers, '.', '_', and '-'"
         )));
     }

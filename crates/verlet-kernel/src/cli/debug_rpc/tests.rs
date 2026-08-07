@@ -1,4 +1,3 @@
-use super::*;
 #[test]
 fn parse_debug_rpc_call_accepts_method_params_and_url() {
     let args = vec![
@@ -8,10 +7,10 @@ fn parse_debug_rpc_call_accepts_method_params_and_url() {
         "ws://127.0.0.1:49200/rpc",
     ]
     .into_iter()
-    .map(OsString::from)
+    .map(std::ffi::OsString::from)
     .collect();
 
-    let parsed = parse_debug_rpc_call_args(args).unwrap();
+    let parsed = crate::cli::debug_rpc::parse_debug_rpc_call_args(args).unwrap();
 
     assert_eq!(parsed.method, "thread/read");
     assert_eq!(parsed.params["threadId"].as_str(), Some("abc"));
@@ -32,10 +31,12 @@ fn parse_debug_rpc_rejects_conflicting_endpoint_flags() {
         "/tmp/verlet.toml",
     ]
     .into_iter()
-    .map(OsString::from)
+    .map(std::ffi::OsString::from)
     .collect();
 
-    let err = parse_debug_rpc_call_args(args).unwrap_err().to_string();
+    let err = crate::cli::debug_rpc::parse_debug_rpc_call_args(args)
+        .unwrap_err()
+        .to_string();
 
     assert!(err.contains("--url or --config"));
 }
@@ -44,10 +45,12 @@ fn parse_debug_rpc_rejects_conflicting_endpoint_flags() {
 fn parse_debug_rpc_call_rejects_invalid_params_json() {
     let args = vec!["thread/list", "{not-json"]
         .into_iter()
-        .map(OsString::from)
+        .map(std::ffi::OsString::from)
         .collect();
 
-    let err = parse_debug_rpc_call_args(args).unwrap_err().to_string();
+    let err = crate::cli::debug_rpc::parse_debug_rpc_call_args(args)
+        .unwrap_err()
+        .to_string();
 
     assert!(err.contains("invalid PARAMS_JSON"));
 }
@@ -56,18 +59,21 @@ fn parse_debug_rpc_call_rejects_invalid_params_json() {
 fn parse_debug_rpc_turn_requires_one_thread_selector_and_text() {
     let both = vec!["--thread", "abc", "--new", "hello"]
         .into_iter()
-        .map(OsString::from)
+        .map(std::ffi::OsString::from)
         .collect();
-    let missing = vec!["--new"].into_iter().map(OsString::from).collect();
+    let missing = vec!["--new"]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect();
 
     assert!(
-        parse_debug_rpc_turn_args(both)
+        crate::cli::debug_rpc::parse_debug_rpc_turn_args(both)
             .unwrap_err()
             .to_string()
             .contains("exactly one of --thread or --new")
     );
     assert!(
-        parse_debug_rpc_turn_args(missing)
+        crate::cli::debug_rpc::parse_debug_rpc_turn_args(missing)
             .unwrap_err()
             .to_string()
             .contains("requires <text>")
@@ -87,28 +93,32 @@ fn parse_debug_rpc_turn_collects_json_thread_and_text() {
         "/tmp/verlet.toml",
     ]
     .into_iter()
-    .map(OsString::from)
+    .map(std::ffi::OsString::from)
     .collect();
 
-    let parsed = parse_debug_rpc_turn_args(args).unwrap();
+    let parsed = crate::cli::debug_rpc::parse_debug_rpc_turn_args(args).unwrap();
 
     match parsed.target {
-        DebugRpcThreadTarget::Existing(thread_id) => assert_eq!(thread_id, "thread-1"),
-        DebugRpcThreadTarget::New => panic!("expected existing thread target"),
+        crate::cli::debug_rpc::DebugRpcThreadTarget::Existing(thread_id) => {
+            assert_eq!(thread_id, "thread-1")
+        }
+        crate::cli::debug_rpc::DebugRpcThreadTarget::New => {
+            panic!("expected existing thread target")
+        }
     }
     assert!(parsed.json);
     assert_eq!(parsed.text, "hello from rpc");
     assert_eq!(
         parsed.endpoint.config,
-        Some(PathBuf::from("/tmp/verlet.toml"))
+        Some(std::path::PathBuf::from("/tmp/verlet.toml"))
     );
 }
 
 #[test]
 fn notification_error_detection_handles_failed_completed_turn() {
-    let notification = JsonRpcNotification {
+    let notification = crate::JsonRpcNotification {
         method: "turn/completed".to_string(),
-        params: Some(json!({
+        params: Some(serde_json::json!({
             "threadId": "thread-1",
             "turn": {
                 "id": "turn-1",
@@ -118,29 +128,31 @@ fn notification_error_detection_handles_failed_completed_turn() {
         })),
     };
 
-    assert!(notification_is_turn_error(
+    assert!(crate::cli::debug_rpc::notification_is_turn_error(
         &notification,
         "thread-1",
         "turn-1"
     ));
     assert_eq!(
-        notification_turn_error_message(&notification),
+        crate::cli::debug_rpc::notification_turn_error_message(&notification),
         "provider failed"
     );
 }
 
 #[test]
 fn rpc_tail_treats_remote_connection_close_as_success() {
-    assert!(rpc_connection_was_closed(&VerletError::RpcClient(
-        "Verlet RPC connection closed".to_string()
-    )));
-    assert!(rpc_connection_was_closed(&VerletError::RpcClient(
-        "Verlet RPC connection was closed by the endpoint: going away".to_string()
-    )));
-    assert!(!rpc_connection_was_closed(&VerletError::RpcClient(
-        "Verlet RPC connection read failed: reset".to_string()
-    )));
-    assert!(!rpc_connection_was_closed(&VerletError::RuntimeFactory(
-        "Verlet RPC connection closed".to_string()
-    )));
+    assert!(crate::cli::debug_rpc::rpc_connection_was_closed(
+        &crate::VerletError::RpcClient("Verlet RPC connection closed".to_string())
+    ));
+    assert!(crate::cli::debug_rpc::rpc_connection_was_closed(
+        &crate::VerletError::RpcClient(
+            "Verlet RPC connection was closed by the endpoint: going away".to_string()
+        )
+    ));
+    assert!(!crate::cli::debug_rpc::rpc_connection_was_closed(
+        &crate::VerletError::RpcClient("Verlet RPC connection read failed: reset".to_string())
+    ));
+    assert!(!crate::cli::debug_rpc::rpc_connection_was_closed(
+        &crate::VerletError::RuntimeFactory("Verlet RPC connection closed".to_string())
+    ));
 }

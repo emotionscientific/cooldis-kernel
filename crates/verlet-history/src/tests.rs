@@ -1,19 +1,19 @@
-use super::*;
-
-fn coords(tenant: &str, user: &str, session: &str) -> ThreadCoordinates {
-    ThreadCoordinates::new(tenant, user, session)
+use crate::EventStore as _;
+use crate::SessionStore as _;
+fn coords(tenant: &str, user: &str, session: &str) -> verlet_runtime_contracts::ThreadCoordinates {
+    verlet_runtime_contracts::ThreadCoordinates::new(tenant, user, session)
 }
 
-fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
+fn message_texts(messages: &[crate::CanonicalMessage]) -> Vec<&str> {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => content
+            crate::CanonicalMessage::User { content, .. }
+            | crate::CanonicalMessage::Assistant { content, .. }
+            | crate::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .find_map(|content| match content {
-                    CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                    crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .unwrap_or(""),
@@ -21,27 +21,27 @@ fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
         .collect()
 }
 
-fn message_timestamps(messages: &[CanonicalMessage]) -> Vec<i64> {
+fn message_timestamps(messages: &[crate::CanonicalMessage]) -> Vec<i64> {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { timestamp_ms, .. }
-            | CanonicalMessage::Assistant { timestamp_ms, .. }
-            | CanonicalMessage::ToolResult { timestamp_ms, .. } => *timestamp_ms,
+            crate::CanonicalMessage::User { timestamp_ms, .. }
+            | crate::CanonicalMessage::Assistant { timestamp_ms, .. }
+            | crate::CanonicalMessage::ToolResult { timestamp_ms, .. } => *timestamp_ms,
         })
         .collect()
 }
 
 #[tokio::test]
 async fn append_only_context_follows_active_branch() {
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let root = store
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("root"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("root"),
             },
         )
         .await
@@ -50,8 +50,8 @@ async fn append_only_context_follows_active_branch() {
         .append(
             &coordinates,
             Some(root.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("left"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("left"),
             },
         )
         .await
@@ -60,8 +60,8 @@ async fn append_only_context_follows_active_branch() {
         .append(
             &coordinates,
             Some(root.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("right"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("right"),
             },
         )
         .await
@@ -79,14 +79,14 @@ async fn append_only_context_follows_active_branch() {
 
 #[tokio::test]
 async fn select_branch_restores_checkpoint_leaf() {
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
     let coordinates = coords("tenant_a", "user_1", "session_1");
     store
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("root"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("root"),
             },
         )
         .await
@@ -95,7 +95,7 @@ async fn select_branch_restores_checkpoint_leaf() {
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Runtime {
+            crate::SessionEntryKind::Runtime {
                 kind: "thread_checkpoint".to_string(),
                 payload: serde_json::json!({"checkpoint_id":"checkpoint"}),
             },
@@ -106,8 +106,8 @@ async fn select_branch_restores_checkpoint_leaf() {
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("after"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("after"),
             },
         )
         .await
@@ -128,33 +128,33 @@ async fn select_branch_restores_checkpoint_leaf() {
     store.select_branch(&coordinates, None).await.unwrap();
 
     let events = store
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
         .await
         .unwrap();
     let selections = events
         .iter()
-        .filter(|event| event.kind == EventKind::ThreadBranchSelected)
+        .filter(|event| event.kind == crate::EventKind::ThreadBranchSelected)
         .collect::<Vec<_>>();
     assert_eq!(selections.len(), 2);
-    assert_eq!(selections[0].origin, EventOrigin::Witnessed);
+    assert_eq!(selections[0].origin, crate::EventOrigin::Witnessed);
     assert!(selections[0].provenance.is_empty());
     assert_eq!(
         selections[0].to_stream_record_v1().payload_schema,
-        EventKind::ThreadBranchSelected.payload_schema_id()
+        crate::EventKind::ThreadBranchSelected.payload_schema_id()
     );
     assert_eq!(
-        serde_json::from_value::<ThreadBranchSelectedPayload>(selections[0].payload.clone())
+        serde_json::from_value::<crate::ThreadBranchSelectedPayload>(selections[0].payload.clone())
             .unwrap(),
-        ThreadBranchSelectedPayload {
+        crate::ThreadBranchSelectedPayload {
             thread_id: coordinates.thread_id,
             selected_entry_id: Some(checkpoint_leaf.entry_id),
             prior_entry_id: Some(after.entry_id),
         }
     );
     assert_eq!(
-        serde_json::from_value::<ThreadBranchSelectedPayload>(selections[1].payload.clone())
+        serde_json::from_value::<crate::ThreadBranchSelectedPayload>(selections[1].payload.clone())
             .unwrap(),
-        ThreadBranchSelectedPayload {
+        crate::ThreadBranchSelectedPayload {
             thread_id: coordinates.thread_id,
             selected_entry_id: None,
             prior_entry_id: Some(checkpoint_leaf.entry_id),
@@ -164,15 +164,15 @@ async fn select_branch_restores_checkpoint_leaf() {
 
 #[tokio::test]
 async fn clone_branch_copies_source_lineage_into_new_thread() {
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
     let source = coords("tenant_a", "user_1", "session_1");
     let target = coords("tenant_a", "user_1", "session_1");
     store
         .append(
             &source,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("root"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("root"),
             },
         )
         .await
@@ -181,8 +181,8 @@ async fn clone_branch_copies_source_lineage_into_new_thread() {
         .append(
             &source,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("source"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("source"),
             },
         )
         .await
@@ -210,15 +210,15 @@ async fn clone_branch_copies_source_lineage_into_new_thread() {
 
 #[tokio::test]
 async fn fork_by_reference_builds_context_without_copying_source_events() {
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
     let source = coords("tenant_a", "user_1", "session_1");
     let target = coords("tenant_a", "user_1", "session_1");
     let root = store
         .append(
             &source,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("root"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("root"),
             },
         )
         .await
@@ -227,20 +227,20 @@ async fn fork_by_reference_builds_context_without_copying_source_events() {
         .append(
             &source,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("source"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("source"),
             },
         )
         .await
         .unwrap();
-    let source_stream = EventStreamId::for_thread(&source);
-    let target_stream = EventStreamId::for_thread(&target);
+    let source_stream = crate::EventStreamId::for_thread(&source);
+    let target_stream = crate::EventStreamId::for_thread(&target);
 
     store
         .fork_by_reference(
             &source,
             &target,
-            ThreadBaseRef {
+            crate::ThreadBaseRef {
                 child_thread_id: target.thread_id,
                 parent_thread_id: source.thread_id,
                 parent_checkpoint_id: None,
@@ -248,8 +248,8 @@ async fn fork_by_reference_builds_context_without_copying_source_events() {
                 parent_stream_id: source_stream.clone(),
                 parent_stream_to_sequence: None,
                 parent_binding_snapshot_id: Some("sha256:parent".to_string()),
-                reason: ThreadForkReason::ManifestUpdate,
-                created_at_ms: now_ms(),
+                reason: crate::ThreadForkReason::ManifestUpdate,
+                created_at_ms: crate::now_ms(),
             },
         )
         .await
@@ -264,7 +264,7 @@ async fn fork_by_reference_builds_context_without_copying_source_events() {
     assert_eq!(target_context.entries[1].coordinates, source);
     assert_eq!(
         target_context.source_cuts,
-        vec![SessionContextSourceCut {
+        vec![crate::SessionContextSourceCut {
             coordinates: source.clone(),
             stream_id: source_stream.clone(),
             inherited: true,
@@ -283,8 +283,8 @@ async fn fork_by_reference_builds_context_without_copying_source_events() {
         .append(
             &target,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("child"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("child"),
             },
         )
         .await
@@ -297,7 +297,7 @@ async fn fork_by_reference_builds_context_without_copying_source_events() {
     assert_eq!(target_context.entries.last().unwrap().coordinates, target);
     assert_eq!(
         target_context.source_cuts.last(),
-        Some(&SessionContextSourceCut {
+        Some(&crate::SessionContextSourceCut {
             coordinates: target.clone(),
             stream_id: target_stream,
             inherited: false,
@@ -308,15 +308,15 @@ async fn fork_by_reference_builds_context_without_copying_source_events() {
 
 #[tokio::test]
 async fn fork_by_reference_rejects_cycles_and_cross_scope_edges() {
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
     let source = coords("tenant_a", "user_1", "session_1");
     let target = coords("tenant_a", "user_1", "session_1");
     let source_leaf = store
         .append(
             &source,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("source"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("source"),
             },
         )
         .await
@@ -326,16 +326,16 @@ async fn fork_by_reference_rejects_cycles_and_cross_scope_edges() {
         .fork_by_reference(
             &source,
             &target,
-            ThreadBaseRef {
+            crate::ThreadBaseRef {
                 child_thread_id: target.thread_id,
                 parent_thread_id: source.thread_id,
                 parent_checkpoint_id: None,
                 parent_leaf_entry_id: Some(source_leaf.entry_id),
-                parent_stream_id: EventStreamId::for_thread(&source),
+                parent_stream_id: crate::EventStreamId::for_thread(&source),
                 parent_stream_to_sequence: None,
                 parent_binding_snapshot_id: None,
-                reason: ThreadForkReason::Manual,
-                created_at_ms: now_ms(),
+                reason: crate::ThreadForkReason::Manual,
+                created_at_ms: crate::now_ms(),
             },
         )
         .await
@@ -345,57 +345,60 @@ async fn fork_by_reference_rejects_cycles_and_cross_scope_edges() {
         .fork_by_reference(
             &target,
             &source,
-            ThreadBaseRef {
+            crate::ThreadBaseRef {
                 child_thread_id: source.thread_id,
                 parent_thread_id: target.thread_id,
                 parent_checkpoint_id: None,
                 parent_leaf_entry_id: None,
-                parent_stream_id: EventStreamId::for_thread(&target),
+                parent_stream_id: crate::EventStreamId::for_thread(&target),
                 parent_stream_to_sequence: None,
                 parent_binding_snapshot_id: None,
-                reason: ThreadForkReason::Manual,
-                created_at_ms: now_ms(),
+                reason: crate::ThreadForkReason::Manual,
+                created_at_ms: crate::now_ms(),
             },
         )
         .await
         .unwrap_err();
-    assert!(matches!(cycle_err, HistoryError::ThreadBaseCycle { .. }));
+    assert!(matches!(
+        cycle_err,
+        crate::HistoryError::ThreadBaseCycle { .. }
+    ));
 
     let wrong_scope_target = coords("tenant_b", "user_1", "session_1");
     let scope_err = store
         .fork_by_reference(
             &source,
             &wrong_scope_target,
-            ThreadBaseRef {
+            crate::ThreadBaseRef {
                 child_thread_id: wrong_scope_target.thread_id,
                 parent_thread_id: source.thread_id,
                 parent_checkpoint_id: None,
                 parent_leaf_entry_id: Some(source_leaf.entry_id),
-                parent_stream_id: EventStreamId::for_thread(&source),
+                parent_stream_id: crate::EventStreamId::for_thread(&source),
                 parent_stream_to_sequence: None,
                 parent_binding_snapshot_id: None,
-                reason: ThreadForkReason::Manual,
-                created_at_ms: now_ms(),
+                reason: crate::ThreadForkReason::Manual,
+                created_at_ms: crate::now_ms(),
             },
         )
         .await
         .unwrap_err();
     assert!(matches!(
         scope_err,
-        HistoryError::ThreadScopeMismatch { .. }
+        crate::HistoryError::ThreadScopeMismatch { .. }
     ));
 }
 
 #[tokio::test]
 async fn compaction_clears_prior_model_visible_messages() {
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
     let coordinates = coords("tenant_a", "user_1", "session_1");
     store
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("old"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("old"),
             },
         )
         .await
@@ -404,7 +407,7 @@ async fn compaction_clears_prior_model_visible_messages() {
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Compaction {
+            crate::SessionEntryKind::Compaction {
                 summary: "old summary".to_string(),
             },
         )
@@ -423,31 +426,31 @@ async fn compaction_clears_prior_model_visible_messages() {
 #[test]
 fn model_visible_context_rebuild_preserves_persisted_timestamps() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let mut old = SessionEntry::new(
+    let mut old = crate::SessionEntry::new(
         coordinates.clone(),
         None,
-        SessionEntryKind::Message {
-            message: CanonicalMessage::User {
-                content: vec![CanonicalContent::text("old")],
+        crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::User {
+                content: vec![crate::CanonicalContent::text("old")],
                 timestamp_ms: 10,
             },
         },
     );
     old.created_at_ms = 10;
-    let mut compacted = SessionEntry::new(
+    let mut compacted = crate::SessionEntry::new(
         coordinates.clone(),
         Some(old.entry_id),
-        SessionEntryKind::Compaction {
+        crate::SessionEntryKind::Compaction {
             summary: "old summary".to_string(),
         },
     );
     compacted.created_at_ms = 20;
-    let mut hook = SessionEntry::new(
+    let mut hook = crate::SessionEntry::new(
         coordinates,
         Some(compacted.entry_id),
-        SessionEntryKind::CustomContextMessage {
-            message: CanonicalMessage::User {
-                content: vec![CanonicalContent::text("persisted hook context")],
+        crate::SessionEntryKind::CustomContextMessage {
+            message: crate::CanonicalMessage::User {
+                content: vec![crate::CanonicalContent::text("persisted hook context")],
                 timestamp_ms: 30,
             },
         },
@@ -456,13 +459,13 @@ fn model_visible_context_rebuild_preserves_persisted_timestamps() {
     let entries = vec![old, compacted, hook];
     let reopened_entries = entries
         .iter()
-        .map(|entry| decode_entry(&serde_json::to_string(entry).unwrap()).unwrap())
+        .map(|entry| crate::decode_entry(&serde_json::to_string(entry).unwrap()).unwrap())
         .collect::<Vec<_>>();
 
     let mut first = Vec::new();
-    append_model_visible_messages(&entries, &mut first);
+    crate::append_model_visible_messages(&entries, &mut first);
     let mut reopened = Vec::new();
-    append_model_visible_messages(&reopened_entries, &mut reopened);
+    crate::append_model_visible_messages(&reopened_entries, &mut reopened);
 
     assert_eq!(first, reopened);
     assert_eq!(
@@ -477,15 +480,15 @@ fn model_visible_context_rebuild_preserves_persisted_timestamps() {
 
 #[tokio::test]
 async fn histories_are_isolated_by_thread_coordinates() {
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
     let first = coords("tenant_a", "user_1", "session_1");
     let second = coords("tenant_b", "user_1", "session_1");
     store
         .append(
             &first,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("first"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("first"),
             },
         )
         .await
@@ -494,8 +497,8 @@ async fn histories_are_isolated_by_thread_coordinates() {
         .append(
             &second,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("second"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("second"),
             },
         )
         .await
@@ -561,108 +564,115 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "io.egress.failed",
         "admission.decided",
     ];
-    assert_eq!(EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.3");
-    let kinds = EventKind::all();
+    assert_eq!(crate::EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.3");
+    let kinds = crate::EventKind::all();
     assert_eq!(
         kinds.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),
         expected
     );
     for kind in kinds {
-        assert_eq!(kind.as_str().parse::<EventKind>().unwrap(), *kind);
+        assert_eq!(kind.as_str().parse::<crate::EventKind>().unwrap(), *kind);
         let json = serde_json::to_string(&kind).unwrap();
-        assert_eq!(serde_json::from_str::<EventKind>(&json).unwrap(), *kind);
+        assert_eq!(
+            serde_json::from_str::<crate::EventKind>(&json).unwrap(),
+            *kind
+        );
     }
 
-    let err = "unknown.event.kind".parse::<EventKind>().unwrap_err();
-    assert!(matches!(err, HistoryError::Codec(message) if message.contains("unknown event kind")));
-    let err = serde_json::from_str::<EventKind>("\"unknown.event.kind\"").unwrap_err();
+    let err = "unknown.event.kind"
+        .parse::<crate::EventKind>()
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::HistoryError::Codec(message) if message.contains("unknown event kind"))
+    );
+    let err = serde_json::from_str::<crate::EventKind>("\"unknown.event.kind\"").unwrap_err();
     assert!(err.to_string().contains("unknown event kind"));
 }
 
 #[test]
 fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
     assert_eq!(
-        EventKind::ContextCompileCompleted.payload_schema_id(),
+        crate::EventKind::ContextCompileCompleted.payload_schema_id(),
         "cooldis.event.context.compile.completed/1"
     );
     assert_eq!(
-        EventKind::ContextSummaryCompleted.payload_schema_id(),
+        crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
         "cooldis.event.context.summary.completed/1"
     );
     assert_eq!(
-        EventKind::ContextReadPlanSet.payload_schema_id(),
+        crate::EventKind::ContextReadPlanSet.payload_schema_id(),
         "cooldis.event.context.read_plan.set/1"
     );
     assert_eq!(
-        EventKind::ThreadSpawnRequested.payload_schema_id(),
+        crate::EventKind::ThreadSpawnRequested.payload_schema_id(),
         "cooldis.event.thread.spawn.requested/1"
     );
     assert_eq!(
-        EventKind::ThreadSpawned.payload_schema_id(),
+        crate::EventKind::ThreadSpawned.payload_schema_id(),
         "cooldis.event.thread.spawned/1"
     );
     assert_eq!(
-        EventKind::ThreadJoined.payload_schema_id(),
+        crate::EventKind::ThreadJoined.payload_schema_id(),
         "cooldis.event.thread.joined/1"
     );
     assert_eq!(
-        EventKind::ThreadBranchSelected.payload_schema_id(),
+        crate::EventKind::ThreadBranchSelected.payload_schema_id(),
         "cooldis.event.thread.branch.selected/1"
     );
     assert_eq!(
-        EventKind::ThreadReloadDegraded.payload_schema_id(),
+        crate::EventKind::ThreadReloadDegraded.payload_schema_id(),
         "cooldis.event.thread.reload.degraded/1"
     );
     assert_eq!(
-        EventKind::PolicyBound.payload_schema_id(),
+        crate::EventKind::PolicyBound.payload_schema_id(),
         "cooldis.event.policy.bound/1"
     );
     assert_eq!(
-        EventKind::GrantPetitioned.payload_schema_id(),
+        crate::EventKind::GrantPetitioned.payload_schema_id(),
         "cooldis.event.grant.petitioned/1"
     );
     assert_eq!(
-        EventKind::TimerFired.payload_schema_id(),
+        crate::EventKind::TimerFired.payload_schema_id(),
         "cooldis.event.timer.fired/1"
     );
     assert_eq!(
-        EventKind::ClientRecordAppended.payload_schema_id(),
+        crate::EventKind::ClientRecordAppended.payload_schema_id(),
         "cooldis.event.client.record.appended/1"
     );
     assert_eq!(
-        EventKind::IoIngressReceived.payload_schema_id(),
+        crate::EventKind::IoIngressReceived.payload_schema_id(),
         "cooldis.event.io.ingress.received/1"
     );
     assert_eq!(
-        EventKind::IoIngressClaimed.payload_schema_id(),
+        crate::EventKind::IoIngressClaimed.payload_schema_id(),
         "cooldis.event.io.ingress.claimed/1"
     );
     assert_eq!(
-        EventKind::IoIngressSettled.payload_schema_id(),
+        crate::EventKind::IoIngressSettled.payload_schema_id(),
         "cooldis.event.io.ingress.settled/1"
     );
     assert_eq!(
-        EventKind::IoEgressRequested.payload_schema_id(),
+        crate::EventKind::IoEgressRequested.payload_schema_id(),
         "cooldis.event.io.egress.requested/1"
     );
     assert_eq!(
-        EventKind::IoEgressDelivered.payload_schema_id(),
+        crate::EventKind::IoEgressDelivered.payload_schema_id(),
         "cooldis.event.io.egress.delivered/1"
     );
     assert_eq!(
-        EventKind::IoEgressFailed.payload_schema_id(),
+        crate::EventKind::IoEgressFailed.payload_schema_id(),
         "cooldis.event.io.egress.failed/1"
     );
     assert_eq!(
-        EventKind::AdmissionDecided.payload_schema_id(),
+        crate::EventKind::AdmissionDecided.payload_schema_id(),
         "cooldis.event.admission.decided/1"
     );
 }
 
 #[test]
 fn client_record_carrier_payload_schema_is_registered_and_strict() {
-    let registry = stream_schema_registry_v1();
-    let schema = EventKind::ClientRecordAppended.payload_schema_id();
+    let registry = crate::stream_schema_registry_v1();
+    let schema = crate::EventKind::ClientRecordAppended.payload_schema_id();
     registry
         .validate(
             schema,
@@ -690,8 +700,10 @@ fn client_record_carrier_payload_schema_is_registered_and_strict() {
 
 #[test]
 fn thread_reload_degraded_payload_schema_is_registered() {
-    let thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
-    let payload = serde_json::to_value(ThreadReloadDegradedPayload {
+    let thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str("018f0000-0000-7000-8000-000000000001")
+            .unwrap();
+    let payload = serde_json::to_value(crate::ThreadReloadDegradedPayload {
         thread_id,
         missing: vec![
             "topology".to_string(),
@@ -702,9 +714,9 @@ fn thread_reload_degraded_payload_schema_is_registered() {
     })
     .unwrap();
 
-    stream_schema_registry_v1()
+    crate::stream_schema_registry_v1()
         .validate(
-            EventKind::ThreadReloadDegraded.payload_schema_id(),
+            crate::EventKind::ThreadReloadDegraded.payload_schema_id(),
             &payload,
         )
         .unwrap();
@@ -712,85 +724,89 @@ fn thread_reload_degraded_payload_schema_is_registered() {
 
 #[test]
 fn ingress_outcome_payloads_round_trip_whole_and_validate() {
-    let witness_event_id = EventRecordId::from_uuid(
+    let witness_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000011").unwrap(),
     );
-    let admission_event_id = EventRecordId::from_uuid(
+    let admission_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000012").unwrap(),
     );
-    let claim_event_id = EventRecordId::from_uuid(
+    let claim_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000013").unwrap(),
     );
-    let evidence_event_id = EventRecordId::from_uuid(
+    let evidence_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000014").unwrap(),
     );
-    let claim = IoIngressClaimedPayload {
+    let claim = crate::IoIngressClaimedPayload {
         ingress_envelope_ids: vec!["ingress-1".to_string()],
         ingress_witness_event_ids: vec![witness_event_id],
         admission_event_id,
-        intent: IngressOutcomeIntent::Turn {
+        intent: crate::IngressOutcomeIntent::Turn {
             turn_id: "turn-1".to_string(),
             submission_mode: "queue".to_string(),
             input_digest: "sha256:input".to_string(),
         },
     };
-    let settle = IoIngressSettledPayload {
+    let settle = crate::IoIngressSettledPayload {
         claim_event_id,
         ingress_envelope_ids: vec!["ingress-1".to_string()],
         evidence_event_id: Some(evidence_event_id),
-        settled_by: IngressSettledBy::Recovery,
+        settled_by: crate::IngressSettledBy::Recovery,
     };
     let claim_value = serde_json::to_value(&claim).unwrap();
     let settle_value = serde_json::to_value(&settle).unwrap();
-    let registry = stream_schema_registry_v1();
+    let registry = crate::stream_schema_registry_v1();
 
     registry
         .validate(
-            EventKind::IoIngressClaimed.payload_schema_id(),
+            crate::EventKind::IoIngressClaimed.payload_schema_id(),
             &claim_value,
         )
         .unwrap();
     registry
         .validate(
-            EventKind::IoIngressSettled.payload_schema_id(),
+            crate::EventKind::IoIngressSettled.payload_schema_id(),
             &settle_value,
         )
         .unwrap();
     assert_eq!(
-        serde_json::from_value::<IoIngressClaimedPayload>(claim_value).unwrap(),
+        serde_json::from_value::<crate::IoIngressClaimedPayload>(claim_value).unwrap(),
         claim
     );
     assert_eq!(
-        serde_json::from_value::<IoIngressSettledPayload>(settle_value).unwrap(),
+        serde_json::from_value::<crate::IoIngressSettledPayload>(settle_value).unwrap(),
         settle
     );
 }
 
 #[test]
 fn events_0_3_payload_fixtures_round_trip_and_validate() {
-    let parent_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
-    let child_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000002").unwrap();
-    let spawned_event_id = EventRecordId::from_uuid(
+    let parent_thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str("018f0000-0000-7000-8000-000000000001")
+            .unwrap();
+    let child_thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str("018f0000-0000-7000-8000-000000000002")
+            .unwrap();
+    let spawned_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap(),
     );
-    let checkpoint_id = ThreadCheckpointId::from_uuid(
+    let checkpoint_id = verlet_runtime_contracts::ThreadCheckpointId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000006").unwrap(),
     );
-    let leaf_entry_id = SessionEntryId::from_uuid(
+    let leaf_entry_id = crate::SessionEntryId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000007").unwrap(),
     );
-    let mandate_event_id = EventRecordId::from_uuid(
+    let mandate_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000004").unwrap(),
     );
-    let ingress_event_id = EventRecordId::from_uuid(
+    let ingress_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000005").unwrap(),
     );
-    let registry = stream_schema_registry_v1();
+    let registry = crate::stream_schema_registry_v1();
 
     let cases = [
         (
-            EventKind::ThreadSpawnRequested,
-            serde_json::to_value(ThreadSpawnRequestedPayload {
+            crate::EventKind::ThreadSpawnRequested,
+            serde_json::to_value(crate::ThreadSpawnRequestedPayload {
                 parent_thread_id,
                 parent_turn_id: Some("turn-parent".to_string()),
                 task_name: None,
@@ -803,8 +819,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::ThreadSpawned,
-            serde_json::to_value(ThreadSpawnedPayload {
+            crate::EventKind::ThreadSpawned,
+            serde_json::to_value(crate::ThreadSpawnedPayload {
                 parent_thread_id,
                 parent_turn_id: Some("turn-parent".to_string()),
                 child_thread_id,
@@ -820,8 +836,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::ThreadSpawned,
-            serde_json::to_value(ThreadSpawnedPayload {
+            crate::EventKind::ThreadSpawned,
+            serde_json::to_value(crate::ThreadSpawnedPayload {
                 parent_thread_id,
                 parent_turn_id: None,
                 child_thread_id,
@@ -829,33 +845,33 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
                 child_policy_hash: None,
                 granted: vec!["threads.spawn".to_string()],
                 inputs_hash: "sha256:fork-inputs".to_string(),
-                fork: Some(ThreadSpawnedForkPayload {
+                fork: Some(crate::ThreadSpawnedForkPayload {
                     mode: "clone".to_string(),
                     claim_event_id: Some(spawned_event_id),
-                    source_cut: ThreadSpawnedForkSourceCutPayload {
+                    source_cut: crate::ThreadSpawnedForkSourceCutPayload {
                         thread_id: parent_thread_id,
                         checkpoint_id,
                         leaf_entry_id: Some(leaf_entry_id),
-                        stream_id: EventStreamId::new(format!("thread:{parent_thread_id}")),
-                        stream_to_sequence: Some(EventSequence::new(42)),
+                        stream_id: crate::EventStreamId::new(format!("thread:{parent_thread_id}")),
+                        stream_to_sequence: Some(crate::EventSequence::new(42)),
                     },
                 }),
             })
             .unwrap(),
         ),
         (
-            EventKind::ThreadJoined,
-            serde_json::to_value(ThreadJoinedPayload {
+            crate::EventKind::ThreadJoined,
+            serde_json::to_value(crate::ThreadJoinedPayload {
                 child_thread_id,
                 spawned_event_id,
-                terminal_state: ThreadTerminalState::Completed,
+                terminal_state: crate::ThreadTerminalState::Completed,
                 result_digest: Some("sha256:result".to_string()),
             })
             .unwrap(),
         ),
         (
-            EventKind::ThreadBranchSelected,
-            serde_json::to_value(ThreadBranchSelectedPayload {
+            crate::EventKind::ThreadBranchSelected,
+            serde_json::to_value(crate::ThreadBranchSelectedPayload {
                 thread_id: child_thread_id,
                 selected_entry_id: Some(leaf_entry_id),
                 prior_entry_id: None,
@@ -863,9 +879,9 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::PolicyBound,
-            serde_json::to_value(PolicyBoundPayload {
-                policy_kind: PolicyKind::AdmissionRoute,
+            crate::EventKind::PolicyBound,
+            serde_json::to_value(crate::PolicyBoundPayload {
+                policy_kind: crate::PolicyKind::AdmissionRoute,
                 policy_id: "route:telegram".to_string(),
                 content_hash: "sha256:policy".to_string(),
                 valid_from_note: "valid until next policy.bound of same policy_id".to_string(),
@@ -873,8 +889,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::GrantPetitioned,
-            serde_json::to_value(GrantPetitionedPayload {
+            crate::EventKind::GrantPetitioned,
+            serde_json::to_value(crate::GrantPetitionedPayload {
                 thread_id: child_thread_id,
                 requested: vec!["net:https://api.example.test".to_string()],
                 reason: "tool needs outbound API access".to_string(),
@@ -883,8 +899,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::TimerFired,
-            serde_json::to_value(TimerFiredPayload {
+            crate::EventKind::TimerFired,
+            serde_json::to_value(crate::TimerFiredPayload {
                 mandate_event_id,
                 scheduled_for: "2026-07-04T12:00:00Z".to_string(),
                 occurrence_index: 3,
@@ -893,8 +909,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::IoIngressReceived,
-            serde_json::to_value(IoIngressReceivedPayload {
+            crate::EventKind::IoIngressReceived,
+            serde_json::to_value(crate::IoIngressReceivedPayload {
                 route_id: Some("route:telegram".to_string()),
                 dedupe_key: Some("telegram:42".to_string()),
                 external_conversation_id: Some("chat-1".to_string()),
@@ -906,8 +922,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::IoEgressDelivered,
-            serde_json::to_value(IoEgressDeliveredPayload {
+            crate::EventKind::IoEgressDelivered,
+            serde_json::to_value(crate::IoEgressDeliveredPayload {
                 route_id: "route:telegram".to_string(),
                 egress_kind: "telegram.reply".to_string(),
                 external_message_id: Some("message-2".to_string()),
@@ -916,8 +932,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::IoEgressRequested,
-            serde_json::to_value(IoEgressRequestedPayload {
+            crate::EventKind::IoEgressRequested,
+            serde_json::to_value(crate::IoEgressRequestedPayload {
                 egress_kind: serde_json::json!({
                     "type": "platform_action",
                     "action": "reaction",
@@ -942,8 +958,8 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::IoEgressFailed,
-            serde_json::to_value(IoEgressFailedPayload {
+            crate::EventKind::IoEgressFailed,
+            serde_json::to_value(crate::IoEgressFailedPayload {
                 route_id: "route:telegram".to_string(),
                 egress_kind: "telegram.reply".to_string(),
                 attempts: 3,
@@ -953,15 +969,15 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
             .unwrap(),
         ),
         (
-            EventKind::AdmissionDecided,
-            serde_json::to_value(AdmissionDecidedPayload {
+            crate::EventKind::AdmissionDecided,
+            serde_json::to_value(crate::AdmissionDecidedPayload {
                 route_id: "route:telegram".to_string(),
                 policy_hash: "sha256:admission-policy".to_string(),
-                decision: AdmissionDecision::Coalesce,
+                decision: crate::AdmissionDecision::Coalesce,
                 admissible: Some(vec![
-                    AdmissionDecision::Queue,
-                    AdmissionDecision::Coalesce,
-                    AdmissionDecision::Reject,
+                    crate::AdmissionDecision::Queue,
+                    crate::AdmissionDecision::Coalesce,
+                    crate::AdmissionDecision::Reject,
                 ]),
                 source_ingress_event_ids: vec![ingress_event_id],
             })
@@ -981,17 +997,21 @@ fn events_0_3_payload_fixtures_round_trip_and_validate() {
 
 #[test]
 fn events_0_2_optional_fields_deserialize_when_absent() {
-    let parent_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000011").unwrap();
-    let child_thread_id = ThreadId::parse_str("018f0000-0000-7000-8000-000000000012").unwrap();
-    let spawned_event_id = EventRecordId::from_uuid(
+    let parent_thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str("018f0000-0000-7000-8000-000000000011")
+            .unwrap();
+    let child_thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str("018f0000-0000-7000-8000-000000000012")
+            .unwrap();
+    let spawned_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000013").unwrap(),
     );
-    let ingress_event_id = EventRecordId::from_uuid(
+    let ingress_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000014").unwrap(),
     );
 
-    let spawned: ThreadSpawnedPayload = serde_json::from_value(serde_json::json!({
-        "schema": EventKind::ThreadSpawned.payload_schema_id(),
+    let spawned: crate::ThreadSpawnedPayload = serde_json::from_value(serde_json::json!({
+        "schema": crate::EventKind::ThreadSpawned.payload_schema_id(),
         "parent_thread_id": parent_thread_id,
         "child_thread_id": child_thread_id,
         "child_manifest_hash": "sha256:child-manifest",
@@ -1003,8 +1023,8 @@ fn events_0_2_optional_fields_deserialize_when_absent() {
     assert_eq!(spawned.child_policy_hash, None);
     assert_eq!(spawned.fork, None);
 
-    let spawned_fork: ThreadSpawnedPayload = serde_json::from_value(serde_json::json!({
-        "schema": EventKind::ThreadSpawned.payload_schema_id(),
+    let spawned_fork: crate::ThreadSpawnedPayload = serde_json::from_value(serde_json::json!({
+        "schema": crate::EventKind::ThreadSpawned.payload_schema_id(),
         "parent_thread_id": parent_thread_id,
         "child_thread_id": child_thread_id,
         "child_manifest_hash": "sha256:child-manifest",
@@ -1024,8 +1044,8 @@ fn events_0_2_optional_fields_deserialize_when_absent() {
     .unwrap();
     assert_eq!(spawned_fork.fork.unwrap().claim_event_id, None);
 
-    let joined: ThreadJoinedPayload = serde_json::from_value(serde_json::json!({
-        "schema": EventKind::ThreadJoined.payload_schema_id(),
+    let joined: crate::ThreadJoinedPayload = serde_json::from_value(serde_json::json!({
+        "schema": crate::EventKind::ThreadJoined.payload_schema_id(),
         "child_thread_id": child_thread_id,
         "spawned_event_id": spawned_event_id,
         "terminal_state": "budget_exhausted"
@@ -1033,16 +1053,16 @@ fn events_0_2_optional_fields_deserialize_when_absent() {
     .unwrap();
     assert_eq!(joined.result_digest, None);
 
-    let ingress: IoIngressReceivedPayload = serde_json::from_value(serde_json::json!({
-        "schema": EventKind::IoIngressReceived.payload_schema_id(),
+    let ingress: crate::IoIngressReceivedPayload = serde_json::from_value(serde_json::json!({
+        "schema": crate::EventKind::IoIngressReceived.payload_schema_id(),
         "envelope_digest": "sha256:ingress"
     }))
     .unwrap();
     assert_eq!(ingress.route_id, None);
     assert_eq!(ingress.external_message_id, None);
 
-    let admission: AdmissionDecidedPayload = serde_json::from_value(serde_json::json!({
-        "schema": EventKind::AdmissionDecided.payload_schema_id(),
+    let admission: crate::AdmissionDecidedPayload = serde_json::from_value(serde_json::json!({
+        "schema": crate::EventKind::AdmissionDecided.payload_schema_id(),
         "route_id": "route:telegram",
         "policy_hash": "sha256:admission-policy",
         "decision": "queue",
@@ -1054,13 +1074,13 @@ fn events_0_2_optional_fields_deserialize_when_absent() {
 
 #[test]
 fn thread_spawn_payload_schemas_type_only_fields_owned_by_their_wire_structs() {
-    let spawned = thread_spawned_payload_schema_v1();
+    let spawned = crate::thread_spawned_payload_schema_v1();
     assert_eq!(
         spawned["properties"]["inputs_hash"],
         serde_json::json!({"type": "string"})
     );
 
-    let requested = thread_spawn_requested_payload_schema_v1();
+    let requested = crate::thread_spawn_requested_payload_schema_v1();
     assert!(requested["properties"].get("inputs_hash").is_none());
     assert_eq!(
         requested["properties"]["task_name"],
@@ -1076,26 +1096,26 @@ fn thread_spawn_payload_schemas_type_only_fields_owned_by_their_wire_structs() {
 fn events_0_1_style_stream_record_still_parses_and_unknown_kind_fails_closed() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let record = serde_json::json!({
-        "schema": STREAM_RECORD_SCHEMA_V1,
+        "schema": crate::STREAM_RECORD_SCHEMA_V1,
         "event_id": "018f0000-0000-7000-8000-000000000101",
-        "stream_id": EventStreamId::for_thread(&coordinates),
+        "stream_id": crate::EventStreamId::for_thread(&coordinates),
         "sequence": 1,
         "coordinates": coordinates,
         "created_at_ms": 1_772_640_000_000i64,
         "kind": "turn.completed",
         "origin": "discharged",
-        "payload_schema": EventKind::TurnCompleted.payload_schema_id(),
+        "payload_schema": crate::EventKind::TurnCompleted.payload_schema_id(),
         "provenance": {"source_event_ids": ["018f0000-0000-7000-8000-000000000100"]},
         "payload": {"turn_id": "turn-1"}
     });
-    let parsed: StreamRecordEnvelopeV1 = serde_json::from_value(record).unwrap();
+    let parsed: crate::StreamRecordEnvelopeV1 = serde_json::from_value(record).unwrap();
     assert_eq!(
-        parsed.kind.parse::<EventKind>().unwrap(),
-        EventKind::TurnCompleted
+        parsed.kind.parse::<crate::EventKind>().unwrap(),
+        crate::EventKind::TurnCompleted
     );
-    stream_schema_registry_v1()
+    crate::stream_schema_registry_v1()
         .validate(
-            STREAM_RECORD_SCHEMA_V1,
+            crate::STREAM_RECORD_SCHEMA_V1,
             &serde_json::to_value(parsed).unwrap(),
         )
         .unwrap();
@@ -1103,40 +1123,43 @@ fn events_0_1_style_stream_record_still_parses_and_unknown_kind_fails_closed() {
     let unknown = serde_json::json!({
         "kind": "unknown.event.kind"
     });
-    let err = serde_json::from_value::<EventKind>(unknown["kind"].clone()).unwrap_err();
+    let err = serde_json::from_value::<crate::EventKind>(unknown["kind"].clone()).unwrap_err();
     assert!(err.to_string().contains("unknown event kind"));
 }
 
 #[test]
 fn canonical_usage_survives_assistant_session_entry_stream_record() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let usage = CanonicalUsage {
+    let usage = crate::CanonicalUsage {
         input_tokens: 11,
         output_tokens: 7,
         cache_creation_input_tokens: 3,
         cache_read_input_tokens: 5,
     };
-    let entry = SessionEntry::new(
+    let entry = crate::SessionEntry::new(
         coordinates.clone(),
         None,
-        SessionEntryKind::Message {
-            message: CanonicalMessage::assistant_with_usage(
+        crate::SessionEntryKind::Message {
+            message: crate::CanonicalMessage::assistant_with_usage(
                 "test-provider",
-                ProviderApi::OpenAIResponses,
+                crate::ProviderApi::OpenAIResponses,
                 "model-1",
-                vec![CanonicalContent::text("hello")],
+                vec![crate::CanonicalContent::text("hello")],
                 usage.clone(),
-                CanonicalStopReason::EndTurn,
+                crate::CanonicalStopReason::EndTurn,
             ),
         },
     );
-    let event = EventRecord::from_new(
-        EventStreamId::for_thread(&coordinates),
-        EventSequence::new(1),
-        session_entry_event(&entry),
+    let event = crate::EventRecord::from_new(
+        crate::EventStreamId::for_thread(&coordinates),
+        crate::EventSequence::new(1),
+        crate::session_entry_event(&entry),
     );
     let envelope = event.to_stream_record_v1();
-    assert_eq!(envelope.kind, EventKind::SessionEntryAppended.as_str());
+    assert_eq!(
+        envelope.kind,
+        crate::EventKind::SessionEntryAppended.as_str()
+    );
     assert_eq!(
         envelope.payload["usage"],
         serde_json::to_value(usage).unwrap()
@@ -1147,13 +1170,13 @@ fn canonical_usage_survives_assistant_session_entry_stream_record() {
 #[test]
 fn event_record_renders_stream_schema_v1_envelope() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let record = EventRecord::from_new(
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let record = crate::EventRecord::from_new(
         stream_id.clone(),
-        EventSequence::new(7),
-        NewEventRecord::discharged(
+        crate::EventSequence::new(7),
+        crate::NewEventRecord::discharged(
             coordinates.clone(),
-            EventKind::ContextReadPlanSet,
+            crate::EventKind::ContextReadPlanSet,
             serde_json::json!({
                 "schema": "cooldis.event.context.read_plan.set/1",
                 "scope": "thread",
@@ -1166,21 +1189,21 @@ fn event_record_renders_stream_schema_v1_envelope() {
                     "entries": []
                 }
             }),
-            EventProvenance {
+            crate::EventProvenance {
                 source_streams: vec![stream_id.clone()],
                 discharged_by: Some("controller:context-budget".to_string()),
                 function: Some("context_read_plan/v1".to_string()),
                 config_hash: Some("sha256:context-budget-config".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         ),
     );
 
     let envelope = record.to_stream_record_v1();
-    assert_eq!(envelope.schema, STREAM_RECORD_SCHEMA_V1);
+    assert_eq!(envelope.schema, crate::STREAM_RECORD_SCHEMA_V1);
     assert_eq!(envelope.event_id, record.id);
     assert_eq!(envelope.stream_id, stream_id);
-    assert_eq!(envelope.sequence, EventSequence::new(7));
+    assert_eq!(envelope.sequence, crate::EventSequence::new(7));
     assert_eq!(envelope.kind, "context.read_plan.set");
     assert_eq!(
         envelope.payload_schema,
@@ -1203,15 +1226,15 @@ fn event_record_renders_stream_schema_v1_envelope() {
 #[test]
 fn stream_routing_decision_v1_uses_envelope_fields_not_payload() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let record = EventRecord::from_new(
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let record = crate::EventRecord::from_new(
         stream_id.clone(),
-        EventSequence::new(8),
-        NewEventRecord::witnessed(
+        crate::EventSequence::new(8),
+        crate::NewEventRecord::witnessed(
             coordinates,
-            EventKind::ToolCallCompleted,
+            crate::EventKind::ToolCallCompleted,
             serde_json::json!({
-                "schema": EventKind::ToolCallCompleted.payload_schema_id(),
+                "schema": crate::EventKind::ToolCallCompleted.payload_schema_id(),
                 "payload_bait": {
                     "kind": "placement.decision",
                     "stream_id": "control:pretend",
@@ -1227,17 +1250,17 @@ fn stream_routing_decision_v1_uses_envelope_fields_not_payload() {
     }));
 
     let decision = envelope.route_decision_v1();
-    assert_eq!(decision.schema, STREAM_ROUTING_DECISION_SCHEMA_V1);
+    assert_eq!(decision.schema, crate::STREAM_ROUTING_DECISION_SCHEMA_V1);
     assert_eq!(decision.event_id, record.id);
     assert_eq!(decision.stream_id, stream_id);
     assert_eq!(
         decision.routes,
         vec![
-            StreamRouteProfile::AuthorityStore,
-            StreamRouteProfile::ExportBundle,
-            StreamRouteProfile::ModelTrace,
-            StreamRouteProfile::BrowserSafeProjection,
-            StreamRouteProfile::AnalyticsAggregate,
+            crate::StreamRouteProfile::AuthorityStore,
+            crate::StreamRouteProfile::ExportBundle,
+            crate::StreamRouteProfile::ModelTrace,
+            crate::StreamRouteProfile::BrowserSafeProjection,
+            crate::StreamRouteProfile::AnalyticsAggregate,
         ]
     );
     assert_eq!(decision.keys.kind, "tool.call.completed");
@@ -1251,9 +1274,9 @@ fn stream_routing_decision_v1_uses_envelope_fields_not_payload() {
     });
     assert_eq!(baited.route_decision_v1(), decision);
 
-    stream_schema_registry_v1()
+    crate::stream_schema_registry_v1()
         .validate(
-            STREAM_ROUTING_DECISION_SCHEMA_V1,
+            crate::STREAM_ROUTING_DECISION_SCHEMA_V1,
             &serde_json::to_value(decision).unwrap(),
         )
         .unwrap();
@@ -1262,27 +1285,35 @@ fn stream_routing_decision_v1_uses_envelope_fields_not_payload() {
 #[test]
 fn stream_routing_decision_v1_separates_runtime_and_model_trace_profiles() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let record = EventRecord::from_new(
+    let stream_id = crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let record = crate::EventRecord::from_new(
         stream_id,
-        EventSequence::new(9),
-        NewEventRecord::discharged(
+        crate::EventSequence::new(9),
+        crate::NewEventRecord::discharged(
             coordinates,
-            EventKind::PlacementDecision,
+            crate::EventKind::PlacementDecision,
             serde_json::json!({
-                "schema": EventKind::PlacementDecision.payload_schema_id(),
+                "schema": crate::EventKind::PlacementDecision.payload_schema_id(),
                 "placement": "local"
             }),
-            EventProvenance {
+            crate::EventProvenance {
                 discharged_by: Some("controller:placement".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         ),
     );
 
     let decision = record.route_decision_v1();
-    assert!(decision.routes.contains(&StreamRouteProfile::RuntimeTrace));
-    assert!(!decision.routes.contains(&StreamRouteProfile::ModelTrace));
+    assert!(
+        decision
+            .routes
+            .contains(&crate::StreamRouteProfile::RuntimeTrace)
+    );
+    assert!(
+        !decision
+            .routes
+            .contains(&crate::StreamRouteProfile::ModelTrace)
+    );
     assert_eq!(
         decision.keys.discharged_by.as_deref(),
         Some("controller:placement")
@@ -1293,65 +1324,68 @@ fn stream_routing_decision_v1_separates_runtime_and_model_trace_profiles() {
 #[test]
 fn stream_append_ack_v1_freezes_ack_classes_and_tail_identity() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let first = EventRecord::from_new(
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let first = crate::EventRecord::from_new(
         stream_id.clone(),
-        EventSequence::new(10),
-        NewEventRecord::witnessed(
+        crate::EventSequence::new(10),
+        crate::NewEventRecord::witnessed(
             coordinates.clone(),
-            EventKind::TurnSubmitted,
+            crate::EventKind::TurnSubmitted,
             serde_json::json!({
-                "schema": EventKind::TurnSubmitted.payload_schema_id(),
+                "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
                 "turn_id": "turn-1"
             }),
         ),
     );
-    let second = EventRecord::from_new(
+    let second = crate::EventRecord::from_new(
         stream_id.clone(),
-        EventSequence::new(11),
-        NewEventRecord::witnessed(
+        crate::EventSequence::new(11),
+        crate::NewEventRecord::witnessed(
             coordinates,
-            EventKind::TurnCompleted,
+            crate::EventKind::TurnCompleted,
             serde_json::json!({
-                "schema": EventKind::TurnCompleted.payload_schema_id(),
+                "schema": crate::EventKind::TurnCompleted.payload_schema_id(),
                 "turn_id": "turn-1"
             }),
         ),
     );
 
-    let ack = StreamAppendAckV1::from_appended(
+    let ack = crate::StreamAppendAckV1::from_appended(
         stream_id.clone(),
         &[first.clone(), second.clone()],
         vec![
-            StreamAckClass::LocalCommitted,
-            StreamAckClass::QueryProjected,
+            crate::StreamAckClass::LocalCommitted,
+            crate::StreamAckClass::QueryProjected,
         ],
     )
     .unwrap();
-    assert_eq!(ack.schema, STREAM_APPEND_ACK_SCHEMA_V1);
+    assert_eq!(ack.schema, crate::STREAM_APPEND_ACK_SCHEMA_V1);
     assert_eq!(ack.stream_id, stream_id);
-    assert_eq!(ack.start_sequence, EventSequence::new(10));
-    assert_eq!(ack.end_sequence, EventSequence::new(11));
-    assert_eq!(ack.tail_sequence, EventSequence::new(11));
+    assert_eq!(ack.start_sequence, crate::EventSequence::new(10));
+    assert_eq!(ack.end_sequence, crate::EventSequence::new(11));
+    assert_eq!(ack.tail_sequence, crate::EventSequence::new(11));
     assert_eq!(ack.tail_event_id, second.id);
     assert_eq!(
         ack.acks,
         vec![
-            StreamAckClass::LocalCommitted,
-            StreamAckClass::QueryProjected
+            crate::StreamAckClass::LocalCommitted,
+            crate::StreamAckClass::QueryProjected
         ]
     );
 
-    stream_schema_registry_v1()
+    crate::stream_schema_registry_v1()
         .validate(
-            STREAM_APPEND_ACK_SCHEMA_V1,
+            crate::STREAM_APPEND_ACK_SCHEMA_V1,
             &serde_json::to_value(ack).unwrap(),
         )
         .unwrap();
 
-    let empty =
-        StreamAppendAckV1::from_appended(stream_id, &[], vec![StreamAckClass::LocalCommitted])
-            .unwrap_err();
+    let empty = crate::StreamAppendAckV1::from_appended(
+        stream_id,
+        &[],
+        vec![crate::StreamAckClass::LocalCommitted],
+    )
+    .unwrap_err();
     assert!(
         empty
             .to_string()
@@ -1362,19 +1396,25 @@ fn stream_append_ack_v1_freezes_ack_classes_and_tail_identity() {
 #[test]
 fn stream_backend_capabilities_v1_freezes_sqlite_reference_shape() {
     let capabilities =
-        StreamBackendCapabilitiesV1::sqlite_local("/tmp/verlet/session_history.sqlite3");
+        crate::StreamBackendCapabilitiesV1::sqlite_local("/tmp/verlet/session_history.sqlite3");
 
-    assert_eq!(capabilities.schema, STREAM_BACKEND_CAPABILITIES_SCHEMA_V1);
-    assert_eq!(capabilities.backend_kind, StreamBackendKindV1::Sqlite);
+    assert_eq!(
+        capabilities.schema,
+        crate::STREAM_BACKEND_CAPABILITIES_SCHEMA_V1
+    );
+    assert_eq!(
+        capabilities.backend_kind,
+        crate::StreamBackendKindV1::Sqlite
+    );
     assert_eq!(
         capabilities.storage_scope,
-        StreamStorageScopeV1::LocalEmbedded
+        crate::StreamStorageScopeV1::LocalEmbedded
     );
     assert_eq!(
         capabilities.ack_classes,
         vec![
-            StreamAckClass::LocalCommitted,
-            StreamAckClass::QueryProjected
+            crate::StreamAckClass::LocalCommitted,
+            crate::StreamAckClass::QueryProjected
         ]
     );
     assert!(capabilities.supports_atomic_batch_append);
@@ -1390,9 +1430,9 @@ fn stream_backend_capabilities_v1_freezes_sqlite_reference_shape() {
         Some("/tmp/verlet/session_history.sqlite3")
     );
 
-    stream_schema_registry_v1()
+    crate::stream_schema_registry_v1()
         .validate(
-            STREAM_BACKEND_CAPABILITIES_SCHEMA_V1,
+            crate::STREAM_BACKEND_CAPABILITIES_SCHEMA_V1,
             &serde_json::to_value(capabilities).unwrap(),
         )
         .unwrap();
@@ -1400,8 +1440,8 @@ fn stream_backend_capabilities_v1_freezes_sqlite_reference_shape() {
 
 #[test]
 fn stream_schema_registry_v1_is_cached_once_per_process() {
-    let first = stream_schema_registry_v1();
-    let second = stream_schema_registry_v1();
+    let first = crate::stream_schema_registry_v1();
+    let second = crate::stream_schema_registry_v1();
 
     assert!(std::ptr::eq(first, second));
 }
@@ -1409,14 +1449,14 @@ fn stream_schema_registry_v1_is_cached_once_per_process() {
 #[test]
 fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let source_range = ObservationSourceRange {
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let source_range = crate::ObservationSourceRange {
         stream_id: stream_id.clone(),
-        from_sequence: EventSequence::new(1),
-        to_sequence: EventSequence::new(2),
+        from_sequence: crate::EventSequence::new(1),
+        to_sequence: crate::EventSequence::new(2),
     };
     let read_plan = serde_json::json!({
-        "schema": CONTEXT_READ_PLAN_SCHEMA_V1,
+        "schema": crate::CONTEXT_READ_PLAN_SCHEMA_V1,
         "name": "history.default",
         "source_stream": stream_id.as_str(),
         "frontier": "compile_frontier",
@@ -1429,36 +1469,36 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
             }
         }]
     });
-    let compile = EventRecord::from_new(
+    let compile = crate::EventRecord::from_new(
         stream_id.clone(),
-        EventSequence::new(3),
-        NewEventRecord::discharged(
+        crate::EventSequence::new(3),
+        crate::NewEventRecord::discharged(
             coordinates.clone(),
-            EventKind::ContextCompileCompleted,
+            crate::EventKind::ContextCompileCompleted,
             serde_json::json!({
-                "schema": EventKind::ContextCompileCompleted.payload_schema_id(),
+                "schema": crate::EventKind::ContextCompileCompleted.payload_schema_id(),
                 "strategy": "naive_assembly",
                 "output_hash": "sha256:compiled-context",
                 "read_plan": read_plan.clone(),
             }),
-            EventProvenance {
+            crate::EventProvenance {
                 source_streams: vec![stream_id.clone()],
                 source_range: Some(source_range.clone()),
                 source_ranges: vec![source_range.clone()],
                 discharged_by: Some("projection:context-compiler".to_string()),
                 function: Some("naive_assembly/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         ),
     );
-    let summary = EventRecord::from_new(
+    let summary = crate::EventRecord::from_new(
         stream_id.clone(),
-        EventSequence::new(4),
-        NewEventRecord::discharged(
+        crate::EventSequence::new(4),
+        crate::NewEventRecord::discharged(
             coordinates.clone(),
-            EventKind::ContextSummaryCompleted,
+            crate::EventKind::ContextSummaryCompleted,
             serde_json::json!({
-                "schema": EventKind::ContextSummaryCompleted.payload_schema_id(),
+                "schema": crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
                 "role": "summary_checkpoint",
                 "text": "The compacted discharge text stays inside the stream payload.",
                 "covered_ranges": [{
@@ -1470,31 +1510,31 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
                     "sha256": "sha256:summary-content"
                 }
             }),
-            EventProvenance {
+            crate::EventProvenance {
                 source_streams: vec![stream_id.clone()],
                 source_range: Some(source_range.clone()),
                 source_ranges: vec![source_range],
                 discharged_by: Some("projection:context-summarizer".to_string()),
                 function: Some("context_summary/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         ),
     );
-    let read_plan_set = EventRecord::from_new(
+    let read_plan_set = crate::EventRecord::from_new(
         stream_id.clone(),
-        EventSequence::new(5),
-        NewEventRecord::discharged(
+        crate::EventSequence::new(5),
+        crate::NewEventRecord::discharged(
             coordinates.clone(),
-            EventKind::ContextReadPlanSet,
+            crate::EventKind::ContextReadPlanSet,
             serde_json::json!({
-                "schema": EventKind::ContextReadPlanSet.payload_schema_id(),
+                "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
                 "scope": "thread",
                 "name": "history.default",
                 "pipeline_id": "context.default",
                 "source_id": stream_id.as_str(),
                 "summary_event_id": summary.id.to_string(),
                 "read_plan": {
-                    "schema": CONTEXT_READ_PLAN_SCHEMA_V1,
+                    "schema": crate::CONTEXT_READ_PLAN_SCHEMA_V1,
                     "name": "history.default",
                     "source_stream": stream_id.as_str(),
                     "frontier": "compile_frontier",
@@ -1510,23 +1550,23 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
                     }]
                 }
             }),
-            EventProvenance {
+            crate::EventProvenance {
                 source_streams: vec![stream_id.clone()],
                 source_event_ids: vec![summary.id],
                 discharged_by: Some("controller:context-budget".to_string()),
                 function: Some("context_read_plan/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         ),
     );
 
-    let registry = stream_schema_registry_v1();
+    let registry = crate::stream_schema_registry_v1();
     for record in [&compile, &summary, &read_plan_set] {
         record.validate_stream_record_v1().unwrap();
-        validate_context_payload_schema_v1(record.kind, &record.payload).unwrap();
+        crate::validate_context_payload_schema_v1(record.kind, &record.payload).unwrap();
         registry
             .validate(
-                STREAM_RECORD_SCHEMA_V1,
+                crate::STREAM_RECORD_SCHEMA_V1,
                 &serde_json::to_value(record.to_stream_record_v1()).unwrap(),
             )
             .unwrap();
@@ -1538,7 +1578,7 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
         .unwrap()
         .remove("stream_id");
     let err = registry
-        .validate(STREAM_RECORD_SCHEMA_V1, &missing_stream_id)
+        .validate(crate::STREAM_RECORD_SCHEMA_V1, &missing_stream_id)
         .unwrap_err();
     assert!(
         err.to_string()
@@ -1548,12 +1588,12 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
     let mut malformed_plan = read_plan;
     malformed_plan["entries"][0]["kind"] = serde_json::json!("keep_everything");
     let err = registry
-        .validate(CONTEXT_READ_PLAN_SCHEMA_V1, &malformed_plan)
+        .validate(crate::CONTEXT_READ_PLAN_SCHEMA_V1, &malformed_plan)
         .unwrap_err();
     assert!(err.to_string().contains("allowed enum values"));
 
     let mut debug_export = serde_json::json!({
-        "schema": DEBUG_THREAD_EXPORT_SCHEMA_V1,
+        "schema": crate::DEBUG_THREAD_EXPORT_SCHEMA_V1,
         "threadId": coordinates.thread_id.to_string(),
         "generatedAtMs": 1_771_718_499_999i64,
         "backend": {
@@ -1596,11 +1636,11 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
         "receipts": []
     });
     registry
-        .validate(DEBUG_THREAD_EXPORT_SCHEMA_V1, &debug_export)
+        .validate(crate::DEBUG_THREAD_EXPORT_SCHEMA_V1, &debug_export)
         .unwrap();
     debug_export.as_object_mut().unwrap().remove("streams");
     let err = registry
-        .validate(DEBUG_THREAD_EXPORT_SCHEMA_V1, &debug_export)
+        .validate(crate::DEBUG_THREAD_EXPORT_SCHEMA_V1, &debug_export)
         .unwrap_err();
     assert!(
         err.to_string()
@@ -1608,7 +1648,7 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
     );
 
     let mut debug_export_with_extra = serde_json::json!({
-        "schema": DEBUG_THREAD_EXPORT_SCHEMA_V1,
+        "schema": crate::DEBUG_THREAD_EXPORT_SCHEMA_V1,
         "threadId": coordinates.thread_id.to_string(),
         "generatedAtMs": 1_771_718_499_999i64,
         "backend": {
@@ -1629,7 +1669,10 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
         "surprise": true
     });
     let err = registry
-        .validate(DEBUG_THREAD_EXPORT_SCHEMA_V1, &debug_export_with_extra)
+        .validate(
+            crate::DEBUG_THREAD_EXPORT_SCHEMA_V1,
+            &debug_export_with_extra,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("unexpected property \"surprise\""));
     debug_export_with_extra
@@ -1637,7 +1680,10 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
         .unwrap()
         .remove("surprise");
     registry
-        .validate(DEBUG_THREAD_EXPORT_SCHEMA_V1, &debug_export_with_extra)
+        .validate(
+            crate::DEBUG_THREAD_EXPORT_SCHEMA_V1,
+            &debug_export_with_extra,
+        )
         .unwrap();
 }
 
@@ -1649,7 +1695,7 @@ fn legacy_ingress_received_payload_decodes_without_witnessed_content() {
         "envelope_digest": "sha256:legacy"
     });
 
-    let decoded: IoIngressReceivedPayload = serde_json::from_value(raw).unwrap();
+    let decoded: crate::IoIngressReceivedPayload = serde_json::from_value(raw).unwrap();
 
     assert!(decoded.content.is_none());
 }
@@ -1657,34 +1703,34 @@ fn legacy_ingress_received_payload_decodes_without_witnessed_content() {
 #[tokio::test]
 async fn discharged_control_event_kinds_require_provenance() {
     let discharged_kinds = [
-        EventKind::ToolCallRequested,
-        EventKind::ToolCallSuspended,
-        EventKind::ToolCallDecision,
-        EventKind::TurnWaiting,
-        EventKind::TurnResumed,
-        EventKind::TurnCompleted,
-        EventKind::ApprovalRequested,
-        EventKind::TurnContinueRequested,
-        EventKind::TurnContinuationAccepted,
-        EventKind::TurnContinuationRejected,
-        EventKind::LoopCompleted,
-        EventKind::LoopBlocked,
-        EventKind::LoopBudgetExhausted,
-        EventKind::LoopDenied,
-        EventKind::CouplingRunCompleted,
-        EventKind::CouplingRunFailed,
-        EventKind::PlacementDecision,
+        crate::EventKind::ToolCallRequested,
+        crate::EventKind::ToolCallSuspended,
+        crate::EventKind::ToolCallDecision,
+        crate::EventKind::TurnWaiting,
+        crate::EventKind::TurnResumed,
+        crate::EventKind::TurnCompleted,
+        crate::EventKind::ApprovalRequested,
+        crate::EventKind::TurnContinueRequested,
+        crate::EventKind::TurnContinuationAccepted,
+        crate::EventKind::TurnContinuationRejected,
+        crate::EventKind::LoopCompleted,
+        crate::EventKind::LoopBlocked,
+        crate::EventKind::LoopBudgetExhausted,
+        crate::EventKind::LoopDenied,
+        crate::EventKind::CouplingRunCompleted,
+        crate::EventKind::CouplingRunFailed,
+        crate::EventKind::PlacementDecision,
     ];
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
 
     for kind in discharged_kinds {
-        let store = InMemorySessionStore::new();
-        let record = NewEventRecord::discharged(
+        let store = crate::InMemorySessionStore::new();
+        let record = crate::NewEventRecord::discharged(
             coordinates.clone(),
             kind,
             serde_json::json!({"kind": kind.as_str()}),
-            EventProvenance::default(),
+            crate::EventProvenance::default(),
         );
         let record_id = record.id;
         let err = store
@@ -1693,7 +1739,7 @@ async fn discharged_control_event_kinds_require_provenance() {
             .unwrap_err();
         assert!(matches!(
             err,
-            HistoryError::DischargedWithoutProvenance(id) if id == record_id
+            crate::HistoryError::DischargedWithoutProvenance(id) if id == record_id
         ));
     }
 }
@@ -1701,23 +1747,23 @@ async fn discharged_control_event_kinds_require_provenance() {
 #[tokio::test]
 async fn discharged_events_without_provenance_are_rejected() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let record = NewEventRecord::discharged(
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let record = crate::NewEventRecord::discharged(
         coordinates.clone(),
-        EventKind::ContextCompileCompleted,
+        crate::EventKind::ContextCompileCompleted,
         serde_json::json!({"output_hash": "sha256:test"}),
-        EventProvenance::default(),
+        crate::EventProvenance::default(),
     );
     let record_id = record.id;
 
-    let memory_store = InMemorySessionStore::new();
+    let memory_store = crate::InMemorySessionStore::new();
     let err = memory_store
         .append_events(&stream_id, vec![record.clone()])
         .await
         .unwrap_err();
     assert!(matches!(
         err,
-        HistoryError::DischargedWithoutProvenance(id) if id == record_id
+        crate::HistoryError::DischargedWithoutProvenance(id) if id == record_id
     ));
     assert!(
         memory_store
@@ -1731,16 +1777,16 @@ async fn discharged_events_without_provenance_are_rejected() {
 #[tokio::test]
 async fn loop_discharged_session_entry_records_triggering_event_id() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let store = InMemorySessionStore::new();
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let store = crate::InMemorySessionStore::new();
     let submitted = store
         .append_events(
             &stream_id,
-            vec![NewEventRecord::witnessed(
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::TurnSubmitted,
+                crate::EventKind::TurnSubmitted,
                 serde_json::json!({
-                    "schema": EventKind::TurnSubmitted.payload_schema_id(),
+                    "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
                     "turn_id": "turn-1",
                 }),
             )],
@@ -1753,21 +1799,21 @@ async fn loop_discharged_session_entry_records_triggering_event_id() {
         .append_with_provenance(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::assistant(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::assistant(
                     "test-provider",
-                    ProviderApi::OpenAIResponses,
+                    crate::ProviderApi::OpenAIResponses,
                     "model-1",
-                    vec![CanonicalContent::text("hello back")],
-                    CanonicalStopReason::EndTurn,
+                    vec![crate::CanonicalContent::text("hello back")],
+                    crate::CanonicalStopReason::EndTurn,
                 ),
             },
-            EventProvenance {
+            crate::EventProvenance {
                 source_streams: vec![stream_id.clone()],
                 source_event_ids: vec![submitted.id],
                 discharged_by: Some("propagator:agent-loop".to_string()),
                 function: Some("session_entry_append/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         )
         .await
@@ -1777,11 +1823,11 @@ async fn loop_discharged_session_entry_records_triggering_event_id() {
     let assistant_event = events
         .iter()
         .find(|event| {
-            event.kind == EventKind::SessionEntryAppended
+            event.kind == crate::EventKind::SessionEntryAppended
                 && event.payload["entry_id"] == assistant_entry.entry_id.to_string()
         })
         .unwrap();
-    assert_eq!(assistant_event.origin, EventOrigin::Discharged);
+    assert_eq!(assistant_event.origin, crate::EventOrigin::Discharged);
     assert_eq!(
         assistant_event.provenance.source_event_ids,
         vec![submitted.id]
@@ -1795,20 +1841,20 @@ async fn loop_discharged_session_entry_records_triggering_event_id() {
 #[tokio::test]
 async fn in_memory_append_events_rejects_partial_batch_without_mutation() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let valid = NewEventRecord::witnessed(
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let valid = crate::NewEventRecord::witnessed(
         coordinates.clone(),
-        EventKind::SessionEntryAppended,
+        crate::EventKind::SessionEntryAppended,
         serde_json::json!({"entry_id": "entry-1"}),
     );
-    let invalid = NewEventRecord::discharged(
+    let invalid = crate::NewEventRecord::discharged(
         coordinates.clone(),
-        EventKind::ContextCompileCompleted,
+        crate::EventKind::ContextCompileCompleted,
         serde_json::json!({"output_hash": "sha256:test"}),
-        EventProvenance::default(),
+        crate::EventProvenance::default(),
     );
     let invalid_id = invalid.id;
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
 
     let err = store
         .append_events(&stream_id, vec![valid.clone(), invalid])
@@ -1816,7 +1862,7 @@ async fn in_memory_append_events_rejects_partial_batch_without_mutation() {
         .unwrap_err();
     assert!(matches!(
         err,
-        HistoryError::DischargedWithoutProvenance(id) if id == invalid_id
+        crate::HistoryError::DischargedWithoutProvenance(id) if id == invalid_id
     ));
     assert!(
         store
@@ -1834,24 +1880,26 @@ async fn in_memory_append_events_rejects_partial_batch_without_mutation() {
 #[tokio::test]
 async fn in_memory_append_events_validate_stream_schema_before_mutation() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let valid = NewEventRecord::witnessed(
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let valid = crate::NewEventRecord::witnessed(
         coordinates.clone(),
-        EventKind::SessionEntryAppended,
+        crate::EventKind::SessionEntryAppended,
         serde_json::json!({"entry_id": "entry-1"}),
     );
-    let invalid = NewEventRecord::witnessed(
+    let invalid = crate::NewEventRecord::witnessed(
         coordinates,
-        EventKind::TurnSubmitted,
+        crate::EventKind::TurnSubmitted,
         serde_json::json!("not-an-object-payload"),
     );
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
 
     let err = store
         .append_events(&stream_id, vec![valid.clone(), invalid])
         .await
         .unwrap_err();
-    assert!(matches!(err, HistoryError::Codec(message) if message.contains("expected object")));
+    assert!(
+        matches!(err, crate::HistoryError::Codec(message) if message.contains("expected object"))
+    );
     assert!(
         store
             .read_events(&stream_id, None)
@@ -1868,28 +1916,28 @@ async fn in_memory_append_events_validate_stream_schema_before_mutation() {
 #[tokio::test]
 async fn in_memory_append_events_validates_io_egress_requested_payload_schema() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let invalid = NewEventRecord::discharged(
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let invalid = crate::NewEventRecord::discharged(
         coordinates.clone(),
-        EventKind::IoEgressRequested,
+        crate::EventKind::IoEgressRequested,
         serde_json::json!({
-            "schema": EventKind::IoEgressRequested.payload_schema_id(),
+            "schema": crate::EventKind::IoEgressRequested.payload_schema_id(),
             "requested_by_tool_call_id": "call_1"
         }),
-        EventProvenance {
+        crate::EventProvenance {
             source_streams: vec![stream_id.clone()],
             discharged_by: Some("rpc:append_events".to_string()),
             function: Some("io_egress_requested/v1".to_string()),
-            ..EventProvenance::default()
+            ..crate::EventProvenance::default()
         },
     );
-    let store = InMemorySessionStore::new();
+    let store = crate::InMemorySessionStore::new();
 
     let err = store
         .append_events(&stream_id, vec![invalid])
         .await
         .unwrap_err();
-    assert!(matches!(err, HistoryError::Codec(message) if message.contains("egress_kind")));
+    assert!(matches!(err, crate::HistoryError::Codec(message) if message.contains("egress_kind")));
     assert!(
         store
             .read_events(&stream_id, None)
@@ -1902,26 +1950,26 @@ async fn in_memory_append_events_validates_io_egress_requested_payload_schema() 
 #[tokio::test]
 async fn in_memory_stream_cursor_reads_strictly_after_verified_event() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let store = InMemorySessionStore::new();
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+    let store = crate::InMemorySessionStore::new();
 
     let appended = store
         .append_events(
             &stream_id,
             vec![
-                NewEventRecord::witnessed(
+                crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnSubmitted,
+                    crate::EventKind::TurnSubmitted,
                     serde_json::json!({"schema": "cooldis.event.turn.submitted/1", "turn_id": "turn-1"}),
                 ),
-                NewEventRecord::witnessed(
+                crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::ToolCallCompleted,
+                    crate::EventKind::ToolCallCompleted,
                     serde_json::json!({"schema": "cooldis.event.tool.call.completed/1", "call_id": "call-1"}),
                 ),
-                NewEventRecord::witnessed(
+                crate::NewEventRecord::witnessed(
                     coordinates,
-                    EventKind::TurnCompleted,
+                    crate::EventKind::TurnCompleted,
                     serde_json::json!({"schema": "cooldis.event.turn.completed/1", "turn_id": "turn-1"}),
                 ),
             ],
@@ -1944,17 +1992,17 @@ async fn in_memory_stream_cursor_reads_strictly_after_verified_event() {
     assert_eq!(replay[0].id, appended[1].id);
     assert_eq!(replay[1].id, appended[2].id);
 
-    let wrong_stream = EventStreamId::new("control:wrong-thread");
+    let wrong_stream = crate::EventStreamId::new("control:wrong-thread");
     let stream_err = store
         .read_events_after_cursor(&wrong_stream, &cursor)
         .await
         .unwrap_err();
     assert!(matches!(
         stream_err,
-        HistoryError::StreamCursorStreamMismatch { .. }
+        crate::HistoryError::StreamCursorStreamMismatch { .. }
     ));
 
-    let tampered = StreamCursorV1 {
+    let tampered = crate::StreamCursorV1 {
         event_id: appended[2].id,
         ..cursor
     };
@@ -1964,6 +2012,6 @@ async fn in_memory_stream_cursor_reads_strictly_after_verified_event() {
         .unwrap_err();
     assert!(matches!(
         cursor_err,
-        HistoryError::StreamCursorMismatch { .. }
+        crate::HistoryError::StreamCursorMismatch { .. }
     ));
 }

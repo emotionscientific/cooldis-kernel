@@ -9,50 +9,22 @@
 //! `manifest.bind.completed` event. Both fail closed: a thread either starts
 //! with a fully resolved, receipted configuration or it does not start.
 
-use crate::agent::manifest::{AgentAliasResolutionReceipt, PublishedAgentRecord};
-use crate::agent::manifest_schema::{
-    AgentManifestBudgetRest, AgentManifestBudgetShare, AgentManifestContextPipeline,
-    AgentManifestCoupling, AgentManifestCouplingBudget, AgentManifestCouplingQuota,
-    AgentManifestCouplingSelector, AgentManifestCouplingSink, AgentManifestGrant,
-    AgentManifestGrantExpiry, AgentManifestMaxToolRounds, AgentManifestModelProfile,
-    AgentManifestProtocolToolImport, AgentManifestResource, AgentManifestResourceKind,
-    AgentManifestRuntimeDefaults, AgentManifestRuntimeOverrideKey, AgentManifestSchema,
-    AgentManifestTool, AgentManifestToolSurface, AgentManifestWorkspaceMode,
-    AgentManifestWorkspaceRequirement, EffectClass, KERNEL_ASSEMBLER_STATIC,
-};
-use crate::agent::tool_universe::{
-    PinnedToolRef, ToolUniverseBindReceipt, ToolUniverseBinding, ToolUniverseDiscoverer,
-};
-use crate::kernel::control_decision::PlacementTarget;
-use crate::kernel::coupling_executor_registry::{
-    RegisteredCouplingExecutorKind, registered_coupling_executor_for_id,
-};
-use crate::{
-    DeclaredSkillPackageRef, EventKind, LlmProviderRecord, LocalBlobRegistry,
-    LocalOperationRegistry, LocalSkillRegistry, ProviderCapabilityRecord, PublishedOperationSource,
-    SkillPackageEntry, THREADS_SPAWN_CAPABILITY, VERLET_THREADS_PACKAGE, VerletError, VerletResult,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use sha2::Digest as _;
+use std::io::Read as _;
 #[cfg(unix)]
-use std::ffi::{CStr, CString, OsString};
-use std::fs::File;
-use std::io::Read;
+use std::os::fd::AsRawFd as _;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::FromRawFd as _;
 #[cfg(unix)]
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt as _;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::ffi::OsStringExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-use verlet_abi::{
-    COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI, WasmOperationDefinition,
-    WasmOperationValueKind,
-};
+use std::os::windows::fs::MetadataExt as _;
 
 /// `discharged_by` coupling names and `function` versions for the two
 /// manifest receipts, mirroring `projection:context-compiler` /
@@ -72,7 +44,7 @@ pub const THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA: &str =
 /// field is checked against the manifest's override allowlist
 /// (`AgentManifestRuntimeOverridePolicy`); a non-allowlisted override fails
 /// the bind, it is never silently ignored.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestBindOverrides {
     #[serde(default, alias = "defaultCwd")]
@@ -88,7 +60,7 @@ pub struct AgentManifestBindOverrides {
         alias = "maxToolRounds",
         skip_serializing_if = "Option::is_none"
     )]
-    pub max_tool_rounds: Option<AgentManifestMaxToolRounds>,
+    pub max_tool_rounds: Option<crate::agent::manifest_schema::AgentManifestMaxToolRounds>,
     #[serde(
         default,
         alias = "compactionAutoAtTextBytes",
@@ -112,7 +84,7 @@ impl AgentManifestBindOverrides {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentManifestProviderSurface {
     pub provider_id: String,
-    pub model_ids: BTreeSet<String>,
+    pub model_ids: std::collections::BTreeSet<String>,
     pub supports_streaming: bool,
 }
 
@@ -121,7 +93,7 @@ impl AgentManifestProviderSurface {
     pub fn single(provider_id: impl Into<String>, model_id: impl Into<String>) -> Self {
         Self {
             provider_id: provider_id.into(),
-            model_ids: BTreeSet::from([model_id.into()]),
+            model_ids: std::collections::BTreeSet::from([model_id.into()]),
             supports_streaming: true,
         }
     }
@@ -132,7 +104,7 @@ impl AgentManifestProviderSurface {
     }
 
     /// A catalog-backed provider surface from the stored provider record.
-    pub fn from_provider_record(record: &LlmProviderRecord) -> Self {
+    pub fn from_provider_record(record: &crate::LlmProviderRecord) -> Self {
         Self {
             provider_id: record.provider_id.clone(),
             model_ids: record
@@ -140,7 +112,7 @@ impl AgentManifestProviderSurface {
                 .iter()
                 .map(|model| model.model_id.clone())
                 .collect(),
-            supports_streaming: ProviderCapabilityRecord::for_api(record.api.clone())
+            supports_streaming: crate::ProviderCapabilityRecord::for_api(record.api.clone())
                 .supports_streaming,
         }
     }
@@ -180,7 +152,7 @@ impl AgentManifestModelProfileSelection {
 /// Result of compiling and binding a published manifest for one thread.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentManifestBoundThread {
-    pub manifest: AgentManifestSchema,
+    pub manifest: crate::agent::manifest_schema::AgentManifestSchema,
     pub compile_receipt: AgentManifestCompileReceipt,
     pub bind_receipt: AgentManifestBindReceipt,
     pub coupling_set: BoundCouplingSet,
@@ -194,19 +166,22 @@ pub struct AgentManifestBoundThread {
     /// Witnessed universe bindings for the thread's protocol tool imports;
     /// the runtime factory mounts these as the search surface (plus direct
     /// rows for pins).
-    pub tool_universes: Vec<ToolUniverseBinding>,
+    pub tool_universes: Vec<crate::agent::tool_universe::ToolUniverseBinding>,
 }
 
 /// Re-parse the immutable published record into the typed manifest schema
 /// and build the compile receipt for the thread stream.
 pub fn compile_published_agent_record(
-    record: &PublishedAgentRecord,
-    alias: Option<AgentAliasResolutionReceipt>,
-) -> VerletResult<(AgentManifestSchema, AgentManifestCompileReceipt)> {
+    record: &crate::agent::manifest::PublishedAgentRecord,
+    alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
+) -> crate::VerletResult<(
+    crate::agent::manifest_schema::AgentManifestSchema,
+    AgentManifestCompileReceipt,
+)> {
     record.validate()?;
-    let manifest: AgentManifestSchema = serde_json::from_value(record.resolved_manifest.clone())
-        .map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+    let manifest: crate::agent::manifest_schema::AgentManifestSchema =
+        serde_json::from_value(record.resolved_manifest.clone()).map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to decode resolved agent manifest {}: {err}",
                 record.ref_uri
             ))
@@ -224,17 +199,17 @@ pub fn compile_published_agent_record(
 /// Compile and bind a published manifest against the live app-server
 /// provider, operation, and MCP source surfaces.
 pub async fn bind_published_agent_record(
-    record: &PublishedAgentRecord,
-    alias: Option<AgentAliasResolutionReceipt>,
+    record: &crate::agent::manifest::PublishedAgentRecord,
+    alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
     provider_surface: &AgentManifestProviderSurface,
-    operation_registry_root: Option<&Path>,
-    blob_registry_root: Option<&Path>,
-    skill_registry_root: Option<&Path>,
-    configured_mcp_server_refs: &BTreeSet<String>,
-    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    operation_registry_root: Option<&std::path::Path>,
+    blob_registry_root: Option<&std::path::Path>,
+    skill_registry_root: Option<&std::path::Path>,
+    configured_mcp_server_refs: &std::collections::BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
     model_selection: &AgentManifestModelProfileSelection,
     overrides: &AgentManifestBindOverrides,
-) -> VerletResult<AgentManifestBoundThread> {
+) -> crate::VerletResult<AgentManifestBoundThread> {
     bind_published_agent_record_at(
         record,
         alias,
@@ -254,18 +229,18 @@ pub async fn bind_published_agent_record(
 /// Compile and bind with caller-supplied time for deterministic authority
 /// checks. Production callers normally use [`bind_published_agent_record`].
 pub async fn bind_published_agent_record_at(
-    record: &PublishedAgentRecord,
-    alias: Option<AgentAliasResolutionReceipt>,
+    record: &crate::agent::manifest::PublishedAgentRecord,
+    alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
     provider_surface: &AgentManifestProviderSurface,
-    operation_registry_root: Option<&Path>,
-    blob_registry_root: Option<&Path>,
-    skill_registry_root: Option<&Path>,
-    configured_mcp_server_refs: &BTreeSet<String>,
-    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    operation_registry_root: Option<&std::path::Path>,
+    blob_registry_root: Option<&std::path::Path>,
+    skill_registry_root: Option<&std::path::Path>,
+    configured_mcp_server_refs: &std::collections::BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
     model_selection: &AgentManifestModelProfileSelection,
     overrides: &AgentManifestBindOverrides,
     now_ms: i64,
-) -> VerletResult<AgentManifestBoundThread> {
+) -> crate::VerletResult<AgentManifestBoundThread> {
     bind_published_agent_record_with_placement_at(
         record,
         alias,
@@ -294,14 +269,14 @@ pub async fn bind_published_agent_record_at(
 /// from manifest runtime overrides: manifests are portable and cannot allow,
 /// deny, or select their deployment target.
 pub async fn bind_published_agent_record_with_placement(
-    record: &PublishedAgentRecord,
-    alias: Option<AgentAliasResolutionReceipt>,
+    record: &crate::agent::manifest::PublishedAgentRecord,
+    alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
     provider_surface: &AgentManifestProviderSurface,
-    operation_registry_root: Option<&Path>,
-    blob_registry_root: Option<&Path>,
-    skill_registry_root: Option<&Path>,
-    configured_mcp_server_refs: &BTreeSet<String>,
-    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    operation_registry_root: Option<&std::path::Path>,
+    blob_registry_root: Option<&std::path::Path>,
+    skill_registry_root: Option<&std::path::Path>,
+    configured_mcp_server_refs: &std::collections::BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
     model_selection: &AgentManifestModelProfileSelection,
     overrides: &AgentManifestBindOverrides,
     default_placement: Option<&AgentManifestPlacementBinding>,
@@ -309,7 +284,7 @@ pub async fn bind_published_agent_record_with_placement(
     default_workspace: Option<&AgentManifestWorkspaceBinding>,
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
     remote_event_store_served: bool,
-) -> VerletResult<AgentManifestBoundThread> {
+) -> crate::VerletResult<AgentManifestBoundThread> {
     bind_published_agent_record_with_placement_at(
         record,
         alias,
@@ -333,14 +308,14 @@ pub async fn bind_published_agent_record_with_placement(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn bind_published_agent_record_with_placement_at(
-    record: &PublishedAgentRecord,
-    alias: Option<AgentAliasResolutionReceipt>,
+    record: &crate::agent::manifest::PublishedAgentRecord,
+    alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
     provider_surface: &AgentManifestProviderSurface,
-    operation_registry_root: Option<&Path>,
-    blob_registry_root: Option<&Path>,
-    skill_registry_root: Option<&Path>,
-    configured_mcp_server_refs: &BTreeSet<String>,
-    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    operation_registry_root: Option<&std::path::Path>,
+    blob_registry_root: Option<&std::path::Path>,
+    skill_registry_root: Option<&std::path::Path>,
+    configured_mcp_server_refs: &std::collections::BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
     model_selection: &AgentManifestModelProfileSelection,
     overrides: &AgentManifestBindOverrides,
     default_placement: Option<&AgentManifestPlacementBinding>,
@@ -349,7 +324,7 @@ pub async fn bind_published_agent_record_with_placement_at(
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
     remote_event_store_served: bool,
     now_ms: i64,
-) -> VerletResult<AgentManifestBoundThread> {
+) -> crate::VerletResult<AgentManifestBoundThread> {
     bind_published_agent_record_with_placement_and_skill_witness(
         record,
         alias,
@@ -375,14 +350,14 @@ pub async fn bind_published_agent_record_with_placement_at(
 }
 
 pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness(
-    record: &PublishedAgentRecord,
-    alias: Option<AgentAliasResolutionReceipt>,
+    record: &crate::agent::manifest::PublishedAgentRecord,
+    alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
     provider_surface: &AgentManifestProviderSurface,
-    operation_registry_root: Option<&Path>,
-    blob_registry_root: Option<&Path>,
-    skill_registry_root: Option<&Path>,
-    configured_mcp_server_refs: &BTreeSet<String>,
-    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    operation_registry_root: Option<&std::path::Path>,
+    blob_registry_root: Option<&std::path::Path>,
+    skill_registry_root: Option<&std::path::Path>,
+    configured_mcp_server_refs: &std::collections::BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
     model_selection: &AgentManifestModelProfileSelection,
     overrides: &AgentManifestBindOverrides,
     default_placement: Option<&AgentManifestPlacementBinding>,
@@ -394,7 +369,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     skill_discovery_witness: Option<&AgentManifestSkillDiscovery>,
     rehydrating_from_witness: bool,
     now_ms: i64,
-) -> VerletResult<AgentManifestBoundThread> {
+) -> crate::VerletResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
     let placement = resolve_manifest_placement_with_origin(
         default_placement,
@@ -406,8 +381,10 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
         default_workspace,
         workspace_override,
     )?;
-    if placement.binding.target != PlacementTarget::Local && workspace.is_some() {
-        return Err(VerletError::RuntimeFactory(
+    if placement.binding.target != crate::kernel::control_decision::PlacementTarget::Local
+        && workspace.is_some()
+    {
+        return Err(crate::VerletError::RuntimeFactory(
             "workspace bindings currently require local placement; remote and sandbox workspace transfer belongs to the sandbox executor boundary"
                 .to_string(),
         ));
@@ -416,7 +393,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     let profile = selected.profile;
     let provider_id = selected.provider_id;
     if provider_id != provider_surface.provider_id {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "agent manifest provider_ref {:?} is not configured; available provider is {:?}",
             profile.provider_ref, provider_surface.provider_id
         )));
@@ -429,7 +406,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
             .cloned()
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "agent manifest model_ref {:?} is not configured for provider {:?}; available models: {}",
             profile.model_ref, provider_id, available
         )));
@@ -438,7 +415,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     let (effective_runtime, overridden_keys) =
         apply_runtime_overrides(&manifest.runtime, overrides)?;
     if effective_runtime.streaming && !provider_surface.supports_streaming {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "agent manifest runtime.streaming requires provider {:?} to support streaming",
             provider_surface.provider_id
         )));
@@ -511,7 +488,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
         tool_universes: bound_tools
             .tool_universes
             .iter()
-            .map(ToolUniverseBindReceipt::from_binding)
+            .map(crate::agent::tool_universe::ToolUniverseBindReceipt::from_binding)
             .collect(),
         couplings: coupling_bindings,
         granted: bound_tools.granted,
@@ -555,23 +532,23 @@ struct BoundTools {
     granted: Vec<String>,
     grant_bindings: Vec<AgentManifestGrantBindingReceipt>,
     operation_bindings: Vec<AgentManifestOperationBinding>,
-    tool_universes: Vec<ToolUniverseBinding>,
+    tool_universes: Vec<crate::agent::tool_universe::ToolUniverseBinding>,
 }
 
 struct BoundSkills {
     package_bindings: Vec<AgentManifestSkillPackageBinding>,
     context_segments: Vec<AgentManifestStaticContextSegment>,
-    skill_names: BTreeSet<String>,
+    skill_names: std::collections::BTreeSet<String>,
 }
 
 fn bind_static_context_sources(
-    manifest: &AgentManifestSchema,
-    blob_registry_root: Option<&Path>,
-) -> VerletResult<Vec<AgentManifestStaticContextSegment>> {
+    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
+    blob_registry_root: Option<&std::path::Path>,
+) -> crate::VerletResult<Vec<AgentManifestStaticContextSegment>> {
     let pipeline = manifest.effective_context_pipeline();
     let mut segments = Vec::new();
     for source in &pipeline.sources {
-        if source.assembler != KERNEL_ASSEMBLER_STATIC {
+        if source.assembler != crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC {
             continue;
         }
         let Some(input) = source
@@ -584,16 +561,16 @@ fn bind_static_context_sources(
         let Some(resource) = static_source_resource(input, &manifest.resources)? else {
             continue;
         };
-        if resource.kind != AgentManifestResourceKind::Blob {
+        if resource.kind != crate::agent::manifest_schema::AgentManifestResourceKind::Blob {
             continue;
         }
         let registry_root = blob_registry_root.ok_or_else(|| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "blob resource {:?} ref {:?} requires an app-server blob registry root",
                 resource.name, resource.reference
             ))
         })?;
-        let registry = LocalBlobRegistry::new(registry_root);
+        let registry = crate::LocalBlobRegistry::new(registry_root);
         let (record, content) = registry
             .load_text_ref(&resource.reference)
             .map_err(|err| missing_blob_resource_error(resource, err))?;
@@ -613,15 +590,15 @@ fn bind_static_context_sources(
 
 fn static_source_resource<'a>(
     input: &str,
-    resources: &'a [AgentManifestResource],
-) -> VerletResult<Option<&'a AgentManifestResource>> {
+    resources: &'a [crate::agent::manifest_schema::AgentManifestResource],
+) -> crate::VerletResult<Option<&'a crate::agent::manifest_schema::AgentManifestResource>> {
     if input.starts_with("resource://") || input.starts_with("skill://") {
         return resources
             .iter()
             .find(|resource| resource.reference == input)
             .map(Some)
             .ok_or_else(|| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "static context source input {input:?} does not match a declared resource ref"
                 ))
             });
@@ -631,24 +608,24 @@ fn static_source_resource<'a>(
         .find(|resource| resource.name == input)
         .map(Some)
         .ok_or_else(|| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "static context source input {input:?} does not name a declared resource"
             ))
         })
 }
 
 fn missing_blob_resource_error(
-    resource: &AgentManifestResource,
+    resource: &crate::agent::manifest_schema::AgentManifestResource,
     err: impl std::fmt::Display,
-) -> VerletError {
-    VerletError::RuntimeFactory(format!(
+) -> crate::VerletError {
+    crate::VerletError::RuntimeFactory(format!(
         "blob resource {:?} ref {:?} was not found in the local blob registry: {err}; run `verlet blob publish <file>` and use the returned resource://artifact/sha256:<hash> ref",
         resource.name, resource.reference
     ))
 }
 
 fn static_source_budget_share(
-    pipeline: &AgentManifestContextPipeline,
+    pipeline: &crate::agent::manifest_schema::AgentManifestContextPipeline,
     source_id: &str,
 ) -> Option<f64> {
     pipeline
@@ -656,26 +633,34 @@ fn static_source_budget_share(
         .iter()
         .find(|source| source.id == source_id)
         .and_then(|source| match source.budget_share {
-            Some(AgentManifestBudgetShare::Fraction(value)) => Some(value),
-            Some(AgentManifestBudgetShare::Rest(AgentManifestBudgetRest::Rest)) | None => None,
+            Some(crate::agent::manifest_schema::AgentManifestBudgetShare::Fraction(value)) => {
+                Some(value)
+            }
+            Some(crate::agent::manifest_schema::AgentManifestBudgetShare::Rest(
+                crate::agent::manifest_schema::AgentManifestBudgetRest::Rest,
+            ))
+            | None => None,
         })
 }
 
 /// Role inferred from the coupling's resolved sink relation. Manifest
 /// authors cannot choose this directly.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CouplingRole {
     Projection,
     Controller,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BoundCouplingSet {
     pub snapshot_id: String,
     pub couplings: Vec<BoundCoupling>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub grant_expiries: BTreeMap<String, Vec<AgentManifestGrantExpiry>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub grant_expiries: std::collections::BTreeMap<
+        String,
+        Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
+    >,
 }
 
 impl BoundCouplingSet {
@@ -683,14 +668,17 @@ impl BoundCouplingSet {
         Self {
             snapshot_id: snapshot_id.into(),
             couplings,
-            grant_expiries: BTreeMap::new(),
+            grant_expiries: std::collections::BTreeMap::new(),
         }
     }
 
     pub fn new_with_grant_expiries(
         snapshot_id: impl Into<String>,
         couplings: Vec<BoundCoupling>,
-        grant_expiries: BTreeMap<String, Vec<AgentManifestGrantExpiry>>,
+        grant_expiries: std::collections::BTreeMap<
+            String,
+            Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
+        >,
     ) -> Self {
         Self {
             snapshot_id: snapshot_id.into(),
@@ -700,41 +688,41 @@ impl BoundCouplingSet {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BoundCoupling {
     pub id: String,
     pub role: CouplingRole,
-    pub trigger_kind: EventKind,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub trigger_match: BTreeMap<String, JsonValue>,
-    pub trigger_quota: AgentManifestCouplingQuota,
+    pub trigger_kind: crate::EventKind,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub trigger_match: std::collections::BTreeMap<String, serde_json::Value>,
+    pub trigger_quota: crate::agent::manifest_schema::AgentManifestCouplingQuota,
     pub source_selectors: Vec<BoundCouplingSelector>,
     pub sink: BoundCouplingSink,
     pub function_ref: String,
     pub function: BoundCouplingFunction,
     pub grants: Vec<String>,
-    pub budget: AgentManifestCouplingBudget,
-    pub config: JsonValue,
+    pub budget: crate::agent::manifest_schema::AgentManifestCouplingBudget,
+    pub config: serde_json::Value,
     pub config_hash: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BoundCouplingSelector {
     pub stream: String,
-    pub kinds: Vec<EventKind>,
+    pub kinds: Vec<crate::EventKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BoundCouplingSink {
     pub stream: String,
-    pub kinds: Vec<EventKind>,
+    pub kinds: Vec<crate::EventKind>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BoundCouplingFunction {
     pub name: String,
     pub artifact_hash: String,
@@ -744,11 +732,12 @@ pub struct BoundCouplingFunction {
 
 #[derive(Clone, Debug, Default)]
 struct OperationBindingAccumulator {
-    grants: BTreeSet<String>,
-    grant_expiries: BTreeSet<AgentManifestGrantExpiry>,
-    operations: BTreeSet<String>,
-    direct_tools: BTreeSet<AgentManifestDirectToolBinding>,
-    effect_class: Option<EffectClass>,
+    grants: std::collections::BTreeSet<String>,
+    grant_expiries:
+        std::collections::BTreeSet<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
+    operations: std::collections::BTreeSet<String>,
+    direct_tools: std::collections::BTreeSet<AgentManifestDirectToolBinding>,
+    effect_class: Option<crate::agent::manifest_schema::EffectClass>,
     whole_record: bool,
 }
 
@@ -756,26 +745,28 @@ impl OperationBindingAccumulator {
     #[cfg(test)]
     fn merge(
         &mut self,
-        grants: BTreeSet<String>,
+        grants: std::collections::BTreeSet<String>,
         operation: Option<String>,
         direct_tool: Option<AgentManifestDirectToolBinding>,
     ) {
         self.merge_with_expiries(
             grants,
-            BTreeSet::new(),
+            std::collections::BTreeSet::new(),
             operation,
             direct_tool,
-            EffectClass::AtMostOnce,
+            crate::agent::manifest_schema::EffectClass::AtMostOnce,
         );
     }
 
     fn merge_with_expiries(
         &mut self,
-        grants: BTreeSet<String>,
-        grant_expiries: BTreeSet<AgentManifestGrantExpiry>,
+        grants: std::collections::BTreeSet<String>,
+        grant_expiries: std::collections::BTreeSet<
+            crate::agent::manifest_schema::AgentManifestGrantExpiry,
+        >,
         operation: Option<String>,
         direct_tool: Option<AgentManifestDirectToolBinding>,
-        effect_class: EffectClass,
+        effect_class: crate::agent::manifest_schema::EffectClass,
     ) {
         self.grants.extend(grants);
         self.grant_expiries.extend(grant_expiries);
@@ -808,50 +799,53 @@ impl OperationBindingAccumulator {
     }
 }
 
-type OperationBindingMap = BTreeMap<(String, String), OperationBindingAccumulator>;
+type OperationBindingMap =
+    std::collections::BTreeMap<(String, String), OperationBindingAccumulator>;
 
 fn bind_skill_resources(
-    resources: &[AgentManifestResource],
-    skill_registry_root: Option<&Path>,
-) -> VerletResult<BoundSkills> {
+    resources: &[crate::agent::manifest_schema::AgentManifestResource],
+    skill_registry_root: Option<&std::path::Path>,
+) -> crate::VerletResult<BoundSkills> {
     let skill_resources = resources
         .iter()
-        .filter(|resource| resource.kind == AgentManifestResourceKind::Skill)
+        .filter(|resource| {
+            resource.kind == crate::agent::manifest_schema::AgentManifestResourceKind::Skill
+        })
         .collect::<Vec<_>>();
     if skill_resources.is_empty() {
         return Ok(BoundSkills {
             package_bindings: Vec::new(),
             context_segments: Vec::new(),
-            skill_names: BTreeSet::new(),
+            skill_names: std::collections::BTreeSet::new(),
         });
     }
     let registry_root = skill_registry_root.ok_or_else(|| {
-        VerletError::RuntimeFactory(
+        crate::VerletError::RuntimeFactory(
             "skill resources require an app-server skill registry root".to_string(),
         )
     })?;
-    let registry = LocalSkillRegistry::new(registry_root);
+    let registry = crate::LocalSkillRegistry::new(registry_root);
     let mut package_bindings = Vec::new();
     let mut context_segments = Vec::new();
-    let mut mounted_skill_names = BTreeSet::new();
+    let mut mounted_skill_names = std::collections::BTreeSet::new();
     for resource in skill_resources {
-        let parsed = DeclaredSkillPackageRef::parse(&resource.reference).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let parsed = crate::DeclaredSkillPackageRef::parse(&resource.reference).map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
                 "skill resource {:?} ref {:?} is invalid: {err}",
                 resource.name, resource.reference
             ))
         })?;
         let record = match &parsed {
-            DeclaredSkillPackageRef::Floating { name } => registry.load_record(name).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            crate::DeclaredSkillPackageRef::Floating { name } => registry.load_record(name).map_err(|err| {
+                crate::VerletError::RuntimeFactory(format!(
                     "skill resource {:?} floating ref {:?} was not found in the local skill registry: {err}; publish it first with `verlet skill publish <dir>`",
                     resource.name, resource.reference
                 ))
             }),
-            DeclaredSkillPackageRef::Pinned(reference) => registry
+            crate::DeclaredSkillPackageRef::Pinned(reference) => registry
                 .load_version_record(&reference.name, &reference.artifact_hash)
                 .map_err(|err| {
-                    VerletError::RuntimeFactory(format!(
+                    crate::VerletError::RuntimeFactory(format!(
                         "skill resource {:?} ref {:?} was not found in the local skill registry: {err}; publish the skill package or replace the ref with a hash from the registry",
                         resource.name, resource.reference
                     ))
@@ -874,16 +868,18 @@ fn bind_skill_resources(
 }
 
 fn bind_skill_resources_from_witness(
-    resources: &[AgentManifestResource],
-    skill_registry_root: Option<&Path>,
+    resources: &[crate::agent::manifest_schema::AgentManifestResource],
+    skill_registry_root: Option<&std::path::Path>,
     witness: &[AgentManifestSkillPackageBinding],
-) -> VerletResult<BoundSkills> {
+) -> crate::VerletResult<BoundSkills> {
     let skill_resources = resources
         .iter()
-        .filter(|resource| resource.kind == AgentManifestResourceKind::Skill)
+        .filter(|resource| {
+            resource.kind == crate::agent::manifest_schema::AgentManifestResourceKind::Skill
+        })
         .collect::<Vec<_>>();
     if skill_resources.len() != witness.len() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "stored skill package witness has {} bindings for {} manifest skill resources",
             witness.len(),
             skill_resources.len()
@@ -893,16 +889,16 @@ fn bind_skill_resources_from_witness(
         return Ok(BoundSkills {
             package_bindings: Vec::new(),
             context_segments: Vec::new(),
-            skill_names: BTreeSet::new(),
+            skill_names: std::collections::BTreeSet::new(),
         });
     }
-    let mut bindings_by_resource = BTreeMap::new();
+    let mut bindings_by_resource = std::collections::BTreeMap::new();
     for binding in witness {
         if bindings_by_resource
             .insert(binding.resource_name.as_str(), binding)
             .is_some()
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill package witness repeats resource {:?}",
                 binding.resource_name
             )));
@@ -913,18 +909,18 @@ fn bind_skill_resources_from_witness(
         let binding = bindings_by_resource
             .remove(resource.name.as_str())
             .ok_or_else(|| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "stored skill package witness has no binding for manifest resource {:?}",
                     resource.name
                 ))
             })?;
-        match DeclaredSkillPackageRef::parse(&resource.reference)? {
-            DeclaredSkillPackageRef::Floating { name } if name == binding.package_name => {}
-            DeclaredSkillPackageRef::Pinned(reference)
+        match crate::DeclaredSkillPackageRef::parse(&resource.reference)? {
+            crate::DeclaredSkillPackageRef::Floating { name } if name == binding.package_name => {}
+            crate::DeclaredSkillPackageRef::Pinned(reference)
                 if reference.name == binding.package_name
                     && reference.artifact_hash == binding.artifact_hash => {}
             _ => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "stored skill package binding for resource {:?} does not match manifest ref {:?}",
                     resource.name, resource.reference
                 )));
@@ -944,13 +940,13 @@ fn bind_skill_resources_from_witness(
 fn append_bound_skill(
     resource_name: &str,
     record: &crate::PublishedSkillPackageRecord,
-    mounted_skill_names: &mut BTreeSet<String>,
+    mounted_skill_names: &mut std::collections::BTreeSet<String>,
     package_bindings: &mut Vec<AgentManifestSkillPackageBinding>,
     context_segments: &mut Vec<AgentManifestStaticContextSegment>,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     for skill in &record.package.skills {
         if !mounted_skill_names.insert(skill.name.clone()) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "skill resource {resource_name:?} package {:?} would mount duplicate /skills/{}.md; skill names must be unique across bound packages",
                 record.name, skill.name
             )));
@@ -961,7 +957,7 @@ fn append_bound_skill(
     let ref_uri = record.ref_uri();
     context_segments.push(AgentManifestStaticContextSegment {
         id: format!("skill-index:{resource_name}"),
-        assembler: KERNEL_ASSEMBLER_STATIC.to_string(),
+        assembler: crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC.to_string(),
         input: resource_name.to_string(),
         pinned: true,
         budget_share: None,
@@ -983,15 +979,15 @@ fn append_bound_skill(
 
 pub(crate) fn skill_context_segments_for_witnesses(
     bindings: &[AgentManifestSkillPackageBinding],
-    skill_registry_root: Option<&Path>,
+    skill_registry_root: Option<&std::path::Path>,
     discovery: Option<&AgentManifestSkillDiscovery>,
-) -> VerletResult<Vec<AgentManifestStaticContextSegment>> {
+) -> crate::VerletResult<Vec<AgentManifestStaticContextSegment>> {
     let (mut segments, skill_names) =
         skill_context_segments_and_names_for_bindings(bindings, skill_registry_root)?;
     if let Some(discovery) = discovery {
         let normalized_path = normalize_workspace_relative_path(&discovery.path);
         if discovery.path != normalized_path {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill discovery witness path {:?} is not canonical",
                 discovery.path
             )));
@@ -1004,25 +1000,28 @@ pub(crate) fn skill_context_segments_for_witnesses(
 
 fn skill_context_segments_and_names_for_bindings(
     bindings: &[AgentManifestSkillPackageBinding],
-    skill_registry_root: Option<&Path>,
-) -> VerletResult<(Vec<AgentManifestStaticContextSegment>, BTreeSet<String>)> {
+    skill_registry_root: Option<&std::path::Path>,
+) -> crate::VerletResult<(
+    Vec<AgentManifestStaticContextSegment>,
+    std::collections::BTreeSet<String>,
+)> {
     if bindings.is_empty() {
-        return Ok((Vec::new(), BTreeSet::new()));
+        return Ok((Vec::new(), std::collections::BTreeSet::new()));
     }
     let registry_root = skill_registry_root.ok_or_else(|| {
-        VerletError::RuntimeFactory(
+        crate::VerletError::RuntimeFactory(
             "skill package bindings require an app-server skill registry root".to_string(),
         )
     })?;
-    let registry = LocalSkillRegistry::new(registry_root);
+    let registry = crate::LocalSkillRegistry::new(registry_root);
     let mut actual_bindings = Vec::new();
     let mut context_segments = Vec::new();
-    let mut mounted_skill_names = BTreeSet::new();
+    let mut mounted_skill_names = std::collections::BTreeSet::new();
     for binding in bindings {
         let record = registry
             .load_version_record(&binding.package_name, &binding.artifact_hash)
             .map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "stored skill package binding {:?}@sha256:{} was not found: {err}",
                     binding.package_name, binding.artifact_hash
                 ))
@@ -1035,7 +1034,7 @@ fn skill_context_segments_and_names_for_bindings(
             &mut context_segments,
         )?;
         if actual_bindings.last() != Some(binding) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill package binding for resource {:?} disagrees with immutable registry content",
                 binding.resource_name
             )));
@@ -1073,18 +1072,18 @@ pub(crate) fn skill_package_bindings_match(
 }
 
 fn bind_workspace_skill_discovery(
-    manifest: &AgentManifestSchema,
+    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
     workspace: Option<&AgentManifestResolvedWorkspaceMount>,
     witness: Option<&AgentManifestSkillDiscovery>,
     rehydrating: bool,
-    registry_skill_names: &BTreeSet<String>,
-) -> VerletResult<(
+    registry_skill_names: &std::collections::BTreeSet<String>,
+) -> crate::VerletResult<(
     Option<AgentManifestSkillDiscovery>,
     Option<AgentManifestStaticContextSegment>,
 )> {
     if !manifest.skills.discover {
         if witness.is_some() {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletError::RuntimeFactory(
                 "stored skill discovery witness exists, but the manifest disables workspace skill discovery"
                     .to_string(),
             ));
@@ -1093,7 +1092,7 @@ fn bind_workspace_skill_discovery(
     }
 
     let workspace = workspace.ok_or_else(|| {
-        VerletError::RuntimeFactory(
+        crate::VerletError::RuntimeFactory(
             "agent manifest skill discovery requires a resolved workspace binding".to_string(),
         )
     })?;
@@ -1104,7 +1103,7 @@ fn bind_workspace_skill_discovery(
             witness.clone()
         }
         None if rehydrating => {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletError::RuntimeFactory(
                 "manifest enables workspace skill discovery, but the durable bind receipt has no skill discovery witness"
                     .to_string(),
             ));
@@ -1118,8 +1117,8 @@ fn bind_workspace_skill_discovery(
 fn discover_workspace_skills(
     workspace: &AgentManifestResolvedWorkspaceMount,
     resolved_path: &str,
-    registry_skill_names: &BTreeSet<String>,
-) -> VerletResult<AgentManifestSkillDiscovery> {
+    registry_skill_names: &std::collections::BTreeSet<String>,
+) -> crate::VerletResult<AgentManifestSkillDiscovery> {
     let discovery_root = workspace.host_path.join(resolved_path);
     let canonical_discovery_root = match std::fs::canonicalize(&discovery_root) {
         Ok(path) => path,
@@ -1130,14 +1129,14 @@ fn discover_workspace_skills(
             });
         }
         Err(err) => {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "failed to resolve workspace skill discovery directory {}: {err}",
                 discovery_root.display()
             )));
         }
     };
     if !canonical_discovery_root.starts_with(&workspace.host_path) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "workspace skill discovery path {resolved_path:?} resolves outside the witnessed workspace"
         )));
     }
@@ -1152,20 +1151,20 @@ fn discover_workspace_skills(
             Ok(path) => path,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "failed to resolve discovered workspace skill file {}: {err}",
                     skill_file.display()
                 )));
             }
         };
         if !canonical_skill_file.starts_with(&workspace.host_path) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "discovered workspace skill file {} resolves outside the witnessed workspace",
                 skill_file.display()
             )));
         }
         let Some(file) = open_workspace_skill_file(&skill_dir, &skill_file).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to open discovered workspace skill file {}: {err}",
                 skill_file.display()
             ))
@@ -1174,9 +1173,9 @@ fn discover_workspace_skills(
             continue;
         };
         let body = read_opened_workspace_skill_file(&workspace.host_path, &skill_file, file)?;
-        let entry = SkillPackageEntry::from_skill_body(&skill_dir.path, body)?;
+        let entry = crate::SkillPackageEntry::from_skill_body(&skill_dir.path, body)?;
         if !names.insert(entry.name.clone()) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "workspace skill discovery found duplicate skill name {:?} across discovered entries or registry-bound skill packages",
                 entry.name
             )));
@@ -1186,7 +1185,7 @@ fn discover_workspace_skills(
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "workspace skill directory {} has no unicode name",
                     skill_dir.path.display()
                 ))
@@ -1208,29 +1207,29 @@ fn discover_workspace_skills(
 }
 
 struct WorkspaceSkillDirectory {
-    path: PathBuf,
+    path: std::path::PathBuf,
     #[cfg(unix)]
-    file: File,
+    file: std::fs::File,
 }
 
 #[cfg(unix)]
 fn open_workspace_skill_directories(
-    workspace_host_path: &Path,
-    discovery_root: &Path,
-) -> VerletResult<Vec<WorkspaceSkillDirectory>> {
-    let mut options = File::options();
+    workspace_host_path: &std::path::Path,
+    discovery_root: &std::path::Path,
+) -> crate::VerletResult<Vec<WorkspaceSkillDirectory>> {
+    let mut options = std::fs::File::options();
     options
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW);
     let directory = options.open(discovery_root).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to open workspace skill discovery directory {}: {err}",
             discovery_root.display()
         ))
     })?;
     validate_opened_workspace_directory(workspace_host_path, discovery_root, &directory)?;
     let names = read_opened_directory_names(&directory).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to read opened workspace skill discovery directory {}: {err}",
             discovery_root.display()
         ))
@@ -1238,7 +1237,7 @@ fn open_workspace_skill_directories(
     let mut skill_dirs = Vec::new();
     for name in names {
         if let Some(file) = open_directory_at(&directory, &name).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to inspect workspace skill discovery entry {}: {err}",
                 discovery_root.join(&name).display()
             ))
@@ -1254,11 +1253,11 @@ fn open_workspace_skill_directories(
 
 #[cfg(not(unix))]
 fn open_workspace_skill_directories(
-    _workspace_host_path: &Path,
-    discovery_root: &Path,
-) -> VerletResult<Vec<WorkspaceSkillDirectory>> {
+    _workspace_host_path: &std::path::Path,
+    discovery_root: &std::path::Path,
+) -> crate::VerletResult<Vec<WorkspaceSkillDirectory>> {
     let entries = std::fs::read_dir(discovery_root).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to read workspace skill discovery directory {}: {err}",
             discovery_root.display()
         ))
@@ -1266,13 +1265,13 @@ fn open_workspace_skill_directories(
     let mut skill_dirs = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to read an entry in workspace skill discovery directory {}: {err}",
                 discovery_root.display()
             ))
         })?;
         let file_type = entry.file_type().map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to inspect workspace skill discovery entry {}: {err}",
                 entry.path().display()
             ))
@@ -1287,36 +1286,36 @@ fn open_workspace_skill_directories(
 
 #[cfg(unix)]
 fn validate_opened_workspace_directory(
-    workspace_host_path: &Path,
-    discovery_root: &Path,
-    directory: &File,
-) -> VerletResult<()> {
+    workspace_host_path: &std::path::Path,
+    discovery_root: &std::path::Path,
+    directory: &std::fs::File,
+) -> crate::VerletResult<()> {
     let resolved = std::fs::canonicalize(discovery_root).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to re-resolve opened workspace skill discovery directory {}: {err}",
             discovery_root.display()
         ))
     })?;
     if !resolved.starts_with(workspace_host_path) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "opened workspace skill discovery directory {} resolves outside the witnessed workspace",
             discovery_root.display()
         )));
     }
     let opened_metadata = directory.metadata().map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to inspect opened workspace skill discovery directory {}: {err}",
             discovery_root.display()
         ))
     })?;
     let resolved_metadata = std::fs::metadata(&resolved).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to inspect resolved workspace skill discovery directory {}: {err}",
             resolved.display()
         ))
     })?;
     if !opened_metadata.is_dir() || !same_file_identity(&opened_metadata, &resolved_metadata) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "workspace skill discovery directory {} changed while it was opened",
             discovery_root.display()
         )));
@@ -1325,8 +1324,11 @@ fn validate_opened_workspace_directory(
 }
 
 #[cfg(unix)]
-fn open_directory_at(parent: &File, name: &std::ffi::OsStr) -> std::io::Result<Option<File>> {
-    let name = CString::new(name.as_bytes()).map_err(|_| {
+fn open_directory_at(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<Option<std::fs::File>> {
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "directory entry contains a nul byte",
@@ -1340,7 +1342,7 @@ fn open_directory_at(parent: &File, name: &std::ffi::OsStr) -> std::io::Result<O
         )
     };
     if descriptor >= 0 {
-        return Ok(Some(unsafe { File::from_raw_fd(descriptor) }));
+        return Ok(Some(unsafe { std::fs::File::from_raw_fd(descriptor) }));
     }
     let err = std::io::Error::last_os_error();
     if matches!(
@@ -1366,7 +1368,9 @@ impl Drop for DirectoryStream {
 }
 
 #[cfg(unix)]
-fn read_opened_directory_names(directory: &File) -> std::io::Result<Vec<OsString>> {
+fn read_opened_directory_names(
+    directory: &std::fs::File,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
     let descriptor = unsafe { libc::dup(directory.as_raw_fd()) };
     if descriptor < 0 {
         return Err(std::io::Error::last_os_error());
@@ -1390,9 +1394,9 @@ fn read_opened_directory_names(directory: &File) -> std::io::Result<Vec<OsString
             }
             break;
         }
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name != b"." && name != b".." {
-            names.push(OsString::from_vec(name.to_vec()));
+            names.push(std::ffi::OsString::from_vec(name.to_vec()));
         }
     }
     names.sort();
@@ -1474,8 +1478,8 @@ fn directory_errno() -> Option<std::io::Error> {
 #[cfg(unix)]
 fn open_workspace_skill_file(
     skill_dir: &WorkspaceSkillDirectory,
-    _path: &Path,
-) -> std::io::Result<Option<File>> {
+    _path: &std::path::Path,
+) -> std::io::Result<Option<std::fs::File>> {
     let descriptor = unsafe {
         libc::openat(
             skill_dir.file.as_raw_fd(),
@@ -1484,7 +1488,7 @@ fn open_workspace_skill_file(
         )
     };
     if descriptor >= 0 {
-        return Ok(Some(unsafe { File::from_raw_fd(descriptor) }));
+        return Ok(Some(unsafe { std::fs::File::from_raw_fd(descriptor) }));
     }
     let err = std::io::Error::last_os_error();
     if err.kind() == std::io::ErrorKind::NotFound {
@@ -1497,9 +1501,9 @@ fn open_workspace_skill_file(
 #[cfg(not(unix))]
 fn open_workspace_skill_file(
     _skill_dir: &WorkspaceSkillDirectory,
-    path: &Path,
-) -> std::io::Result<Option<File>> {
-    let mut options = File::options();
+    path: &std::path::Path,
+) -> std::io::Result<Option<std::fs::File>> {
+    let mut options = std::fs::File::options();
     options.read(true);
     match options.open(path) {
         Ok(file) => Ok(Some(file)),
@@ -1509,49 +1513,49 @@ fn open_workspace_skill_file(
 }
 
 fn read_opened_workspace_skill_file(
-    workspace_host_path: &Path,
-    skill_file: &Path,
-    mut file: File,
-) -> VerletResult<String> {
+    workspace_host_path: &std::path::Path,
+    skill_file: &std::path::Path,
+    mut file: std::fs::File,
+) -> crate::VerletResult<String> {
     let canonical_skill_file = std::fs::canonicalize(skill_file).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to re-resolve opened workspace skill file {}: {err}",
             skill_file.display()
         ))
     })?;
     if !canonical_skill_file.starts_with(workspace_host_path) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "opened workspace skill file {} resolves outside the witnessed workspace",
             skill_file.display()
         )));
     }
     let opened_metadata = file.metadata().map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to inspect opened workspace skill file {}: {err}",
             skill_file.display()
         ))
     })?;
     if !opened_metadata.is_file() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "discovered workspace skill path {} is not a regular file",
             skill_file.display()
         )));
     }
     let resolved_metadata = std::fs::metadata(&canonical_skill_file).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to inspect resolved workspace skill file {}: {err}",
             canonical_skill_file.display()
         ))
     })?;
     if !same_file_identity(&opened_metadata, &resolved_metadata) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "workspace skill file {} changed while it was opened",
             skill_file.display()
         )));
     }
     let mut body = String::new();
     file.read_to_string(&mut body).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to read opened workspace skill file {}: {err}",
             skill_file.display()
         ))
@@ -1584,7 +1588,7 @@ fn discovered_skill_path(resolved_path: &str, directory_name: &str) -> String {
 }
 
 fn normalize_workspace_relative_path(path: &str) -> String {
-    let parts = Path::new(path)
+    let parts = std::path::Path::new(path)
         .components()
         .filter_map(|component| match component {
             std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
@@ -1602,16 +1606,16 @@ fn normalize_workspace_relative_path(path: &str) -> String {
 fn validate_skill_discovery_witness(
     witness: &AgentManifestSkillDiscovery,
     resolved_path: &str,
-    registry_skill_names: &BTreeSet<String>,
-) -> VerletResult<()> {
+    registry_skill_names: &std::collections::BTreeSet<String>,
+) -> crate::VerletResult<()> {
     if witness.path != resolved_path {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "stored skill discovery witness path {:?} does not match manifest path {:?}",
             witness.path, resolved_path
         )));
     }
     if witness.path.chars().any(char::is_control) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "stored skill discovery witness path {:?} is unsafe",
             witness.path
         )));
@@ -1622,7 +1626,7 @@ fn validate_skill_discovery_witness(
     } else {
         format!("{resolved_path}/")
     };
-    let mut paths = BTreeSet::new();
+    let mut paths = std::collections::BTreeSet::new();
     for skill in &witness.skills {
         if skill.name.trim().is_empty()
             || skill.name.contains('/')
@@ -1631,19 +1635,19 @@ fn validate_skill_discovery_witness(
             || skill.name == ".."
             || skill.name.chars().any(char::is_control)
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill discovery witness contains unsafe skill name {:?}",
                 skill.name
             )));
         }
         if !names.insert(skill.name.clone()) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill discovery witness contains duplicate skill name {:?} across discovered entries or registry-bound skill packages",
                 skill.name
             )));
         }
         if skill.description.trim().is_empty() || skill.description.chars().any(char::is_control) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill discovery witness entry {:?} has an empty or unsafe description",
                 skill.name
             )));
@@ -1654,12 +1658,12 @@ fn validate_skill_discovery_witness(
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill discovery witness entry {:?} has non-canonical content sha256 {:?}",
                 skill.name, skill.content_sha256
             )));
         }
-        let skill_path = Path::new(&skill.path);
+        let skill_path = std::path::Path::new(&skill.path);
         let unsafe_path = skill_path.is_absolute()
             || skill_path.components().any(|component| {
                 matches!(
@@ -1675,7 +1679,7 @@ fn validate_skill_discovery_witness(
             skill.path.strip_prefix(&path_prefix)
         };
         let direct_child_path = relative_path.and_then(|relative_path| {
-            let mut components = Path::new(relative_path).components();
+            let mut components = std::path::Path::new(relative_path).components();
             let directory = match components.next() {
                 Some(std::path::Component::Normal(directory)) => directory.to_str(),
                 _ => None,
@@ -1695,7 +1699,7 @@ fn validate_skill_discovery_witness(
             }
         });
         if unsafe_path || !paths.insert(skill.path.as_str()) || direct_child_path.is_none() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill discovery witness entry {:?} path {:?} is not a canonical direct child of discovery path {:?}",
                 skill.name, skill.path, resolved_path
             )));
@@ -1706,7 +1710,7 @@ fn validate_skill_discovery_witness(
         .windows(2)
         .any(|pair| pair[0].name > pair[1].name)
     {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletError::RuntimeFactory(
             "stored skill discovery witness entries are not sorted by skill name".to_string(),
         ));
     }
@@ -1714,12 +1718,12 @@ fn validate_skill_discovery_witness(
 }
 
 pub(crate) fn validate_skill_discovery_witness_for_manifest(
-    manifest: &AgentManifestSchema,
+    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
     witness: Option<&AgentManifestSkillDiscovery>,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     if !manifest.skills.discover {
         if witness.is_some() {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletError::RuntimeFactory(
                 "stored skill discovery witness exists, but the manifest disables workspace skill discovery"
                     .to_string(),
             ));
@@ -1727,13 +1731,13 @@ pub(crate) fn validate_skill_discovery_witness_for_manifest(
         return Ok(());
     }
     let witness = witness.ok_or_else(|| {
-        VerletError::RuntimeFactory(
+        crate::VerletError::RuntimeFactory(
             "manifest enables workspace skill discovery, but the durable bind receipt has no skill discovery witness"
                 .to_string(),
         )
     })?;
     let resolved_path = normalize_workspace_relative_path(&manifest.skills.path);
-    validate_skill_discovery_witness(witness, &resolved_path, &BTreeSet::new())
+    validate_skill_discovery_witness(witness, &resolved_path, &std::collections::BTreeSet::new())
 }
 
 fn skill_discovery_context_segment(
@@ -1755,7 +1759,7 @@ fn skill_discovery_context_segment(
     };
     AgentManifestStaticContextSegment {
         id: "skill-discovery-index".to_string(),
-        assembler: KERNEL_ASSEMBLER_STATIC.to_string(),
+        assembler: crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC.to_string(),
         input: discovery.path.clone(),
         pinned: true,
         budget_share: None,
@@ -1767,17 +1771,20 @@ fn skill_discovery_context_segment(
 
 struct BoundCouplings {
     couplings: Vec<BoundCoupling>,
-    grant_expiries: BTreeMap<String, Vec<AgentManifestGrantExpiry>>,
+    grant_expiries: std::collections::BTreeMap<
+        String,
+        Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
+    >,
     grant_bindings: Vec<AgentManifestGrantBindingReceipt>,
 }
 
 fn bind_couplings(
-    couplings: &[AgentManifestCoupling],
-    operation_registry_root: Option<&Path>,
+    couplings: &[crate::agent::manifest_schema::AgentManifestCoupling],
+    operation_registry_root: Option<&std::path::Path>,
     now_ms: i64,
-) -> VerletResult<BoundCouplings> {
+) -> crate::VerletResult<BoundCouplings> {
     let mut bound = Vec::new();
-    let mut expiries = BTreeMap::new();
+    let mut expiries = std::collections::BTreeMap::new();
     let mut grant_bindings = Vec::new();
     for coupling in couplings {
         let mut receipts =
@@ -1804,25 +1811,30 @@ fn bind_couplings(
 }
 
 fn bind_coupling(
-    coupling: &AgentManifestCoupling,
-    operation_registry_root: Option<&Path>,
-) -> VerletResult<BoundCoupling> {
-    let executor_kind = registered_coupling_executor_for_id(&coupling.id).ok_or_else(|| {
-        VerletError::RuntimeFactory(format!(
-            "no registered executor for coupling id {:?}",
-            coupling.id
-        ))
-    })?;
-    if executor_kind == RegisteredCouplingExecutorKind::Wasm
+    coupling: &crate::agent::manifest_schema::AgentManifestCoupling,
+    operation_registry_root: Option<&std::path::Path>,
+) -> crate::VerletResult<BoundCoupling> {
+    let executor_kind =
+        crate::kernel::coupling_executor_registry::registered_coupling_executor_for_id(
+            &coupling.id,
+        )
+        .ok_or_else(|| {
+            crate::VerletError::RuntimeFactory(format!(
+                "no registered executor for coupling id {:?}",
+                coupling.id
+            ))
+        })?;
+    if executor_kind
+        == crate::kernel::coupling_executor_registry::RegisteredCouplingExecutorKind::Wasm
         && !coupling.function_ref.starts_with("op://")
     {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "custom coupling {:?} function_ref {:?} must be an op:// Wasm operation ref",
             coupling.id, coupling.function_ref
         )));
     }
     let registry_root = operation_registry_root.ok_or_else(|| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "coupling {:?} function_ref {:?} requires an app-server operation registry root",
             coupling.id, coupling.function_ref
         ))
@@ -1834,14 +1846,14 @@ fn bind_coupling(
         .selectors
         .iter()
         .map(|selector| bind_coupling_source_selector(&coupling.id, selector))
-        .collect::<VerletResult<Vec<_>>>()?;
+        .collect::<crate::VerletResult<Vec<_>>>()?;
     let source_streams = source_selectors
         .iter()
         .map(|selector| selector.stream.clone())
-        .collect::<BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>();
     let sink = bind_coupling_sink(&coupling.id, &coupling.sink)?;
     if source_streams.contains(&sink.stream) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "coupling {:?} sink must not equal selected source stream {:?}",
             coupling.id, sink.stream
         )));
@@ -1860,8 +1872,10 @@ fn bind_coupling(
         registry_root,
     )?;
     let operation_name = match executor_kind {
-        RegisteredCouplingExecutorKind::Stdlib => verification.operation.clone(),
-        RegisteredCouplingExecutorKind::Wasm => {
+        crate::kernel::coupling_executor_registry::RegisteredCouplingExecutorKind::Stdlib => {
+            verification.operation.clone()
+        }
+        crate::kernel::coupling_executor_registry::RegisteredCouplingExecutorKind::Wasm => {
             wasm_coupling_operation_name(&coupling.id, &coupling.function_ref, &verification)?
         }
     };
@@ -1891,30 +1905,32 @@ fn wasm_coupling_operation_name(
     coupling_id: &str,
     function_ref: &str,
     verification: &VerifiedOperationRef,
-) -> VerletResult<Option<String>> {
+) -> crate::VerletResult<Option<String>> {
     if !matches!(
         verification.record.source,
-        PublishedOperationSource::Wasm { .. }
+        crate::PublishedOperationSource::Wasm { .. }
     ) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "custom coupling {coupling_id:?} function_ref {function_ref:?} must resolve to a Wasm operation record"
         )));
     }
     let operation = selected_wasm_coupling_operation(coupling_id, function_ref, verification)?;
-    if operation.input != WasmOperationValueKind::Json {
-        return Err(VerletError::RuntimeFactory(format!(
+    if operation.input != verlet_abi::WasmOperationValueKind::Json {
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} must declare json input for {COUPLING_INVOCATION_ABI}",
-            operation.name
+            operation.name,
+            COUPLING_INVOCATION_ABI = verlet_abi::COUPLING_INVOCATION_ABI
         )));
     }
-    if operation.output != WasmOperationValueKind::Json {
-        return Err(VerletError::RuntimeFactory(format!(
+    if operation.output != verlet_abi::WasmOperationValueKind::Json {
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} must declare json output for {COUPLING_DISCHARGE_ABI}",
-            operation.name
+            operation.name,
+            COUPLING_DISCHARGE_ABI = verlet_abi::COUPLING_DISCHARGE_ABI
         )));
     }
     if !operation.required_capabilities.is_empty() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "custom coupling {coupling_id:?} function_ref {function_ref:?} operation {:?} declares effect capabilities; couplings are pure compute and must use config, selected events, and stream grants only",
             operation.name
         )));
@@ -1926,7 +1942,7 @@ fn selected_wasm_coupling_operation<'a>(
     coupling_id: &str,
     function_ref: &str,
     verification: &'a VerifiedOperationRef,
-) -> VerletResult<&'a WasmOperationDefinition> {
+) -> crate::VerletResult<&'a verlet_abi::WasmOperationDefinition> {
     if let Some(operation_name) = verification.operation.as_deref() {
         return verification
             .record
@@ -1945,20 +1961,20 @@ fn selected_wasm_coupling_operation<'a>(
     if verification.record.manifest.operations.len() == 1 {
         return Ok(&verification.record.manifest.operations[0]);
     }
-    Err(VerletError::RuntimeFactory(format!(
+    Err(crate::VerletError::RuntimeFactory(format!(
         "custom coupling {coupling_id:?} function_ref {function_ref:?} must select one operation with op://<record>/<operation>@sha256:<hash>"
     )))
 }
 
 fn bind_coupling_source_selector(
     coupling_id: &str,
-    selector: &AgentManifestCouplingSelector,
-) -> VerletResult<BoundCouplingSelector> {
+    selector: &crate::agent::manifest_schema::AgentManifestCouplingSelector,
+) -> crate::VerletResult<BoundCouplingSelector> {
     let kinds = selector
         .kind
         .iter()
         .map(|kind| parse_coupling_event_kind(coupling_id, "source kind", kind))
-        .collect::<VerletResult<Vec<_>>>()?;
+        .collect::<crate::VerletResult<Vec<_>>>()?;
     Ok(BoundCouplingSelector {
         stream: selector.stream.clone(),
         kinds,
@@ -1969,13 +1985,13 @@ fn bind_coupling_source_selector(
 
 fn bind_coupling_sink(
     coupling_id: &str,
-    sink: &AgentManifestCouplingSink,
-) -> VerletResult<BoundCouplingSink> {
+    sink: &crate::agent::manifest_schema::AgentManifestCouplingSink,
+) -> crate::VerletResult<BoundCouplingSink> {
     let kinds = sink
         .kind
         .iter()
         .map(|kind| parse_coupling_event_kind(coupling_id, "sink kind", kind))
-        .collect::<VerletResult<Vec<_>>>()?;
+        .collect::<crate::VerletResult<Vec<_>>>()?;
     Ok(BoundCouplingSink {
         stream: sink.stream.clone(),
         kinds,
@@ -1986,22 +2002,24 @@ fn parse_coupling_event_kind(
     coupling_id: &str,
     label: &str,
     value: &str,
-) -> VerletResult<EventKind> {
-    value.parse::<EventKind>().map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+) -> crate::VerletResult<crate::EventKind> {
+    value.parse::<crate::EventKind>().map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
             "coupling {coupling_id:?} {label} {value:?} is not in the kernel event-kind vocabulary: {err}"
         ))
     })
 }
 
-pub(crate) fn coupling_config_hash(value: &JsonValue) -> VerletResult<String> {
+pub(crate) fn coupling_config_hash(value: &serde_json::Value) -> crate::VerletResult<String> {
     canonical_json_hash(value)
 }
 
-pub(crate) fn coupling_set_content_hash(coupling_set: &BoundCouplingSet) -> VerletResult<String> {
+pub(crate) fn coupling_set_content_hash(
+    coupling_set: &BoundCouplingSet,
+) -> crate::VerletResult<String> {
     let mut couplings = coupling_set.couplings.iter().collect::<Vec<_>>();
     couplings.sort_by(|left, right| left.id.cmp(&right.id));
-    let value = JsonValue::Array(
+    let value = serde_json::Value::Array(
         couplings
             .into_iter()
             .map(|coupling| {
@@ -2016,28 +2034,37 @@ pub(crate) fn coupling_set_content_hash(coupling_set: &BoundCouplingSet) -> Verl
     canonical_json_hash(&value)
 }
 
-pub(crate) fn canonical_json_hash(value: &JsonValue) -> VerletResult<String> {
+pub(crate) fn canonical_json_hash(value: &serde_json::Value) -> crate::VerletResult<String> {
     let mut canonical = Vec::new();
     write_canonical_json(value, &mut canonical)?;
-    let digest = Sha256::digest(&canonical);
+    let digest = sha2::Sha256::digest(&canonical);
     Ok(format!("sha256:{digest:x}"))
 }
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    let digest = sha2::Sha256::digest(bytes);
     format!("sha256:{digest:x}")
 }
 
-fn write_canonical_json(value: &JsonValue, output: &mut Vec<u8>) -> VerletResult<()> {
+fn write_canonical_json(
+    value: &serde_json::Value,
+    output: &mut Vec<u8>,
+) -> crate::VerletResult<()> {
     match value {
-        JsonValue::Null => output.extend_from_slice(b"null"),
-        JsonValue::Bool(true) => output.extend_from_slice(b"true"),
-        JsonValue::Bool(false) => output.extend_from_slice(b"false"),
-        JsonValue::Number(number) => output.extend_from_slice(number.to_string().as_bytes()),
-        JsonValue::String(string) => serde_json::to_writer(output, string).map_err(|err| {
-            VerletError::RuntimeFactory(format!("failed to canonicalize coupling config: {err}"))
-        })?,
-        JsonValue::Array(values) => {
+        serde_json::Value::Null => output.extend_from_slice(b"null"),
+        serde_json::Value::Bool(true) => output.extend_from_slice(b"true"),
+        serde_json::Value::Bool(false) => output.extend_from_slice(b"false"),
+        serde_json::Value::Number(number) => {
+            output.extend_from_slice(number.to_string().as_bytes())
+        }
+        serde_json::Value::String(string) => {
+            serde_json::to_writer(output, string).map_err(|err| {
+                crate::VerletError::RuntimeFactory(format!(
+                    "failed to canonicalize coupling config: {err}"
+                ))
+            })?
+        }
+        serde_json::Value::Array(values) => {
             output.push(b'[');
             for (index, item) in values.iter().enumerate() {
                 if index > 0 {
@@ -2047,7 +2074,7 @@ fn write_canonical_json(value: &JsonValue, output: &mut Vec<u8>) -> VerletResult
             }
             output.push(b']');
         }
-        JsonValue::Object(object) => {
+        serde_json::Value::Object(object) => {
             output.push(b'{');
             let mut entries = object.iter().collect::<Vec<_>>();
             entries.sort_by(|(left, _), (right, _)| left.cmp(right));
@@ -2056,7 +2083,7 @@ fn write_canonical_json(value: &JsonValue, output: &mut Vec<u8>) -> VerletResult
                     output.push(b',');
                 }
                 serde_json::to_writer(&mut *output, key).map_err(|err| {
-                    VerletError::RuntimeFactory(format!(
+                    crate::VerletError::RuntimeFactory(format!(
                         "failed to canonicalize coupling config: {err}"
                     ))
                 })?;
@@ -2069,14 +2096,16 @@ fn write_canonical_json(value: &JsonValue, output: &mut Vec<u8>) -> VerletResult
     Ok(())
 }
 
-fn grant_capabilities(grants: &[AgentManifestGrant]) -> Vec<String> {
+fn grant_capabilities(grants: &[crate::agent::manifest_schema::AgentManifestGrant]) -> Vec<String> {
     grants
         .iter()
         .map(|grant| grant.capability().to_string())
         .collect()
 }
 
-fn grant_expiries(grants: &[AgentManifestGrant]) -> Vec<AgentManifestGrantExpiry> {
+fn grant_expiries(
+    grants: &[crate::agent::manifest_schema::AgentManifestGrant],
+) -> Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry> {
     grants
         .iter()
         .filter_map(|grant| grant.expiry().cloned())
@@ -2086,9 +2115,9 @@ fn grant_expiries(grants: &[AgentManifestGrant]) -> Vec<AgentManifestGrantExpiry
 fn grant_binding_receipts(
     subject_kind: &str,
     subject_id: &str,
-    grants: &[AgentManifestGrant],
+    grants: &[crate::agent::manifest_schema::AgentManifestGrant],
     now_ms: i64,
-) -> VerletResult<Vec<AgentManifestGrantBindingReceipt>> {
+) -> crate::VerletResult<Vec<AgentManifestGrantBindingReceipt>> {
     grants
         .iter()
         .map(|grant| {
@@ -2109,11 +2138,13 @@ fn grant_binding_receipts(
         .collect()
 }
 
-pub(crate) fn grant_expiry_timestamp_ms(expiry: &AgentManifestGrantExpiry) -> VerletResult<i64> {
+pub(crate) fn grant_expiry_timestamp_ms(
+    expiry: &crate::agent::manifest_schema::AgentManifestGrantExpiry,
+) -> crate::VerletResult<i64> {
     chrono::DateTime::parse_from_rfc3339(&expiry.expires_at)
         .map(|instant| instant.timestamp_millis())
         .map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "grant {:?} has invalid RFC3339 expiry {:?}: {err}",
                 expiry.capability, expiry.expires_at
             ))
@@ -2124,9 +2155,9 @@ pub(crate) fn grant_expiry_timestamp_ms(expiry: &AgentManifestGrantExpiry) -> Ve
 /// its bound form snapshot, but authority is live: once `now_ms` passes a
 /// grant expiry, the next tool or coupling invocation fails closed.
 pub(crate) fn ensure_grant_expiries_live(
-    expiries: &[AgentManifestGrantExpiry],
+    expiries: &[crate::agent::manifest_schema::AgentManifestGrantExpiry],
     now_ms: i64,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     let mut lapsed = Vec::new();
     for expiry in expiries {
         if now_ms > grant_expiry_timestamp_ms(expiry)? {
@@ -2139,7 +2170,7 @@ pub(crate) fn ensure_grant_expiries_live(
     if lapsed.is_empty() {
         Ok(())
     } else {
-        Err(VerletError::RuntimeExecution(format!(
+        Err(crate::VerletError::RuntimeExecution(format!(
             "missing capability grants: {}",
             lapsed.join(", ")
         )))
@@ -2147,21 +2178,21 @@ pub(crate) fn ensure_grant_expiries_live(
 }
 
 async fn bind_tools(
-    tools: &[AgentManifestTool],
-    operation_registry_root: Option<&Path>,
-    configured_mcp_server_refs: &BTreeSet<String>,
-    tool_universe_discoverer: Option<&dyn ToolUniverseDiscoverer>,
+    tools: &[crate::agent::manifest_schema::AgentManifestTool],
+    operation_registry_root: Option<&std::path::Path>,
+    configured_mcp_server_refs: &std::collections::BTreeSet<String>,
+    tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
     now_ms: i64,
-) -> VerletResult<BoundTools> {
+) -> crate::VerletResult<BoundTools> {
     let mut tool_ids = Vec::new();
-    let mut granted = BTreeSet::new();
+    let mut granted = std::collections::BTreeSet::new();
     let mut operation_bindings = OperationBindingMap::new();
-    let mut direct_tool_names = BTreeSet::new();
+    let mut direct_tool_names = std::collections::BTreeSet::new();
     let mut tool_universes = Vec::new();
     let mut grant_bindings = Vec::new();
     for tool in tools {
         match tool {
-            AgentManifestTool::Bash(tool) => {
+            crate::agent::manifest_schema::AgentManifestTool::Bash(tool) => {
                 let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
                 if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
                     receipts
@@ -2187,7 +2218,7 @@ async fn bind_tools(
                 tool_ids.push(tool.id.clone());
                 grant_bindings.extend(receipts);
             }
-            AgentManifestTool::Direct(tool) => {
+            crate::agent::manifest_schema::AgentManifestTool::Direct(tool) => {
                 let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
                 if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
                     receipts
@@ -2197,7 +2228,7 @@ async fn bind_tools(
                     continue;
                 }
                 if !direct_tool_names.insert(tool.tool_name.clone()) {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletError::RuntimeFactory(format!(
                         "duplicate direct tool_name surface {:?}",
                         tool.tool_name
                     )));
@@ -2219,7 +2250,7 @@ async fn bind_tools(
                 tool_ids.push(tool.id.clone());
                 grant_bindings.extend(receipts);
             }
-            AgentManifestTool::ProtocolImport(tool) => {
+            crate::agent::manifest_schema::AgentManifestTool::ProtocolImport(tool) => {
                 let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
                 if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
                     receipts
@@ -2229,7 +2260,7 @@ async fn bind_tools(
                     continue;
                 }
                 if !configured_mcp_server_refs.contains(&tool.server_ref) {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletError::RuntimeFactory(format!(
                         "protocol tool {:?} server_ref {:?} is not configured",
                         tool.id, tool.server_ref
                     )));
@@ -2238,7 +2269,7 @@ async fn bind_tools(
                 if let Some(pin) = &binding.pin
                     && !direct_tool_names.insert(pin.tool_name.clone())
                 {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletError::RuntimeFactory(format!(
                         "duplicate direct tool_name surface {:?}",
                         pin.tool_name
                     )));
@@ -2264,30 +2295,30 @@ async fn bind_tools(
 }
 
 fn enforce_child_agent_policy(
-    manifest: &AgentManifestSchema,
+    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
     operation_bindings: &[AgentManifestOperationBinding],
     couplings: &[BoundCoupling],
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     if manifest.policies.allow_child_agents {
         return Ok(());
     }
     let tool_declares_thread_spawn = operation_bindings.iter().any(|binding| {
-        binding.name == VERLET_THREADS_PACKAGE
+        binding.name == crate::VERLET_THREADS_PACKAGE
             && binding
                 .grants
                 .iter()
-                .any(|grant| grant == THREADS_SPAWN_CAPABILITY)
+                .any(|grant| grant == crate::THREADS_SPAWN_CAPABILITY)
     });
     let coupling_declares_thread_spawn = couplings.iter().any(|coupling| {
         coupling.id == crate::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
             && coupling
                 .grants
                 .iter()
-                .any(|grant| grant == THREADS_SPAWN_CAPABILITY)
+                .any(|grant| grant == crate::THREADS_SPAWN_CAPABILITY)
     });
     let declares_thread_spawn = tool_declares_thread_spawn || coupling_declares_thread_spawn;
     if declares_thread_spawn {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletError::RuntimeFactory(
             "agent manifest policies.allow_child_agents = false but a child-thread operation or supervisor coupling grants threads.spawn; remove thread_spawn/std::supervisor.spawn or set allow_child_agents = true".to_string(),
         ));
     }
@@ -2295,18 +2326,18 @@ fn enforce_child_agent_policy(
 }
 
 struct SelectedManifestModelProfile<'a> {
-    profile: &'a AgentManifestModelProfile,
+    profile: &'a crate::agent::manifest_schema::AgentManifestModelProfile,
     provider_id: String,
     model_id: String,
     origin: AgentManifestModelProfileOrigin,
 }
 
 fn select_manifest_model_profile<'a>(
-    manifest: &'a AgentManifestSchema,
+    manifest: &'a crate::agent::manifest_schema::AgentManifestSchema,
     selection: &AgentManifestModelProfileSelection,
-) -> VerletResult<SelectedManifestModelProfile<'a>> {
+) -> crate::VerletResult<SelectedManifestModelProfile<'a>> {
     if manifest.model_profiles.is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletError::RuntimeFactory(
             "agent manifest requires at least one model profile".to_string(),
         ));
     }
@@ -2361,12 +2392,12 @@ fn select_manifest_model_profile<'a>(
 
 fn model_profile_selection_error(
     reason: &str,
-    manifest: &AgentManifestSchema,
+    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
     selection: &AgentManifestModelProfileSelection,
-) -> VerletError {
+) -> crate::VerletError {
     let requested = model_profile_selection_summary(selection);
     let declared = declared_model_profiles_summary(manifest).unwrap_or_else(|err| err.to_string());
-    VerletError::RuntimeFactory(format!(
+    crate::VerletError::RuntimeFactory(format!(
         "thread/start {reason} for {requested}; declared model profiles: {declared}"
     ))
 }
@@ -2389,7 +2420,9 @@ fn model_profile_selection_summary(selection: &AgentManifestModelProfileSelectio
     }
 }
 
-fn declared_model_profiles_summary(manifest: &AgentManifestSchema) -> VerletResult<String> {
+fn declared_model_profiles_summary(
+    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
+) -> crate::VerletResult<String> {
     manifest
         .model_profiles
         .iter()
@@ -2401,7 +2434,7 @@ fn declared_model_profiles_summary(manifest: &AgentManifestSchema) -> VerletResu
                 profile.id, provider_id, model_id
             ))
         })
-        .collect::<VerletResult<Vec<_>>>()
+        .collect::<crate::VerletResult<Vec<_>>>()
         .map(|profiles| profiles.join("; "))
 }
 
@@ -2432,26 +2465,28 @@ fn operation_bindings_from_map(
 /// skip. A pin resolves only when the filtered witnessed contract matches
 /// its content address exactly; missing or mismatched contracts are drift.
 async fn bind_protocol_tool_import(
-    tool: &AgentManifestProtocolToolImport,
-    discoverer: Option<&dyn ToolUniverseDiscoverer>,
-) -> VerletResult<ToolUniverseBinding> {
+    tool: &crate::agent::manifest_schema::AgentManifestProtocolToolImport,
+    discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
+) -> crate::VerletResult<crate::agent::tool_universe::ToolUniverseBinding> {
     let discoverer = discoverer.ok_or_else(|| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "protocol tool import {:?} requires a tool universe discoverer; fail closed",
             tool.id
         ))
     })?;
     let discovery = discoverer.discover(&tool.server_ref).await?;
     if discovery.server_ref != tool.server_ref {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "protocol tool import {:?} discovery returned server_ref {:?}, expected {:?}; fail closed",
             tool.id, discovery.server_ref, tool.server_ref
         )));
     }
-    let include_tools = tool
-        .include_tools
-        .as_ref()
-        .map(|tools| tools.iter().cloned().collect::<BTreeSet<_>>());
+    let include_tools = tool.include_tools.as_ref().map(|tools| {
+        tools
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    });
     let discovery = match &include_tools {
         Some(include_tools) => discovery.filtered(include_tools)?,
         None => discovery,
@@ -2459,18 +2494,20 @@ async fn bind_protocol_tool_import(
     let pin = tool
         .pin
         .as_ref()
-        .map(|reference| PinnedToolRef::parse(reference))
+        .map(|reference| crate::agent::tool_universe::PinnedToolRef::parse(reference))
         .transpose()?;
-    let exposes_direct = tool.expose.contains(&AgentManifestToolSurface::DirectTool);
+    let exposes_direct = tool
+        .expose
+        .contains(&crate::agent::manifest_schema::AgentManifestToolSurface::DirectTool);
     match (&pin, exposes_direct) {
         (None, true) => {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "protocol tool import {:?} declares expose = [\"direct_tool\"] without a pin; fail closed",
                 tool.id
             )));
         }
         (Some(_), false) => {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "protocol tool import {:?} declares a pin without expose = [\"direct_tool\"]; fail closed",
                 tool.id
             )));
@@ -2483,13 +2520,13 @@ async fn bind_protocol_tool_import(
             .map(|contract| contract.schema_hash.as_str())
             .unwrap_or("<missing>");
         if !witnessed.is_some_and(|contract| contract.matches_pin(pin)) {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "protocol tool import {:?} pin drift for {:?}: expected schema hash {}, witnessed {}; fail closed",
                 tool.id, pin.tool_name, pin.schema_hash, witnessed_hash
             )));
         }
     }
-    let binding = ToolUniverseBinding {
+    let binding = crate::agent::tool_universe::ToolUniverseBinding {
         import_id: tool.id.clone(),
         server_ref: tool.server_ref.clone(),
         effect_class: tool.effect_class,
@@ -2508,16 +2545,16 @@ async fn bind_operation_ref(
     operation_ref: &str,
     grants: &[String],
     direct_tool_name: Option<&str>,
-    operation_registry_root: Option<&Path>,
-    granted: &mut BTreeSet<String>,
+    operation_registry_root: Option<&std::path::Path>,
+    granted: &mut std::collections::BTreeSet<String>,
     operation_bindings: &mut OperationBindingMap,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     bind_operation_ref_with_expiries(
         tool_id,
         operation_ref,
         grants,
         &[],
-        EffectClass::AtMostOnce,
+        crate::agent::manifest_schema::EffectClass::AtMostOnce,
         direct_tool_name,
         operation_registry_root,
         granted,
@@ -2530,15 +2567,15 @@ async fn bind_operation_ref_with_expiries(
     tool_id: &str,
     operation_ref: &str,
     grants: &[String],
-    grant_expiries: &[AgentManifestGrantExpiry],
-    effect_class: EffectClass,
+    grant_expiries: &[crate::agent::manifest_schema::AgentManifestGrantExpiry],
+    effect_class: crate::agent::manifest_schema::EffectClass,
     direct_tool_name: Option<&str>,
-    operation_registry_root: Option<&Path>,
-    granted: &mut BTreeSet<String>,
+    operation_registry_root: Option<&std::path::Path>,
+    granted: &mut std::collections::BTreeSet<String>,
     operation_bindings: &mut OperationBindingMap,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     let registry_root = operation_registry_root.ok_or_else(|| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "tool {tool_id:?} operation_ref {operation_ref:?} requires an app-server operation registry root"
         ))
     })?;
@@ -2551,12 +2588,14 @@ async fn bind_operation_ref_with_expiries(
                 verification.operation.as_deref(),
                 &verification.record,
             )?;
-            Ok::<AgentManifestDirectToolBinding, VerletError>(AgentManifestDirectToolBinding {
-                tool_name: tool_name.to_string(),
-                operation,
-                effect_class,
-                grant_expiries: grant_expiries.to_vec(),
-            })
+            Ok::<AgentManifestDirectToolBinding, crate::VerletError>(
+                AgentManifestDirectToolBinding {
+                    tool_name: tool_name.to_string(),
+                    operation,
+                    effect_class,
+                    grant_expiries: grant_expiries.to_vec(),
+                },
+            )
         })
         .transpose()?;
     granted.extend(verification.grants.iter().cloned());
@@ -2578,7 +2617,7 @@ pub(crate) struct VerifiedOperationRef {
     pub(crate) name: String,
     pub(crate) artifact_hash: String,
     pub(crate) operation: Option<String>,
-    pub(crate) grants: BTreeSet<String>,
+    pub(crate) grants: std::collections::BTreeSet<String>,
     pub(crate) record: crate::PublishedOperationRecord,
 }
 
@@ -2586,8 +2625,8 @@ pub(crate) fn verify_operation_ref(
     tool_id: &str,
     operation_ref: &str,
     grants: &[String],
-    operation_registry_root: &Path,
-) -> VerletResult<VerifiedOperationRef> {
+    operation_registry_root: &std::path::Path,
+) -> crate::VerletResult<VerifiedOperationRef> {
     verify_operation_ref_for_subject(
         "tool",
         tool_id,
@@ -2602,28 +2641,31 @@ fn verify_operation_ref_for_subject(
     subject_id: &str,
     operation_ref: &str,
     grants: &[String],
-    operation_registry_root: &Path,
-) -> VerletResult<VerifiedOperationRef> {
+    operation_registry_root: &std::path::Path,
+) -> crate::VerletResult<VerifiedOperationRef> {
     let parsed = parse_operation_ref(operation_ref)?;
     let artifact_hash = parsed.artifact_hash.clone().ok_or_else(|| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} must be content-addressed with @sha256:<hash>; for agent publish, pass --resolve-ops to pin op:// authoring refs from the operations registry"
         ))
     })?;
-    let registry = LocalOperationRegistry::new(operation_registry_root);
+    let registry = crate::LocalOperationRegistry::new(operation_registry_root);
     registry.load_record(&parsed.name).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} was not found in the local operation registry: {err}; seed the operation registry or fix the op:// record name"
         ))
     })?;
     let record = registry
         .load_version_record(&parsed.name, &artifact_hash)
         .map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} names artifact hash sha256:{artifact_hash} that is not a published version in the local operation registry: {err}; republish the operation or replace the ref with a hash from the registry"
             ))
         })?;
-    let granted_set = grants.iter().cloned().collect::<BTreeSet<_>>();
+    let granted_set = grants
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     let operations = if let Some(operation_name) = parsed.operation.as_deref() {
         let operation = record.manifest.operation(operation_name).ok_or_else(|| {
             unknown_operation_ref_error(
@@ -2649,7 +2691,7 @@ fn verify_operation_ref_for_subject(
         })
         .collect::<Vec<_>>();
     if !missing.is_empty() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} requires grants not declared on the {subject_kind} binding: {}",
             missing.join(", ")
         )));
@@ -2668,7 +2710,7 @@ fn direct_tool_operation_name(
     operation_ref: &str,
     operation_name: Option<&str>,
     record: &crate::PublishedOperationRecord,
-) -> VerletResult<String> {
+) -> crate::VerletResult<String> {
     if let Some(operation) = operation_name {
         if record.manifest.operation(operation).is_none() {
             return Err(unknown_operation_ref_error(
@@ -2684,7 +2726,7 @@ fn direct_tool_operation_name(
     if record.manifest.operations.len() == 1 {
         return Ok(record.manifest.operations[0].name.clone());
     }
-    Err(VerletError::RuntimeFactory(format!(
+    Err(crate::VerletError::RuntimeFactory(format!(
         "direct tool {tool_id:?} operation_ref {operation_ref:?} must select one operation with op://<record>/<operation>@sha256:<hash>"
     )))
 }
@@ -2695,7 +2737,7 @@ fn unknown_operation_ref_error(
     operation_ref: &str,
     record_name: &str,
     record: &crate::PublishedOperationRecord,
-) -> VerletError {
+) -> crate::VerletError {
     let available = record
         .manifest
         .operations
@@ -2703,7 +2745,7 @@ fn unknown_operation_ref_error(
         .map(|operation| operation.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    VerletError::RuntimeFactory(format!(
+    crate::VerletError::RuntimeFactory(format!(
         "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} selects an operation that is not in record {record_name:?}; use op://<record>@sha256:<hash> for the whole record or op://<record>/<operation>@sha256:<hash> for one operation; available operations: {}",
         if available.is_empty() {
             "<none>"
@@ -2713,37 +2755,39 @@ fn unknown_operation_ref_error(
     ))
 }
 
-fn provider_id_from_ref(provider_ref: &str) -> VerletResult<String> {
+fn provider_id_from_ref(provider_ref: &str) -> crate::VerletResult<String> {
     let id = provider_ref.strip_prefix("provider://").ok_or_else(|| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "provider_ref {provider_ref:?} must start with provider://"
         ))
     })?;
     if id.is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletError::RuntimeFactory(
             "provider_ref must include a provider id".to_string(),
         ));
     }
     Ok(id.to_string())
 }
 
-fn model_id_from_ref(model_ref: &str, provider_id: &str) -> VerletResult<String> {
+fn model_id_from_ref(model_ref: &str, provider_id: &str) -> crate::VerletResult<String> {
     let id = model_ref.strip_prefix("model://").ok_or_else(|| {
-        VerletError::RuntimeFactory(format!("model_ref {model_ref:?} must start with model://"))
+        crate::VerletError::RuntimeFactory(format!(
+            "model_ref {model_ref:?} must start with model://"
+        ))
     })?;
     if id.is_empty() {
-        return Err(VerletError::RuntimeFactory(
+        return Err(crate::VerletError::RuntimeFactory(
             "model_ref must include a model id".to_string(),
         ));
     }
     if let Some((provider, model)) = id.split_once('/') {
         if provider != provider_id {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "model_ref {model_ref:?} names provider {provider:?}, expected {provider_id:?}"
             )));
         }
         if model.is_empty() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "model_ref {model_ref:?} must include a model id"
             )));
         }
@@ -2752,16 +2796,16 @@ fn model_id_from_ref(model_ref: &str, provider_id: &str) -> VerletResult<String>
     Ok(id.to_string())
 }
 
-fn parse_operation_ref(operation_ref: &str) -> VerletResult<OperationRef> {
+fn parse_operation_ref(operation_ref: &str) -> crate::VerletResult<OperationRef> {
     let body = operation_ref.strip_prefix("op://").ok_or_else(|| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "operation_ref {operation_ref:?} must start with op://"
         ))
     })?;
     let (name, artifact_hash) = match body.split_once("@sha256:") {
         Some((name, hash)) => {
             if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "operation_ref {operation_ref:?} has an invalid sha256 artifact hash"
                 )));
             }
@@ -2780,7 +2824,7 @@ fn parse_operation_ref(operation_ref: &str) -> VerletResult<OperationRef> {
 fn parse_operation_ref_body(
     operation_ref: &str,
     body: &str,
-) -> VerletResult<(String, Option<String>)> {
+) -> crate::VerletResult<(String, Option<String>)> {
     let grammar = "op://<record>@sha256:<hash> or op://<record>/<operation>@sha256:<hash>";
     let segments = body.split('/').collect::<Vec<_>>();
     match segments.as_slice() {
@@ -2788,42 +2832,44 @@ fn parse_operation_ref_body(
         [record, operation] if !record.is_empty() && !operation.is_empty() => {
             Ok(((*record).to_string(), Some((*operation).to_string())))
         }
-        _ => Err(VerletError::RuntimeFactory(format!(
+        _ => Err(crate::VerletError::RuntimeFactory(format!(
             "operation_ref {operation_ref:?} must match {grammar}"
         ))),
     }
 }
 
-fn override_key_name(key: AgentManifestRuntimeOverrideKey) -> &'static str {
+fn override_key_name(
+    key: crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey,
+) -> &'static str {
     match key {
-        AgentManifestRuntimeOverrideKey::DefaultCwd => "default_cwd",
-        AgentManifestRuntimeOverrideKey::Streaming => "streaming",
-        AgentManifestRuntimeOverrideKey::TurnTimeoutMs => "turn_timeout_ms",
-        AgentManifestRuntimeOverrideKey::CancellationGraceMs => "cancellation_grace_ms",
-        AgentManifestRuntimeOverrideKey::MaxToolRounds => "max_tool_rounds",
-        AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes => {
+        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd => "default_cwd",
+        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::Streaming => "streaming",
+        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::TurnTimeoutMs => "turn_timeout_ms",
+        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::CancellationGraceMs => "cancellation_grace_ms",
+        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::MaxToolRounds => "max_tool_rounds",
+        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes => {
             "compaction.auto_at_text_bytes"
         }
     }
 }
 
 fn require_override_key(
-    allowlist: &[AgentManifestRuntimeOverrideKey],
-    key: AgentManifestRuntimeOverrideKey,
-) -> VerletResult<&'static str> {
+    allowlist: &[crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey],
+    key: crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey,
+) -> crate::VerletResult<&'static str> {
     let name = override_key_name(key);
     if allowlist.contains(&key) {
         Ok(name)
     } else {
-        Err(VerletError::RuntimeFactory(format!(
+        Err(crate::VerletError::RuntimeFactory(format!(
             "runtime override {name:?} is not allowlisted by the agent manifest"
         )))
     }
 }
 
-fn validate_optional_positive_u64(label: &str, value: Option<u64>) -> VerletResult<()> {
+fn validate_optional_positive_u64(label: &str, value: Option<u64>) -> crate::VerletResult<()> {
     if value == Some(0) {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "runtime override {label:?} must be > 0"
         )));
     }
@@ -2832,10 +2878,10 @@ fn validate_optional_positive_u64(label: &str, value: Option<u64>) -> VerletResu
 
 fn validate_tool_round_budget(
     label: &str,
-    value: Option<AgentManifestMaxToolRounds>,
-) -> VerletResult<()> {
-    if value == Some(AgentManifestMaxToolRounds::Limited(0)) {
-        return Err(VerletError::RuntimeFactory(format!(
+    value: Option<crate::agent::manifest_schema::AgentManifestMaxToolRounds>,
+) -> crate::VerletResult<()> {
+    if value == Some(crate::agent::manifest_schema::AgentManifestMaxToolRounds::Limited(0)) {
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "runtime override {label:?} must be > 0 or \"unlimited\""
         )));
     }
@@ -2845,19 +2891,19 @@ fn validate_tool_round_budget(
 /// Payload of the discharged `manifest.compile.completed` event: which
 /// immutable manifest this thread compiled, and through which alias it was
 /// reached, if any.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentManifestCompileReceipt {
     pub ref_uri: String,
     pub manifest_hash: String,
     pub source_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alias: Option<AgentAliasResolutionReceipt>,
+    pub alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
 }
 
 /// Payload of the discharged `manifest.bind.completed` event: what the
 /// thread can actually do. An audit answers "what could this agent do for
 /// this run" from this receipt alone.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentManifestBindReceipt {
     pub ref_uri: String,
     pub manifest_hash: String,
@@ -2885,7 +2931,7 @@ pub struct AgentManifestBindReceipt {
     /// Witnessed tool universes mounted on the search surface: server ref,
     /// discovery hash, in-scope contracts, and pinned rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_universes: Vec<ToolUniverseBindReceipt>,
+    pub tool_universes: Vec<crate::agent::tool_universe::ToolUniverseBindReceipt>,
     /// Resolved coupling functions that can observe or alter this thread's
     /// future behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2897,7 +2943,7 @@ pub struct AgentManifestBindReceipt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grant_bindings: Vec<AgentManifestGrantBindingReceipt>,
     /// Runtime defaults after allowlisted overrides were applied.
-    pub effective_runtime: AgentManifestRuntimeDefaults,
+    pub effective_runtime: crate::agent::manifest_schema::AgentManifestRuntimeDefaults,
     /// Which override keys the caller actually exercised.
     pub overridden_keys: Vec<String>,
     /// Where this thread's runtime executes, fixed at bind time (ADR 0006).
@@ -2915,14 +2961,14 @@ pub struct AgentManifestBindReceipt {
     pub workspace_origin: Option<AgentManifestBindingOrigin>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentManifestModelProfileOrigin {
     ManifestDefault,
     SelectedAtStart,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentManifestBindingOrigin {
     DaemonDefault,
@@ -2930,7 +2976,7 @@ pub enum AgentManifestBindingOrigin {
     Manifest,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestGrantBindingReceipt {
     pub subject_kind: String,
@@ -2956,23 +3002,23 @@ fn is_false(value: &bool) -> bool {
 /// daemon config supplies deployment defaults and operator surfaces may
 /// override at bind time. ADR 0006 requires the resolved binding target to be
 /// witnessed with the existing `placement.decision` event.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentManifestPlacementBinding {
-    pub target: PlacementTarget,
+    pub target: crate::kernel::control_decision::PlacementTarget,
     /// Which registered executor serves a non-local target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_ref: Option<String>,
     /// Executor-specific configuration, opaque to the bind layer.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub config: BTreeMap<String, JsonValue>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub config: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for AgentManifestPlacementBinding {
     fn default() -> Self {
         Self {
-            target: PlacementTarget::Local,
+            target: crate::kernel::control_decision::PlacementTarget::Local,
             executor_ref: None,
-            config: BTreeMap::new(),
+            config: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -2987,7 +3033,7 @@ pub fn resolve_manifest_placement(
     default_placement: Option<&AgentManifestPlacementBinding>,
     placement_override: Option<&AgentManifestPlacementBinding>,
     remote_event_store_served: bool,
-) -> VerletResult<AgentManifestPlacementBinding> {
+) -> crate::VerletResult<AgentManifestPlacementBinding> {
     Ok(resolve_manifest_placement_with_origin(
         default_placement,
         placement_override,
@@ -3005,7 +3051,7 @@ fn resolve_manifest_placement_with_origin(
     default_placement: Option<&AgentManifestPlacementBinding>,
     placement_override: Option<&AgentManifestPlacementBinding>,
     remote_event_store_served: bool,
-) -> VerletResult<ResolvedManifestPlacement> {
+) -> crate::VerletResult<ResolvedManifestPlacement> {
     let (resolved, origin) = match placement_override {
         Some(placement) => (placement.clone(), AgentManifestBindingOrigin::BindOverride),
         None => (
@@ -3013,19 +3059,21 @@ fn resolve_manifest_placement_with_origin(
             AgentManifestBindingOrigin::DaemonDefault,
         ),
     };
-    if resolved.target == PlacementTarget::Remote && remote_event_store_served {
+    if resolved.target == crate::kernel::control_decision::PlacementTarget::Remote
+        && remote_event_store_served
+    {
         return Ok(ResolvedManifestPlacement {
             binding: resolved,
             origin,
         });
     }
-    if resolved.target != PlacementTarget::Local {
+    if resolved.target != crate::kernel::control_decision::PlacementTarget::Local {
         let target = match resolved.target {
-            PlacementTarget::Local => "local",
-            PlacementTarget::Remote => "remote",
-            PlacementTarget::Sandbox => "sandbox",
+            crate::kernel::control_decision::PlacementTarget::Local => "local",
+            crate::kernel::control_decision::PlacementTarget::Remote => "remote",
+            crate::kernel::control_decision::PlacementTarget::Sandbox => "sandbox",
         };
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "placement target {target} requires the remote EventStore backend capability, which is not available"
         )));
     }
@@ -3041,21 +3089,21 @@ fn resolve_manifest_placement_with_origin(
 /// This type is never part of the content-addressed manifest and is never a
 /// model-facing tool argument. `host_path` may be relative on daemon config
 /// input; bind resolution canonicalizes it before writing the receipt.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestWorkspaceBinding {
     #[serde(alias = "hostPath")]
-    pub host_path: PathBuf,
-    pub mode: AgentManifestWorkspaceMode,
+    pub host_path: std::path::PathBuf,
+    pub mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode,
 }
 
 /// Effective workspace mount witnessed by `manifest.bind.completed` and
 /// persisted in thread lifecycle metadata for restart and fork recovery.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentManifestResolvedWorkspaceMount {
-    pub guest_path: PathBuf,
-    pub host_path: PathBuf,
-    pub mode: AgentManifestWorkspaceMode,
+    pub guest_path: std::path::PathBuf,
+    pub host_path: std::path::PathBuf,
+    pub mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode,
 }
 
 impl AgentManifestResolvedWorkspaceMount {
@@ -3072,10 +3120,10 @@ impl AgentManifestResolvedWorkspaceMount {
 /// fail-closed: required-without-binding and binding-without-declaration are
 /// errors, and the supplied mode must satisfy the declared floor.
 pub fn resolve_manifest_workspace(
-    requirement: Option<&AgentManifestWorkspaceRequirement>,
+    requirement: Option<&crate::agent::manifest_schema::AgentManifestWorkspaceRequirement>,
     default_workspace: Option<&AgentManifestWorkspaceBinding>,
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
-) -> VerletResult<Option<AgentManifestResolvedWorkspaceMount>> {
+) -> crate::VerletResult<Option<AgentManifestResolvedWorkspaceMount>> {
     Ok(
         resolve_manifest_workspace_with_origin(requirement, default_workspace, workspace_override)?
             .map(|workspace| workspace.mount),
@@ -3088,10 +3136,10 @@ struct ResolvedManifestWorkspace {
 }
 
 fn resolve_manifest_workspace_with_origin(
-    requirement: Option<&AgentManifestWorkspaceRequirement>,
+    requirement: Option<&crate::agent::manifest_schema::AgentManifestWorkspaceRequirement>,
     default_workspace: Option<&AgentManifestWorkspaceBinding>,
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
-) -> VerletResult<Option<ResolvedManifestWorkspace>> {
+) -> crate::VerletResult<Option<ResolvedManifestWorkspace>> {
     let (binding, origin) = match workspace_override {
         Some(binding) => (Some(binding), AgentManifestBindingOrigin::BindOverride),
         None => (default_workspace, AgentManifestBindingOrigin::DaemonDefault),
@@ -3099,13 +3147,13 @@ fn resolve_manifest_workspace_with_origin(
     let (requirement, binding) = match (requirement, binding) {
         (None, None) => return Ok(None),
         (Some(_), None) => {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletError::RuntimeFactory(
                 "agent manifest requires a workspace binding, but neither the bind override nor daemon default supplied one"
                     .to_string(),
             ));
         }
         (None, Some(_)) => {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletError::RuntimeFactory(
                 "workspace binding was supplied, but the agent manifest did not declare a workspace requirement"
                     .to_string(),
             ));
@@ -3114,27 +3162,27 @@ fn resolve_manifest_workspace_with_origin(
     };
 
     if binding.mode < requirement.min_mode {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "workspace binding mode {} does not satisfy manifest minimum mode {}",
             workspace_mode_name(binding.mode),
             workspace_mode_name(requirement.min_mode)
         )));
     }
     let host_path = std::fs::canonicalize(&binding.host_path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "workspace host path {} could not be resolved: {err}",
             binding.host_path.display()
         ))
     })?;
     if !host_path.is_dir() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "workspace host path {} is not a directory",
             host_path.display()
         )));
     }
     Ok(Some(ResolvedManifestWorkspace {
         mount: AgentManifestResolvedWorkspaceMount {
-            guest_path: PathBuf::from(&requirement.guest_path),
+            guest_path: std::path::PathBuf::from(&requirement.guest_path),
             host_path,
             mode: binding.mode,
         },
@@ -3142,14 +3190,16 @@ fn resolve_manifest_workspace_with_origin(
     }))
 }
 
-fn workspace_mode_name(mode: AgentManifestWorkspaceMode) -> &'static str {
+fn workspace_mode_name(
+    mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode,
+) -> &'static str {
     match mode {
-        AgentManifestWorkspaceMode::ReadOnly => "ro",
-        AgentManifestWorkspaceMode::ReadWrite => "rw",
+        crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadOnly => "ro",
+        crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite => "rw",
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestSkillPackageBinding {
     pub resource_name: String,
@@ -3161,7 +3211,7 @@ pub struct AgentManifestSkillPackageBinding {
     pub index_sha256: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestSkillDiscovery {
     /// Normalized path relative to the witnessed workspace root.
@@ -3169,7 +3219,7 @@ pub struct AgentManifestSkillDiscovery {
     pub skills: Vec<AgentManifestDiscoveredSkill>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestDiscoveredSkill {
     pub name: String,
@@ -3179,7 +3229,7 @@ pub struct AgentManifestDiscoveredSkill {
     pub description: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestStaticContextSegment {
     pub id: String,
@@ -3193,14 +3243,14 @@ pub struct AgentManifestStaticContextSegment {
     pub content: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingBinding {
     pub id: String,
     pub role: CouplingRole,
     pub trigger_kind: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub trigger_match: BTreeMap<String, JsonValue>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub trigger_match: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_streams: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3214,25 +3264,28 @@ pub struct AgentManifestCouplingBinding {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
-    pub budget: AgentManifestCouplingBudget,
+    pub grant_expiries: Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
+    pub budget: crate::agent::manifest_schema::AgentManifestCouplingBudget,
     pub config_hash: String,
 }
 
 impl AgentManifestCouplingBinding {
-    fn from_bound(coupling: &BoundCoupling, grant_expiries: Vec<AgentManifestGrantExpiry>) -> Self {
+    fn from_bound(
+        coupling: &BoundCoupling,
+        grant_expiries: Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
+    ) -> Self {
         let source_streams = coupling
             .source_selectors
             .iter()
             .map(|selector| selector.stream.clone())
-            .collect::<BTreeSet<_>>()
+            .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         let source_kinds = coupling
             .source_selectors
             .iter()
             .flat_map(|selector| selector.kinds.iter().map(|kind| kind.to_string()))
-            .collect::<BTreeSet<_>>()
+            .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         Self {
@@ -3260,17 +3313,20 @@ impl AgentManifestCouplingBinding {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestOperationBinding {
     pub name: String,
     pub artifact_hash: String,
-    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
-    pub effect_class: EffectClass,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::manifest_schema::EffectClass::is_at_most_once"
+    )]
+    pub effect_class: crate::agent::manifest_schema::EffectClass,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
+    pub grant_expiries: Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
     /// Empty means the binding exposes the whole record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<String>,
@@ -3279,24 +3335,30 @@ pub struct AgentManifestOperationBinding {
     pub direct_tools: Vec<AgentManifestDirectToolBinding>,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestDirectToolBinding {
     pub tool_name: String,
     pub operation: String,
-    #[serde(default, skip_serializing_if = "EffectClass::is_at_most_once")]
-    pub effect_class: EffectClass,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::manifest_schema::EffectClass::is_at_most_once"
+    )]
+    pub effect_class: crate::agent::manifest_schema::EffectClass,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<AgentManifestGrantExpiry>,
+    pub grant_expiries: Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
 }
 
 /// Apply caller overrides onto the manifest's runtime defaults, enforcing
 /// the deny-by-default allowlist. Returns the effective defaults plus the
 /// list of keys actually overridden, for the bind receipt.
 pub fn apply_runtime_overrides(
-    defaults: &AgentManifestRuntimeDefaults,
+    defaults: &crate::agent::manifest_schema::AgentManifestRuntimeDefaults,
     overrides: &AgentManifestBindOverrides,
-) -> VerletResult<(AgentManifestRuntimeDefaults, Vec<String>)> {
+) -> crate::VerletResult<(
+    crate::agent::manifest_schema::AgentManifestRuntimeDefaults,
+    Vec<String>,
+)> {
     validate_optional_positive_u64("turn_timeout_ms", overrides.turn_timeout_ms)?;
     validate_optional_positive_u64("cancellation_grace_ms", overrides.cancellation_grace_ms)?;
     validate_tool_round_budget("max_tool_rounds", overrides.max_tool_rounds)?;
@@ -3309,37 +3371,49 @@ pub fn apply_runtime_overrides(
     let mut effective = defaults.clone();
     let mut overridden_keys = Vec::new();
     if let Some(value) = &overrides.default_cwd {
-        let key = require_override_key(&allowlist, AgentManifestRuntimeOverrideKey::DefaultCwd)?;
+        let key = require_override_key(
+            &allowlist,
+            crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd,
+        )?;
         effective.default_cwd = value.clone();
         overridden_keys.push(key.to_string());
     }
     if let Some(value) = overrides.streaming {
-        let key = require_override_key(&allowlist, AgentManifestRuntimeOverrideKey::Streaming)?;
+        let key = require_override_key(
+            &allowlist,
+            crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::Streaming,
+        )?;
         effective.streaming = value;
         overridden_keys.push(key.to_string());
     }
     if let Some(value) = overrides.turn_timeout_ms {
-        let key = require_override_key(&allowlist, AgentManifestRuntimeOverrideKey::TurnTimeoutMs)?;
+        let key = require_override_key(
+            &allowlist,
+            crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::TurnTimeoutMs,
+        )?;
         effective.turn_timeout_ms = Some(value);
         overridden_keys.push(key.to_string());
     }
     if let Some(value) = overrides.cancellation_grace_ms {
         let key = require_override_key(
             &allowlist,
-            AgentManifestRuntimeOverrideKey::CancellationGraceMs,
+            crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::CancellationGraceMs,
         )?;
         effective.cancellation_grace_ms = Some(value);
         overridden_keys.push(key.to_string());
     }
     if let Some(value) = overrides.max_tool_rounds {
-        let key = require_override_key(&allowlist, AgentManifestRuntimeOverrideKey::MaxToolRounds)?;
+        let key = require_override_key(
+            &allowlist,
+            crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::MaxToolRounds,
+        )?;
         effective.max_tool_rounds = Some(value);
         overridden_keys.push(key.to_string());
     }
     if let Some(value) = overrides.compaction_auto_at_text_bytes {
         let key = require_override_key(
             &allowlist,
-            AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes,
+            crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes,
         )?;
         effective.compaction.auto_at_text_bytes = Some(value);
         overridden_keys.push(key.to_string());

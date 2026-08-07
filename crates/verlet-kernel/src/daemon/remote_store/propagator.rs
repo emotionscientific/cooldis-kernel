@@ -15,22 +15,9 @@
 //! superseded lease is never correct. Transport failures are the retryable
 //! class.
 //!
-//! [`LeaseFenceDecision::Superseded`]: super::lease::LeaseFenceDecision::Superseded
+//! [`LeaseFenceDecision::Superseded`]: crate::daemon::remote_store::lease::LeaseFenceDecision::Superseded
 
-use super::endpoint::{
-    SYNC_PUSH_SCHEMA_V1, SyncLeaseRenewer, SyncPullSource, SyncPushGate, SyncPushOutcome,
-    SyncPushRejectionReason, SyncPushRequestV1,
-};
-use super::lease::{LeaseFenceDecision, StreamLeaseGrantV1};
-use crate::{
-    DaemonClock, EventSequence, EventStore, EventStreamId, SqliteSessionStore, StreamCursorV1,
-    StreamRecordEnvelopeV1, VerletError, VerletResult,
-};
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use std::future::Future;
-use std::sync::Arc;
-use verlet_sqlite::{TransactionBehavior, params};
+use crate::EventStore as _;
 
 const DEFAULT_PUSH_BATCH_SIZE: usize = 128;
 const MIN_RENEWAL_MARGIN_MS: i64 = 1_000;
@@ -41,12 +28,12 @@ const MIN_RENEWAL_MARGIN_MS: i64 = 1_000;
 /// accepted push, so a crash between send and ack re-pushes a batch. That
 /// retry first receives a sequence conflict; the propagator then pulls and
 /// compares the durable records before adopting the already-applied tail.
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamPropagationState {
-    pub stream_id: EventStreamId,
-    pub lease: StreamLeaseGrantV1,
+    pub stream_id: crate::EventStreamId,
+    pub lease: crate::daemon::remote_store::lease::StreamLeaseGrantV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pushed_through: Option<EventSequence>,
+    pub pushed_through: Option<crate::EventSequence>,
 }
 
 impl std::fmt::Debug for StreamPropagationState {
@@ -65,7 +52,9 @@ pub enum PropagationStep {
     /// Nothing new past `pushed_through`; the stream is converged.
     Converged,
     /// A batch was accepted; `pushed_through` advanced to the acked tail.
-    Advanced { pushed_through: EventSequence },
+    Advanced {
+        pushed_through: crate::EventSequence,
+    },
     /// The endpoint was unreachable or failed transiently; retry with
     /// backoff, keep appending locally.
     EndpointUnavailable,
@@ -80,7 +69,9 @@ pub enum PropagationStep {
     /// The parent stream contains records different from the local batch at
     /// the expected position. Terminal and fail-closed: neither tail may be
     /// silently adopted over the other.
-    StreamDiverged { actual_next_sequence: EventSequence },
+    StreamDiverged {
+        actual_next_sequence: crate::EventSequence,
+    },
 }
 
 /// Pushes one stream's local tail to the parent endpoint.
@@ -93,9 +84,9 @@ pub enum PropagationStep {
 /// batch is adopted, while different records return
 /// [`PropagationStep::StreamDiverged`].
 ///
-/// [`SyncPushGate`]: super::endpoint::SyncPushGate
-/// [`SyncLeaseRenewer`]: super::endpoint::SyncLeaseRenewer
-#[async_trait]
+/// [`SyncPushGate`]: crate::daemon::remote_store::endpoint::SyncPushGate
+/// [`SyncLeaseRenewer`]: crate::daemon::remote_store::endpoint::SyncLeaseRenewer
+#[async_trait::async_trait]
 pub trait StreamPropagator: Send + Sync {
     /// Run one bounded propagation attempt and report what happened. The
     /// caller owns pacing (backoff on [`PropagationStep::EndpointUnavailable`],
@@ -103,7 +94,7 @@ pub trait StreamPropagator: Send + Sync {
     async fn propagate_once(
         &self,
         state: &mut StreamPropagationState,
-    ) -> VerletResult<PropagationStep>;
+    ) -> crate::VerletResult<PropagationStep>;
 }
 
 /// SQLite persistence for a child's per-stream propagation positions.
@@ -113,7 +104,7 @@ pub trait StreamPropagator: Send + Sync {
 /// before [`PropagationStep::Advanced`] or renewed progress is returned.
 #[derive(Clone)]
 pub struct SqlitePropagationStateStore {
-    store: SqliteSessionStore,
+    store: crate::SqliteSessionStore,
 }
 
 impl std::fmt::Debug for SqlitePropagationStateStore {
@@ -124,7 +115,7 @@ impl std::fmt::Debug for SqlitePropagationStateStore {
 }
 
 impl SqlitePropagationStateStore {
-    pub async fn new(store: SqliteSessionStore) -> VerletResult<Self> {
+    pub async fn new(store: crate::SqliteSessionStore) -> crate::VerletResult<Self> {
         let state_store = Self { store };
         state_store.init_schema().await?;
         Ok(state_store)
@@ -132,14 +123,14 @@ impl SqlitePropagationStateStore {
 
     pub async fn load(
         &self,
-        stream_id: &EventStreamId,
-    ) -> VerletResult<Option<StreamPropagationState>> {
+        stream_id: &crate::EventStreamId,
+    ) -> crate::VerletResult<Option<StreamPropagationState>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let mut rows = connection
             .query(
                 "SELECT state_json FROM cooldis_stream_propagation_state WHERE stream_id = ?1",
-                params![stream_id.as_str()],
+                verlet_sqlite::params![stream_id.as_str()],
             )
             .await
             .map_err(storage_error)?;
@@ -149,23 +140,23 @@ impl SqlitePropagationStateStore {
             .map(|row| {
                 let encoded = row.get::<String>(0).map_err(storage_error)?;
                 serde_json::from_str(&encoded).map_err(|error| {
-                    VerletError::History(format!("decode stream propagation state: {error}"))
+                    crate::VerletError::History(format!("decode stream propagation state: {error}"))
                 })
             })
             .transpose()
     }
 
-    pub async fn persist(&self, state: &StreamPropagationState) -> VerletResult<()> {
+    pub async fn persist(&self, state: &StreamPropagationState) -> crate::VerletResult<()> {
         let state = state.clone();
         let store = self.store.clone();
         cancellation_safe(async move {
             let encoded = serde_json::to_string(&state).map_err(|error| {
-                VerletError::History(format!("encode stream propagation state: {error}"))
+                crate::VerletError::History(format!("encode stream propagation state: {error}"))
             })?;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             transaction
@@ -173,7 +164,7 @@ impl SqlitePropagationStateStore {
                     "INSERT INTO cooldis_stream_propagation_state (stream_id, state_json)
                      VALUES (?1, ?2)
                      ON CONFLICT(stream_id) DO UPDATE SET state_json = excluded.state_json",
-                    params![state.stream_id.as_str(), encoded],
+                    verlet_sqlite::params![state.stream_id.as_str(), encoded],
                 )
                 .await
                 .map_err(storage_error)?;
@@ -183,13 +174,13 @@ impl SqlitePropagationStateStore {
         .await
     }
 
-    async fn init_schema(&self) -> VerletResult<()> {
+    async fn init_schema(&self) -> crate::VerletResult<()> {
         let store = self.store.clone();
         cancellation_safe(async move {
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
             let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
             transaction
@@ -219,13 +210,13 @@ impl SqlitePropagationStateStore {
 /// immediately on [`PropagationStep::LeaseFenced`] or
 /// [`PropagationStep::StreamDiverged`].
 pub struct LocalFirstStreamPropagator {
-    local_store: SqliteSessionStore,
-    push_gate: Arc<dyn SyncPushGate>,
-    pull_source: Arc<dyn SyncPullSource>,
-    lease_renewer: Arc<dyn SyncLeaseRenewer>,
-    state_store: Arc<SqlitePropagationStateStore>,
+    local_store: crate::SqliteSessionStore,
+    push_gate: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncPushGate>,
+    pull_source: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncPullSource>,
+    lease_renewer: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+    state_store: std::sync::Arc<SqlitePropagationStateStore>,
     bearer_token: String,
-    clock: Arc<dyn DaemonClock>,
+    clock: std::sync::Arc<dyn crate::DaemonClock>,
     batch_size: usize,
 }
 
@@ -240,13 +231,13 @@ impl std::fmt::Debug for LocalFirstStreamPropagator {
 impl LocalFirstStreamPropagator {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        local_store: SqliteSessionStore,
-        push_gate: Arc<dyn SyncPushGate>,
-        pull_source: Arc<dyn SyncPullSource>,
-        lease_renewer: Arc<dyn SyncLeaseRenewer>,
-        state_store: Arc<SqlitePropagationStateStore>,
+        local_store: crate::SqliteSessionStore,
+        push_gate: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncPushGate>,
+        pull_source: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncPullSource>,
+        lease_renewer: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+        state_store: std::sync::Arc<SqlitePropagationStateStore>,
         bearer_token: String,
-        clock: Arc<dyn DaemonClock>,
+        clock: std::sync::Arc<dyn crate::DaemonClock>,
     ) -> Self {
         Self {
             local_store,
@@ -268,7 +259,7 @@ impl LocalFirstStreamPropagator {
     async fn renew_if_due(
         &self,
         state: &mut StreamPropagationState,
-    ) -> VerletResult<Option<PropagationStep>> {
+    ) -> crate::VerletResult<Option<PropagationStep>> {
         let lease_duration_ms = state
             .lease
             .expires_at_ms
@@ -285,7 +276,7 @@ impl LocalFirstStreamPropagator {
     async fn renew(
         &self,
         state: &mut StreamPropagationState,
-    ) -> VerletResult<Option<PropagationStep>> {
+    ) -> crate::VerletResult<Option<PropagationStep>> {
         let renewed = match self.lease_renewer.renew_lease(&self.bearer_token).await {
             Ok(renewed) => renewed,
             Err(_) => return Ok(Some(PropagationStep::EndpointUnavailable)),
@@ -304,25 +295,27 @@ impl LocalFirstStreamPropagator {
     async fn reconcile_sequence_conflict(
         &self,
         state: &mut StreamPropagationState,
-        batch: &[StreamRecordEnvelopeV1],
-        actual_next_sequence: EventSequence,
-    ) -> VerletResult<PropagationStep> {
+        batch: &[crate::StreamRecordEnvelopeV1],
+        actual_next_sequence: crate::EventSequence,
+    ) -> crate::VerletResult<PropagationStep> {
         let expected = batch[0].sequence;
         let cursor = if expected.get() == 1 {
             None
         } else {
-            let previous_sequence = EventSequence::new(expected.get() - 1);
+            let previous_sequence = crate::EventSequence::new(expected.get() - 1);
             let previous = self
                 .local_store
                 .read_events(&state.stream_id, Some(previous_sequence))
                 .await
-                .map_err(|error| VerletError::History(error.to_string()))?
+                .map_err(|error| crate::VerletError::History(error.to_string()))?
                 .into_iter()
                 .next()
                 .ok_or_else(|| {
-                    VerletError::History("local propagation cursor record is missing".to_string())
+                    crate::VerletError::History(
+                        "local propagation cursor record is missing".to_string(),
+                    )
                 })?;
-            Some(StreamCursorV1::from_event(&previous))
+            Some(crate::StreamCursorV1::from_event(&previous))
         };
         let remote = match self
             .pull_source
@@ -330,10 +323,10 @@ impl LocalFirstStreamPropagator {
             .await
         {
             Ok(remote) => remote,
-            Err(VerletError::History(message)) if message == "sync pull not authorized" => {
+            Err(crate::VerletError::History(message)) if message == "sync pull not authorized" => {
                 return Ok(PropagationStep::LeaseFenced);
             }
-            Err(VerletError::History(_)) => {
+            Err(crate::VerletError::History(_)) => {
                 return Ok(PropagationStep::StreamDiverged {
                     actual_next_sequence,
                 });
@@ -350,7 +343,7 @@ impl LocalFirstStreamPropagator {
                 .local_store
                 .read_events(&state.stream_id, Some(expected))
                 .await
-                .map_err(|error| VerletError::History(error.to_string()))?
+                .map_err(|error| crate::VerletError::History(error.to_string()))?
                 .into_iter()
                 .map(|event| event.to_stream_record_v1())
                 .collect::<Vec<_>>();
@@ -370,14 +363,14 @@ impl LocalFirstStreamPropagator {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl StreamPropagator for LocalFirstStreamPropagator {
     async fn propagate_once(
         &self,
         state: &mut StreamPropagationState,
-    ) -> VerletResult<PropagationStep> {
+    ) -> crate::VerletResult<PropagationStep> {
         if !state.lease.scope.authorizes(&state.stream_id) {
-            return Err(VerletError::History(
+            return Err(crate::VerletError::History(
                 "propagation lease scope does not authorize its stream".to_string(),
             ));
         }
@@ -386,12 +379,12 @@ impl StreamPropagator for LocalFirstStreamPropagator {
         }
         let from_sequence = state
             .pushed_through
-            .map(|sequence| EventSequence::new(sequence.get().saturating_add(1)));
+            .map(|sequence| crate::EventSequence::new(sequence.get().saturating_add(1)));
         let local = self
             .local_store
             .read_events(&state.stream_id, from_sequence)
             .await
-            .map_err(|error| VerletError::History(error.to_string()))?;
+            .map_err(|error| crate::VerletError::History(error.to_string()))?;
         let batch = local
             .into_iter()
             .take(self.batch_size)
@@ -400,8 +393,8 @@ impl StreamPropagator for LocalFirstStreamPropagator {
         let Some(first) = batch.first() else {
             return Ok(PropagationStep::Converged);
         };
-        let request = SyncPushRequestV1 {
-            schema: SYNC_PUSH_SCHEMA_V1.to_string(),
+        let request = crate::daemon::remote_store::endpoint::SyncPushRequestV1 {
+            schema: crate::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
             stream_id: state.stream_id.clone(),
             lease_id: state.lease.lease_id.clone(),
             expected_next_sequence: first.sequence,
@@ -421,7 +414,7 @@ impl StreamPropagator for LocalFirstStreamPropagator {
                 return Ok(PropagationStep::EndpointUnavailable);
             }
             match outcome {
-                SyncPushOutcome::Accepted { ack } => {
+                crate::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { ack } => {
                     let expected_end = batch
                         .last()
                         .expect("non-empty propagation batches are validated")
@@ -433,16 +426,16 @@ impl StreamPropagator for LocalFirstStreamPropagator {
                         pushed_through: expected_end,
                     });
                 }
-                SyncPushOutcome::Rejected { rejection } => match rejection.reason {
-                    SyncPushRejectionReason::LeaseFence {
-                        fence: LeaseFenceDecision::Expired,
+                crate::daemon::remote_store::endpoint::SyncPushOutcome::Rejected { rejection } => match rejection.reason {
+                    crate::daemon::remote_store::endpoint::SyncPushRejectionReason::LeaseFence {
+                        fence: crate::daemon::remote_store::lease::LeaseFenceDecision::Expired,
                     } if !renewed_after_expiry => {
                         if let Some(step) = self.renew(state).await? {
                             return Ok(step);
                         }
                         renewed_after_expiry = true;
                     }
-                    SyncPushRejectionReason::SequenceFenceConflict {
+                    crate::daemon::remote_store::endpoint::SyncPushRejectionReason::SequenceFenceConflict {
                         actual_next_sequence,
                     } => {
                         return self
@@ -456,18 +449,18 @@ impl StreamPropagator for LocalFirstStreamPropagator {
     }
 }
 
-fn storage_error(error: impl std::fmt::Display) -> VerletError {
-    VerletError::History(error.to_string())
+fn storage_error(error: impl std::fmt::Display) -> crate::VerletError {
+    crate::VerletError::History(error.to_string())
 }
 
 async fn cancellation_safe<T>(
-    future: impl Future<Output = VerletResult<T>> + Send + 'static,
-) -> VerletResult<T>
+    future: impl std::future::Future<Output = crate::VerletResult<T>> + Send + 'static,
+) -> crate::VerletResult<T>
 where
     T: Send + 'static,
 {
     tokio::spawn(future).await.map_err(|error| {
-        VerletError::History(format!(
+        crate::VerletError::History(format!(
             "propagation state transaction task failed: {error}"
         ))
     })?

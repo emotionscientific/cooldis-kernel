@@ -51,18 +51,15 @@ pub mod tail;
 
 #[cfg(test)]
 mod tests {
-    use super::endpoint::{SYNC_PUSH_REJECTION_SCHEMA_V1, SYNC_PUSH_SCHEMA_V1};
-    use super::lease::{SYNC_STREAM_LEASE_SCHEMA_V1, SYNC_STREAM_WRITE_CREDENTIAL_SCHEMA_V1};
-    use super::queue::SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1;
 
     #[test]
     fn v1_wire_schemas_use_the_stream_namespace() {
         for schema in [
-            SYNC_STREAM_LEASE_SCHEMA_V1,
-            SYNC_STREAM_WRITE_CREDENTIAL_SCHEMA_V1,
-            SYNC_PUSH_SCHEMA_V1,
-            SYNC_PUSH_REJECTION_SCHEMA_V1,
-            SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1,
+            crate::daemon::remote_store::lease::SYNC_STREAM_LEASE_SCHEMA_V1,
+            crate::daemon::remote_store::lease::SYNC_STREAM_WRITE_CREDENTIAL_SCHEMA_V1,
+            crate::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1,
+            crate::daemon::remote_store::endpoint::SYNC_PUSH_REJECTION_SCHEMA_V1,
+            crate::daemon::remote_store::queue::SYNC_INGRESS_QUEUE_ENTRY_SCHEMA_V1,
         ] {
             assert!(schema.starts_with("cooldis.stream."), "{schema}");
             assert!(schema.ends_with("/1"), "{schema}");

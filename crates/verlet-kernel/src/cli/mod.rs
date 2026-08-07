@@ -1,62 +1,3 @@
-use crate::daemon::handle_ingress::ThreadHandleIngressAdapter;
-use crate::daemon::remote_store::endpoint::{SqliteSyncEndpoint, VerletDaemonSyncConfig};
-use crate::daemon::remote_store::endpoint_http::DaemonSyncHttpServer;
-use crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority;
-use crate::daemon::remote_store::process_executor::{
-    ProcessRemoteThreadExecutor, RemoteChildBootstrapV1, is_remote_child_command, run_remote_child,
-};
-use crate::{
-    APP_SERVER_ANTHROPIC_BEDROCK_MODEL, APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER,
-    APP_SERVER_ANTHROPIC_MODEL, APP_SERVER_ANTHROPIC_PROVIDER, APP_SERVER_BIFROST_MODEL,
-    APP_SERVER_BIFROST_PROVIDER, APP_SERVER_OPENAI_COMPATIBLE_MODEL,
-    APP_SERVER_OPENAI_COMPATIBLE_PROVIDER, AgentManifestRefStatus, AppServerListenAddr,
-    AppServerProviderConfig, BoundCoupling, BoundCouplingSet, CapsuleBindingsConfig,
-    CodexTuiConnectConfig, CodexTuiEvent, CodexTuiTestClient, ConsoleAssetConfig,
-    CouplingRunStatus, CouplingScheduler, CouplingSchedulerCycleReceipt, EventKind, EventRecord,
-    EventSequence, EventStore, EventStreamId, HostFileSystem, HostFileSystemMode,
-    ImportBuildReceipt, ImportOperationBuild, ImportPackageSource, JsonRpcNotification,
-    LlmProviderAuthStore, LlmProviderCatalogStore, LoadedVerletDaemonConfig, LocalAgentRegistry,
-    LocalBlobRegistry, LocalOperationRegistry, LocalSkillRegistry, McpRemoteServerConfig,
-    McpRemoteToolProvider, McpRemoteTransport, NewEventRecord, OperationImportPlan,
-    PublishOperationRequest, PublishSkillPackageRequest, PublishedAgentRecord,
-    PublishedOperationRecord, PublishedOperationSource, RegisteredOperation, RouteIngressSink,
-    RustWasmBuildOptions, SecretSourceKind, SkillImportPlan, SqliteMcpSourceRegistry,
-    SqliteMetadataStore, SqliteSecretStore, SqliteSessionStore, StreamRecordEnvelopeV1,
-    SystemDaemonClock, TelegramWebhookServer, TelegramWebhookServerConfig, ThreadId,
-    ToolBuildReceipt, ToolCommandContract, ToolFixtureRun, ToolInterfaceContract,
-    ToolManualExitStatus, ToolOperationInterface, ToolOperationManual, ToolPackageIdentity,
-    ToolPackageSource, ToolRuntimeContract, VerletAppServer, VerletAppServerConfig,
-    VerletDaemonClockRoute, VerletDaemonIoBridge, VerletDaemonQueueWorker, VerletDaemonServiceSpec,
-    VerletDaemonServiceTarget, VerletError, VerletIngressConfig, VerletIoConfig,
-    VerletIoRouteConfig, VerletProviderConfig, VerletResult, VerletVfs, WasmOperationManifest,
-    WasmOperationValueKind, WasmRuntimeArtifact, WasmRuntimeConfig, WasmRuntimeFactory,
-    agent::agent_tool_router::AgentKernelToolProvider, build_rust_wasm_module,
-    default_blob_registry_root, default_blob_registry_root_for_agent_registry_root,
-    default_operations_registry_root, discover_verlet_daemon_config_path, discover_verlet_project,
-    install_verlet_daemon_service, load_verlet_daemon_config, load_verlet_daemon_config_layers,
-    render_openapi_import_artifact, render_verlet_daemon_service, required_secret_names,
-    resolve_manifest_secret_resolution, uninstall_verlet_daemon_service, wasm_sha256,
-};
-use bashkit::InMemoryFs;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io::{Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
-use uuid::Uuid;
-use verlet_abi::{COUPLING_DISCHARGE_ABI, COUPLING_INVOCATION_ABI};
-use verlet_io_core::{IngressPersistenceMode, IngressSink};
-use verlet_io_pgqrs::{PgqrsIngressQueue, PgqrsQueueConfig};
-use verlet_io_telegram::{TELEGRAM_PROTOCOL, TelegramBotClient, TelegramEgressAdapter};
-
 mod agent;
 mod auth;
 mod blob;
@@ -73,28 +14,12 @@ mod secret;
 mod skill;
 mod tool;
 
-use agent::*;
-use auth::*;
-use blob::*;
-use console::*;
-use coupling::*;
-use daemon::*;
-use debug_bind::*;
-use debug_rpc::*;
-use identity::*;
-use import::*;
-use rpc::*;
-use secret::*;
-use skill::*;
-use tool::*;
-
-pub async fn run() -> VerletResult<()> {
+pub async fn run() -> crate::VerletResult<()> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if args
-        .first()
-        .is_some_and(|command| is_remote_child_command(command))
-    {
-        return remote_child_run().await;
+    if args.first().is_some_and(|command| {
+        crate::daemon::remote_store::process_executor::is_remote_child_command(command)
+    }) {
+        return crate::cli::daemon::remote_child_run().await;
     }
     if args
         .first()
@@ -122,28 +47,28 @@ pub async fn run() -> VerletResult<()> {
             Ok(())
         }
         "help" => run_help(args),
-        "init" => agent_init(args).await,
-        "agent" => run_agent(args).await,
-        "blob" => run_blob(args).await,
-        "coupling" => run_coupling(args).await,
-        "import" => run_import(args).await,
-        "tool" => run_tool(args).await,
-        "skill" => run_skill(args).await,
-        "secret" => run_secret(args).await,
-        "auth" => run_auth(args).await,
-        "identity" => run_identity(args).await,
-        "console" => run_console(args).await,
+        "init" => crate::cli::agent::agent_init(args).await,
+        "agent" => crate::cli::agent::run_agent(args).await,
+        "blob" => crate::cli::blob::run_blob(args).await,
+        "coupling" => crate::cli::coupling::run_coupling(args).await,
+        "import" => crate::cli::import::run_import(args).await,
+        "tool" => crate::cli::tool::run_tool(args).await,
+        "skill" => crate::cli::skill::run_skill(args).await,
+        "secret" => crate::cli::secret::run_secret(args).await,
+        "auth" => crate::cli::auth::run_auth(args).await,
+        "identity" => crate::cli::identity::run_identity(args).await,
+        "console" => crate::cli::console::run_console(args).await,
         "chat" => run_chat(args).await,
-        "debug" => run_debug(args).await,
-        "daemon" => run_daemon(args).await,
-        "rpc" => run_rpc(args).await,
+        "debug" => crate::cli::debug_rpc::run_debug(args).await,
+        "daemon" => crate::cli::daemon::run_daemon(args).await,
+        "rpc" => crate::cli::rpc::run_rpc(args).await,
         other => Err(usage_error(format!(
             "unknown command {other:?}; use `verlet --help`"
         ))),
     }
 }
 
-fn run_help(args: Vec<OsString>) -> VerletResult<()> {
+fn run_help(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let path = args
         .into_iter()
         .filter(|arg| arg != "--help" && arg != "-h")
@@ -156,87 +81,89 @@ fn run_help(args: Vec<OsString>) -> VerletResult<()> {
     print_command_help(&path)
 }
 
-fn print_command_help(path: &[String]) -> VerletResult<()> {
+fn print_command_help(path: &[String]) -> crate::VerletResult<()> {
     match path {
         [command] if command == "commands" => print_commands_help(),
         [command] if command == "help" => print_help_help(),
-        [command] if command == "console" => print_console_help(),
-        [command] if command == "chat" => print_chat_help(),
-        [command] if command == "init" => print_agent_init_help(),
-        [command] if command == "agent" => print_agent_help(),
-        [command] if command == "coupling" => print_coupling_help(),
+        [command] if command == "console" => crate::cli::console::print_console_help(),
+        [command] if command == "chat" => crate::cli::console::print_chat_help(),
+        [command] if command == "init" => crate::cli::agent::print_agent_init_help(),
+        [command] if command == "agent" => crate::cli::agent::print_agent_help(),
+        [command] if command == "coupling" => crate::cli::coupling::print_coupling_help(),
         [command, subcommand] if command == "coupling" && subcommand == "init" => {
-            print_coupling_init_help()
+            crate::cli::coupling::print_coupling_init_help()
         }
         [command, subcommand] if command == "coupling" && subcommand == "run" => {
-            print_coupling_run_help()
+            crate::cli::coupling::print_coupling_run_help()
         }
-        [command] if command == "blob" => print_blob_help(),
+        [command] if command == "blob" => crate::cli::blob::print_blob_help(),
         [command, subcommand] if command == "blob" && subcommand == "publish" => {
-            print_blob_publish_help()
+            crate::cli::blob::print_blob_publish_help()
         }
         [command, subcommand] if command == "agent" && subcommand == "init" => {
-            print_agent_init_help()
+            crate::cli::agent::print_agent_init_help()
         }
         [command, subcommand] if command == "agent" && subcommand == "plan" => {
-            print_agent_plan_help()
+            crate::cli::agent::print_agent_plan_help()
         }
         [command, subcommand] if command == "agent" && subcommand == "publish" => {
-            print_agent_publish_help()
+            crate::cli::agent::print_agent_publish_help()
         }
         [command, subcommand] if command == "agent" && subcommand == "list" => {
-            print_agent_list_help()
+            crate::cli::agent::print_agent_list_help()
         }
         [command, subcommand] if command == "agent" && subcommand == "versions" => {
-            print_agent_versions_help()
+            crate::cli::agent::print_agent_versions_help()
         }
         [command, subcommand] if command == "agent" && subcommand == "diff" => {
-            print_agent_diff_help()
+            crate::cli::agent::print_agent_diff_help()
         }
         [command, subcommand] if command == "agent" && subcommand == "show" => {
-            print_agent_show_help()
+            crate::cli::agent::print_agent_show_help()
         }
         [command, subcommand] if command == "agent" && subcommand == "run" => {
-            print_agent_run_help()
+            crate::cli::agent::print_agent_run_help()
         }
-        [command] if command == "tool" => print_tool_help(),
-        [command] if command == "import" => print_import_help(),
+        [command] if command == "tool" => crate::cli::tool::print_tool_help(),
+        [command] if command == "import" => crate::cli::import::print_import_help(),
         [command, subcommand] if command == "import" && subcommand == "build" => {
-            print_import_build_help()
+            crate::cli::import::print_import_build_help()
         }
         [command, subcommand] if command == "import" && subcommand == "publish" => {
-            print_import_publish_help()
+            crate::cli::import::print_import_publish_help()
         }
-        [command] if command == "skill" => print_skill_help(),
+        [command] if command == "skill" => crate::cli::skill::print_skill_help(),
         [command, subcommand] if command == "skill" && subcommand == "publish" => {
-            print_skill_publish_help()
+            crate::cli::skill::print_skill_publish_help()
         }
         [command, subcommand] if command == "skill" && subcommand == "import" => {
-            print_skill_import_help()
+            crate::cli::skill::print_skill_import_help()
         }
         [command, subcommand] if command == "tool" && subcommand == "build" => {
-            print_tool_build_help()
+            crate::cli::tool::print_tool_build_help()
         }
         [command, subcommand] if command == "tool" && subcommand == "list" => {
-            print_tool_list_help()
+            crate::cli::tool::print_tool_list_help()
         }
         [command, subcommand] if command == "tool" && subcommand == "publish" => {
-            print_tool_publish_help()
+            crate::cli::tool::print_tool_publish_help()
         }
-        [command, subcommand] if command == "tool" && subcommand == "run" => print_tool_run_help(),
+        [command, subcommand] if command == "tool" && subcommand == "run" => {
+            crate::cli::tool::print_tool_run_help()
+        }
         [command, subcommand] if command == "tool" && subcommand == "manual" => {
-            print_tool_manual_help()
+            crate::cli::tool::print_tool_manual_help()
         }
         [command, subcommand] if command == "tool" && subcommand == "source" => {
-            print_tool_source_help()
+            crate::cli::tool::print_tool_source_help()
         }
         [command, subcommand, action] if command == "tool" && subcommand == "source" => {
             match action.as_str() {
-                "add" => print_tool_source_add_help(),
-                "discover" => print_tool_source_discover_help(),
-                "list" => print_tool_source_list_help(),
-                "show" => print_tool_source_show_help(),
-                "remove" => print_tool_source_remove_help(),
+                "add" => crate::cli::tool::print_tool_source_add_help(),
+                "discover" => crate::cli::tool::print_tool_source_discover_help(),
+                "list" => crate::cli::tool::print_tool_source_list_help(),
+                "show" => crate::cli::tool::print_tool_source_show_help(),
+                "remove" => crate::cli::tool::print_tool_source_remove_help(),
                 other => {
                     return Err(usage_error(format!(
                         "unknown tool source help command {other:?}"
@@ -244,61 +171,65 @@ fn print_command_help(path: &[String]) -> VerletResult<()> {
                 }
             }
         }
-        [command] if command == "auth" => print_auth_help(),
+        [command] if command == "auth" => crate::cli::auth::print_auth_help(),
         [command, subcommand] if command == "auth" && subcommand == "status" => {
-            print_auth_status_help()
+            crate::cli::auth::print_auth_status_help()
         }
-        [command, subcommand] if command == "auth" && subcommand == "set" => print_auth_set_help(),
+        [command, subcommand] if command == "auth" && subcommand == "set" => {
+            crate::cli::auth::print_auth_set_help()
+        }
         [command, subcommand] if command == "auth" && subcommand == "delete" => {
-            print_auth_delete_help()
+            crate::cli::auth::print_auth_delete_help()
         }
-        [command] if command == "identity" => print_identity_help(),
+        [command] if command == "identity" => crate::cli::identity::print_identity_help(),
         [command, subcommand] if command == "identity" => match subcommand.as_str() {
-            "bootstrap" => print_identity_bootstrap_help(),
-            "declare" => print_identity_declare_help(),
-            "mint" => print_identity_mint_help(),
-            "revoke-credential" => print_identity_revoke_credential_help(),
-            "revoke-principal" => print_identity_revoke_principal_help(),
-            "list" => print_identity_list_help(),
+            "bootstrap" => crate::cli::identity::print_identity_bootstrap_help(),
+            "declare" => crate::cli::identity::print_identity_declare_help(),
+            "mint" => crate::cli::identity::print_identity_mint_help(),
+            "revoke-credential" => crate::cli::identity::print_identity_revoke_credential_help(),
+            "revoke-principal" => crate::cli::identity::print_identity_revoke_principal_help(),
+            "list" => crate::cli::identity::print_identity_list_help(),
             other => {
                 return Err(usage_error(format!(
                     "unknown identity help command {other:?}"
                 )));
             }
         },
-        [command] if command == "secret" => print_secret_help(),
+        [command] if command == "secret" => crate::cli::secret::print_secret_help(),
         [command, subcommand] if command == "secret" && subcommand == "import" => {
-            print_secret_import_help()
+            crate::cli::secret::print_secret_import_help()
         }
         [command, subcommand] if command == "secret" && subcommand == "set" => {
-            print_secret_set_help()
+            crate::cli::secret::print_secret_set_help()
         }
         [command, subcommand] if command == "secret" && subcommand == "list" => {
-            print_secret_list_help()
+            crate::cli::secret::print_secret_list_help()
         }
         [command, subcommand] if command == "secret" && subcommand == "status" => {
-            print_secret_status_help()
+            crate::cli::secret::print_secret_status_help()
         }
         [command, subcommand] if command == "secret" && subcommand == "delete" => {
-            print_secret_delete_help()
+            crate::cli::secret::print_secret_delete_help()
         }
-        [command] if command == "rpc" => print_rpc_help(),
-        [command] if command == "debug" => print_debug_help(),
+        [command] if command == "rpc" => crate::cli::rpc::print_rpc_help(),
+        [command] if command == "debug" => crate::cli::debug_rpc::print_debug_help(),
         [command, subcommand] if command == "debug" && subcommand == "bind" => {
-            print_debug_bind_help()
+            crate::cli::debug_bind::print_debug_bind_help()
         }
         [command, subcommand] if command == "debug" && subcommand == "rpc" => {
-            print_debug_rpc_help()
+            crate::cli::debug_rpc::print_debug_rpc_help()
         }
-        [command] if command == "daemon" => print_daemon_help(),
-        [command, subcommand] if command == "daemon" && subcommand == "run" => print_daemon_help(),
+        [command] if command == "daemon" => crate::cli::daemon::print_daemon_help(),
+        [command, subcommand] if command == "daemon" && subcommand == "run" => {
+            crate::cli::daemon::print_daemon_help()
+        }
         [command, subcommand, action]
             if command == "daemon" && subcommand == "config" && action == "validate" =>
         {
-            print_daemon_help()
+            crate::cli::daemon::print_daemon_help()
         }
         [command, subcommand, _action] if command == "daemon" && subcommand == "service" => {
-            print_daemon_help()
+            crate::cli::daemon::print_daemon_help()
         }
         _ => {
             return Err(usage_error(format!(
@@ -310,16 +241,16 @@ fn print_command_help(path: &[String]) -> VerletResult<()> {
     Ok(())
 }
 
-async fn run_chat(args: Vec<OsString>) -> VerletResult<()> {
+async fn run_chat(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     chat::run(args, chat::ChatInvocation::Chat).await
 }
 
-fn usage_error(message: impl Into<String>) -> VerletError {
-    VerletError::RuntimeFactory(message.into())
+fn usage_error(message: impl Into<String>) -> crate::VerletError {
+    crate::VerletError::RuntimeFactory(message.into())
 }
 
-fn io_error(err: impl std::fmt::Display) -> VerletError {
-    VerletError::RuntimeFactory(err.to_string())
+fn io_error(err: impl std::fmt::Display) -> crate::VerletError {
+    crate::VerletError::RuntimeFactory(err.to_string())
 }
 
 const ROOT_HELP: &str = "verlet
@@ -434,19 +365,18 @@ fn print_command_group(title: &str, commands: &[&str]) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn root_help_is_a_concise_starting_surface() {
-        assert!(ROOT_HELP.contains(
+        assert!(crate::cli::ROOT_HELP.contains(
             "Start here:\n  verlet console\n  verlet chat [PROMPT]\n  verlet init <name>"
         ));
-        assert!(ROOT_HELP.contains(
+        assert!(crate::cli::ROOT_HELP.contains(
             "Explore:\n  verlet commands\n  verlet help <command>\n  verlet <command> --help\n  man verlet"
         ));
-        assert!(!ROOT_HELP.contains("Example usage:"));
-        assert!(!ROOT_HELP.contains("Advanced:"));
-        assert!(!ROOT_HELP.contains("verlet coupling run --replay"));
-        assert!(!ROOT_HELP.contains("verlet daemon run"));
+        assert!(!crate::cli::ROOT_HELP.contains("Example usage:"));
+        assert!(!crate::cli::ROOT_HELP.contains("Advanced:"));
+        assert!(!crate::cli::ROOT_HELP.contains("verlet coupling run --replay"));
+        assert!(!crate::cli::ROOT_HELP.contains("verlet daemon run"));
     }
 }

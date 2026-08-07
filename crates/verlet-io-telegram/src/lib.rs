@@ -6,18 +6,7 @@
 //! persistence, and whether an inbound Telegram event queues, steers, or
 //! interrupts a turn.
 
-use async_trait::async_trait;
-use serde::{
-    Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeStruct,
-};
-use serde_json::{Value as JsonValue, json};
-use std::collections::BTreeMap;
-use verlet_io_core::{
-    ConversationKind, DeliveryReceipt, EgressAdapter, EgressEnvelope, EgressKind, IngressAck,
-    IngressContent, IngressEnvelope, IngressSink, IoActor, IoAttachment, IoConversation,
-    IoDedupeKey, IoDelivery, IoError, IoProtocolAdapter, IoProtocolCapabilities, IoResult,
-    IoSource, IoTarget,
-};
+use serde::ser::SerializeStruct as _;
 
 pub const TELEGRAM_PROTOCOL: &str = "telegram.bot";
 
@@ -51,7 +40,7 @@ pub enum TelegramError {
     Decode(String),
 }
 
-impl From<TelegramError> for IoError {
+impl From<TelegramError> for verlet_io_core::IoError {
     fn from(value: TelegramError) -> Self {
         match value {
             TelegramError::UnsupportedUpdate(_)
@@ -59,14 +48,16 @@ impl From<TelegramError> for IoError {
             | TelegramError::InvalidInstance { .. }
             | TelegramError::MissingChatId
             | TelegramError::InvalidChatId(_)
-            | TelegramError::InvalidThreadId(_) => IoError::InvalidEnvelope(value.to_string()),
+            | TelegramError::InvalidThreadId(_) => {
+                verlet_io_core::IoError::InvalidEnvelope(value.to_string())
+            }
             TelegramError::NoVisibleText
             | TelegramError::UnknownPlatformAction(_)
             | TelegramError::InvalidPlatformActionPayload { .. }
             | TelegramError::Api { .. }
             | TelegramError::MissingApiResult
             | TelegramError::Transport(_)
-            | TelegramError::Decode(_) => IoError::Delivery(value.to_string()),
+            | TelegramError::Decode(_) => verlet_io_core::IoError::Delivery(value.to_string()),
         }
     }
 }
@@ -87,15 +78,15 @@ impl TelegramNormalizer {
         &self.instance_id
     }
 
-    pub fn source(&self) -> IoSource {
-        IoSource::new(TELEGRAM_PROTOCOL, self.instance_id.clone())
+    pub fn source(&self) -> verlet_io_core::IoSource {
+        verlet_io_core::IoSource::new(TELEGRAM_PROTOCOL, self.instance_id.clone())
     }
 
     pub fn normalize_update(
         &self,
         update: &TelegramUpdate,
         received_at_ms: u64,
-    ) -> IoResult<Option<IngressEnvelope>> {
+    ) -> verlet_io_core::IoResult<Option<verlet_io_core::IngressEnvelope>> {
         if let Some(message) = update.message.as_ref() {
             return Ok(Some(self.envelope_from_message(
                 update.update_id,
@@ -157,9 +148,9 @@ impl TelegramNormalizer {
                 "callback_query",
                 message,
                 Some(actor_from_user(&callback.from)),
-                IngressContent::Event {
+                verlet_io_core::IngressContent::Event {
                     kind: "telegram.callback_query".to_string(),
-                    payload: json!({
+                    payload: serde_json::json!({
                         "id": callback.id,
                         "data": callback.data,
                     }),
@@ -176,22 +167,24 @@ impl TelegramNormalizer {
         update_id: i64,
         update_kind: &'static str,
         message: &TelegramMessage,
-        actor: Option<IoActor>,
-        content: IngressContent,
+        actor: Option<verlet_io_core::IoActor>,
+        content: verlet_io_core::IngressContent,
         received_at_ms: u64,
-    ) -> IngressEnvelope {
+    ) -> verlet_io_core::IngressEnvelope {
         let source = self.source();
-        let mut envelope = IngressEnvelope::new(
+        let mut envelope = verlet_io_core::IngressEnvelope::new(
             source.clone(),
             conversation_from_chat(&message.chat, message.message_thread_id),
             content,
             received_at_ms,
         )
-        .with_dedupe_key(IoDedupeKey::for_source(
+        .with_dedupe_key(verlet_io_core::IoDedupeKey::for_source(
             &source,
             format!("update:{update_id}"),
         ))
-        .with_delivery(IoDelivery::new(format!("update:{update_id}")))
+        .with_delivery(verlet_io_core::IoDelivery::new(format!(
+            "update:{update_id}"
+        )))
         .with_metadata("telegram_update_id", update_id.to_string())
         .with_metadata("telegram_update_kind", update_kind)
         .with_metadata("telegram_message_id", message.message_id.to_string())
@@ -207,14 +200,14 @@ impl TelegramNormalizer {
         update_id: i64,
         reaction: &TelegramMessageReactionUpdated,
         received_at_ms: u64,
-    ) -> IngressEnvelope {
+    ) -> verlet_io_core::IngressEnvelope {
         let source = self.source();
-        let mut envelope = IngressEnvelope::new(
+        let mut envelope = verlet_io_core::IngressEnvelope::new(
             source.clone(),
             conversation_from_chat(&reaction.chat, None),
-            IngressContent::Event {
+            verlet_io_core::IngressContent::Event {
                 kind: "telegram.message_reaction".to_string(),
-                payload: json!({
+                payload: serde_json::json!({
                     "message_id": reaction.message_id,
                     "old_reaction": reaction.old_reaction,
                     "new_reaction": reaction.new_reaction,
@@ -222,11 +215,13 @@ impl TelegramNormalizer {
             },
             received_at_ms,
         )
-        .with_dedupe_key(IoDedupeKey::for_source(
+        .with_dedupe_key(verlet_io_core::IoDedupeKey::for_source(
             &source,
             format!("update:{update_id}"),
         ))
-        .with_delivery(IoDelivery::new(format!("update:{update_id}")))
+        .with_delivery(verlet_io_core::IoDelivery::new(format!(
+            "update:{update_id}"
+        )))
         .with_metadata("telegram_update_id", update_id.to_string())
         .with_metadata("telegram_update_kind", "message_reaction")
         .with_metadata("telegram_message_id", reaction.message_id.to_string())
@@ -259,10 +254,10 @@ impl TelegramWebhookAdapter {
 
     pub async fn submit_update(
         &self,
-        sink: &dyn IngressSink,
+        sink: &dyn verlet_io_core::IngressSink,
         update: &TelegramUpdate,
         received_at_ms: u64,
-    ) -> IoResult<Option<IngressAck>> {
+    ) -> verlet_io_core::IoResult<Option<verlet_io_core::IngressAck>> {
         let Some(envelope) = self.normalizer.normalize_update(update, received_at_ms)? else {
             return Ok(None);
         };
@@ -270,13 +265,13 @@ impl TelegramWebhookAdapter {
     }
 }
 
-impl IoProtocolAdapter for TelegramWebhookAdapter {
+impl verlet_io_core::IoProtocolAdapter for TelegramWebhookAdapter {
     fn kind(&self) -> &'static str {
         TELEGRAM_PROTOCOL
     }
 
-    fn capabilities(&self) -> IoProtocolCapabilities {
-        IoProtocolCapabilities {
+    fn capabilities(&self) -> verlet_io_core::IoProtocolCapabilities {
+        verlet_io_core::IoProtocolCapabilities {
             ingress: true,
             egress: false,
             streaming: false,
@@ -313,21 +308,21 @@ impl TelegramEgressAdapter {
 
     pub fn build_send_message(
         &self,
-        envelope: &EgressEnvelope,
-    ) -> IoResult<Option<TelegramSendMessageRequest>> {
+        envelope: &verlet_io_core::EgressEnvelope,
+    ) -> verlet_io_core::IoResult<Option<TelegramSendMessageRequest>> {
         self.validate_target(&envelope.target)?;
         build_send_message_request(envelope)
     }
 
     pub fn build_platform_action(
         &self,
-        envelope: &EgressEnvelope,
-    ) -> IoResult<Option<TelegramPlatformActionRequest>> {
+        envelope: &verlet_io_core::EgressEnvelope,
+    ) -> verlet_io_core::IoResult<Option<TelegramPlatformActionRequest>> {
         self.validate_target(&envelope.target)?;
         build_platform_action_request(envelope)
     }
 
-    fn validate_target(&self, target: &IoTarget) -> IoResult<()> {
+    fn validate_target(&self, target: &verlet_io_core::IoTarget) -> verlet_io_core::IoResult<()> {
         if target.source.protocol != TELEGRAM_PROTOCOL {
             return Err(TelegramError::InvalidProtocol(target.source.protocol.clone()).into());
         }
@@ -342,13 +337,13 @@ impl TelegramEgressAdapter {
     }
 }
 
-impl IoProtocolAdapter for TelegramEgressAdapter {
+impl verlet_io_core::IoProtocolAdapter for TelegramEgressAdapter {
     fn kind(&self) -> &'static str {
         TELEGRAM_PROTOCOL
     }
 
-    fn capabilities(&self) -> IoProtocolCapabilities {
-        IoProtocolCapabilities {
+    fn capabilities(&self) -> verlet_io_core::IoProtocolCapabilities {
+        verlet_io_core::IoProtocolCapabilities {
             ingress: false,
             egress: true,
             streaming: false,
@@ -358,12 +353,15 @@ impl IoProtocolAdapter for TelegramEgressAdapter {
     }
 }
 
-#[async_trait]
-impl EgressAdapter for TelegramEgressAdapter {
-    async fn deliver(&self, envelope: EgressEnvelope) -> IoResult<DeliveryReceipt> {
+#[async_trait::async_trait]
+impl verlet_io_core::EgressAdapter for TelegramEgressAdapter {
+    async fn deliver(
+        &self,
+        envelope: verlet_io_core::EgressEnvelope,
+    ) -> verlet_io_core::IoResult<verlet_io_core::DeliveryReceipt> {
         self.validate_target(&envelope.target)?;
         match &envelope.kind {
-            EgressKind::PlatformAction { .. } => {
+            verlet_io_core::EgressKind::PlatformAction { .. } => {
                 let Some(request) = build_platform_action_request(&envelope)? else {
                     return Ok(suppressed_receipt(&envelope, "no_platform_action"));
                 };
@@ -378,14 +376,14 @@ impl EgressAdapter for TelegramEgressAdapter {
                     }
                     TelegramPlatformActionRequest::SendSticker(request) => {
                         let message = self.client.send_sticker(&request).await?;
-                        Ok(DeliveryReceipt::delivered(
+                        Ok(verlet_io_core::DeliveryReceipt::delivered(
                             &envelope,
                             message.message_id.to_string(),
                         ))
                     }
                 };
             }
-            EgressKind::Silence { .. } => {
+            verlet_io_core::EgressKind::Silence { .. } => {
                 return Ok(suppressed_receipt(&envelope, "silence"));
             }
             _ => {}
@@ -395,7 +393,7 @@ impl EgressAdapter for TelegramEgressAdapter {
         };
 
         let message = self.client.send_message(&request).await?;
-        Ok(DeliveryReceipt::delivered(
+        Ok(verlet_io_core::DeliveryReceipt::delivered(
             &envelope,
             message.message_id.to_string(),
         ))
@@ -426,11 +424,14 @@ impl TelegramBotClient {
     pub async fn send_message(
         &self,
         request: &TelegramSendMessageRequest,
-    ) -> IoResult<TelegramMessage> {
+    ) -> verlet_io_core::IoResult<TelegramMessage> {
         self.post_api("sendMessage", request).await
     }
 
-    pub async fn send_chat_action(&self, request: &TelegramSendChatActionRequest) -> IoResult<()> {
+    pub async fn send_chat_action(
+        &self,
+        request: &TelegramSendChatActionRequest,
+    ) -> verlet_io_core::IoResult<()> {
         let delivered: bool = self.post_api("sendChatAction", request).await?;
         if delivered {
             Ok(())
@@ -442,7 +443,7 @@ impl TelegramBotClient {
     pub async fn set_message_reaction(
         &self,
         request: &TelegramSetMessageReactionRequest,
-    ) -> IoResult<()> {
+    ) -> verlet_io_core::IoResult<()> {
         let delivered: bool = self.post_api("setMessageReaction", request).await?;
         if delivered {
             Ok(())
@@ -454,15 +455,15 @@ impl TelegramBotClient {
     pub async fn send_sticker(
         &self,
         request: &TelegramSendStickerRequest,
-    ) -> IoResult<TelegramMessage> {
+    ) -> verlet_io_core::IoResult<TelegramMessage> {
         self.post_api("sendSticker", request).await
     }
 
-    async fn post_api<T: DeserializeOwned>(
+    async fn post_api<T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
-        request: &impl Serialize,
-    ) -> IoResult<T> {
+        request: &impl serde::Serialize,
+    ) -> verlet_io_core::IoResult<T> {
         let url = format!(
             "{}/bot{}/{}",
             self.api_base.trim_end_matches('/'),
@@ -504,7 +505,7 @@ impl TelegramBotClient {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelegramUpdate {
     pub update_id: i64,
     #[serde(default)]
@@ -521,7 +522,7 @@ pub struct TelegramUpdate {
     pub callback_query: Option<TelegramCallbackQuery>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelegramMessageReactionUpdated {
     pub chat: TelegramChat,
     pub message_id: i64,
@@ -536,7 +537,7 @@ pub struct TelegramMessageReactionUpdated {
     pub new_reaction: Vec<TelegramReactionType>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelegramCallbackQuery {
     pub id: String,
     pub from: TelegramUser,
@@ -546,7 +547,7 @@ pub struct TelegramCallbackQuery {
     pub data: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelegramMessage {
     pub message_id: i64,
     #[serde(default)]
@@ -567,7 +568,7 @@ pub struct TelegramMessage {
     pub photo: Vec<TelegramPhotoSize>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelegramUser {
     pub id: i64,
     #[serde(default)]
@@ -581,7 +582,7 @@ pub struct TelegramUser {
     pub language_code: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelegramChat {
     pub id: i64,
     #[serde(rename = "type")]
@@ -596,7 +597,7 @@ pub struct TelegramChat {
     pub last_name: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelegramDocument {
     pub file_id: String,
     #[serde(default)]
@@ -609,7 +610,7 @@ pub struct TelegramDocument {
     pub file_size: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelegramPhotoSize {
     pub file_id: String,
     #[serde(default)]
@@ -620,7 +621,7 @@ pub struct TelegramPhotoSize {
     pub file_size: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct TelegramSendMessageRequest {
     pub chat_id: TelegramChatId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -639,7 +640,7 @@ pub enum TelegramPlatformActionRequest {
     SendSticker(TelegramSendStickerRequest),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct TelegramSendChatActionRequest {
     pub chat_id: TelegramChatId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -647,14 +648,14 @@ pub struct TelegramSendChatActionRequest {
     pub action: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct TelegramSetMessageReactionRequest {
     pub chat_id: TelegramChatId,
     pub message_id: i64,
     pub reaction: Vec<TelegramReactionType>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct TelegramSendStickerRequest {
     pub chat_id: TelegramChatId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -668,13 +669,13 @@ pub struct TelegramSendStickerRequest {
 pub enum TelegramReactionType {
     Emoji { emoji: String },
     CustomEmoji { custom_emoji_id: String },
-    Other(JsonValue),
+    Other(serde_json::Value),
 }
 
-impl Serialize for TelegramReactionType {
+impl serde::Serialize for TelegramReactionType {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer,
+        S: serde::Serializer,
     {
         match self {
             Self::Emoji { emoji } => {
@@ -694,24 +695,25 @@ impl Serialize for TelegramReactionType {
     }
 }
 
-impl<'de> Deserialize<'de> for TelegramReactionType {
+impl<'de> serde::Deserialize<'de> for TelegramReactionType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>,
+        D: serde::Deserializer<'de>,
     {
-        let value = JsonValue::deserialize(deserializer)?;
+        let value = serde_json::Value::deserialize(deserializer)?;
         if let Some(object) = value.as_object() {
-            match object.get("type").and_then(JsonValue::as_str) {
+            match object.get("type").and_then(serde_json::Value::as_str) {
                 Some("emoji") if object.len() == 2 => {
-                    if let Some(emoji) = object.get("emoji").and_then(JsonValue::as_str) {
+                    if let Some(emoji) = object.get("emoji").and_then(serde_json::Value::as_str) {
                         return Ok(Self::Emoji {
                             emoji: emoji.to_string(),
                         });
                     }
                 }
                 Some("custom_emoji") if object.len() == 2 => {
-                    if let Some(custom_emoji_id) =
-                        object.get("custom_emoji_id").and_then(JsonValue::as_str)
+                    if let Some(custom_emoji_id) = object
+                        .get("custom_emoji_id")
+                        .and_then(serde_json::Value::as_str)
                     {
                         return Ok(Self::CustomEmoji {
                             custom_emoji_id: custom_emoji_id.to_string(),
@@ -725,14 +727,14 @@ impl<'de> Deserialize<'de> for TelegramReactionType {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(untagged)]
 pub enum TelegramChatId {
     Id(i64),
     Username(String),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct TelegramApiResponse<T> {
     ok: bool,
     result: Option<T>,
@@ -741,8 +743,8 @@ struct TelegramApiResponse<T> {
 }
 
 pub fn build_send_message_request(
-    envelope: &EgressEnvelope,
-) -> IoResult<Option<TelegramSendMessageRequest>> {
+    envelope: &verlet_io_core::EgressEnvelope,
+) -> verlet_io_core::IoResult<Option<TelegramSendMessageRequest>> {
     let Some(text) = envelope.kind.visible_text() else {
         return Ok(None);
     };
@@ -775,9 +777,9 @@ pub fn build_send_message_request(
 }
 
 pub fn build_platform_action_request(
-    envelope: &EgressEnvelope,
-) -> IoResult<Option<TelegramPlatformActionRequest>> {
-    let EgressKind::PlatformAction { action, payload } = &envelope.kind else {
+    envelope: &verlet_io_core::EgressEnvelope,
+) -> verlet_io_core::IoResult<Option<TelegramPlatformActionRequest>> {
+    let verlet_io_core::EgressKind::PlatformAction { action, payload } = &envelope.kind else {
         return Ok(None);
     };
 
@@ -832,25 +834,32 @@ pub fn build_platform_action_request(
     }
 }
 
-pub fn target_from_message(instance_id: impl Into<String>, message: &TelegramMessage) -> IoTarget {
-    IoTarget {
-        source: IoSource::new(TELEGRAM_PROTOCOL, instance_id),
+pub fn target_from_message(
+    instance_id: impl Into<String>,
+    message: &TelegramMessage,
+) -> verlet_io_core::IoTarget {
+    verlet_io_core::IoTarget {
+        source: verlet_io_core::IoSource::new(TELEGRAM_PROTOCOL, instance_id),
         conversation: conversation_from_chat(&message.chat, message.message_thread_id),
         actor: actor_from_message(message),
-        metadata: BTreeMap::new(),
+        metadata: std::collections::BTreeMap::new(),
     }
 }
 
-fn conversation_from_chat(chat: &TelegramChat, message_thread_id: Option<i64>) -> IoConversation {
+fn conversation_from_chat(
+    chat: &TelegramChat,
+    message_thread_id: Option<i64>,
+) -> verlet_io_core::IoConversation {
     let kind = match chat.kind.as_str() {
-        "private" => ConversationKind::Direct,
-        "channel" => ConversationKind::Channel,
-        "supergroup" | "group" => ConversationKind::Group,
-        _ => ConversationKind::Group,
+        "private" => verlet_io_core::ConversationKind::Direct,
+        "channel" => verlet_io_core::ConversationKind::Channel,
+        "supergroup" | "group" => verlet_io_core::ConversationKind::Group,
+        _ => verlet_io_core::ConversationKind::Group,
     };
 
-    let mut conversation = IoConversation::new(format!("telegram:chat:{}", chat.id), kind)
-        .with_title(chat_title(chat));
+    let mut conversation =
+        verlet_io_core::IoConversation::new(format!("telegram:chat:{}", chat.id), kind)
+            .with_title(chat_title(chat));
 
     if let Some(thread_id) = message_thread_id {
         conversation = conversation.with_external_thread_id(thread_id.to_string());
@@ -867,7 +876,7 @@ fn conversation_from_chat(chat: &TelegramChat, message_thread_id: Option<i64>) -
     conversation
 }
 
-fn actor_from_message(message: &TelegramMessage) -> Option<IoActor> {
+fn actor_from_message(message: &TelegramMessage) -> Option<verlet_io_core::IoActor> {
     message
         .from
         .as_ref()
@@ -875,8 +884,8 @@ fn actor_from_message(message: &TelegramMessage) -> Option<IoActor> {
         .or_else(|| message.sender_chat.as_ref().map(actor_from_chat))
 }
 
-fn actor_from_user(user: &TelegramUser) -> IoActor {
-    let mut actor = IoActor::new(format!("telegram:user:{}", user.id));
+fn actor_from_user(user: &TelegramUser) -> verlet_io_core::IoActor {
+    let mut actor = verlet_io_core::IoActor::new(format!("telegram:user:{}", user.id));
     actor.display_name = Some(user_display_name(user));
     actor.is_bot = user.is_bot;
     if let Some(username) = user.username.as_ref() {
@@ -892,8 +901,8 @@ fn actor_from_user(user: &TelegramUser) -> IoActor {
     actor
 }
 
-fn actor_from_chat(chat: &TelegramChat) -> IoActor {
-    let mut actor = IoActor::new(format!("telegram:chat:{}", chat.id));
+fn actor_from_chat(chat: &TelegramChat) -> verlet_io_core::IoActor {
+    let mut actor = verlet_io_core::IoActor::new(format!("telegram:chat:{}", chat.id));
     actor.display_name = Some(chat_title(chat));
     actor
         .metadata
@@ -901,7 +910,7 @@ fn actor_from_chat(chat: &TelegramChat) -> IoActor {
     actor
 }
 
-fn message_content(message: &TelegramMessage) -> IngressContent {
+fn message_content(message: &TelegramMessage) -> verlet_io_core::IngressContent {
     if let Some(text) = message.text.as_ref().filter(|text| !text.is_empty()) {
         return text_or_command(text);
     }
@@ -913,9 +922,9 @@ fn message_content(message: &TelegramMessage) -> IngressContent {
         return text_or_command(caption);
     }
 
-    IngressContent::Event {
+    verlet_io_core::IngressContent::Event {
         kind: "telegram.message".to_string(),
-        payload: json!({
+        payload: serde_json::json!({
             "message_id": message.message_id,
             "has_document": message.document.is_some(),
             "photo_count": message.photo.len(),
@@ -923,9 +932,9 @@ fn message_content(message: &TelegramMessage) -> IngressContent {
     }
 }
 
-fn text_or_command(text: &str) -> IngressContent {
+fn text_or_command(text: &str) -> verlet_io_core::IngressContent {
     let Some(command) = text.strip_prefix('/') else {
-        return IngressContent::text(text);
+        return verlet_io_core::IngressContent::text(text);
     };
 
     let mut parts = command.splitn(2, char::is_whitespace);
@@ -937,17 +946,17 @@ fn text_or_command(text: &str) -> IngressContent {
         .map(ToOwned::to_owned);
 
     if name.is_empty() {
-        IngressContent::text(text)
+        verlet_io_core::IngressContent::text(text)
     } else {
-        IngressContent::Command { name, args }
+        verlet_io_core::IngressContent::Command { name, args }
     }
 }
 
-fn message_attachments(message: &TelegramMessage) -> Vec<IoAttachment> {
+fn message_attachments(message: &TelegramMessage) -> Vec<verlet_io_core::IoAttachment> {
     let mut attachments = Vec::new();
 
     if let Some(document) = message.document.as_ref() {
-        let mut attachment = IoAttachment::new(
+        let mut attachment = verlet_io_core::IoAttachment::new(
             format!("telegram:file:{}", document.file_id),
             document
                 .mime_type
@@ -967,8 +976,10 @@ fn message_attachments(message: &TelegramMessage) -> Vec<IoAttachment> {
     }
 
     if let Some(photo) = message.photo.last() {
-        let mut attachment =
-            IoAttachment::new(format!("telegram:file:{}", photo.file_id), "image/jpeg");
+        let mut attachment = verlet_io_core::IoAttachment::new(
+            format!("telegram:file:{}", photo.file_id),
+            "image/jpeg",
+        );
         attachment.uri = Some(format!("telegram:file:{}", photo.file_id));
         attachment.size_bytes = photo.file_size;
         attachment
@@ -989,7 +1000,7 @@ fn message_attachments(message: &TelegramMessage) -> Vec<IoAttachment> {
     attachments
 }
 
-fn parse_chat_id(value: &str) -> IoResult<TelegramChatId> {
+fn parse_chat_id(value: &str) -> verlet_io_core::IoResult<TelegramChatId> {
     let raw = value.strip_prefix("telegram:chat:").unwrap_or(value).trim();
     if raw.is_empty() {
         return Err(TelegramError::MissingChatId.into());
@@ -1003,29 +1014,37 @@ fn parse_chat_id(value: &str) -> IoResult<TelegramChatId> {
     Err(TelegramError::InvalidChatId(value.to_string()).into())
 }
 
-fn parse_thread_id(value: &str) -> IoResult<i64> {
+fn parse_thread_id(value: &str) -> verlet_io_core::IoResult<i64> {
     let raw = value.strip_prefix("telegram:topic:").unwrap_or(value);
     parse_i64(raw, TelegramError::InvalidThreadId(value.to_string()))
 }
 
-fn parse_i64(value: &str, err: TelegramError) -> IoResult<i64> {
+fn parse_i64(value: &str, err: TelegramError) -> verlet_io_core::IoResult<i64> {
     value.parse::<i64>().map_err(|_| err.into())
 }
 
-fn payload_string(payload: &JsonValue, action: &str, field: &'static str) -> IoResult<String> {
+fn payload_string(
+    payload: &serde_json::Value,
+    action: &str,
+    field: &'static str,
+) -> verlet_io_core::IoResult<String> {
     payload
         .get(field)
-        .and_then(JsonValue::as_str)
+        .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| invalid_platform_action_field(action, field))
 }
 
-fn payload_i64(payload: &JsonValue, action: &str, field: &'static str) -> IoResult<i64> {
-    if let Some(value) = payload.get(field).and_then(JsonValue::as_i64) {
+fn payload_i64(
+    payload: &serde_json::Value,
+    action: &str,
+    field: &'static str,
+) -> verlet_io_core::IoResult<i64> {
+    if let Some(value) = payload.get(field).and_then(serde_json::Value::as_i64) {
         return Ok(value);
     }
-    if let Some(value) = payload.get(field).and_then(JsonValue::as_str) {
+    if let Some(value) = payload.get(field).and_then(serde_json::Value::as_str) {
         return value
             .parse::<i64>()
             .map_err(|_| invalid_platform_action_field(action, field));
@@ -1033,7 +1052,10 @@ fn payload_i64(payload: &JsonValue, action: &str, field: &'static str) -> IoResu
     Err(invalid_platform_action_field(action, field))
 }
 
-fn metadata_i64(metadata: &BTreeMap<String, String>, key: &'static str) -> IoResult<i64> {
+fn metadata_i64(
+    metadata: &std::collections::BTreeMap<String, String>,
+    key: &'static str,
+) -> verlet_io_core::IoResult<i64> {
     metadata
         .get(key)
         .map(String::as_str)
@@ -1042,7 +1064,7 @@ fn metadata_i64(metadata: &BTreeMap<String, String>, key: &'static str) -> IoRes
         .map_err(|_| invalid_platform_action_field("reaction", key))
 }
 
-fn invalid_platform_action_field(action: &str, field: &'static str) -> IoError {
+fn invalid_platform_action_field(action: &str, field: &'static str) -> verlet_io_core::IoError {
     TelegramError::InvalidPlatformActionPayload {
         action: action.to_string(),
         field,
@@ -1075,23 +1097,35 @@ fn user_display_name(user: &TelegramUser) -> String {
     }
 }
 
-fn suppressed_receipt(envelope: &EgressEnvelope, reason: &str) -> DeliveryReceipt {
-    DeliveryReceipt {
+fn suppressed_receipt(
+    envelope: &verlet_io_core::EgressEnvelope,
+    reason: &str,
+) -> verlet_io_core::DeliveryReceipt {
+    verlet_io_core::DeliveryReceipt {
         egress_id: envelope.id.clone(),
         delivered: true,
         external_message_id: None,
         error: None,
-        metadata: BTreeMap::from([("telegram_suppressed".to_string(), reason.to_string())]),
+        metadata: std::collections::BTreeMap::from([(
+            "telegram_suppressed".to_string(),
+            reason.to_string(),
+        )]),
     }
 }
 
-fn action_receipt(envelope: &EgressEnvelope, action: &str) -> DeliveryReceipt {
-    DeliveryReceipt {
+fn action_receipt(
+    envelope: &verlet_io_core::EgressEnvelope,
+    action: &str,
+) -> verlet_io_core::DeliveryReceipt {
+    verlet_io_core::DeliveryReceipt {
         egress_id: envelope.id.clone(),
         delivered: true,
         external_message_id: None,
         error: None,
-        metadata: BTreeMap::from([("telegram_action".to_string(), action.to_string())]),
+        metadata: std::collections::BTreeMap::from([(
+            "telegram_action".to_string(),
+            action.to_string(),
+        )]),
     }
 }
 
@@ -1114,10 +1148,11 @@ fn truncate_body(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use verlet_io_core::EgressAdapter as _;
+    use verlet_io_core::IoProtocolAdapter as _;
 
-    fn direct_update() -> TelegramUpdate {
-        serde_json::from_value(json!({
+    fn direct_update() -> crate::TelegramUpdate {
+        serde_json::from_value(serde_json::json!({
             "update_id": 999,
             "message": {
                 "message_id": 555,
@@ -1142,19 +1177,22 @@ mod tests {
 
     #[test]
     fn normalizes_direct_message_update_to_ingress_envelope() {
-        let normalizer = TelegramNormalizer::new("main");
+        let normalizer = crate::TelegramNormalizer::new("main");
         let envelope = normalizer
             .normalize_update(&direct_update(), 1_777_000_000_123)
             .unwrap()
             .unwrap();
 
-        assert_eq!(envelope.source.protocol, TELEGRAM_PROTOCOL);
+        assert_eq!(envelope.source.protocol, crate::TELEGRAM_PROTOCOL);
         assert_eq!(envelope.source.instance_id, "main");
         assert_eq!(
             envelope.conversation.external_conversation_id,
             "telegram:chat:123"
         );
-        assert_eq!(envelope.conversation.kind, ConversationKind::Direct);
+        assert_eq!(
+            envelope.conversation.kind,
+            verlet_io_core::ConversationKind::Direct
+        );
         assert_eq!(
             envelope
                 .actor
@@ -1163,14 +1201,17 @@ mod tests {
             Some("telegram:user:42")
         );
         assert_eq!(
-            envelope.dedupe_key.as_ref().map(IoDedupeKey::stable_key),
+            envelope
+                .dedupe_key
+                .as_ref()
+                .map(verlet_io_core::IoDedupeKey::stable_key),
             Some("telegram.bot:main:update:999".to_string())
         );
         assert_eq!(
             envelope
                 .effective_dedupe_key()
                 .as_ref()
-                .map(IoDedupeKey::stable_key),
+                .map(verlet_io_core::IoDedupeKey::stable_key),
             Some("telegram.bot:main:update:999".to_string()),
             "the adapter-envelope migration must preserve the literal pre-contract key"
         );
@@ -1194,7 +1235,7 @@ mod tests {
 
     #[test]
     fn normalizes_supergroup_topic_command() {
-        let update: TelegramUpdate = serde_json::from_value(json!({
+        let update: crate::TelegramUpdate = serde_json::from_value(serde_json::json!({
             "update_id": 1000,
             "message": {
                 "message_id": 556,
@@ -1216,12 +1257,15 @@ mod tests {
         }))
         .unwrap();
 
-        let envelope = TelegramNormalizer::new("main")
+        let envelope = crate::TelegramNormalizer::new("main")
             .normalize_update(&update, 1)
             .unwrap()
             .unwrap();
 
-        assert_eq!(envelope.conversation.kind, ConversationKind::Group);
+        assert_eq!(
+            envelope.conversation.kind,
+            verlet_io_core::ConversationKind::Group
+        );
         assert_eq!(
             envelope.conversation.external_thread_id.as_deref(),
             Some("777")
@@ -1229,7 +1273,7 @@ mod tests {
         assert_eq!(envelope.content.text_projection(), "/steer keep going");
         assert!(matches!(
             envelope.content,
-            IngressContent::Command {
+            verlet_io_core::IngressContent::Command {
                 ref name,
                 ref args
             } if name == "steer" && args.as_deref() == Some("keep going")
@@ -1238,7 +1282,7 @@ mod tests {
 
     #[test]
     fn normalizes_callback_query_as_event() {
-        let update: TelegramUpdate = serde_json::from_value(json!({
+        let update: crate::TelegramUpdate = serde_json::from_value(serde_json::json!({
             "update_id": 1001,
             "callback_query": {
                 "id": "cb-1",
@@ -1262,7 +1306,7 @@ mod tests {
         }))
         .unwrap();
 
-        let envelope = TelegramNormalizer::new("main")
+        let envelope = crate::TelegramNormalizer::new("main")
             .normalize_update(&update, 1)
             .unwrap()
             .unwrap();
@@ -1276,7 +1320,7 @@ mod tests {
         );
         assert!(matches!(
             envelope.content,
-            IngressContent::Event { ref kind, .. } if kind == "telegram.callback_query"
+            verlet_io_core::IngressContent::Event { ref kind, .. } if kind == "telegram.callback_query"
         ));
         assert_eq!(
             envelope
@@ -1289,7 +1333,7 @@ mod tests {
 
     #[test]
     fn normalizes_message_reaction_as_event() {
-        let update: TelegramUpdate = serde_json::from_value(json!({
+        let update: crate::TelegramUpdate = serde_json::from_value(serde_json::json!({
             "update_id": 1002,
             "message_reaction": {
                 "chat": {
@@ -1316,7 +1360,7 @@ mod tests {
         }))
         .unwrap();
 
-        let envelope = TelegramNormalizer::new("main")
+        let envelope = crate::TelegramNormalizer::new("main")
             .normalize_update(&update, 1)
             .unwrap()
             .unwrap();
@@ -1330,11 +1374,11 @@ mod tests {
         );
         assert!(matches!(
             envelope.content,
-            IngressContent::Event { ref kind, ref payload }
+            verlet_io_core::IngressContent::Event { ref kind, ref payload }
                 if kind == "telegram.message_reaction"
                     && payload["message_id"] == 555
-                    && payload["old_reaction"] == json!([{ "type": "emoji", "emoji": "👍" }])
-                    && payload["new_reaction"] == json!([
+                    && payload["old_reaction"] == serde_json::json!([{ "type": "emoji", "emoji": "👍" }])
+                    && payload["new_reaction"] == serde_json::json!([
                         { "type": "custom_emoji", "custom_emoji_id": "custom-1" },
                         { "type": "emoji", "emoji": "❤️" }
                     ])
@@ -1357,7 +1401,7 @@ mod tests {
 
     #[test]
     fn message_reaction_unknown_reaction_type_stays_opaque() {
-        let update: TelegramUpdate = serde_json::from_value(json!({
+        let update: crate::TelegramUpdate = serde_json::from_value(serde_json::json!({
             "update_id": 1003,
             "message_reaction": {
                 "chat": { "id": 123, "type": "private" },
@@ -1375,16 +1419,16 @@ mod tests {
         }))
         .unwrap();
 
-        let envelope = TelegramNormalizer::new("main")
+        let envelope = crate::TelegramNormalizer::new("main")
             .normalize_update(&update, 1)
             .unwrap()
             .unwrap();
 
         assert!(matches!(
             envelope.content,
-            IngressContent::Event { ref kind, ref payload }
+            verlet_io_core::IngressContent::Event { ref kind, ref payload }
                 if kind == "telegram.message_reaction"
-                    && payload["new_reaction"] == json!([
+                    && payload["new_reaction"] == serde_json::json!([
                         {
                             "type": "paid",
                             "emoji": "⭐",
@@ -1396,7 +1440,7 @@ mod tests {
 
     #[test]
     fn message_reaction_missing_actor_and_unknown_chat_type_still_normalizes() {
-        let update: TelegramUpdate = serde_json::from_value(json!({
+        let update: crate::TelegramUpdate = serde_json::from_value(serde_json::json!({
             "update_id": 1004,
             "message_reaction": {
                 "chat": { "id": 123, "type": "forumish" },
@@ -1408,13 +1452,16 @@ mod tests {
         }))
         .unwrap();
 
-        let envelope = TelegramNormalizer::new("main")
+        let envelope = crate::TelegramNormalizer::new("main")
             .normalize_update(&update, 1)
             .unwrap()
             .unwrap();
 
         assert!(envelope.actor.is_none());
-        assert_eq!(envelope.conversation.kind, ConversationKind::Group);
+        assert_eq!(
+            envelope.conversation.kind,
+            verlet_io_core::ConversationKind::Group
+        );
         assert_eq!(
             envelope
                 .conversation
@@ -1425,19 +1472,19 @@ mod tests {
         );
         assert!(matches!(
             envelope.content,
-            IngressContent::Event { ref kind, ref payload }
+            verlet_io_core::IngressContent::Event { ref kind, ref payload }
                 if kind == "telegram.message_reaction"
-                    && payload["old_reaction"] == json!([])
-                    && payload["new_reaction"] == json!([])
+                    && payload["old_reaction"] == serde_json::json!([])
+                    && payload["new_reaction"] == serde_json::json!([])
         ));
     }
 
     #[test]
     fn message_reaction_emoji_egress_serializes_in_derived_field_order() {
-        let request = TelegramSetMessageReactionRequest {
-            chat_id: TelegramChatId::Id(123),
+        let request = crate::TelegramSetMessageReactionRequest {
+            chat_id: crate::TelegramChatId::Id(123),
             message_id: 555,
-            reaction: vec![TelegramReactionType::Emoji {
+            reaction: vec![crate::TelegramReactionType::Emoji {
                 emoji: "👍".to_string(),
             }],
         };
@@ -1450,36 +1497,36 @@ mod tests {
 
     #[test]
     fn message_reaction_other_round_trips_opaque_json() {
-        let source = json!({
+        let source = serde_json::json!({
             "type": "paid",
             "emoji": "⭐",
             "amount": 1,
             "nested": { "ok": true }
         });
 
-        let reaction: TelegramReactionType = serde_json::from_value(source.clone()).unwrap();
+        let reaction: crate::TelegramReactionType = serde_json::from_value(source.clone()).unwrap();
 
-        assert!(matches!(reaction, TelegramReactionType::Other(_)));
+        assert!(matches!(reaction, crate::TelegramReactionType::Other(_)));
         assert_eq!(serde_json::to_value(&reaction).unwrap(), source);
     }
 
     #[test]
     fn message_reaction_known_type_with_extra_fields_stays_opaque() {
-        let source = json!({
+        let source = serde_json::json!({
             "type": "emoji",
             "emoji": "👍",
             "future_field": "kept"
         });
 
-        let reaction: TelegramReactionType = serde_json::from_value(source.clone()).unwrap();
+        let reaction: crate::TelegramReactionType = serde_json::from_value(source.clone()).unwrap();
 
-        assert!(matches!(reaction, TelegramReactionType::Other(_)));
+        assert!(matches!(reaction, crate::TelegramReactionType::Other(_)));
         assert_eq!(serde_json::to_value(&reaction).unwrap(), source);
     }
 
     #[test]
     fn captures_basic_document_and_photo_attachments() {
-        let update: TelegramUpdate = serde_json::from_value(json!({
+        let update: crate::TelegramUpdate = serde_json::from_value(serde_json::json!({
             "update_id": 1002,
             "message": {
                 "message_id": 558,
@@ -1513,7 +1560,7 @@ mod tests {
         }))
         .unwrap();
 
-        let envelope = TelegramNormalizer::new("main")
+        let envelope = crate::TelegramNormalizer::new("main")
             .normalize_update(&update, 1)
             .unwrap()
             .unwrap();
@@ -1526,19 +1573,22 @@ mod tests {
 
     #[test]
     fn builds_send_message_request_from_egress() {
-        let conversation = IoConversation::new("telegram:chat:-10042", ConversationKind::Group)
-            .with_external_thread_id("777");
-        let mut target = IoTarget {
-            source: IoSource::new(TELEGRAM_PROTOCOL, "main"),
+        let conversation = verlet_io_core::IoConversation::new(
+            "telegram:chat:-10042",
+            verlet_io_core::ConversationKind::Group,
+        )
+        .with_external_thread_id("777");
+        let mut target = verlet_io_core::IoTarget {
+            source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "main"),
             conversation,
             actor: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         };
         target.metadata.insert(
             "telegram_reply_to_message_id".to_string(),
             "555".to_string(),
         );
-        let egress = EgressEnvelope::new(
+        let egress = verlet_io_core::EgressEnvelope::new(
             target,
             verlet_io_core::EgressKind::AssistantMessage {
                 text: "hello back".to_string(),
@@ -1546,9 +1596,9 @@ mod tests {
             1,
         );
 
-        let request = build_send_message_request(&egress).unwrap().unwrap();
+        let request = crate::build_send_message_request(&egress).unwrap().unwrap();
 
-        assert_eq!(request.chat_id, TelegramChatId::Id(-10042));
+        assert_eq!(request.chat_id, crate::TelegramChatId::Id(-10042));
         assert_eq!(request.message_thread_id, Some(777));
         assert_eq!(request.reply_to_message_id, Some(555));
         assert_eq!(request.text, "hello back");
@@ -1556,26 +1606,31 @@ mod tests {
 
     #[test]
     fn builds_typing_platform_action_request() {
-        let egress = EgressEnvelope::new(
-            IoTarget {
-                source: IoSource::new(TELEGRAM_PROTOCOL, "main"),
-                conversation: IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+        let egress = verlet_io_core::EgressEnvelope::new(
+            verlet_io_core::IoTarget {
+                source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "main"),
+                conversation: verlet_io_core::IoConversation::new(
+                    "telegram:chat:123",
+                    verlet_io_core::ConversationKind::Direct,
+                ),
                 actor: None,
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
             verlet_io_core::EgressKind::PlatformAction {
                 action: "typing".to_string(),
-                payload: json!({}),
+                payload: serde_json::json!({}),
             },
             1,
         );
 
-        let request = build_platform_action_request(&egress).unwrap().unwrap();
+        let request = crate::build_platform_action_request(&egress)
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(
             request,
-            TelegramPlatformActionRequest::SendChatAction(TelegramSendChatActionRequest {
-                chat_id: TelegramChatId::Id(123),
+            crate::TelegramPlatformActionRequest::SendChatAction(crate::TelegramSendChatActionRequest {
+                chat_id: crate::TelegramChatId::Id(123),
                 message_thread_id: None,
                 ref action,
             }) if action == "typing"
@@ -1584,16 +1639,19 @@ mod tests {
 
     #[test]
     fn builds_reaction_platform_action_request() {
-        let egress = EgressEnvelope::new(
-            IoTarget {
-                source: IoSource::new(TELEGRAM_PROTOCOL, "main"),
-                conversation: IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+        let egress = verlet_io_core::EgressEnvelope::new(
+            verlet_io_core::IoTarget {
+                source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "main"),
+                conversation: verlet_io_core::IoConversation::new(
+                    "telegram:chat:123",
+                    verlet_io_core::ConversationKind::Direct,
+                ),
                 actor: None,
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
             verlet_io_core::EgressKind::PlatformAction {
                 action: "reaction".to_string(),
-                payload: json!({
+                payload: serde_json::json!({
                     "message_id": 555,
                     "emoji": "👍",
                 }),
@@ -1601,30 +1659,35 @@ mod tests {
             1,
         );
 
-        let request = build_platform_action_request(&egress).unwrap().unwrap();
+        let request = crate::build_platform_action_request(&egress)
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(
             request,
-            TelegramPlatformActionRequest::SetMessageReaction(TelegramSetMessageReactionRequest {
-                chat_id: TelegramChatId::Id(123),
+            crate::TelegramPlatformActionRequest::SetMessageReaction(crate::TelegramSetMessageReactionRequest {
+                chat_id: crate::TelegramChatId::Id(123),
                 message_id: 555,
                 reaction,
-            }) if reaction == vec![TelegramReactionType::Emoji { emoji: "👍".to_string() }]
+            }) if reaction == vec![crate::TelegramReactionType::Emoji { emoji: "👍".to_string() }]
         ));
     }
 
     #[test]
     fn reaction_platform_action_can_use_egress_metadata_message_id() {
-        let mut egress = EgressEnvelope::new(
-            IoTarget {
-                source: IoSource::new(TELEGRAM_PROTOCOL, "main"),
-                conversation: IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+        let mut egress = verlet_io_core::EgressEnvelope::new(
+            verlet_io_core::IoTarget {
+                source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "main"),
+                conversation: verlet_io_core::IoConversation::new(
+                    "telegram:chat:123",
+                    verlet_io_core::ConversationKind::Direct,
+                ),
                 actor: None,
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
             verlet_io_core::EgressKind::PlatformAction {
                 action: "reaction".to_string(),
-                payload: json!({
+                payload: serde_json::json!({
                     "emoji": "👍",
                 }),
             },
@@ -1634,43 +1697,52 @@ mod tests {
             .metadata
             .insert("telegram_message_id".to_string(), "555".to_string());
 
-        let request = build_platform_action_request(&egress).unwrap().unwrap();
+        let request = crate::build_platform_action_request(&egress)
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(
             request,
-            TelegramPlatformActionRequest::SetMessageReaction(TelegramSetMessageReactionRequest {
-                message_id: 555,
-                ..
-            })
+            crate::TelegramPlatformActionRequest::SetMessageReaction(
+                crate::TelegramSetMessageReactionRequest {
+                    message_id: 555,
+                    ..
+                }
+            )
         ));
     }
 
     #[test]
     fn builds_sticker_platform_action_request() {
-        let conversation = IoConversation::new("telegram:chat:-10042", ConversationKind::Group)
-            .with_external_thread_id("777");
-        let egress = EgressEnvelope::new(
-            IoTarget {
-                source: IoSource::new(TELEGRAM_PROTOCOL, "main"),
+        let conversation = verlet_io_core::IoConversation::new(
+            "telegram:chat:-10042",
+            verlet_io_core::ConversationKind::Group,
+        )
+        .with_external_thread_id("777");
+        let egress = verlet_io_core::EgressEnvelope::new(
+            verlet_io_core::IoTarget {
+                source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "main"),
                 conversation,
                 actor: None,
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
             verlet_io_core::EgressKind::PlatformAction {
                 action: "sticker".to_string(),
-                payload: json!({
+                payload: serde_json::json!({
                     "file_id": "sticker-file",
                 }),
             },
             1,
         );
 
-        let request = build_platform_action_request(&egress).unwrap().unwrap();
+        let request = crate::build_platform_action_request(&egress)
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(
             request,
-            TelegramPlatformActionRequest::SendSticker(TelegramSendStickerRequest {
-                chat_id: TelegramChatId::Id(-10042),
+            crate::TelegramPlatformActionRequest::SendSticker(crate::TelegramSendStickerRequest {
+                chat_id: crate::TelegramChatId::Id(-10042),
                 message_thread_id: Some(777),
                 ref sticker,
                 ..
@@ -1680,32 +1752,38 @@ mod tests {
 
     #[test]
     fn rejects_unknown_platform_action() {
-        let egress = EgressEnvelope::new(
-            IoTarget {
-                source: IoSource::new(TELEGRAM_PROTOCOL, "main"),
-                conversation: IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+        let egress = verlet_io_core::EgressEnvelope::new(
+            verlet_io_core::IoTarget {
+                source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "main"),
+                conversation: verlet_io_core::IoConversation::new(
+                    "telegram:chat:123",
+                    verlet_io_core::ConversationKind::Direct,
+                ),
                 actor: None,
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
             verlet_io_core::EgressKind::PlatformAction {
                 action: "wave".to_string(),
-                payload: json!({}),
+                payload: serde_json::json!({}),
             },
             1,
         );
 
-        let err = build_platform_action_request(&egress).unwrap_err();
+        let err = crate::build_platform_action_request(&egress).unwrap_err();
         assert!(err.to_string().contains("unknown Telegram platform action"));
     }
 
     #[tokio::test]
     async fn silence_egress_is_suppressed_without_wire_request() {
-        let egress = EgressEnvelope::new(
-            IoTarget {
-                source: IoSource::new(TELEGRAM_PROTOCOL, "main"),
-                conversation: IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+        let egress = verlet_io_core::EgressEnvelope::new(
+            verlet_io_core::IoTarget {
+                source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "main"),
+                conversation: verlet_io_core::IoConversation::new(
+                    "telegram:chat:123",
+                    verlet_io_core::ConversationKind::Direct,
+                ),
                 actor: None,
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
             verlet_io_core::EgressKind::Silence {
                 reason: Some("agent_declined".to_string()),
@@ -1713,7 +1791,7 @@ mod tests {
             1,
         );
 
-        let receipt = TelegramEgressAdapter::new("main", "token")
+        let receipt = crate::TelegramEgressAdapter::new("main", "token")
             .deliver(egress)
             .await
             .unwrap();
@@ -1731,12 +1809,15 @@ mod tests {
 
     #[test]
     fn skips_non_visible_egress_events() {
-        let egress = EgressEnvelope::new(
-            IoTarget {
-                source: IoSource::new(TELEGRAM_PROTOCOL, "main"),
-                conversation: IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+        let egress = verlet_io_core::EgressEnvelope::new(
+            verlet_io_core::IoTarget {
+                source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "main"),
+                conversation: verlet_io_core::IoConversation::new(
+                    "telegram:chat:123",
+                    verlet_io_core::ConversationKind::Direct,
+                ),
                 actor: None,
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
             verlet_io_core::EgressKind::ToolStarted {
                 name: "bash".to_string(),
@@ -1744,17 +1825,20 @@ mod tests {
             1,
         );
 
-        assert_eq!(build_send_message_request(&egress).unwrap(), None);
+        assert_eq!(crate::build_send_message_request(&egress).unwrap(), None);
     }
 
     #[test]
     fn egress_adapter_rejects_wrong_bot_instance() {
-        let egress = EgressEnvelope::new(
-            IoTarget {
-                source: IoSource::new(TELEGRAM_PROTOCOL, "other"),
-                conversation: IoConversation::new("telegram:chat:123", ConversationKind::Direct),
+        let egress = verlet_io_core::EgressEnvelope::new(
+            verlet_io_core::IoTarget {
+                source: verlet_io_core::IoSource::new(crate::TELEGRAM_PROTOCOL, "other"),
+                conversation: verlet_io_core::IoConversation::new(
+                    "telegram:chat:123",
+                    verlet_io_core::ConversationKind::Direct,
+                ),
                 actor: None,
-                metadata: BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
             verlet_io_core::EgressKind::AssistantMessage {
                 text: "hello".to_string(),
@@ -1762,7 +1846,7 @@ mod tests {
             1,
         );
 
-        let err = TelegramEgressAdapter::new("main", "token")
+        let err = crate::TelegramEgressAdapter::new("main", "token")
             .build_send_message(&egress)
             .unwrap_err();
         assert!(err.to_string().contains("expected"));
@@ -1770,12 +1854,12 @@ mod tests {
 
     #[test]
     fn protocol_capabilities_are_explicit() {
-        let ingress = TelegramWebhookAdapter::new("main").capabilities();
+        let ingress = crate::TelegramWebhookAdapter::new("main").capabilities();
         assert!(ingress.ingress);
         assert!(!ingress.egress);
         assert!(ingress.durable_offsets);
 
-        let egress = TelegramEgressAdapter::new("main", "token").capabilities();
+        let egress = crate::TelegramEgressAdapter::new("main", "token").capabilities();
         assert!(!egress.ingress);
         assert!(egress.egress);
     }

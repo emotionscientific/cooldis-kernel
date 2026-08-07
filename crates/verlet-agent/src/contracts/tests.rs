@@ -1,7 +1,5 @@
-use super::*;
-
-fn source() -> ThreadContractSource {
-    ThreadContractSource::markdown(
+fn source() -> crate::contracts::ThreadContractSource {
+    crate::contracts::ThreadContractSource::markdown(
         r#"---
 name: release-verifier
 kind: thread
@@ -47,18 +45,21 @@ Prefer source-grounded findings.
 
 #[test]
 fn compiler_lowers_markdown_thread_contract_to_stable_runtime_shape() {
-    let contract = ThreadContractCompiler::compile(&source()).unwrap();
+    let contract = crate::contracts::ThreadContractCompiler::compile(&source()).unwrap();
 
-    assert_eq!(contract.kind, THREAD_CONTRACT_KIND);
-    assert_eq!(contract.version, THREAD_CONTRACT_VERSION);
+    assert_eq!(contract.kind, crate::contracts::THREAD_CONTRACT_KIND);
+    assert_eq!(contract.version, crate::contracts::THREAD_CONTRACT_VERSION);
     assert_eq!(contract.name, "release-verifier");
     assert!(contract.source_hash.starts_with("sha256:"));
     assert_eq!(contract.requires.len(), 2);
-    assert_eq!(contract.requires[1].value, ThreadContractValueKind::Json);
+    assert_eq!(
+        contract.requires[1].value,
+        crate::contracts::ThreadContractValueKind::Json
+    );
     assert_eq!(contract.ensures.len(), 2);
     assert_eq!(
         contract.capabilities[0],
-        ThreadCapabilityRequirement {
+        crate::contracts::ThreadCapabilityRequirement {
             kind: "cli".to_string(),
             name: "git".to_string()
         }
@@ -82,13 +83,16 @@ fn compiler_lowers_markdown_thread_contract_to_stable_runtime_shape() {
 
 #[test]
 fn compiled_thread_contract_projects_to_abi_ports_and_capabilities() {
-    let contract = ThreadContractCompiler::compile(&source()).unwrap();
+    let contract = crate::contracts::ThreadContractCompiler::compile(&source()).unwrap();
     let projection = contract.abi_projection().unwrap();
 
     assert_eq!(projection.registered_name, "release-verifier");
     assert_eq!(projection.operation_name, "run_thread");
     assert_eq!(projection.source_ports.len(), 2);
-    assert_eq!(projection.source_ports[1].value, AbiPortValue::Json);
+    assert_eq!(
+        projection.source_ports[1].value,
+        verlet_abi::AbiPortValue::Json
+    );
     assert_eq!(projection.sink_ports.len(), 2);
     assert_eq!(projection.effect_ports.len(), 1);
     assert_eq!(
@@ -103,46 +107,46 @@ fn compiled_thread_contract_projects_to_abi_ports_and_capabilities() {
 
 #[test]
 fn thread_declaration_requires_one_contract_source() {
-    let declaration = ThreadDeclaration::new(
-        ThreadContractReference::inline_markdown(source().source),
-        ThreadInitialTurn::user("verify release"),
+    let declaration = crate::contracts::ThreadDeclaration::new(
+        crate::contracts::ThreadContractReference::inline_markdown(source().source),
+        crate::contracts::ThreadInitialTurn::user("verify release"),
     );
 
     declaration.validate().unwrap();
 
-    let invalid = ThreadDeclaration::new(
-        ThreadContractReference {
+    let invalid = crate::contracts::ThreadDeclaration::new(
+        crate::contracts::ThreadContractReference {
             ref_path: Some("a".to_string()),
             inline: Some("b".to_string()),
             format: None,
             compiled: None,
         },
-        ThreadInitialTurn::user("verify release"),
+        crate::contracts::ThreadInitialTurn::user("verify release"),
     );
     assert!(invalid.validate().is_err());
 }
 
 #[test]
 fn thread_contracts_accept_legacy_agent_compatibility_shape() {
-    let legacy_source = ThreadContractSource {
-        format: ThreadContractSourceFormat::MarkdownV0,
+    let legacy_source = crate::contracts::ThreadContractSource {
+        format: crate::contracts::ThreadContractSourceFormat::MarkdownV0,
         source: source().source.replace("kind: thread", "kind: agent"),
     };
-    let mut contract = ThreadContractCompiler::compile(&legacy_source).unwrap();
-    assert_eq!(contract.kind, THREAD_CONTRACT_KIND);
+    let mut contract = crate::contracts::ThreadContractCompiler::compile(&legacy_source).unwrap();
+    assert_eq!(contract.kind, crate::contracts::THREAD_CONTRACT_KIND);
 
-    contract.kind = LEGACY_AGENT_CONTRACT_KIND.to_string();
+    contract.kind = crate::contracts::LEGACY_AGENT_CONTRACT_KIND.to_string();
     contract.validate().unwrap();
 
-    let mut declaration = ThreadDeclaration::new(
-        ThreadContractReference {
+    let mut declaration = crate::contracts::ThreadDeclaration::new(
+        crate::contracts::ThreadContractReference {
             ref_path: None,
             inline: Some(legacy_source.source),
-            format: Some(LEGACY_AGENT_CONTRACT_SOURCE_FORMAT.to_string()),
+            format: Some(crate::contracts::LEGACY_AGENT_CONTRACT_SOURCE_FORMAT.to_string()),
             compiled: None,
         },
-        ThreadInitialTurn::user("verify release"),
+        crate::contracts::ThreadInitialTurn::user("verify release"),
     );
-    declaration.kind = LEGACY_AGENT_THREAD_DECLARATION_KIND.to_string();
+    declaration.kind = crate::contracts::LEGACY_AGENT_THREAD_DECLARATION_KIND.to_string();
     declaration.validate().unwrap();
 }

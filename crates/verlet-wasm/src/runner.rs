@@ -1,21 +1,4 @@
-use crate::{
-    VerletWasmError, VerletWasmResult, WasmHostImportPolicy, WasmHttpRequest, WasmHttpResponse,
-    WasmRuntimeArtifact, WasmRuntimeConfig,
-};
-use bashkit::{Error as BashkitError, FileSystem};
-use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use verlet_abi::{InvocationContext, WasmOperationManifest};
-use verlet_process::{VerletProcessHandle, WasmOperationOutput};
-use verlet_runtime_contracts::validate_json_value_against_schema;
-use verlet_vfs::VerletVfs;
-use wasmtime::{
-    Caller, Config, Engine, ExternType, Linker, Memory, Module, Store, StoreLimitsBuilder,
-};
+use bashkit::FileSystem as _;
 
 #[doc(hidden)]
 pub const OPERATION_ABI: &str = "cooldis.operation/0.1";
@@ -47,43 +30,51 @@ const BLOCKED_HTTP_ADDRESS_ERROR: &str =
     "refusing to connect to private or special-purpose address";
 
 pub struct WasmRuntimeFactory {
-    config: WasmRuntimeConfig,
-    engine: Arc<Engine>,
+    config: crate::WasmRuntimeConfig,
+    engine: std::sync::Arc<wasmtime::Engine>,
 }
 
 impl WasmRuntimeFactory {
-    pub fn new(config: WasmRuntimeConfig) -> VerletWasmResult<Self> {
-        let mut engine_config = Config::new();
+    pub fn new(config: crate::WasmRuntimeConfig) -> crate::VerletWasmResult<Self> {
+        let mut engine_config = wasmtime::Config::new();
         engine_config.consume_fuel(config.fuel.is_some());
         configure_wasmtime_engine(&mut engine_config);
-        let engine = Engine::new(&engine_config)
-            .map_err(|err| VerletWasmError::RuntimeFactory(err.to_string()))?;
+        let engine = wasmtime::Engine::new(&engine_config)
+            .map_err(|err| crate::VerletWasmError::RuntimeFactory(err.to_string()))?;
         Ok(Self {
             config,
-            engine: Arc::new(engine),
+            engine: std::sync::Arc::new(engine),
         })
     }
 
-    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> VerletWasmResult<Self> {
-        Self::new(WasmRuntimeConfig::new(WasmRuntimeArtifact::bytes(bytes)))
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> crate::VerletWasmResult<Self> {
+        Self::new(crate::WasmRuntimeConfig::new(
+            crate::WasmRuntimeArtifact::bytes(bytes),
+        ))
     }
 
-    pub async fn describe(&self) -> VerletWasmResult<Option<WasmOperationManifest>> {
+    pub async fn describe(
+        &self,
+    ) -> crate::VerletWasmResult<Option<verlet_abi::WasmOperationManifest>> {
         let module = self.load_module().await?;
         load_operation_manifest(&self.engine, &module, &self.config).await
     }
 
-    pub async fn validate_operation_artifact(&self) -> VerletWasmResult<WasmOperationManifest> {
+    pub async fn validate_operation_artifact(
+        &self,
+    ) -> crate::VerletWasmResult<verlet_abi::WasmOperationManifest> {
         let module = self.load_module().await?;
         validate_operation_module(&self.engine, &module, &self.config).await
     }
 
-    pub async fn build_validated_operation_runtime(&self) -> VerletWasmResult<WasmModuleRuntime> {
+    pub async fn build_validated_operation_runtime(
+        &self,
+    ) -> crate::VerletWasmResult<WasmModuleRuntime> {
         let module = self.load_module().await?;
         let manifest = validate_operation_module(&self.engine, &module, &self.config).await?;
         Ok(WasmModuleRuntime {
             config: self.config.clone(),
-            engine: Arc::clone(&self.engine),
+            engine: std::sync::Arc::clone(&self.engine),
             module,
             manifest: Some(manifest),
         })
@@ -93,12 +84,12 @@ impl WasmRuntimeFactory {
         &self,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> VerletWasmResult<WasmOperationOutput> {
+    ) -> crate::VerletWasmResult<verlet_process::WasmOperationOutput> {
         let module = self.load_module().await?;
         let manifest = load_operation_manifest(&self.engine, &module, &self.config)
             .await?
             .ok_or_else(|| {
-                VerletWasmError::RuntimeExecution(format!(
+                crate::VerletWasmError::RuntimeExecution(format!(
                     "wasm module does not export {DESCRIBE_EXPORT}"
                 ))
             })?;
@@ -117,43 +108,41 @@ impl WasmRuntimeFactory {
         &self,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> VerletWasmResult<VerletProcessHandle> {
+    ) -> crate::VerletWasmResult<verlet_process::VerletProcessHandle> {
         let output = self.invoke_operation_bytes(operation_name, input).await?;
-        Ok(VerletProcessHandle::from_wasm_operation_output(
-            None, output,
-        ))
+        Ok(verlet_process::VerletProcessHandle::from_wasm_operation_output(None, output))
     }
 
-    pub async fn build_runtime(&self) -> VerletWasmResult<WasmModuleRuntime> {
+    pub async fn build_runtime(&self) -> crate::VerletWasmResult<WasmModuleRuntime> {
         let module = self.load_module().await?;
         let manifest = load_operation_manifest(&self.engine, &module, &self.config).await?;
         Ok(WasmModuleRuntime {
             config: self.config.clone(),
-            engine: Arc::clone(&self.engine),
+            engine: std::sync::Arc::clone(&self.engine),
             module,
             manifest,
         })
     }
 
-    async fn load_module(&self) -> VerletWasmResult<Arc<Module>> {
+    async fn load_module(&self) -> crate::VerletWasmResult<std::sync::Arc<wasmtime::Module>> {
         let bytes = self.config.artifact.load_bytes().await?;
         reject_textual_wat_artifact(&bytes)?;
-        let module = Module::new(&self.engine, bytes)
-            .map_err(|err| VerletWasmError::RuntimeFactory(err.to_string()))?;
-        Ok(Arc::new(module))
+        let module = wasmtime::Module::new(&self.engine, bytes)
+            .map_err(|err| crate::VerletWasmError::RuntimeFactory(err.to_string()))?;
+        Ok(std::sync::Arc::new(module))
     }
 }
 
 async fn validate_operation_module(
-    engine: &Engine,
-    module: &Module,
-    config: &WasmRuntimeConfig,
-) -> VerletWasmResult<WasmOperationManifest> {
+    engine: &wasmtime::Engine,
+    module: &wasmtime::Module,
+    config: &crate::WasmRuntimeConfig,
+) -> crate::VerletWasmResult<verlet_abi::WasmOperationManifest> {
     validate_module_imports(module, config.host_import_policy)?;
     let manifest = load_operation_manifest(engine, module, config)
         .await?
         .ok_or_else(|| {
-            VerletWasmError::RuntimeFactory(format!(
+            crate::VerletWasmError::RuntimeFactory(format!(
                 "wasm operation artifact must export {DESCRIBE_EXPORT}; legacy handle_turn modules cannot be published as operations"
             ))
         })?;
@@ -161,14 +150,14 @@ async fn validate_operation_module(
         .exports()
         .any(|export| export.name() == CALL_OPERATION_EXPORT)
     {
-        return Err(VerletWasmError::RuntimeFactory(format!(
+        return Err(crate::VerletWasmError::RuntimeFactory(format!(
             "wasm operation artifact must export {CALL_OPERATION_EXPORT}"
         )));
     }
     Ok(manifest)
 }
 
-fn configure_wasmtime_engine(engine_config: &mut Config) {
+fn configure_wasmtime_engine(engine_config: &mut wasmtime::Config) {
     // Wasmtime's default macOS Mach-port trap handler owns a process-global
     // helper thread. Under the parallel lib test harness that thread has
     // intermittently aborted in `mach_msg` with no Rust panic, so Verlet uses
@@ -178,7 +167,7 @@ fn configure_wasmtime_engine(engine_config: &mut Config) {
     engine_config.macos_use_mach_ports(false);
 }
 
-fn reject_textual_wat_artifact(bytes: &[u8]) -> VerletWasmResult<()> {
+fn reject_textual_wat_artifact(bytes: &[u8]) -> crate::VerletWasmResult<()> {
     if bytes
         .iter()
         .copied()
@@ -186,7 +175,7 @@ fn reject_textual_wat_artifact(bytes: &[u8]) -> VerletWasmResult<()> {
         .take(7)
         .eq(b"(module".iter().copied())
     {
-        return Err(VerletWasmError::RuntimeFactory(
+        return Err(crate::VerletWasmError::RuntimeFactory(
             "wasm runtime artifacts must be compiled .wasm bytes; textual WAT is only allowed in tests/fixtures before compilation"
                 .to_string(),
         ));
@@ -195,10 +184,10 @@ fn reject_textual_wat_artifact(bytes: &[u8]) -> VerletWasmResult<()> {
 }
 
 pub struct WasmModuleRuntime {
-    config: WasmRuntimeConfig,
-    engine: Arc<Engine>,
-    module: Arc<Module>,
-    manifest: Option<WasmOperationManifest>,
+    config: crate::WasmRuntimeConfig,
+    engine: std::sync::Arc<wasmtime::Engine>,
+    module: std::sync::Arc<wasmtime::Module>,
+    manifest: Option<verlet_abi::WasmOperationManifest>,
 }
 
 impl WasmModuleRuntime {
@@ -206,9 +195,9 @@ impl WasmModuleRuntime {
         &self,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> VerletWasmResult<WasmOperationOutput> {
+    ) -> crate::VerletWasmResult<verlet_process::WasmOperationOutput> {
         let manifest = self.manifest.as_ref().ok_or_else(|| {
-            VerletWasmError::RuntimeExecution(format!(
+            crate::VerletWasmError::RuntimeExecution(format!(
                 "wasm module does not export {DESCRIBE_EXPORT}"
             ))
         })?;
@@ -223,7 +212,7 @@ impl WasmModuleRuntime {
         .await
     }
 
-    pub async fn execute_turn(&self, input: String) -> VerletWasmResult<String> {
+    pub async fn execute_turn(&self, input: String) -> crate::VerletWasmResult<String> {
         if let Some(manifest) = &self.manifest {
             let output = execute_operation(
                 &self.engine,
@@ -245,26 +234,26 @@ impl WasmModuleRuntime {
         }
 
         let input = truncate_bytes(input.into_bytes(), self.config.max_input_bytes);
-        let mut linker = Linker::new(&self.engine);
+        let mut linker = wasmtime::Linker::new(&self.engine);
         add_verlet_imports(&mut linker)
-            .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+            .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
 
-        let mut store = Store::new(&self.engine, WasmTurnState::new(input, &self.config));
+        let mut store = wasmtime::Store::new(&self.engine, WasmTurnState::new(input, &self.config));
         configure_store(&mut store, &self.config)?;
 
         let instance = linker
             .instantiate_async(&mut store, &self.module)
             .await
-            .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+            .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
         let entry = instance
             .get_typed_func::<(), i32>(&mut store, &self.config.entrypoint)
-            .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+            .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
         let exit_code = entry
             .call_async(&mut store, ())
             .await
-            .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+            .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
         if exit_code != 0 {
-            return Err(VerletWasmError::RuntimeExecution(format!(
+            return Err(crate::VerletWasmError::RuntimeExecution(format!(
                 "wasm entrypoint {} returned exit code {exit_code}",
                 self.config.entrypoint
             )));
@@ -286,10 +275,10 @@ impl WasmModuleRuntime {
 }
 
 async fn load_operation_manifest(
-    engine: &Engine,
-    module: &Module,
-    config: &WasmRuntimeConfig,
-) -> VerletWasmResult<Option<WasmOperationManifest>> {
+    engine: &wasmtime::Engine,
+    module: &wasmtime::Module,
+    config: &crate::WasmRuntimeConfig,
+) -> crate::VerletWasmResult<Option<verlet_abi::WasmOperationManifest>> {
     if !module
         .exports()
         .any(|export| export.name() == DESCRIBE_EXPORT)
@@ -297,57 +286,58 @@ async fn load_operation_manifest(
         return Ok(None);
     }
 
-    let mut linker = Linker::new(engine);
+    let mut linker = wasmtime::Linker::new(engine);
     add_verlet_imports(&mut linker)
-        .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
-    let mut store = Store::new(engine, WasmTurnState::new(Vec::new(), config));
+        .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
+    let mut store = wasmtime::Store::new(engine, WasmTurnState::new(Vec::new(), config));
     configure_store(&mut store, config)?;
     let instance = linker
         .instantiate_async(&mut store, module)
         .await
-        .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+        .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     let Some(export) = instance.get_export(&mut store, DESCRIBE_EXPORT) else {
         return Ok(None);
     };
     let Some(func) = export.into_func() else {
-        return Err(VerletWasmError::RuntimeExecution(format!(
+        return Err(crate::VerletWasmError::RuntimeExecution(format!(
             "{DESCRIBE_EXPORT} export is not a function"
         )));
     };
     let describe = func
         .typed::<u32, i32>(&store)
-        .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+        .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     let status = describe
         .call_async(&mut store, OUTPUT_SINK)
         .await
-        .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+        .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     if status != STATUS_OK {
-        return Err(VerletWasmError::RuntimeExecution(format!(
+        return Err(crate::VerletWasmError::RuntimeExecution(format!(
             "{DESCRIBE_EXPORT} returned status {status}"
         )));
     }
     let bytes = store.into_data().take_sink(OUTPUT_SINK);
-    let manifest: WasmOperationManifest = serde_json::from_slice(&bytes).map_err(|err| {
-        VerletWasmError::RuntimeExecution(format!(
-            "failed to decode wasm operation manifest: {err}"
-        ))
-    })?;
+    let manifest: verlet_abi::WasmOperationManifest =
+        serde_json::from_slice(&bytes).map_err(|err| {
+            crate::VerletWasmError::RuntimeExecution(format!(
+                "failed to decode wasm operation manifest: {err}"
+            ))
+        })?;
     validate_manifest(&manifest)?;
     Ok(Some(manifest))
 }
 
 async fn execute_operation(
-    engine: &Engine,
-    module: &Module,
-    config: &WasmRuntimeConfig,
-    manifest: &WasmOperationManifest,
+    engine: &wasmtime::Engine,
+    module: &wasmtime::Module,
+    config: &crate::WasmRuntimeConfig,
+    manifest: &verlet_abi::WasmOperationManifest,
     operation_name: &str,
     input: Vec<u8>,
-) -> VerletWasmResult<WasmOperationOutput> {
+) -> crate::VerletWasmResult<verlet_process::WasmOperationOutput> {
     let operation = manifest
         .operation(operation_name)
         .ok_or_else(|| {
-            VerletWasmError::RuntimeExecution(format!(
+            crate::VerletWasmError::RuntimeExecution(format!(
                 "wasm operation {operation_name:?} is not in manifest"
             ))
         })?
@@ -360,26 +350,26 @@ async fn execute_operation(
         .cloned()
         .collect();
     if !missing_capabilities.is_empty() {
-        return Err(VerletWasmError::RuntimeExecution(format!(
+        return Err(crate::VerletWasmError::RuntimeExecution(format!(
             "wasm operation {:?} requires ungranted capabilities: {}",
             operation.name,
             missing_capabilities.join(", ")
         )));
     }
 
-    let mut linker = Linker::new(engine);
+    let mut linker = wasmtime::Linker::new(engine);
     add_verlet_imports(&mut linker)
-        .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+        .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     let input = truncate_bytes(input, config.max_input_bytes);
-    let mut store = Store::new(engine, WasmTurnState::new(input, config));
+    let mut store = wasmtime::Store::new(engine, WasmTurnState::new(input, config));
     configure_store(&mut store, config)?;
     let instance = linker
         .instantiate_async(&mut store, module)
         .await
-        .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+        .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     let call = instance
         .get_typed_func::<(u32, u32, u32, u32, u32), i32>(&mut store, CALL_OPERATION_EXPORT)
-        .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+        .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     let status = call
         .call_async(
             &mut store,
@@ -392,16 +382,16 @@ async fn execute_operation(
             ),
         )
         .await
-        .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+        .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     if status != STATUS_OK {
-        return Err(VerletWasmError::RuntimeExecution(format!(
+        return Err(crate::VerletWasmError::RuntimeExecution(format!(
             "{CALL_OPERATION_EXPORT} for {:?} returned status {status}",
             operation.name
         )));
     }
     let mut state = store.into_data();
     let invocation_context = state.invocation_context.clone();
-    Ok(WasmOperationOutput {
+    Ok(verlet_process::WasmOperationOutput {
         manifest: manifest.clone(),
         operation,
         output: state.take_sink(OUTPUT_SINK),
@@ -410,39 +400,39 @@ async fn execute_operation(
     })
 }
 
-fn validate_manifest(manifest: &WasmOperationManifest) -> VerletWasmResult<()> {
+fn validate_manifest(manifest: &verlet_abi::WasmOperationManifest) -> crate::VerletWasmResult<()> {
     if manifest.abi != OPERATION_ABI {
-        return Err(VerletWasmError::RuntimeExecution(format!(
+        return Err(crate::VerletWasmError::RuntimeExecution(format!(
             "unsupported wasm operation abi {:?}",
             manifest.abi
         )));
     }
     if manifest.operations.is_empty() {
-        return Err(VerletWasmError::RuntimeExecution(
+        return Err(crate::VerletWasmError::RuntimeExecution(
             "wasm operation manifest has no operations".to_string(),
         ));
     }
-    let mut ids = BTreeSet::new();
-    let mut names = BTreeSet::new();
+    let mut ids = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
     for operation in &manifest.operations {
         if operation.id == 0 {
-            return Err(VerletWasmError::RuntimeExecution(
+            return Err(crate::VerletWasmError::RuntimeExecution(
                 "wasm operation id 0 is reserved".to_string(),
             ));
         }
         if operation.name.trim().is_empty() {
-            return Err(VerletWasmError::RuntimeExecution(
+            return Err(crate::VerletWasmError::RuntimeExecution(
                 "wasm operation name cannot be empty".to_string(),
             ));
         }
         if !ids.insert(operation.id) {
-            return Err(VerletWasmError::RuntimeExecution(format!(
+            return Err(crate::VerletWasmError::RuntimeExecution(format!(
                 "duplicate wasm operation id {}",
                 operation.id
             )));
         }
         if !names.insert(operation.name.as_str()) {
-            return Err(VerletWasmError::RuntimeExecution(format!(
+            return Err(crate::VerletWasmError::RuntimeExecution(format!(
                 "duplicate wasm operation name {:?}",
                 operation.name
             )));
@@ -451,7 +441,10 @@ fn validate_manifest(manifest: &WasmOperationManifest) -> VerletWasmResult<()> {
     Ok(())
 }
 
-fn validate_module_imports(module: &Module, policy: WasmHostImportPolicy) -> VerletWasmResult<()> {
+fn validate_module_imports(
+    module: &wasmtime::Module,
+    policy: crate::WasmHostImportPolicy,
+) -> crate::VerletWasmResult<()> {
     let mut unsupported = Vec::new();
     for import in module.imports() {
         let module_name = import.module();
@@ -465,7 +458,7 @@ fn validate_module_imports(module: &Module, policy: WasmHostImportPolicy) -> Ver
     if unsupported.is_empty() {
         Ok(())
     } else {
-        Err(VerletWasmError::RuntimeFactory(format!(
+        Err(crate::VerletWasmError::RuntimeFactory(format!(
             "wasm operation artifact imports unsupported host functions: {}",
             unsupported.join(", ")
         )))
@@ -475,13 +468,13 @@ fn validate_module_imports(module: &Module, policy: WasmHostImportPolicy) -> Ver
 fn allowed_import(
     module_name: &str,
     name: &str,
-    ty: ExternType,
-    policy: WasmHostImportPolicy,
+    ty: wasmtime::ExternType,
+    policy: crate::WasmHostImportPolicy,
 ) -> bool {
-    let is_function = matches!(ty, ExternType::Func(_));
+    let is_function = matches!(ty, wasmtime::ExternType::Func(_));
     is_function
         && match policy {
-            WasmHostImportPolicy::Operation => matches!(
+            crate::WasmHostImportPolicy::Operation => matches!(
                 (module_name, name),
                 ("verlet", "input_len")
                     | ("verlet", "input_read")
@@ -497,7 +490,7 @@ fn allowed_import(
                     | ("cooldis_0.1", "fs_close")
                     | ("cooldis_0.1", "log")
             ),
-            WasmHostImportPolicy::PureCompute => matches!(
+            crate::WasmHostImportPolicy::PureCompute => matches!(
                 (module_name, name),
                 ("verlet", "input_len")
                     | ("verlet", "input_read")
@@ -532,19 +525,19 @@ fn import_diagnostic(module_name: &str, name: &str) -> &'static str {
 }
 
 fn configure_store(
-    store: &mut Store<WasmTurnState>,
-    config: &WasmRuntimeConfig,
-) -> VerletWasmResult<()> {
+    store: &mut wasmtime::Store<WasmTurnState>,
+    config: &crate::WasmRuntimeConfig,
+) -> crate::VerletWasmResult<()> {
     store.limiter(|state| &mut state.limits);
     if let Some(fuel) = config.fuel {
         store
             .set_fuel(fuel)
-            .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+            .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     }
     if let Some(interval) = config.fuel_yield_interval {
         store
             .fuel_async_yield_interval(Some(interval))
-            .map_err(|err| VerletWasmError::RuntimeExecution(err.to_string()))?;
+            .map_err(|err| crate::VerletWasmError::RuntimeExecution(err.to_string()))?;
     }
     Ok(())
 }
@@ -552,17 +545,17 @@ fn configure_store(
 struct WasmTurnState {
     input: Vec<u8>,
     input_offset: usize,
-    sources: HashMap<u32, WasmSourceState>,
+    sources: std::collections::HashMap<u32, WasmSourceState>,
     next_source: u32,
-    files: HashMap<u32, WasmFileState>,
+    files: std::collections::HashMap<u32, WasmFileState>,
     next_file: u32,
-    sinks: HashMap<u32, Vec<u8>>,
+    sinks: std::collections::HashMap<u32, Vec<u8>>,
     output_truncated: bool,
     max_output_bytes: usize,
-    capability_grants: BTreeSet<String>,
-    invocation_context: InvocationContext,
-    secrets: BTreeMap<String, String>,
-    vfs: Option<Arc<VerletVfs>>,
+    capability_grants: std::collections::BTreeSet<String>,
+    invocation_context: verlet_abi::InvocationContext,
+    secrets: std::collections::BTreeMap<String, String>,
+    vfs: Option<std::sync::Arc<verlet_vfs::VerletVfs>>,
     limits: wasmtime::StoreLimits,
 }
 
@@ -577,19 +570,19 @@ struct WasmFileState {
 }
 
 impl WasmTurnState {
-    fn new(input: Vec<u8>, config: &WasmRuntimeConfig) -> Self {
-        let mut limits = StoreLimitsBuilder::new();
+    fn new(input: Vec<u8>, config: &crate::WasmRuntimeConfig) -> Self {
+        let mut limits = wasmtime::StoreLimitsBuilder::new();
         if let Some(memory_limit_bytes) = config.memory_limit_bytes {
             limits = limits.memory_size(memory_limit_bytes);
         }
         Self {
             input,
             input_offset: 0,
-            sources: HashMap::new(),
+            sources: std::collections::HashMap::new(),
             next_source: FIRST_DYNAMIC_SOURCE,
-            files: HashMap::new(),
+            files: std::collections::HashMap::new(),
             next_file: FIRST_DYNAMIC_FILE,
-            sinks: HashMap::new(),
+            sinks: std::collections::HashMap::new(),
             output_truncated: false,
             max_output_bytes: config.max_output_bytes,
             capability_grants: config.effective_capability_grants(),
@@ -654,17 +647,19 @@ impl WasmTurnState {
     }
 }
 
-fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()> {
+fn add_verlet_imports(linker: &mut wasmtime::Linker<WasmTurnState>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "verlet",
         "input_len",
-        |caller: Caller<'_, WasmTurnState>| -> i32 { saturating_i32(caller.data().input.len()) },
+        |caller: wasmtime::Caller<'_, WasmTurnState>| -> i32 {
+            saturating_i32(caller.data().input.len())
+        },
     )?;
 
     linker.func_wrap(
         "verlet",
         "input_read",
-        |mut caller: Caller<'_, WasmTurnState>, ptr: i32, max_len: i32| -> i32 {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>, ptr: i32, max_len: i32| -> i32 {
             let ptr = nonnegative_usize(ptr);
             let max_len = nonnegative_usize(max_len);
             let Some(ptr) = ptr else {
@@ -693,7 +688,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "verlet",
         "output_write",
-        |mut caller: Caller<'_, WasmTurnState>, ptr: i32, len: i32| {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>, ptr: i32, len: i32| {
             let Some(bytes) = read_guest_memory(&mut caller, ptr, len) else {
                 caller.data_mut().output_truncated = true;
                 return;
@@ -705,7 +700,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "verlet",
         "log",
-        |mut caller: Caller<'_, WasmTurnState>, ptr: i32, len: i32| {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>, ptr: i32, len: i32| {
             let Some(bytes) = read_guest_memory(&mut caller, ptr, len) else {
                 return;
             };
@@ -721,7 +716,11 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "cooldis_0.1",
         "source_read",
-        |mut caller: Caller<'_, WasmTurnState>, source: i32, ptr: i32, len_ptr: i32| -> i32 {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
+         source: i32,
+         ptr: i32,
+         len_ptr: i32|
+         -> i32 {
             let Some(source) = nonnegative_u32(source) else {
                 return STATUS_INVALID_ARGUMENT;
             };
@@ -761,7 +760,11 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "cooldis_0.1",
         "sink_write",
-        |mut caller: Caller<'_, WasmTurnState>, sink: i32, ptr: i32, len_ptr: i32| -> i32 {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
+         sink: i32,
+         ptr: i32,
+         len_ptr: i32|
+         -> i32 {
             let Some(sink) = nonnegative_u32(sink) else {
                 return STATUS_INVALID_ARGUMENT;
             };
@@ -789,7 +792,11 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "cooldis_0.1",
         "event_emit",
-        |mut caller: Caller<'_, WasmTurnState>, _invocation: i32, ptr: i32, len_ptr: i32| -> i32 {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
+         _invocation: i32,
+         ptr: i32,
+         len_ptr: i32|
+         -> i32 {
             let Some(len_ptr) = nonnegative_usize(len_ptr) else {
                 return STATUS_INVALID_ARGUMENT;
             };
@@ -811,7 +818,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap_async(
         "cooldis_0.1",
         "http_request",
-        |mut caller: Caller<'_, WasmTurnState>,
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
          (invocation, request_ptr, request_len, body_ptr, body_len, out_ptr, event_sink): (
             i32,
             i32,
@@ -884,7 +891,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap_async(
         "cooldis_0.1",
         "fs_open",
-        |mut caller: Caller<'_, WasmTurnState>,
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
          (path_ptr, path_len, mode, out_handle_ptr): (i32, i32, i32, i32)| {
             Box::new(async move {
                 let Some(mode) = nonnegative_u32(mode) else {
@@ -902,7 +909,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
                 let Ok(path) = String::from_utf8(path_bytes) else {
                     return STATUS_INVALID_ARGUMENT;
                 };
-                let path = PathBuf::from(path);
+                let path = std::path::PathBuf::from(path);
                 if !path.is_absolute() {
                     return STATUS_INVALID_ARGUMENT;
                 }
@@ -925,7 +932,11 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "cooldis_0.1",
         "fs_read",
-        |mut caller: Caller<'_, WasmTurnState>, handle: i32, ptr: i32, len_ptr: i32| -> i32 {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
+         handle: i32,
+         ptr: i32,
+         len_ptr: i32|
+         -> i32 {
             let Some(handle) = nonnegative_u32(handle) else {
                 return STATUS_INVALID_ARGUMENT;
             };
@@ -969,7 +980,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "cooldis_0.1",
         "fs_close",
-        |mut caller: Caller<'_, WasmTurnState>, handle: i32| -> i32 {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>, handle: i32| -> i32 {
             let Some(handle) = nonnegative_u32(handle) else {
                 return STATUS_INVALID_ARGUMENT;
             };
@@ -984,7 +995,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "cooldis_0.1",
         "log",
-        |mut caller: Caller<'_, WasmTurnState>, _level: i32, ptr: i32, len: i32| -> i32 {
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>, _level: i32, ptr: i32, len: i32| -> i32 {
             let Some(bytes) = read_guest_memory(&mut caller, ptr, len) else {
                 return STATUS_INVALID_ARGUMENT;
             };
@@ -1001,7 +1012,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
     linker.func_wrap(
         "cooldis_0.1",
         "check_cancelled",
-        |_caller: Caller<'_, WasmTurnState>, invocation: i32| -> i32 {
+        |_caller: wasmtime::Caller<'_, WasmTurnState>, invocation: i32| -> i32 {
             if nonnegative_u32(invocation).is_some() {
                 STATUS_OK
             } else {
@@ -1016,7 +1027,7 @@ fn add_verlet_imports(linker: &mut Linker<WasmTurnState>) -> wasmtime::Result<()
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct WasmHttpExchange {
-    pub response: WasmHttpResponse,
+    pub response: crate::WasmHttpResponse,
     pub body: Vec<u8>,
 }
 
@@ -1102,10 +1113,10 @@ impl WasmHttpError {
 pub async fn execute_http_request(
     request_bytes: Vec<u8>,
     body: Vec<u8>,
-    grants: BTreeSet<String>,
-    secrets: BTreeMap<String, String>,
+    grants: std::collections::BTreeSet<String>,
+    secrets: std::collections::BTreeMap<String, String>,
 ) -> Result<WasmHttpExchange, WasmHttpError> {
-    let mut request: WasmHttpRequest = serde_json::from_slice(&request_bytes)
+    let mut request: crate::WasmHttpRequest = serde_json::from_slice(&request_bytes)
         .map_err(|err| WasmHttpError::invalid_argument(format!("invalid HTTP request: {err}")))?;
     if request.abi != HTTP_ABI {
         return Err(WasmHttpError::invalid_argument(format!(
@@ -1130,12 +1141,12 @@ pub async fn execute_http_request(
 
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(Arc::new(FilteredDnsResolver));
+        .dns_resolver(std::sync::Arc::new(FilteredDnsResolver));
     let timeout_ms = request
         .timeout_ms
         .unwrap_or(HTTP_DEFAULT_TIMEOUT_MS)
         .min(HTTP_MAX_TIMEOUT_MS);
-    builder = builder.timeout(Duration::from_millis(timeout_ms));
+    builder = builder.timeout(std::time::Duration::from_millis(timeout_ms));
     let client = builder
         .build()
         .map_err(|err| WasmHttpError::transport(sanitize_http_error(err)))?;
@@ -1189,7 +1200,7 @@ pub async fn execute_http_request(
         .headers(headers)
         .body(body);
 
-    let started_at = Instant::now();
+    let started_at = std::time::Instant::now();
     let mut response = http.send().await.map_err(|err| {
         if err.is_timeout() {
             WasmHttpError::timeout("HTTP request timed out")
@@ -1253,7 +1264,7 @@ pub async fn execute_http_request(
         (body, truncated)
     };
     Ok(WasmHttpExchange {
-        response: WasmHttpResponse {
+        response: crate::WasmHttpResponse {
             abi: HTTP_ABI.to_string(),
             status,
             headers,
@@ -1268,7 +1279,7 @@ pub async fn execute_http_request(
     })
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct WasmHttpInputMapping {
     #[serde(default)]
     input_schema: Option<serde_json::Value>,
@@ -1278,7 +1289,7 @@ struct WasmHttpInputMapping {
     request_body: Option<WasmHttpRequestBodyMapping>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct WasmHttpParameterMapping {
     name: String,
     input_property: String,
@@ -1287,7 +1298,7 @@ struct WasmHttpParameterMapping {
     schema: serde_json::Value,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct WasmHttpRequestBodyMapping {
     required: bool,
     #[serde(default)]
@@ -1296,7 +1307,7 @@ struct WasmHttpRequestBodyMapping {
 }
 
 fn apply_http_input_mapping(
-    request: &mut WasmHttpRequest,
+    request: &mut crate::WasmHttpRequest,
     input_bytes: Vec<u8>,
 ) -> Result<Vec<u8>, WasmHttpError> {
     let Some(mapping) = request.input_mapping.take() else {
@@ -1308,13 +1319,14 @@ fn apply_http_input_mapping(
     let input: serde_json::Value = serde_json::from_slice(&input_bytes)
         .map_err(|err| WasmHttpError::invalid_argument(format!("invalid JSON input: {err}")))?;
     if let Some(input_schema) = &mapping.input_schema {
-        validate_json_value_against_schema(input_schema, &input, "HTTP mapped input").map_err(
-            |err| {
-                WasmHttpError::invalid_argument(format!(
-                    "HTTP input violates its pinned schema: {err}"
-                ))
-            },
-        )?;
+        verlet_runtime_contracts::validate_json_value_against_schema(
+            input_schema,
+            &input,
+            "HTTP mapped input",
+        )
+        .map_err(|err| {
+            WasmHttpError::invalid_argument(format!("HTTP input violates its pinned schema: {err}"))
+        })?;
     }
     let object = input.as_object();
     let mut url = request.url.clone();
@@ -1330,7 +1342,7 @@ fn apply_http_input_mapping(
             }
             continue;
         };
-        validate_json_value_against_schema(
+        verlet_runtime_contracts::validate_json_value_against_schema(
             &parameter.schema,
             value,
             &format!("HTTP input property {:?}", parameter.input_property),
@@ -1393,12 +1405,16 @@ fn apply_http_input_mapping(
     if body.is_null() {
         Ok(Vec::new())
     } else {
-        validate_json_value_against_schema(&request_body.schema, body, "HTTP request body")
-            .map_err(|err| {
-                WasmHttpError::invalid_argument(format!(
-                    "HTTP request body violates its pinned schema: {err}"
-                ))
-            })?;
+        verlet_runtime_contracts::validate_json_value_against_schema(
+            &request_body.schema,
+            body,
+            "HTTP request body",
+        )
+        .map_err(|err| {
+            WasmHttpError::invalid_argument(format!(
+                "HTTP request body violates its pinned schema: {err}"
+            ))
+        })?;
         serde_json::to_vec(body).map_err(|err| {
             WasmHttpError::invalid_argument(format!("failed to encode HTTP request body: {err}"))
         })
@@ -1445,7 +1461,7 @@ fn encode_http_response_envelope(
     let headers = headers
         .iter()
         .cloned()
-        .collect::<BTreeMap<String, String>>();
+        .collect::<std::collections::BTreeMap<String, String>>();
     let encode = |body: &[u8], truncated| {
         let body = serde_json::from_slice::<serde_json::Value>(body)
             .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(body).into()));
@@ -1512,7 +1528,7 @@ fn percent_encode_path_segment(value: &str) -> String {
 
 #[doc(hidden)]
 pub fn ensure_http_capability(
-    grants: &BTreeSet<String>,
+    grants: &std::collections::BTreeSet<String>,
     method: &reqwest::Method,
     origin: &str,
     private_destination: bool,
@@ -1587,22 +1603,22 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
     pattern_index == pattern.len()
 }
 
-fn vfs_error_status(err: BashkitError) -> i32 {
+fn vfs_error_status(err: bashkit::Error) -> i32 {
     match err {
-        BashkitError::Io(err) => match err.kind() {
+        bashkit::Error::Io(err) => match err.kind() {
             std::io::ErrorKind::NotFound => STATUS_NOT_FOUND,
             std::io::ErrorKind::PermissionDenied => STATUS_CAPABILITY_DENIED,
             std::io::ErrorKind::InvalidInput => STATUS_INVALID_ARGUMENT,
             _ => STATUS_TRANSPORT_ERROR,
         },
-        BashkitError::Cancelled => STATUS_CANCELLED,
-        BashkitError::ResourceLimit(_) => STATUS_TRANSPORT_ERROR,
-        BashkitError::Parse { .. }
-        | BashkitError::Execution(_)
-        | BashkitError::CommandFailure(_)
-        | BashkitError::Network(_)
-        | BashkitError::Regex(_)
-        | BashkitError::Internal(_) => STATUS_TRANSPORT_ERROR,
+        bashkit::Error::Cancelled => STATUS_CANCELLED,
+        bashkit::Error::ResourceLimit(_) => STATUS_TRANSPORT_ERROR,
+        bashkit::Error::Parse { .. }
+        | bashkit::Error::Execution(_)
+        | bashkit::Error::CommandFailure(_)
+        | bashkit::Error::Network(_)
+        | bashkit::Error::Regex(_)
+        | bashkit::Error::Internal(_) => STATUS_TRANSPORT_ERROR,
     }
 }
 
@@ -1655,7 +1671,7 @@ impl reqwest::dns::Resolve for FilteredDnsResolver {
         let host = name.as_str().to_owned();
         Box::pin(async move {
             let addrs = tokio::net::lookup_host((host.as_str(), 0)).await?;
-            let filtered_addrs: Vec<SocketAddr> = addrs
+            let filtered_addrs: Vec<std::net::SocketAddr> = addrs
                 .filter(|addr| !is_private_or_special_ip(addr.ip()))
                 .collect();
 
@@ -1678,19 +1694,19 @@ fn is_private_or_special_url(url: &reqwest::Url) -> bool {
     };
     host.eq_ignore_ascii_case("localhost")
         || host
-            .parse::<IpAddr>()
+            .parse::<std::net::IpAddr>()
             .map(is_private_or_special_ip)
             .unwrap_or(false)
 }
 
-fn is_private_or_special_ip(ip: IpAddr) -> bool {
+fn is_private_or_special_ip(ip: std::net::IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => is_private_or_special_ipv4(ip),
-        IpAddr::V6(ip) => is_private_or_special_ipv6(ip),
+        std::net::IpAddr::V4(ip) => is_private_or_special_ipv4(ip),
+        std::net::IpAddr::V6(ip) => is_private_or_special_ipv6(ip),
     }
 }
 
-fn is_private_or_special_ipv4(ip: Ipv4Addr) -> bool {
+fn is_private_or_special_ipv4(ip: std::net::Ipv4Addr) -> bool {
     ip.is_private()
         || ip.is_loopback()
         || ip.is_link_local()
@@ -1703,7 +1719,7 @@ fn is_private_or_special_ipv4(ip: Ipv4Addr) -> bool {
         || (ip.octets()[0] == 198 && (ip.octets()[1] & 0b1111_1110) == 18)
 }
 
-fn is_private_or_special_ipv6(ip: Ipv6Addr) -> bool {
+fn is_private_or_special_ipv6(ip: std::net::Ipv6Addr) -> bool {
     ip.is_loopback()
         || ip.is_unspecified()
         || (ip.segments()[0] & 0xfe00) == 0xfc00
@@ -1712,14 +1728,14 @@ fn is_private_or_special_ipv6(ip: Ipv6Addr) -> bool {
         || ip.segments()[0] == 0x5f00
 }
 
-fn exported_memory(caller: &mut Caller<'_, WasmTurnState>) -> Option<Memory> {
+fn exported_memory(caller: &mut wasmtime::Caller<'_, WasmTurnState>) -> Option<wasmtime::Memory> {
     caller
         .get_export("memory")
         .and_then(|external| external.into_memory())
 }
 
 fn read_guest_memory(
-    caller: &mut Caller<'_, WasmTurnState>,
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
     ptr: i32,
     len: i32,
 ) -> Option<Vec<u8>> {
@@ -1773,7 +1789,7 @@ fn saturating_i32(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
-fn read_guest_u32_at(caller: &mut Caller<'_, WasmTurnState>, ptr: usize) -> Option<u32> {
+fn read_guest_u32_at(caller: &mut wasmtime::Caller<'_, WasmTurnState>, ptr: usize) -> Option<u32> {
     let memory = exported_memory(caller)?;
     let data = memory.data(caller);
     let end = ptr.checked_add(4)?;
@@ -1783,7 +1799,11 @@ fn read_guest_u32_at(caller: &mut Caller<'_, WasmTurnState>, ptr: usize) -> Opti
     Some(u32::from_le_bytes(data[ptr..end].try_into().ok()?))
 }
 
-fn write_guest_u32_at(caller: &mut Caller<'_, WasmTurnState>, ptr: usize, value: u32) -> bool {
+fn write_guest_u32_at(
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    ptr: usize,
+    value: u32,
+) -> bool {
     let Some(memory) = exported_memory(caller) else {
         return false;
     };

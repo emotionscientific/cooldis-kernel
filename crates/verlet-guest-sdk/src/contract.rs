@@ -6,16 +6,6 @@
 //! wire encoding stays behind the macro expansion; nothing here names linear
 //! memory, exports, or envelopes.
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use serde_json::Value as JsonValue;
-
-use crate::{
-    CouplingDischarge, CouplingDischargeEvent, CouplingInvocation, CouplingInvocationEvent,
-    CouplingInvocationMeta, EventSink, HttpRequest, HttpResponse, Invocation, StatusCode,
-    check_cancelled, emit_event, http_request, read_source_to_end,
-};
-
 /// The one error type of the guest contract.
 ///
 /// Guest functions return `Result<_, GuestError>`; the macro expansion owns
@@ -28,7 +18,7 @@ pub enum GuestError {
     /// The request names something this guest does not provide.
     Unsupported(String),
     /// A host power failed (HTTP, source/sink IO, cancellation).
-    Host(StatusCode),
+    Host(crate::StatusCode),
     /// Guest logic failed.
     Internal(String),
 }
@@ -52,8 +42,8 @@ impl From<serde_json::Error> for GuestError {
     }
 }
 
-impl From<StatusCode> for GuestError {
-    fn from(status: StatusCode) -> Self {
+impl From<crate::StatusCode> for GuestError {
+    fn from(status: crate::StatusCode) -> Self {
         Self::Host(status)
     }
 }
@@ -65,39 +55,39 @@ impl From<StatusCode> for GuestError {
 /// powers.
 #[derive(Clone, Debug)]
 pub struct CouplingContext {
-    invocation: CouplingInvocation,
+    invocation: crate::CouplingInvocation,
 }
 
 impl CouplingContext {
     /// Build a context from the raw invocation envelope.
-    pub fn from_invocation(invocation: CouplingInvocation) -> Self {
+    pub fn from_invocation(invocation: crate::CouplingInvocation) -> Self {
         Self { invocation }
     }
 
     /// The event that fired the trigger.
-    pub fn trigger(&self) -> &CouplingInvocationEvent {
+    pub fn trigger(&self) -> &crate::CouplingInvocationEvent {
         &self.invocation.trigger_event
     }
 
     /// The events selected by the coupling's source selectors, in record
     /// order.
-    pub fn sources(&self) -> &[CouplingInvocationEvent] {
+    pub fn sources(&self) -> &[crate::CouplingInvocationEvent] {
         &self.invocation.selected_events
     }
 
     /// Deserialize the manifest `config` block into a typed struct.
-    pub fn config<C: DeserializeOwned>(&self) -> Result<C, GuestError> {
+    pub fn config<C: serde::de::DeserializeOwned>(&self) -> Result<C, GuestError> {
         serde_json::from_value(self.invocation.config.clone())
             .map_err(|err| GuestError::BadInput(format!("coupling config: {err}")))
     }
 
     /// Metadata about the coupling invocation.
-    pub fn meta(&self) -> &CouplingInvocationMeta {
+    pub fn meta(&self) -> &crate::CouplingInvocationMeta {
         &self.invocation.invocation_meta
     }
 
     /// Escape hatch to the raw envelope; prefer the typed accessors.
-    pub fn invocation(&self) -> &CouplingInvocation {
+    pub fn invocation(&self) -> &crate::CouplingInvocation {
         &self.invocation
     }
 }
@@ -108,7 +98,7 @@ impl CouplingContext {
 /// sink grant; a discharge only ever proposes.
 #[derive(Clone, Debug, Default)]
 pub struct Discharge {
-    events: Vec<CouplingDischargeEvent>,
+    events: Vec<crate::CouplingDischargeEvent>,
 }
 
 impl Discharge {
@@ -123,11 +113,11 @@ impl Discharge {
         mut self,
         stream: impl Into<String>,
         kind: impl Into<String>,
-        payload: impl Serialize,
+        payload: impl serde::Serialize,
     ) -> Result<Self, GuestError> {
         let payload = serde_json::to_value(payload)
             .map_err(|err| GuestError::Internal(format!("discharge payload: {err}")))?;
-        self.events.push(CouplingDischargeEvent {
+        self.events.push(crate::CouplingDischargeEvent {
             stream: stream.into(),
             kind: kind.into(),
             payload,
@@ -141,9 +131,9 @@ impl Discharge {
         mut self,
         stream: impl Into<String>,
         kind: impl Into<String>,
-        payload: JsonValue,
+        payload: serde_json::Value,
     ) -> Self {
-        self.events.push(CouplingDischargeEvent {
+        self.events.push(crate::CouplingDischargeEvent {
             stream: stream.into(),
             kind: kind.into(),
             payload,
@@ -157,8 +147,8 @@ impl Discharge {
     }
 
     /// Convert this builder into the wire discharge envelope.
-    pub fn into_coupling_discharge(self) -> CouplingDischarge {
-        CouplingDischarge::new(self.events)
+    pub fn into_coupling_discharge(self) -> crate::CouplingDischarge {
+        crate::CouplingDischarge::new(self.events)
     }
 }
 
@@ -170,13 +160,13 @@ impl Discharge {
 /// context adds types, not authority.
 #[derive(Debug)]
 pub struct OperationContext {
-    invocation: Invocation,
-    events: EventSink,
+    invocation: crate::Invocation,
+    events: crate::EventSink,
 }
 
 impl OperationContext {
     /// Build an operation context from host invocation and event handles.
-    pub fn new(invocation: Invocation, events: EventSink) -> Self {
+    pub fn new(invocation: crate::Invocation, events: crate::EventSink) -> Self {
         Self { invocation, events }
     }
 
@@ -184,32 +174,32 @@ impl OperationContext {
     /// body bytes.
     pub fn http(
         &mut self,
-        request: &HttpRequest,
+        request: &crate::HttpRequest,
         body: &[u8],
-    ) -> Result<(HttpResponse, Vec<u8>), GuestError> {
+    ) -> Result<(crate::HttpResponse, Vec<u8>), GuestError> {
         let request_bytes = request
             .to_json_vec()
             .map_err(|err| GuestError::Internal(format!("http request encode: {err}")))?;
-        let sources = http_request(self.invocation, &request_bytes, body, self.events)?;
-        let metadata_bytes = read_source_to_end(sources.metadata)?;
-        let response: HttpResponse = serde_json::from_slice(&metadata_bytes)
+        let sources = crate::http_request(self.invocation, &request_bytes, body, self.events)?;
+        let metadata_bytes = crate::read_source_to_end(sources.metadata)?;
+        let response: crate::HttpResponse = serde_json::from_slice(&metadata_bytes)
             .map_err(|err| GuestError::Internal(format!("http response decode: {err}")))?;
-        let body = read_source_to_end(sources.body)?;
+        let body = crate::read_source_to_end(sources.body)?;
         Ok((response, body))
     }
 
     /// Emit one progress event onto the operation's JSONL event port.
-    pub fn emit(&mut self, event: &impl Serialize) -> Result<(), GuestError> {
+    pub fn emit(&mut self, event: &impl serde::Serialize) -> Result<(), GuestError> {
         let mut bytes = serde_json::to_vec(event)
             .map_err(|err| GuestError::Internal(format!("event encode: {err}")))?;
         bytes.push(b'\n');
-        emit_event(self.invocation, self.events, &bytes)?;
+        crate::emit_event(self.invocation, self.events, &bytes)?;
         Ok(())
     }
 
     /// Errors with `GuestError::Host(Cancelled)` once the host has cancelled
     /// this invocation; long loops should call it at safe points.
     pub fn check_cancelled(&self) -> Result<(), GuestError> {
-        check_cancelled(self.invocation).map_err(GuestError::Host)
+        crate::check_cancelled(self.invocation).map_err(GuestError::Host)
     }
 }

@@ -24,14 +24,6 @@
 //! that terminal resident residue did not wedge the reservation. It does not
 //! inspect host reservation maps or require a new lifecycle event kind.
 
-use super::kernel_test::{
-    EventKind, EventRecord, EventStreamId, SessionEntryId, ThreadCoordinates,
-};
-use super::{InvariantViolation, ScenarioInvariant, ScenarioWorld};
-use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, HashSet};
-
 pub const INV1_REPLAY_EQUIVALENCE: &str = "inv1-replay-equivalence";
 pub const INV2_UNIQUE_ACTIVE_TOPOLOGY: &str = "inv2-unique-active-topology";
 pub const INV3_BOUNDED_QUEUE: &str = "inv3-bounded-queue";
@@ -53,7 +45,7 @@ pub struct NoDuplicateProjectedOutputInvariant;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TerminalConsistencyInvariant;
 
-pub fn invariant_set_v1() -> Vec<Box<dyn ScenarioInvariant>> {
+pub fn invariant_set_v1() -> Vec<Box<dyn crate::support::scenario::ScenarioInvariant>> {
     vec![
         Box::new(ReplayEquivalenceInvariant),
         Box::new(UniqueActiveTopologyInvariant),
@@ -63,32 +55,44 @@ pub fn invariant_set_v1() -> Vec<Box<dyn ScenarioInvariant>> {
     ]
 }
 
-fn violation(invariant: &'static str, detail: impl Into<String>) -> InvariantViolation {
-    InvariantViolation {
+fn violation(
+    invariant: &'static str,
+    detail: impl Into<String>,
+) -> crate::support::scenario::InvariantViolation {
+    crate::support::scenario::InvariantViolation {
         invariant,
         detail: detail.into(),
     }
 }
 
-fn transcript_stream_ids(world: &ScenarioWorld<'_>) -> Vec<EventStreamId> {
+fn transcript_stream_ids(
+    world: &crate::support::scenario::ScenarioWorld<'_>,
+) -> Vec<verlet::EventStreamId> {
     let mut stream_ids = world
         .transcript
         .items
         .iter()
         .filter(|item| item.kind == "event")
-        .filter_map(|item| item.value.get("stream_id").and_then(Value::as_str))
+        .filter_map(|item| {
+            item.value
+                .get("stream_id")
+                .and_then(serde_json::Value::as_str)
+        })
         .filter(|stream_id| !stream_id.starts_with('$'))
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     stream_ids.sort();
     stream_ids.dedup();
-    stream_ids.into_iter().map(EventStreamId::new).collect()
+    stream_ids
+        .into_iter()
+        .map(verlet::EventStreamId::new)
+        .collect()
 }
 
 async fn durable_events(
-    world: &ScenarioWorld<'_>,
+    world: &crate::support::scenario::ScenarioWorld<'_>,
     invariant: &'static str,
-) -> Result<Vec<EventRecord>, Vec<InvariantViolation>> {
+) -> Result<Vec<verlet::EventRecord>, Vec<crate::support::scenario::InvariantViolation>> {
     let mut events = Vec::new();
     let mut violations = Vec::new();
     for stream_id in transcript_stream_ids(world) {
@@ -107,13 +111,16 @@ async fn durable_events(
     }
 }
 
-#[async_trait]
-impl ScenarioInvariant for ReplayEquivalenceInvariant {
+#[async_trait::async_trait]
+impl crate::support::scenario::ScenarioInvariant for ReplayEquivalenceInvariant {
     fn name(&self) -> &'static str {
         INV1_REPLAY_EQUIVALENCE
     }
 
-    async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+    async fn check(
+        &self,
+        world: &crate::support::scenario::ScenarioWorld<'_>,
+    ) -> Vec<crate::support::scenario::InvariantViolation> {
         let mut violations = Vec::new();
         for stream_id in transcript_stream_ids(world) {
             let events = match world.store.read_events(&stream_id, None).await {
@@ -145,14 +152,18 @@ impl ScenarioInvariant for ReplayEquivalenceInvariant {
             // records that define the store's active-leaf fold. Replay them
             // from sequence one, then compare the result with durable folded
             // state exposed by SessionStore::active_leaf.
-            let mut replayed_leaf: BTreeMap<String, (ThreadCoordinates, Option<String>)> =
-                BTreeMap::new();
+            let mut replayed_leaf: std::collections::BTreeMap<
+                String,
+                (verlet::ThreadCoordinates, Option<String>),
+            > = std::collections::BTreeMap::new();
             for event in &events {
                 let key = event.coordinates.thread_id.to_string();
                 match event.kind {
-                    EventKind::SessionEntryAppended => {
-                        if let Some(entry_id) =
-                            event.payload.get("entry_id").and_then(Value::as_str)
+                    verlet::EventKind::SessionEntryAppended => {
+                        if let Some(entry_id) = event
+                            .payload
+                            .get("entry_id")
+                            .and_then(serde_json::Value::as_str)
                         {
                             replayed_leaf.insert(
                                 key,
@@ -160,11 +171,11 @@ impl ScenarioInvariant for ReplayEquivalenceInvariant {
                             );
                         }
                     }
-                    EventKind::ThreadBranchSelected => {
+                    verlet::EventKind::ThreadBranchSelected => {
                         let selected = event
                             .payload
                             .get("selected_entry_id")
-                            .and_then(Value::as_str)
+                            .and_then(serde_json::Value::as_str)
                             .map(ToOwned::to_owned);
                         replayed_leaf.insert(key, (event.coordinates.clone(), selected));
                     }
@@ -175,7 +186,7 @@ impl ScenarioInvariant for ReplayEquivalenceInvariant {
             for (_, (coordinates, replayed)) in replayed_leaf {
                 match world.store.active_leaf(&coordinates).await {
                     Ok(current) => {
-                        let current = current.map(|entry_id: SessionEntryId| entry_id.to_string());
+                        let current = current.map(|entry_id: verlet::SessionEntryId| entry_id.to_string());
                         if current != replayed {
                             violations.push(violation(
                                 self.name(),
@@ -200,19 +211,23 @@ impl ScenarioInvariant for ReplayEquivalenceInvariant {
     }
 }
 
-#[async_trait]
-impl ScenarioInvariant for UniqueActiveTopologyInvariant {
+#[async_trait::async_trait]
+impl crate::support::scenario::ScenarioInvariant for UniqueActiveTopologyInvariant {
     fn name(&self) -> &'static str {
         INV2_UNIQUE_ACTIVE_TOPOLOGY
     }
 
-    async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+    async fn check(
+        &self,
+        world: &crate::support::scenario::ScenarioWorld<'_>,
+    ) -> Vec<crate::support::scenario::InvariantViolation> {
         let events = match durable_events(world, self.name()).await {
             Ok(events) => events,
             Err(violations) => return violations,
         };
         let mut violations = Vec::new();
-        let mut active: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut active: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
         let mut ordered = events;
         ordered.sort_by_key(|event| {
             (
@@ -222,11 +237,19 @@ impl ScenarioInvariant for UniqueActiveTopologyInvariant {
             )
         });
         for event in ordered {
-            let Some(runtime_id) = event.payload.get("runtime_id").and_then(Value::as_str) else {
+            let Some(runtime_id) = event
+                .payload
+                .get("runtime_id")
+                .and_then(serde_json::Value::as_str)
+            else {
                 continue;
             };
             let thread_id = event.coordinates.thread_id.to_string();
-            match event.payload.get("runtime_state").and_then(Value::as_str) {
+            match event
+                .payload
+                .get("runtime_state")
+                .and_then(serde_json::Value::as_str)
+            {
                 Some("active") => {
                     let runtimes = active.entry(thread_id.clone()).or_default();
                     runtimes.insert(runtime_id.to_string());
@@ -264,7 +287,7 @@ impl ScenarioInvariant for UniqueActiveTopologyInvariant {
                 return violations;
             };
             for item in world.transcript.items.iter().skip(cut + 1) {
-                let kind = item.value.get("kind").and_then(Value::as_str);
+                let kind = item.value.get("kind").and_then(serde_json::Value::as_str);
                 if kind.is_some_and(is_execution_event_kind) {
                     violations.push(violation(
                         self.name(),
@@ -300,30 +323,42 @@ struct LeaseWitness {
     attempt: u64,
 }
 
-#[async_trait]
-impl ScenarioInvariant for BoundedQueueInvariant {
+#[async_trait::async_trait]
+impl crate::support::scenario::ScenarioInvariant for BoundedQueueInvariant {
     fn name(&self) -> &'static str {
         INV3_BOUNDED_QUEUE
     }
 
-    async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+    async fn check(
+        &self,
+        world: &crate::support::scenario::ScenarioWorld<'_>,
+    ) -> Vec<crate::support::scenario::InvariantViolation> {
         if world.queue.is_none() {
             return Vec::new();
         }
 
         let mut now = None;
-        let mut leases: HashMap<String, LeaseWitness> = HashMap::new();
-        let mut redeliveries: HashMap<String, Vec<(usize, u64)>> = HashMap::new();
-        let mut completions: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut leases: std::collections::HashMap<String, LeaseWitness> =
+            std::collections::HashMap::new();
+        let mut redeliveries: std::collections::HashMap<String, Vec<(usize, u64)>> =
+            std::collections::HashMap::new();
+        let mut completions: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
         let mut violations = Vec::new();
         for (index, item) in world.transcript.items.iter().enumerate() {
             match item.label.as_str() {
-                "queue.clock" => now = item.value.get("tick").and_then(Value::as_u64),
+                "queue.clock" => now = item.value.get("tick").and_then(serde_json::Value::as_u64),
                 "queue.lease" => {
                     if let (Some(message_id), Some(visible_until_tick), Some(attempt)) = (
-                        item.value.get("message_id").and_then(Value::as_str),
-                        item.value.get("visible_until_tick").and_then(Value::as_u64),
-                        item.value.get("attempt").and_then(Value::as_u64),
+                        item.value
+                            .get("message_id")
+                            .and_then(serde_json::Value::as_str),
+                        item.value
+                            .get("visible_until_tick")
+                            .and_then(serde_json::Value::as_u64),
+                        item.value
+                            .get("attempt")
+                            .and_then(serde_json::Value::as_u64),
                     ) {
                         leases.insert(
                             message_id.to_string(),
@@ -337,8 +372,12 @@ impl ScenarioInvariant for BoundedQueueInvariant {
                 }
                 "queue.redelivery" => {
                     if let (Some(message_id), Some(attempt)) = (
-                        item.value.get("message_id").and_then(Value::as_str),
-                        item.value.get("attempt").and_then(Value::as_u64),
+                        item.value
+                            .get("message_id")
+                            .and_then(serde_json::Value::as_str),
+                        item.value
+                            .get("attempt")
+                            .and_then(serde_json::Value::as_u64),
                     ) {
                         redeliveries
                             .entry(message_id.to_string())
@@ -347,7 +386,11 @@ impl ScenarioInvariant for BoundedQueueInvariant {
                     }
                 }
                 "queue.complete" => {
-                    if let Some(message_id) = item.value.get("message_id").and_then(Value::as_str) {
+                    if let Some(message_id) = item
+                        .value
+                        .get("message_id")
+                        .and_then(serde_json::Value::as_str)
+                    {
                         completions
                             .entry(message_id.to_string())
                             .or_default()
@@ -355,7 +398,10 @@ impl ScenarioInvariant for BoundedQueueInvariant {
                     }
                 }
                 "queue.drain.completed" => {
-                    if let Some(remaining) = item.value.get("remaining").and_then(Value::as_u64)
+                    if let Some(remaining) = item
+                        .value
+                        .get("remaining")
+                        .and_then(serde_json::Value::as_u64)
                         && remaining != 0
                     {
                         violations.push(violation(
@@ -401,27 +447,31 @@ impl ScenarioInvariant for BoundedQueueInvariant {
     }
 }
 
-#[async_trait]
-impl ScenarioInvariant for NoDuplicateProjectedOutputInvariant {
+#[async_trait::async_trait]
+impl crate::support::scenario::ScenarioInvariant for NoDuplicateProjectedOutputInvariant {
     fn name(&self) -> &'static str {
         INV4_NO_DUPLICATE_PROJECTED_OUTPUT
     }
 
-    async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+    async fn check(
+        &self,
+        world: &crate::support::scenario::ScenarioWorld<'_>,
+    ) -> Vec<crate::support::scenario::InvariantViolation> {
         let events = match durable_events(world, self.name()).await {
             Ok(events) => events,
             Err(violations) => return violations,
         };
-        let mut delivered: HashMap<String, Vec<String>> = HashMap::new();
+        let mut delivered: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for event in events
             .into_iter()
-            .filter(|event| event.kind == EventKind::IoEgressDelivered)
+            .filter(|event| event.kind == verlet::EventKind::IoEgressDelivered)
         {
             let correlation = event
                 .payload
                 .get("dedupe_key")
                 .or_else(|| event.payload.get("correlation_id"))
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .map(ToOwned::to_owned)
                 .or_else(|| {
                     let source = event.payload.get("source_event_id")?.as_str()?;
@@ -453,23 +503,32 @@ impl ScenarioInvariant for NoDuplicateProjectedOutputInvariant {
     }
 }
 
-#[async_trait]
-impl ScenarioInvariant for TerminalConsistencyInvariant {
+#[async_trait::async_trait]
+impl crate::support::scenario::ScenarioInvariant for TerminalConsistencyInvariant {
     fn name(&self) -> &'static str {
         INV5_TERMINAL_CONSISTENCY
     }
 
-    async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+    async fn check(
+        &self,
+        world: &crate::support::scenario::ScenarioWorld<'_>,
+    ) -> Vec<crate::support::scenario::InvariantViolation> {
         match durable_events(world, self.name()).await {
             Ok(_) => {}
             Err(violations) => return violations,
         }
-        let mut probes: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut terminal: HashMap<String, Vec<(String, usize)>> = HashMap::new();
-        let mut progress: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut probes: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut terminal: std::collections::HashMap<String, Vec<(String, usize)>> =
+            std::collections::HashMap::new();
+        let mut progress: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
         for (index, item) in world.transcript.items.iter().enumerate() {
             if item.label == "recovery.probe"
-                && let Some(key) = item.value.get("reservation_key").and_then(Value::as_str)
+                && let Some(key) = item
+                    .value
+                    .get("reservation_key")
+                    .and_then(serde_json::Value::as_str)
             {
                 probes.entry(key.to_string()).or_default().push(index);
             }
@@ -480,15 +539,22 @@ impl ScenarioInvariant for TerminalConsistencyInvariant {
                 continue;
             };
             if let (Some(state @ ("failed" | "completed")), Some(key)) = (
-                payload.get("resident_state").and_then(Value::as_str),
-                payload.get("reservation_key").and_then(Value::as_str),
+                payload
+                    .get("resident_state")
+                    .and_then(serde_json::Value::as_str),
+                payload
+                    .get("reservation_key")
+                    .and_then(serde_json::Value::as_str),
             ) {
                 terminal
                     .entry(key.to_string())
                     .or_default()
                     .push((state.to_string(), index));
             }
-            if let Some(key) = payload.get("reservation_progress").and_then(Value::as_str) {
+            if let Some(key) = payload
+                .get("reservation_progress")
+                .and_then(serde_json::Value::as_str)
+            {
                 progress.entry(key.to_string()).or_default().push(index);
             }
         }
@@ -530,51 +596,46 @@ impl ScenarioInvariant for TerminalConsistencyInvariant {
 
 #[cfg(test)]
 mod tests {
-    use super::super::kernel_test::{
-        CanonicalMessage, EventOrigin, EventProvenance, EventRecordId, EventStore,
-        InMemorySessionStore, NewEventRecord, SessionEntryKind, SessionStore, ThreadId,
-    };
-    use super::super::transcript::{
-        NormalizedTranscript, NormalizedTranscriptItem, TypedTranscript,
-    };
-    use super::*;
-    use async_trait::async_trait;
-    use serde_json::json;
-    use uuid::Uuid;
-    use verlet_io_core::{
-        IngressAck, IngressEnvelope, IngressQueueStore, IngressSink, IoResult,
-        LeasedIngressEnvelope,
-    };
+    use crate::support::scenario::ScenarioInvariant as _;
+    use verlet::EventStore as _;
+    use verlet::SessionStore as _;
 
-    fn coordinates() -> ThreadCoordinates {
-        ThreadCoordinates {
+    fn coordinates() -> verlet::ThreadCoordinates {
+        verlet::ThreadCoordinates {
             tenant_id: "scenario-tenant".to_string(),
             user_id: "scenario-user".to_string(),
             session_id: "scenario-session".to_string(),
-            thread_id: ThreadId::parse_str("00000000-0000-0000-0000-000000000400").unwrap(),
+            thread_id: verlet::ThreadId::parse_str("00000000-0000-0000-0000-000000000400").unwrap(),
         }
     }
 
-    fn stream_id() -> EventStreamId {
-        EventStreamId::new(
+    fn stream_id() -> verlet::EventStreamId {
+        verlet::EventStreamId::new(
             "thread:scenario-tenant:scenario-user:scenario-session:00000000-0000-0000-0000-000000000400",
         )
     }
 
-    fn event(id: u128, at: i64, kind: EventKind, payload: Value) -> NewEventRecord {
-        NewEventRecord {
-            id: EventRecordId::from_uuid(Uuid::from_u128(id)),
+    fn event(
+        id: u128,
+        at: i64,
+        kind: verlet::EventKind,
+        payload: serde_json::Value,
+    ) -> verlet::NewEventRecord {
+        verlet::NewEventRecord {
+            id: verlet::EventRecordId::from_uuid(uuid::Uuid::from_u128(id)),
             coordinates: coordinates(),
             created_at_ms: at,
             kind,
-            origin: EventOrigin::Witnessed,
-            provenance: EventProvenance::default(),
+            origin: verlet::EventOrigin::Witnessed,
+            provenance: verlet::EventProvenance::default(),
             payload,
         }
     }
 
-    fn transcript_for(events: &[EventRecord]) -> NormalizedTranscript {
-        let mut transcript = TypedTranscript::new();
+    fn transcript_for(
+        events: &[verlet::EventRecord],
+    ) -> crate::support::transcript::NormalizedTranscript {
+        let mut transcript = crate::support::transcript::TypedTranscript::new();
         transcript.preserve_id(stream_id().as_str());
         for event in events {
             transcript.push_event("journal", event);
@@ -582,8 +643,11 @@ mod tests {
         transcript.normalize()
     }
 
-    fn receipt(label: &str, value: Value) -> NormalizedTranscriptItem {
-        NormalizedTranscriptItem {
+    fn receipt(
+        label: &str,
+        value: serde_json::Value,
+    ) -> crate::support::transcript::NormalizedTranscriptItem {
+        crate::support::transcript::NormalizedTranscriptItem {
             kind: "receipt".to_string(),
             label: label.to_string(),
             value,
@@ -591,17 +655,17 @@ mod tests {
     }
 
     async fn append(
-        store: &InMemorySessionStore,
-        records: Vec<NewEventRecord>,
-    ) -> Vec<EventRecord> {
+        store: &verlet::InMemorySessionStore,
+        records: Vec<verlet::NewEventRecord>,
+    ) -> Vec<verlet::EventRecord> {
         store.append_events(&stream_id(), records).await.unwrap()
     }
 
     fn world<'a>(
-        store: &'a InMemorySessionStore,
-        transcript: &'a NormalizedTranscript,
-    ) -> ScenarioWorld<'a> {
-        ScenarioWorld {
+        store: &'a verlet::InMemorySessionStore,
+        transcript: &'a crate::support::transcript::NormalizedTranscript,
+    ) -> crate::support::scenario::ScenarioWorld<'a> {
+        crate::support::scenario::ScenarioWorld {
             store,
             queue: None,
             transcript,
@@ -612,13 +676,13 @@ mod tests {
 
     #[tokio::test]
     async fn inv1_holds_for_monotonic_journal_whose_replay_matches_fold() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         store
             .append(
                 &coordinates(),
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text_at("hello", 1),
+                verlet::SessionEntryKind::Message {
+                    message: verlet::CanonicalMessage::user_text_at("hello", 1),
                 },
             )
             .await
@@ -626,7 +690,7 @@ mod tests {
         let events = store.read_events(&stream_id(), None).await.unwrap();
         let transcript = transcript_for(&events);
         assert!(
-            ReplayEquivalenceInvariant
+            crate::support::invariants::ReplayEquivalenceInvariant
                 .check(&world(&store, &transcript))
                 .await
                 .is_empty()
@@ -635,13 +699,13 @@ mod tests {
 
     #[tokio::test]
     async fn inv1_reports_replay_fold_mismatch_from_bad_durable_history() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         store
             .append(
                 &coordinates(),
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text_at("hello", 1),
+                verlet::SessionEntryKind::Message {
+                    message: verlet::CanonicalMessage::user_text_at("hello", 1),
                 },
             )
             .await
@@ -651,14 +715,14 @@ mod tests {
             vec![event(
                 2,
                 2,
-                EventKind::ThreadBranchSelected,
-                json!({"selected_entry_id": null}),
+                verlet::EventKind::ThreadBranchSelected,
+                serde_json::json!({"selected_entry_id": null}),
             )],
         )
         .await;
         let events = store.read_events(&stream_id(), None).await.unwrap();
         let transcript = transcript_for(&events);
-        let violations = ReplayEquivalenceInvariant
+        let violations = crate::support::invariants::ReplayEquivalenceInvariant
             .check(&world(&store, &transcript))
             .await;
         assert_eq!(violations.len(), 1);
@@ -667,27 +731,28 @@ mod tests {
 
     #[tokio::test]
     async fn inv2_holds_for_one_active_runtime_and_clean_shutdown_cut() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![event(
                 10,
                 1,
-                EventKind::PlacementDecision,
-                json!({
+                verlet::EventKind::PlacementDecision,
+                serde_json::json!({
                     "runtime_id": "runtime-a", "runtime_state": "active"
                 }),
             )],
         )
         .await;
         let mut transcript = transcript_for(&events);
-        transcript
-            .items
-            .push(receipt("shutdown_all.completed", json!({"step": 1})));
+        transcript.items.push(receipt(
+            "shutdown_all.completed",
+            serde_json::json!({"step": 1}),
+        ));
         let mut scenario_world = world(&store, &transcript);
         scenario_world.shut_down = true;
         assert!(
-            UniqueActiveTopologyInvariant
+            crate::support::invariants::UniqueActiveTopologyInvariant
                 .check(&scenario_world)
                 .await
                 .is_empty()
@@ -696,27 +761,27 @@ mod tests {
 
     #[tokio::test]
     async fn inv2_reports_two_durable_active_runtimes_for_one_thread() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     11,
                     1,
-                    EventKind::PlacementDecision,
-                    json!({"runtime_id": "runtime-a", "runtime_state": "active"}),
+                    verlet::EventKind::PlacementDecision,
+                    serde_json::json!({"runtime_id": "runtime-a", "runtime_state": "active"}),
                 ),
                 event(
                     12,
                     2,
-                    EventKind::PlacementDecision,
-                    json!({"runtime_id": "runtime-b", "runtime_state": "active"}),
+                    verlet::EventKind::PlacementDecision,
+                    serde_json::json!({"runtime_id": "runtime-b", "runtime_state": "active"}),
                 ),
             ],
         )
         .await;
         let transcript = transcript_for(&events);
-        let violations = UniqueActiveTopologyInvariant
+        let violations = crate::support::invariants::UniqueActiveTopologyInvariant
             .check(&world(&store, &transcript))
             .await;
         assert_eq!(violations.len(), 1);
@@ -725,36 +790,38 @@ mod tests {
 
     #[tokio::test]
     async fn inv2_reports_durable_execution_after_shutdown_completed() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     13,
                     1,
-                    EventKind::PlacementDecision,
-                    json!({"runtime_id": "runtime-a", "runtime_state": "active"}),
+                    verlet::EventKind::PlacementDecision,
+                    serde_json::json!({"runtime_id": "runtime-a", "runtime_state": "active"}),
                 ),
                 event(
                     14,
                     2,
-                    EventKind::TurnSubmitted,
-                    json!({"turn_id": "after-shutdown"}),
+                    verlet::EventKind::TurnSubmitted,
+                    serde_json::json!({"turn_id": "after-shutdown"}),
                 ),
             ],
         )
         .await;
         let normalized = transcript_for(&events);
-        let transcript = NormalizedTranscript {
+        let transcript = crate::support::transcript::NormalizedTranscript {
             items: vec![
                 normalized.items[0].clone(),
-                receipt("shutdown_all.completed", json!({"step": 1})),
+                receipt("shutdown_all.completed", serde_json::json!({"step": 1})),
                 normalized.items[1].clone(),
             ],
         };
         let mut scenario_world = world(&store, &transcript);
         scenario_world.shut_down = true;
-        let violations = UniqueActiveTopologyInvariant.check(&scenario_world).await;
+        let violations = crate::support::invariants::UniqueActiveTopologyInvariant
+            .check(&scenario_world)
+            .await;
         assert_eq!(violations.len(), 1);
         assert!(violations[0].detail.contains("turn.submitted"));
         assert!(
@@ -767,56 +834,59 @@ mod tests {
     #[derive(Default)]
     struct EmptyQueue;
 
-    #[async_trait]
-    impl IngressSink for EmptyQueue {
-        async fn submit(&self, envelope: IngressEnvelope) -> IoResult<IngressAck> {
-            Ok(IngressAck::accepted(&envelope))
+    #[async_trait::async_trait]
+    impl verlet_io_core::IngressSink for EmptyQueue {
+        async fn submit(
+            &self,
+            envelope: verlet_io_core::IngressEnvelope,
+        ) -> verlet_io_core::IoResult<verlet_io_core::IngressAck> {
+            Ok(verlet_io_core::IngressAck::accepted(&envelope))
         }
     }
 
-    #[async_trait]
-    impl IngressQueueStore for EmptyQueue {
+    #[async_trait::async_trait]
+    impl verlet_io_core::IngressQueueStore for EmptyQueue {
         async fn lease_ingress(
             &self,
             _: &str,
             _: usize,
             _: u32,
-        ) -> IoResult<Vec<LeasedIngressEnvelope>> {
+        ) -> verlet_io_core::IoResult<Vec<verlet_io_core::LeasedIngressEnvelope>> {
             Ok(Vec::new())
         }
-        async fn complete_ingress(&self, _: &str) -> IoResult<()> {
+        async fn complete_ingress(&self, _: &str) -> verlet_io_core::IoResult<()> {
             Ok(())
         }
-        async fn hold_ingress_until(&self, _: &str, _: u64) -> IoResult<()> {
+        async fn hold_ingress_until(&self, _: &str, _: u64) -> verlet_io_core::IoResult<()> {
             Ok(())
         }
-        async fn retry_ingress(&self, _: &str, _: &str) -> IoResult<()> {
+        async fn retry_ingress(&self, _: &str, _: &str) -> verlet_io_core::IoResult<()> {
             Ok(())
         }
     }
 
     #[tokio::test]
     async fn inv3_holds_when_expired_lease_was_redelivered_and_drain_is_empty() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let queue = EmptyQueue;
-        let transcript = NormalizedTranscript {
+        let transcript = crate::support::transcript::NormalizedTranscript {
             items: vec![
                 receipt(
                     "queue.lease",
-                    json!({"message_id": "m1", "attempt": 1, "visible_until_tick": 5}),
+                    serde_json::json!({"message_id": "m1", "attempt": 1, "visible_until_tick": 5}),
                 ),
                 receipt(
                     "queue.redelivery",
-                    json!({"message_id": "m1", "attempt": 2}),
+                    serde_json::json!({"message_id": "m1", "attempt": 2}),
                 ),
-                receipt("queue.clock", json!({"tick": 6})),
-                receipt("queue.drain.completed", json!({"remaining": 0})),
+                receipt("queue.clock", serde_json::json!({"tick": 6})),
+                receipt("queue.drain.completed", serde_json::json!({"remaining": 0})),
             ],
         };
         let mut scenario_world = world(&store, &transcript);
         scenario_world.queue = Some(&queue);
         assert!(
-            BoundedQueueInvariant
+            crate::support::invariants::BoundedQueueInvariant
                 .check(&scenario_world)
                 .await
                 .is_empty()
@@ -825,64 +895,68 @@ mod tests {
 
     #[tokio::test]
     async fn inv3_discharges_completed_lease_but_reports_uncompleted_expired_lease() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let queue = EmptyQueue;
-        let completed = NormalizedTranscript {
+        let completed = crate::support::transcript::NormalizedTranscript {
             items: vec![
                 receipt(
                     "queue.lease",
-                    json!({"message_id": "completed", "attempt": 1, "visible_until_tick": 5}),
+                    serde_json::json!({"message_id": "completed", "attempt": 1, "visible_until_tick": 5}),
                 ),
                 receipt(
                     "queue.complete",
-                    json!({"message_id": "completed", "attempt": 1, "tick": 3}),
+                    serde_json::json!({"message_id": "completed", "attempt": 1, "tick": 3}),
                 ),
-                receipt("queue.clock", json!({"tick": 6})),
+                receipt("queue.clock", serde_json::json!({"tick": 6})),
             ],
         };
         let mut completed_world = world(&store, &completed);
         completed_world.queue = Some(&queue);
         assert!(
-            BoundedQueueInvariant
+            crate::support::invariants::BoundedQueueInvariant
                 .check(&completed_world)
                 .await
                 .is_empty(),
             "an accepted completion after the lease must discharge it"
         );
 
-        let uncompleted = NormalizedTranscript {
+        let uncompleted = crate::support::transcript::NormalizedTranscript {
             items: vec![
                 receipt(
                     "queue.lease",
-                    json!({"message_id": "uncompleted", "attempt": 1, "visible_until_tick": 5}),
+                    serde_json::json!({"message_id": "uncompleted", "attempt": 1, "visible_until_tick": 5}),
                 ),
-                receipt("queue.clock", json!({"tick": 6})),
+                receipt("queue.clock", serde_json::json!({"tick": 6})),
             ],
         };
         let mut uncompleted_world = world(&store, &uncompleted);
         uncompleted_world.queue = Some(&queue);
-        let violations = BoundedQueueInvariant.check(&uncompleted_world).await;
+        let violations = crate::support::invariants::BoundedQueueInvariant
+            .check(&uncompleted_world)
+            .await;
         assert_eq!(violations.len(), 1);
         assert!(violations[0].detail.contains("no later redelivery"));
     }
 
     #[tokio::test]
     async fn inv3_reports_expired_unredelivered_lease_and_nonempty_drain() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let queue = EmptyQueue;
-        let transcript = NormalizedTranscript {
+        let transcript = crate::support::transcript::NormalizedTranscript {
             items: vec![
                 receipt(
                     "queue.lease",
-                    json!({"message_id": "m1", "attempt": 1, "visible_until_tick": 5}),
+                    serde_json::json!({"message_id": "m1", "attempt": 1, "visible_until_tick": 5}),
                 ),
-                receipt("queue.clock", json!({"tick": 9})),
-                receipt("queue.drain.completed", json!({"remaining": 2})),
+                receipt("queue.clock", serde_json::json!({"tick": 9})),
+                receipt("queue.drain.completed", serde_json::json!({"remaining": 2})),
             ],
         };
         let mut scenario_world = world(&store, &transcript);
         scenario_world.queue = Some(&queue);
-        let violations = BoundedQueueInvariant.check(&scenario_world).await;
+        let violations = crate::support::invariants::BoundedQueueInvariant
+            .check(&scenario_world)
+            .await;
         assert_eq!(violations.len(), 2);
         assert!(
             violations
@@ -898,13 +972,13 @@ mod tests {
 
     #[tokio::test]
     async fn inv4_holds_for_one_delivery_per_correlation() {
-        let store = InMemorySessionStore::new();
-        let events = append(&store, vec![event(20, 1, EventKind::IoEgressDelivered, json!({
+        let store = verlet::InMemorySessionStore::new();
+        let events = append(&store, vec![event(20, 1, verlet::EventKind::IoEgressDelivered, serde_json::json!({
             "dedupe_key": "source:0", "egress_kind": "text", "route_id": "route", "attempts": 2
         }))]).await;
         let transcript = transcript_for(&events);
         assert!(
-            NoDuplicateProjectedOutputInvariant
+            crate::support::invariants::NoDuplicateProjectedOutputInvariant
                 .check(&world(&store, &transcript))
                 .await
                 .is_empty()
@@ -913,27 +987,27 @@ mod tests {
 
     #[tokio::test]
     async fn inv4_reports_duplicate_delivery_records_for_one_correlation() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     21,
                     1,
-                    EventKind::IoEgressDelivered,
-                    json!({"dedupe_key": "source:0"}),
+                    verlet::EventKind::IoEgressDelivered,
+                    serde_json::json!({"dedupe_key": "source:0"}),
                 ),
                 event(
                     22,
                     2,
-                    EventKind::IoEgressDelivered,
-                    json!({"dedupe_key": "source:0"}),
+                    verlet::EventKind::IoEgressDelivered,
+                    serde_json::json!({"dedupe_key": "source:0"}),
                 ),
             ],
         )
         .await;
         let transcript = transcript_for(&events);
-        let violations = NoDuplicateProjectedOutputInvariant
+        let violations = crate::support::invariants::NoDuplicateProjectedOutputInvariant
             .check(&world(&store, &transcript))
             .await;
         assert_eq!(violations.len(), 1);
@@ -947,21 +1021,21 @@ mod tests {
 
     #[tokio::test]
     async fn inv5_holds_when_recovery_records_progress_after_terminal_resident() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     31,
                     1,
-                    EventKind::CouplingRunFailed,
-                    json!({"resident_state": "failed", "reservation_key": "turn-1"}),
+                    verlet::EventKind::CouplingRunFailed,
+                    serde_json::json!({"resident_state": "failed", "reservation_key": "turn-1"}),
                 ),
                 event(
                     32,
                     2,
-                    EventKind::TurnResumed,
-                    json!({"reservation_progress": "turn-1"}),
+                    verlet::EventKind::TurnResumed,
+                    serde_json::json!({"reservation_progress": "turn-1"}),
                 ),
             ],
         )
@@ -969,10 +1043,13 @@ mod tests {
         let mut transcript = transcript_for(&events);
         transcript.items.insert(
             1,
-            receipt("recovery.probe", json!({"reservation_key": "turn-1"})),
+            receipt(
+                "recovery.probe",
+                serde_json::json!({"reservation_key": "turn-1"}),
+            ),
         );
         assert!(
-            TerminalConsistencyInvariant
+            crate::support::invariants::TerminalConsistencyInvariant
                 .check(&world(&store, &transcript))
                 .await
                 .is_empty()
@@ -981,21 +1058,21 @@ mod tests {
 
     #[tokio::test]
     async fn inv5_orders_terminal_and_progress_by_transcript_sequence() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     34,
                     1,
-                    EventKind::CouplingRunFailed,
-                    json!({"resident_state": "failed", "reservation_key": "turn-3"}),
+                    verlet::EventKind::CouplingRunFailed,
+                    serde_json::json!({"resident_state": "failed", "reservation_key": "turn-3"}),
                 ),
                 event(
                     35,
                     1,
-                    EventKind::TurnResumed,
-                    json!({"reservation_progress": "turn-3"}),
+                    verlet::EventKind::TurnResumed,
+                    serde_json::json!({"reservation_progress": "turn-3"}),
                 ),
             ],
         )
@@ -1003,10 +1080,13 @@ mod tests {
         let mut transcript = transcript_for(&events);
         transcript.items.insert(
             1,
-            receipt("recovery.probe", json!({"reservation_key": "turn-3"})),
+            receipt(
+                "recovery.probe",
+                serde_json::json!({"reservation_key": "turn-3"}),
+            ),
         );
         assert!(
-            TerminalConsistencyInvariant
+            crate::support::invariants::TerminalConsistencyInvariant
                 .check(&world(&store, &transcript))
                 .await
                 .is_empty()
@@ -1015,27 +1095,27 @@ mod tests {
 
     #[tokio::test]
     async fn inv5_does_not_apply_an_earlier_probe_to_a_later_terminal_record() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![
                 event(
                     36,
                     1,
-                    EventKind::CouplingRunFailed,
-                    json!({"resident_state": "failed", "reservation_key": "turn-4"}),
+                    verlet::EventKind::CouplingRunFailed,
+                    serde_json::json!({"resident_state": "failed", "reservation_key": "turn-4"}),
                 ),
                 event(
                     37,
                     1,
-                    EventKind::TurnResumed,
-                    json!({"reservation_progress": "turn-4"}),
+                    verlet::EventKind::TurnResumed,
+                    serde_json::json!({"reservation_progress": "turn-4"}),
                 ),
                 event(
                     38,
                     1,
-                    EventKind::CouplingRunCompleted,
-                    json!({"resident_state": "completed", "reservation_key": "turn-4"}),
+                    verlet::EventKind::CouplingRunCompleted,
+                    serde_json::json!({"resident_state": "completed", "reservation_key": "turn-4"}),
                 ),
             ],
         )
@@ -1043,10 +1123,13 @@ mod tests {
         let mut transcript = transcript_for(&events);
         transcript.items.insert(
             1,
-            receipt("recovery.probe", json!({"reservation_key": "turn-4"})),
+            receipt(
+                "recovery.probe",
+                serde_json::json!({"reservation_key": "turn-4"}),
+            ),
         );
         assert!(
-            TerminalConsistencyInvariant
+            crate::support::invariants::TerminalConsistencyInvariant
                 .check(&world(&store, &transcript))
                 .await
                 .is_empty()
@@ -1055,14 +1138,14 @@ mod tests {
 
     #[tokio::test]
     async fn inv5_reports_terminal_resident_without_post_recovery_progress() {
-        let store = InMemorySessionStore::new();
+        let store = verlet::InMemorySessionStore::new();
         let events = append(
             &store,
             vec![event(
                 33,
                 1,
-                EventKind::CouplingRunCompleted,
-                json!({
+                verlet::EventKind::CouplingRunCompleted,
+                serde_json::json!({
                     "resident_state": "completed", "reservation_key": "turn-2"
                 }),
             )],
@@ -1071,9 +1154,9 @@ mod tests {
         let mut transcript = transcript_for(&events);
         transcript.items.push(receipt(
             "recovery.probe",
-            json!({"reservation_key": "turn-2"}),
+            serde_json::json!({"reservation_key": "turn-2"}),
         ));
-        let violations = TerminalConsistencyInvariant
+        let violations = crate::support::invariants::TerminalConsistencyInvariant
             .check(&world(&store, &transcript))
             .await;
         assert_eq!(violations.len(), 1);

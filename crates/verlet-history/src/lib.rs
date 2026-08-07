@@ -10,19 +10,6 @@
 //! and honest migration provenance. These retrofits are migration work only;
 //! runtime branch selection must append witnessed journal authority.
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock};
-use std::time::{SystemTime, UNIX_EPOCH};
-use thiserror::Error;
-use tokio::sync::RwLock;
-use uuid::Uuid;
-use verlet_runtime_contracts::{
-    JsonSchemaValidationError, SchemaRegistry, ThreadCheckpointId, ThreadCoordinates, ThreadId,
-};
-
 pub type HistoryResult<T> = Result<T, HistoryError>;
 
 pub const STREAM_RECORD_SCHEMA_V1: &str = "cooldis.stream.record/1";
@@ -51,7 +38,7 @@ pub fn compaction_summary_message(summary: &str, timestamp_ms: i64) -> Canonical
     CanonicalMessage::user_text_at(render_compaction_summary(summary), timestamp_ms)
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
     #[error("session entry not found: {0}")]
     EntryNotFound(SessionEntryId),
@@ -60,20 +47,20 @@ pub enum HistoryError {
     )]
     EntryThreadMismatch {
         entry_id: SessionEntryId,
-        requested_thread_id: ThreadId,
-        actual_thread_id: ThreadId,
+        requested_thread_id: verlet_runtime_contracts::ThreadId,
+        actual_thread_id: verlet_runtime_contracts::ThreadId,
     },
     #[error("thread history belongs to {actual:?}, not {requested:?}")]
     ThreadScopeMismatch {
-        requested: Box<ThreadCoordinates>,
-        actual: Box<ThreadCoordinates>,
+        requested: Box<verlet_runtime_contracts::ThreadCoordinates>,
+        actual: Box<verlet_runtime_contracts::ThreadCoordinates>,
     },
     #[error(
         "thread base for child {child_thread_id} would create a cycle through {ancestor_thread_id}"
     )]
     ThreadBaseCycle {
-        child_thread_id: ThreadId,
-        ancestor_thread_id: ThreadId,
+        child_thread_id: verlet_runtime_contracts::ThreadId,
+        ancestor_thread_id: verlet_runtime_contracts::ThreadId,
     },
     #[error("history storage failed: {0}")]
     Storage(String),
@@ -111,15 +98,15 @@ pub enum HistoryError {
     FencedAppendUnsupported,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SessionEntryId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SessionEntryId(uuid::Uuid);
 
 impl SessionEntryId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
 }
@@ -136,7 +123,7 @@ impl std::fmt::Display for SessionEntryId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct EventStreamId(String);
 
 impl EventStreamId {
@@ -144,7 +131,7 @@ impl EventStreamId {
         Self(value.into())
     }
 
-    pub fn for_thread(coordinates: &ThreadCoordinates) -> Self {
+    pub fn for_thread(coordinates: &verlet_runtime_contracts::ThreadCoordinates) -> Self {
         Self(format!("thread:{}", coordinates.thread_id))
     }
 
@@ -159,7 +146,7 @@ impl std::fmt::Display for EventStreamId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct EventSequence(i64);
 
 impl EventSequence {
@@ -172,15 +159,15 @@ impl EventSequence {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct EventRecordId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct EventRecordId(uuid::Uuid);
 
 impl EventRecordId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
 }
@@ -206,7 +193,7 @@ impl std::fmt::Display for EventRecordId {
 ///   passthrough. There is no `Other` variant by design.
 /// - Event kinds are the trigger addressing scheme for every future
 ///   propagator and controller; renaming one would make receipts lie.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum EventKind {
     /// A session entry was appended to the thread stream.
@@ -564,7 +551,7 @@ impl std::fmt::Display for EventKind {
 }
 
 /// Terminal child-thread states recorded by `thread.joined`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadTerminalState {
     Completed,
@@ -575,7 +562,7 @@ pub enum ThreadTerminalState {
 
 /// Policy identities bound into the event stream. `Other` is a policy-kind
 /// extension point inside the payload, not a catch-all event kind.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyKind {
     AdmissionRoute,
@@ -585,7 +572,7 @@ pub enum PolicyKind {
 }
 
 /// Admission decisions a route policy can choose for an ingress batch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdmissionDecision {
     Queue,
@@ -601,9 +588,9 @@ pub enum AdmissionDecision {
 /// supervised child work. The projector that consumes it performs the spawn
 /// under the parent's `threads.spawn` grant and `allow_child_agents` policy —
 /// the coupling route grants no authority of its own.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadSpawnRequestedPayload {
-    pub parent_thread_id: ThreadId,
+    pub parent_thread_id: verlet_runtime_contracts::ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_turn_id: Option<String>,
     /// Caller-facing alias for the child handle. Absent on pre-handle-lane
@@ -628,12 +615,12 @@ pub struct ThreadSpawnRequestedPayload {
     pub block_parent: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadSpawnedPayload {
-    pub parent_thread_id: ThreadId,
+    pub parent_thread_id: verlet_runtime_contracts::ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_turn_id: Option<String>,
-    pub child_thread_id: ThreadId,
+    pub child_thread_id: verlet_runtime_contracts::ThreadId,
     pub child_manifest_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_policy_hash: Option<String>,
@@ -644,7 +631,7 @@ pub struct ThreadSpawnedPayload {
     pub fork: Option<ThreadSpawnedForkPayload>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadSpawnedForkPayload {
     pub mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -653,26 +640,26 @@ pub struct ThreadSpawnedForkPayload {
     pub source_cut: ThreadSpawnedForkSourceCutPayload,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadSpawnedForkSourceCutPayload {
-    pub thread_id: ThreadId,
-    pub checkpoint_id: ThreadCheckpointId,
+    pub thread_id: verlet_runtime_contracts::ThreadId,
+    pub checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
     pub leaf_entry_id: Option<SessionEntryId>,
     pub stream_id: EventStreamId,
     pub stream_to_sequence: Option<EventSequence>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadJoinedPayload {
-    pub child_thread_id: ThreadId,
+    pub child_thread_id: verlet_runtime_contracts::ThreadId,
     pub spawned_event_id: EventRecordId,
     pub terminal_state: ThreadTerminalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_digest: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PolicyBoundPayload {
     pub policy_kind: PolicyKind,
     pub policy_id: String,
@@ -681,16 +668,16 @@ pub struct PolicyBoundPayload {
     pub valid_from_note: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GrantPetitionedPayload {
-    pub thread_id: ThreadId,
+    pub thread_id: verlet_runtime_contracts::ThreadId,
     pub requested: Vec<String>,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_event_ids: Option<Vec<EventRecordId>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TimerFiredPayload {
     pub mandate_event_id: EventRecordId,
     pub scheduled_for: String,
@@ -698,15 +685,15 @@ pub struct TimerFiredPayload {
     pub catch_up: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClientRecordAppendedPayload {
     pub client_kind: String,
     pub client_schema: String,
     pub principal_id: String,
-    pub body: Value,
+    pub body: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoIngressReceivedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_id: Option<String>,
@@ -721,14 +708,14 @@ pub struct IoIngressReceivedPayload {
     /// Selected ingress content whose payload is itself a durable fold
     /// source. Absent on legacy and ordinary ingress witnesses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<Value>,
+    pub content: Option<serde_json::Value>,
     pub envelope_digest: String,
 }
 
 /// Intended outcome carried by an `io.ingress.claimed` event. Exactly one
 /// intent exists per claim; the variants mirror the admission outcomes
 /// (ADR 0003).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum IngressOutcomeIntent {
     Turn {
@@ -739,7 +726,7 @@ pub enum IngressOutcomeIntent {
     Fork {
         child_key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        child_thread_id: Option<ThreadId>,
+        child_thread_id: Option<verlet_runtime_contracts::ThreadId>,
         input_digest: String,
     },
     Interrupt {
@@ -759,7 +746,7 @@ pub enum IngressOutcomeIntent {
 /// Payload for `io.ingress.claimed`. Laws (ADR 0003): at most one claim
 /// exists per ingress envelope id; the claim precedes every non-idempotent
 /// effect; every claim settles exactly once.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoIngressClaimedPayload {
     /// Envelope set the claim covers (multiple when coalesced).
     pub ingress_envelope_ids: Vec<String>,
@@ -772,7 +759,7 @@ pub struct IoIngressClaimedPayload {
 }
 
 /// How a claim reached its settle (ADR 0003 recovery law).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IngressSettledBy {
     Execution,
@@ -781,7 +768,7 @@ pub enum IngressSettledBy {
 
 /// Payload for `io.ingress.settled`. A settled claim is terminal:
 /// redelivery dedupes against it and repeats no control effects.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoIngressSettledPayload {
     /// The claim this settle terminates.
     pub claim_event_id: EventRecordId,
@@ -794,11 +781,11 @@ pub struct IoIngressSettledPayload {
     pub settled_by: IngressSettledBy,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoEgressRequestedPayload {
-    pub egress_kind: Value,
+    pub egress_kind: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_target: Option<Value>,
+    pub resolved_target: Option<serde_json::Value>,
     pub requested_by_tool_call_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<String>,
@@ -806,7 +793,7 @@ pub struct IoEgressRequestedPayload {
     pub match_event_id: Option<EventRecordId>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoEgressDeliveredPayload {
     pub route_id: String,
     pub egress_kind: String,
@@ -815,7 +802,7 @@ pub struct IoEgressDeliveredPayload {
     pub attempts: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IoEgressFailedPayload {
     pub route_id: String,
     pub egress_kind: String,
@@ -824,7 +811,7 @@ pub struct IoEgressFailedPayload {
     pub dead_lettered: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdmissionDecidedPayload {
     pub route_id: String,
     pub policy_hash: String,
@@ -838,9 +825,9 @@ pub struct AdmissionDecidedPayload {
 /// as the `active_leaves` cache update; the cache is thereby a derived read
 /// model, rebuildable by folding these events (last selection per thread
 /// wins).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadBranchSelectedPayload {
-    pub thread_id: ThreadId,
+    pub thread_id: verlet_runtime_contracts::ThreadId,
     /// The selected leaf entry. `None` clears the selection and is itself a
     /// witnessed selection of "no branch".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -854,9 +841,9 @@ pub struct ThreadBranchSelectedPayload {
 /// on lazy reload and the loader applies a fabricated root record
 /// (EMO-370). Degradation is never silent: this event accompanies every
 /// fallback.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadReloadDegradedPayload {
-    pub thread_id: ThreadId,
+    pub thread_id: verlet_runtime_contracts::ThreadId,
     /// Identity fields the journal could not supply (for example
     /// "topology", "parent_thread_id", "metadata").
     pub missing: Vec<String>,
@@ -873,7 +860,7 @@ pub struct ThreadReloadDegradedPayload {
 /// - `Discharged`: the event was produced by a coupling (propagator,
 ///   projection, or controller). A discharged event MUST carry non-empty
 ///   provenance; appending one without provenance is an error.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventOrigin {
     Witnessed,
@@ -891,7 +878,7 @@ impl EventOrigin {
 
 /// Provenance for a discharged event: which coupling produced it, from what
 /// upstream records. Empty provenance is only legal on witnessed events.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EventProvenance {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_streams: Vec<EventStreamId>,
@@ -924,21 +911,25 @@ impl EventProvenance {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewEventRecord {
     pub id: EventRecordId,
-    pub coordinates: ThreadCoordinates,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub created_at_ms: i64,
     pub kind: EventKind,
     pub origin: EventOrigin,
     #[serde(default)]
     pub provenance: EventProvenance,
-    pub payload: Value,
+    pub payload: serde_json::Value,
 }
 
 impl NewEventRecord {
     /// A witnessed event: arrived from outside the system, no provenance.
-    pub fn witnessed(coordinates: ThreadCoordinates, kind: EventKind, payload: Value) -> Self {
+    pub fn witnessed(
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Self {
         Self {
             id: EventRecordId::new(),
             coordinates,
@@ -953,9 +944,9 @@ impl NewEventRecord {
     /// A discharged event: produced by a coupling. Provenance is required;
     /// the append path rejects discharged events with empty provenance.
     pub fn discharged(
-        coordinates: ThreadCoordinates,
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
         kind: EventKind,
-        payload: Value,
+        payload: serde_json::Value,
         provenance: EventProvenance,
     ) -> Self {
         Self {
@@ -970,39 +961,39 @@ impl NewEventRecord {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EventRecord {
     pub id: EventRecordId,
     pub stream_id: EventStreamId,
     pub sequence: EventSequence,
-    pub coordinates: ThreadCoordinates,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub created_at_ms: i64,
     pub kind: EventKind,
     pub origin: EventOrigin,
     #[serde(default)]
     pub provenance: EventProvenance,
-    pub payload: Value,
+    pub payload: serde_json::Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamRecordEnvelopeV1 {
     pub schema: String,
     pub event_id: EventRecordId,
     pub stream_id: EventStreamId,
     pub sequence: EventSequence,
-    pub coordinates: ThreadCoordinates,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub created_at_ms: i64,
     pub kind: String,
     pub origin: EventOrigin,
     pub payload_schema: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_context: Option<Value>,
+    pub trace_context: Option<serde_json::Value>,
     #[serde(default)]
     pub provenance: EventProvenance,
-    pub payload: Value,
+    pub payload: serde_json::Value,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamAckClass {
     LocalCommitted,
@@ -1012,13 +1003,13 @@ pub enum StreamAckClass {
     Archived,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamBackendKindV1 {
     Sqlite,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamStorageScopeV1 {
     LocalEmbedded,
@@ -1026,7 +1017,7 @@ pub enum StreamStorageScopeV1 {
     Hybrid,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamBackendCapabilitiesV1 {
     pub schema: String,
     pub backend_kind: StreamBackendKindV1,
@@ -1067,7 +1058,7 @@ impl StreamBackendCapabilitiesV1 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamAppendAckV1 {
     pub schema: String,
     pub stream_id: EventStreamId,
@@ -1137,7 +1128,7 @@ impl StreamAppendAckV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamRouteProfile {
     AuthorityStore,
@@ -1148,14 +1139,14 @@ pub enum StreamRouteProfile {
     AnalyticsAggregate,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamRoutingKeysV1 {
     pub schema: String,
     pub stream_id: EventStreamId,
     pub tenant_id: String,
     pub user_id: String,
     pub session_id: String,
-    pub thread_id: ThreadId,
+    pub thread_id: verlet_runtime_contracts::ThreadId,
     pub kind: String,
     pub origin: EventOrigin,
     pub payload_schema: String,
@@ -1165,7 +1156,7 @@ pub struct StreamRoutingKeysV1 {
     pub discharged_by: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamRoutingDecisionV1 {
     pub schema: String,
     pub event_id: EventRecordId,
@@ -1280,7 +1271,7 @@ impl EventRecord {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamCursorV1 {
     pub schema: String,
     pub stream_id: EventStreamId,
@@ -1328,10 +1319,11 @@ impl StreamCursorV1 {
 /// # Panics
 ///
 /// Panics on first use if any frozen schema is malformed.
-pub fn stream_schema_registry_v1() -> &'static SchemaRegistry {
-    static REGISTRY: LazyLock<SchemaRegistry> = LazyLock::new(|| {
-        (|| -> Result<SchemaRegistry, JsonSchemaValidationError> {
-            let mut registry = SchemaRegistry::new();
+pub fn stream_schema_registry_v1() -> &'static verlet_runtime_contracts::SchemaRegistry {
+    static REGISTRY: std::sync::LazyLock<verlet_runtime_contracts::SchemaRegistry> =
+        std::sync::LazyLock::new(|| {
+            (|| -> Result<verlet_runtime_contracts::SchemaRegistry, verlet_runtime_contracts::JsonSchemaValidationError> {
+            let mut registry = verlet_runtime_contracts::SchemaRegistry::new();
             registry.register(STREAM_RECORD_SCHEMA_V1, stream_record_schema_v1())?;
             registry.register(STREAM_CURSOR_SCHEMA_V1, stream_cursor_schema_v1())?;
             registry.register(
@@ -1427,7 +1419,7 @@ pub fn stream_schema_registry_v1() -> &'static SchemaRegistry {
             Ok(registry)
         })()
         .expect("frozen V1 stream schema registry must contain only valid schemas")
-    });
+        });
 
     &REGISTRY
 }
@@ -1508,21 +1500,21 @@ fn stream_id_routes_to_browser_projection(stream_id: &EventStreamId) -> bool {
         || stream_id.as_str().starts_with("derived:")
 }
 
-fn trace_id_from_context(trace_context: Option<&Value>) -> Option<String> {
+fn trace_id_from_context(trace_context: Option<&serde_json::Value>) -> Option<String> {
     trace_context?
         .get("trace_id")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
 }
 
 pub fn validate_context_payload_schema_v1(
     kind: EventKind,
-    payload: &Value,
-) -> Result<(), JsonSchemaValidationError> {
+    payload: &serde_json::Value,
+) -> Result<(), verlet_runtime_contracts::JsonSchemaValidationError> {
     stream_schema_registry_v1().validate(kind.payload_schema_id(), payload)
 }
 
-fn stream_record_schema_v1() -> Value {
+fn stream_record_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -1575,7 +1567,7 @@ fn stream_record_schema_v1() -> Value {
     })
 }
 
-fn stream_cursor_schema_v1() -> Value {
+fn stream_cursor_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["schema", "stream_id", "sequence", "event_id"],
@@ -1589,7 +1581,7 @@ fn stream_cursor_schema_v1() -> Value {
     })
 }
 
-fn stream_backend_capabilities_schema_v1() -> Value {
+fn stream_backend_capabilities_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -1629,7 +1621,7 @@ fn stream_backend_capabilities_schema_v1() -> Value {
     })
 }
 
-fn stream_append_ack_schema_v1() -> Value {
+fn stream_append_ack_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -1654,7 +1646,7 @@ fn stream_append_ack_schema_v1() -> Value {
     })
 }
 
-fn stream_routing_decision_schema_v1() -> Value {
+fn stream_routing_decision_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["schema", "event_id", "stream_id", "sequence", "kind", "routes", "keys"],
@@ -1710,7 +1702,7 @@ fn stream_routing_decision_schema_v1() -> Value {
     })
 }
 
-fn stream_ack_classes_schema_v1() -> Value {
+fn stream_ack_classes_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "items": {
@@ -1725,7 +1717,7 @@ fn stream_ack_classes_schema_v1() -> Value {
     })
 }
 
-fn context_read_plan_schema_v1() -> Value {
+fn context_read_plan_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["schema", "name", "source_stream", "frontier", "entries"],
@@ -1756,7 +1748,7 @@ fn context_read_plan_schema_v1() -> Value {
     })
 }
 
-fn context_compile_completed_payload_schema_v1() -> Value {
+fn context_compile_completed_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["schema", "read_plan"],
@@ -1770,7 +1762,7 @@ fn context_compile_completed_payload_schema_v1() -> Value {
     })
 }
 
-fn context_summary_completed_payload_schema_v1() -> Value {
+fn context_summary_completed_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["schema", "role", "text", "covered_ranges", "content"],
@@ -1804,7 +1796,7 @@ fn context_summary_completed_payload_schema_v1() -> Value {
     })
 }
 
-fn context_read_plan_set_payload_schema_v1() -> Value {
+fn context_read_plan_set_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["schema", "scope", "name", "read_plan"],
@@ -1821,7 +1813,7 @@ fn context_read_plan_set_payload_schema_v1() -> Value {
     })
 }
 
-fn thread_spawned_payload_schema_v1() -> Value {
+fn thread_spawned_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -1871,7 +1863,7 @@ fn thread_spawned_payload_schema_v1() -> Value {
     })
 }
 
-fn thread_spawn_requested_payload_schema_v1() -> Value {
+fn thread_spawn_requested_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -1894,7 +1886,7 @@ fn thread_spawn_requested_payload_schema_v1() -> Value {
     })
 }
 
-fn thread_joined_payload_schema_v1() -> Value {
+fn thread_joined_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["child_thread_id", "spawned_event_id", "terminal_state"],
@@ -1910,7 +1902,7 @@ fn thread_joined_payload_schema_v1() -> Value {
     })
 }
 
-fn thread_branch_selected_payload_schema_v1() -> Value {
+fn thread_branch_selected_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["thread_id"],
@@ -1923,7 +1915,7 @@ fn thread_branch_selected_payload_schema_v1() -> Value {
     })
 }
 
-fn policy_bound_payload_schema_v1() -> Value {
+fn policy_bound_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["policy_kind", "policy_id", "content_hash", "valid_from_note"],
@@ -1940,7 +1932,7 @@ fn policy_bound_payload_schema_v1() -> Value {
     })
 }
 
-fn grant_petitioned_payload_schema_v1() -> Value {
+fn grant_petitioned_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["thread_id", "requested", "reason"],
@@ -1954,7 +1946,7 @@ fn grant_petitioned_payload_schema_v1() -> Value {
     })
 }
 
-fn timer_fired_payload_schema_v1() -> Value {
+fn timer_fired_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["mandate_event_id", "scheduled_for", "occurrence_index", "catch_up"],
@@ -1968,7 +1960,7 @@ fn timer_fired_payload_schema_v1() -> Value {
     })
 }
 
-fn client_record_appended_payload_schema_v1() -> Value {
+fn client_record_appended_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["client_kind", "client_schema", "principal_id", "body"],
@@ -1986,7 +1978,7 @@ fn client_record_appended_payload_schema_v1() -> Value {
     })
 }
 
-fn io_ingress_received_payload_schema_v1() -> Value {
+fn io_ingress_received_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["envelope_digest"],
@@ -2002,7 +1994,7 @@ fn io_ingress_received_payload_schema_v1() -> Value {
     })
 }
 
-fn thread_reload_degraded_payload_schema_v1() -> Value {
+fn thread_reload_degraded_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["thread_id", "missing", "fallback"],
@@ -2018,7 +2010,7 @@ fn thread_reload_degraded_payload_schema_v1() -> Value {
     })
 }
 
-fn io_ingress_claimed_payload_schema_v1() -> Value {
+fn io_ingress_claimed_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -2044,7 +2036,7 @@ fn io_ingress_claimed_payload_schema_v1() -> Value {
     })
 }
 
-fn io_ingress_settled_payload_schema_v1() -> Value {
+fn io_ingress_settled_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["claim_event_id", "ingress_envelope_ids", "settled_by"],
@@ -2058,14 +2050,14 @@ fn io_ingress_settled_payload_schema_v1() -> Value {
     })
 }
 
-fn string_array_schema_v1() -> Value {
+fn string_array_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "items": {"type": "string"}
     })
 }
 
-fn io_egress_requested_payload_schema_v1() -> Value {
+fn io_egress_requested_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["egress_kind", "requested_by_tool_call_id"],
@@ -2086,7 +2078,7 @@ fn io_egress_requested_payload_schema_v1() -> Value {
     })
 }
 
-fn io_egress_delivered_payload_schema_v1() -> Value {
+fn io_egress_delivered_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["route_id", "egress_kind", "attempts"],
@@ -2100,7 +2092,7 @@ fn io_egress_delivered_payload_schema_v1() -> Value {
     })
 }
 
-fn io_egress_failed_payload_schema_v1() -> Value {
+fn io_egress_failed_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["route_id", "egress_kind", "attempts", "error_class", "dead_lettered"],
@@ -2115,7 +2107,7 @@ fn io_egress_failed_payload_schema_v1() -> Value {
     })
 }
 
-fn admission_decided_payload_schema_v1() -> Value {
+fn admission_decided_payload_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -2138,27 +2130,27 @@ fn admission_decided_payload_schema_v1() -> Value {
     })
 }
 
-fn grant_set_schema_v1() -> Value {
+fn grant_set_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "items": {"type": "string"}
     })
 }
 
-fn event_id_array_schema_v1() -> Value {
+fn event_id_array_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "items": {"type": "string"}
     })
 }
 
-fn admission_decision_schema_v1() -> Value {
+fn admission_decision_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "enum": ["queue", "steer", "interrupt", "fork", "observe", "reject", "coalesce"]
     })
 }
 
-fn debug_thread_export_schema_v1() -> Value {
+fn debug_thread_export_schema_v1() -> serde_json::Value {
     let ack_classes = debug_export_ack_classes_schema_v1();
     let backend = debug_export_backend_schema_v1();
     let stream_record = debug_export_stream_record_schema_v1();
@@ -2241,7 +2233,7 @@ fn debug_thread_export_schema_v1() -> Value {
     })
 }
 
-fn debug_export_range_schema_v1() -> Value {
+fn debug_export_range_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -2268,7 +2260,7 @@ fn debug_export_range_schema_v1() -> Value {
     })
 }
 
-fn nullable_stream_cursor_schema_v1() -> Value {
+fn nullable_stream_cursor_schema_v1() -> serde_json::Value {
     let mut schema = stream_cursor_schema_v1();
     schema
         .as_object_mut()
@@ -2277,7 +2269,7 @@ fn nullable_stream_cursor_schema_v1() -> Value {
     schema
 }
 
-fn debug_export_stream_record_schema_v1() -> Value {
+fn debug_export_stream_record_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -2308,7 +2300,7 @@ fn debug_export_stream_record_schema_v1() -> Value {
     })
 }
 
-fn debug_export_receipt_schema_v1() -> Value {
+fn debug_export_receipt_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": [
@@ -2333,7 +2325,7 @@ fn debug_export_receipt_schema_v1() -> Value {
     })
 }
 
-fn debug_export_backend_schema_v1() -> Value {
+fn debug_export_backend_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "required": ["kind", "sessionStorePath"],
@@ -2346,22 +2338,22 @@ fn debug_export_backend_schema_v1() -> Value {
     })
 }
 
-fn debug_export_ack_classes_schema_v1() -> Value {
+fn debug_export_ack_classes_schema_v1() -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "items": {"enum": ["local_committed", "query_projected"]}
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct ObservationId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ObservationId(uuid::Uuid);
 
 impl ObservationId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 
-    pub fn from_uuid(uuid: Uuid) -> Self {
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
 }
@@ -2378,14 +2370,14 @@ impl std::fmt::Display for ObservationId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObservationSourceRange {
     pub stream_id: EventStreamId,
     pub from_sequence: EventSequence,
     pub to_sequence: EventSequence,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObservationProvenance {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_streams: Vec<EventStreamId>,
@@ -2399,12 +2391,12 @@ pub struct ObservationProvenance {
     pub derivation_version: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewObservationRecord {
     pub id: ObservationId,
     pub kind: String,
-    pub scope: ThreadCoordinates,
-    pub payload: Value,
+    pub scope: verlet_runtime_contracts::ThreadCoordinates,
+    pub payload: serde_json::Value,
     pub created_at_ms: i64,
     pub provenance: ObservationProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2414,7 +2406,11 @@ pub struct NewObservationRecord {
 }
 
 impl NewObservationRecord {
-    pub fn new(kind: impl Into<String>, scope: ThreadCoordinates, payload: Value) -> Self {
+    pub fn new(
+        kind: impl Into<String>,
+        scope: verlet_runtime_contracts::ThreadCoordinates,
+        payload: serde_json::Value,
+    ) -> Self {
         Self {
             id: ObservationId::new(),
             kind: kind.into(),
@@ -2433,12 +2429,12 @@ impl NewObservationRecord {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObservationRecord {
     pub id: ObservationId,
     pub kind: String,
-    pub scope: ThreadCoordinates,
-    pub payload: Value,
+    pub scope: verlet_runtime_contracts::ThreadCoordinates,
+    pub payload: serde_json::Value,
     pub created_at_ms: i64,
     pub provenance: ObservationProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2462,7 +2458,7 @@ impl From<NewObservationRecord> for ObservationRecord {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderApi {
     OpenAIResponses,
@@ -2471,7 +2467,7 @@ pub enum ProviderApi {
     Other(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingProvider {
     Anthropic,
@@ -2480,7 +2476,7 @@ pub enum ThinkingProvider {
     Other(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingMetadata {
     None,
@@ -2502,11 +2498,11 @@ pub enum ThinkingMetadata {
     },
     Opaque {
         provider: String,
-        value: Value,
+        value: serde_json::Value,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CacheControl {
     Ephemeral {
@@ -2527,7 +2523,7 @@ impl CacheControl {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheTtl {
     #[serde(rename = "5m")]
@@ -2536,7 +2532,7 @@ pub enum CacheTtl {
     OneHour,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CanonicalContent {
     Text {
@@ -2557,7 +2553,7 @@ pub enum CanonicalContent {
         id: String,
         name: String,
         #[serde(default)]
-        arguments: Value,
+        arguments: serde_json::Value,
     },
 }
 
@@ -2576,7 +2572,11 @@ impl CanonicalContent {
         }
     }
 
-    pub fn tool_call(id: impl Into<String>, name: impl Into<String>, arguments: Value) -> Self {
+    pub fn tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
         Self::ToolCall {
             id: id.into(),
             name: name.into(),
@@ -2585,7 +2585,7 @@ impl CanonicalContent {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CanonicalUsage {
     #[serde(default)]
     pub input_tokens: u64,
@@ -2597,7 +2597,7 @@ pub struct CanonicalUsage {
     pub cache_read_input_tokens: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalStopReason {
     EndTurn,
@@ -2609,7 +2609,7 @@ pub enum CanonicalStopReason {
     Error,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum CanonicalMessage {
     User {
@@ -2706,7 +2706,7 @@ impl CanonicalMessage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEntryKind {
     Message {
@@ -2725,28 +2725,28 @@ pub enum SessionEntryKind {
     },
     Runtime {
         kind: String,
-        payload: Value,
+        payload: serde_json::Value,
     },
     CustomContextMessage {
         message: CanonicalMessage,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionEntry {
     pub entry_id: SessionEntryId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_entry_id: Option<SessionEntryId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
-    pub coordinates: ThreadCoordinates,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub created_at_ms: i64,
     pub kind: SessionEntryKind,
 }
 
 impl SessionEntry {
     pub fn new(
-        coordinates: ThreadCoordinates,
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
     ) -> Self {
@@ -2761,7 +2761,7 @@ impl SessionEntry {
     }
 
     pub fn for_turn(
-        coordinates: ThreadCoordinates,
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
         parent_entry_id: Option<SessionEntryId>,
         turn_id: impl Into<String>,
         kind: SessionEntryKind,
@@ -2772,7 +2772,7 @@ impl SessionEntry {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionContext {
     pub entries: Vec<SessionEntry>,
     pub messages: Vec<CanonicalMessage>,
@@ -2780,9 +2780,9 @@ pub struct SessionContext {
     pub source_cuts: Vec<SessionContextSourceCut>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionContextSourceCut {
-    pub coordinates: ThreadCoordinates,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub stream_id: EventStreamId,
     #[serde(default)]
     pub inherited: bool,
@@ -2790,7 +2790,7 @@ pub struct SessionContextSourceCut {
     pub entry_ids: Vec<SessionEntryId>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadForkReason {
     ManifestUpdate,
@@ -2805,12 +2805,12 @@ impl Default for ThreadForkReason {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadBaseRef {
-    pub child_thread_id: ThreadId,
-    pub parent_thread_id: ThreadId,
+    pub child_thread_id: verlet_runtime_contracts::ThreadId,
+    pub parent_thread_id: verlet_runtime_contracts::ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_checkpoint_id: Option<ThreadCheckpointId>,
+    pub parent_checkpoint_id: Option<verlet_runtime_contracts::ThreadCheckpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_leaf_entry_id: Option<SessionEntryId>,
     pub parent_stream_id: EventStreamId,
@@ -2823,18 +2823,18 @@ pub struct ThreadBaseRef {
     pub created_at_ms: i64,
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait SessionStore: Send + Sync {
     async fn append(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry>;
 
     async fn append_with_provenance(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
         provenance: EventProvenance,
@@ -2845,41 +2845,43 @@ pub trait SessionStore: Send + Sync {
     /// closed.
     async fn append_turn_input(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
         kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry>;
 
     async fn active_leaf(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> HistoryResult<Option<SessionEntryId>>;
 
     async fn select_branch(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         leaf_entry_id: Option<SessionEntryId>,
     ) -> HistoryResult<()>;
 
-    async fn build_context(&self, coordinates: &ThreadCoordinates)
-    -> HistoryResult<SessionContext>;
+    async fn build_context(
+        &self,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> HistoryResult<SessionContext>;
 
     async fn clone_branch(
         &self,
-        source_coordinates: &ThreadCoordinates,
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         source_leaf: Option<SessionEntryId>,
-        target_coordinates: &ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> HistoryResult<Option<SessionEntryId>>;
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        target_coordinates: &ThreadCoordinates,
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         base: ThreadBaseRef,
     ) -> HistoryResult<()>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait EventStore: Send + Sync {
     async fn append_events(
         &self,
@@ -2949,7 +2951,7 @@ pub trait EventStore: Send + Sync {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ObservationStore: Send + Sync {
     async fn append_observation(
         &self,
@@ -2958,7 +2960,7 @@ pub trait ObservationStore: Send + Sync {
 
     async fn list_observations(
         &self,
-        scope: &ThreadCoordinates,
+        scope: &verlet_runtime_contracts::ThreadCoordinates,
         kind: Option<&str>,
     ) -> HistoryResult<Vec<ObservationRecord>>;
 }
@@ -2969,17 +2971,21 @@ impl<T> RuntimeStore for T where T: SessionStore + EventStore + ObservationStore
 
 #[derive(Clone, Default)]
 pub struct InMemorySessionStore {
-    inner: Arc<RwLock<InMemorySessionStoreInner>>,
+    inner: std::sync::Arc<tokio::sync::RwLock<InMemorySessionStoreInner>>,
 }
 
 #[derive(Default)]
 struct InMemorySessionStoreInner {
-    entries: HashMap<ThreadId, HashMap<SessionEntryId, SessionEntry>>,
-    active_leaf: HashMap<ThreadId, SessionEntryId>,
-    bases: HashMap<ThreadId, ThreadBaseRef>,
-    events: HashMap<EventStreamId, Vec<EventRecord>>,
-    event_ids: HashSet<EventRecordId>,
-    observations: HashMap<ThreadId, Vec<ObservationRecord>>,
+    entries: std::collections::HashMap<
+        verlet_runtime_contracts::ThreadId,
+        std::collections::HashMap<SessionEntryId, SessionEntry>,
+    >,
+    active_leaf: std::collections::HashMap<verlet_runtime_contracts::ThreadId, SessionEntryId>,
+    bases: std::collections::HashMap<verlet_runtime_contracts::ThreadId, ThreadBaseRef>,
+    events: std::collections::HashMap<EventStreamId, Vec<EventRecord>>,
+    event_ids: std::collections::HashSet<EventRecordId>,
+    observations:
+        std::collections::HashMap<verlet_runtime_contracts::ThreadId, Vec<ObservationRecord>>,
 }
 
 impl InMemorySessionStore {
@@ -2988,11 +2994,11 @@ impl InMemorySessionStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl SessionStore for InMemorySessionStore {
     async fn append(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry> {
@@ -3002,7 +3008,7 @@ impl SessionStore for InMemorySessionStore {
 
     async fn append_with_provenance(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
         provenance: EventProvenance,
@@ -3013,7 +3019,7 @@ impl SessionStore for InMemorySessionStore {
 
     async fn append_turn_input(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
         kind: SessionEntryKind,
     ) -> HistoryResult<SessionEntry> {
@@ -3050,7 +3056,7 @@ impl SessionStore for InMemorySessionStore {
 
     async fn active_leaf(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> HistoryResult<Option<SessionEntryId>> {
         let inner = self.inner.read().await;
         let Some(active_leaf) = inner.active_leaf.get(&coordinates.thread_id).copied() else {
@@ -3067,7 +3073,7 @@ impl SessionStore for InMemorySessionStore {
 
     async fn select_branch(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         leaf_entry_id: Option<SessionEntryId>,
     ) -> HistoryResult<()> {
         let mut inner = self.inner.write().await;
@@ -3109,17 +3115,23 @@ impl SessionStore for InMemorySessionStore {
 
     async fn build_context(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> HistoryResult<SessionContext> {
         let inner = self.inner.read().await;
-        build_in_memory_context(&inner, coordinates, None, false, &mut HashSet::new())
+        build_in_memory_context(
+            &inner,
+            coordinates,
+            None,
+            false,
+            &mut std::collections::HashSet::new(),
+        )
     }
 
     async fn clone_branch(
         &self,
-        source_coordinates: &ThreadCoordinates,
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         source_leaf: Option<SessionEntryId>,
-        target_coordinates: &ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> HistoryResult<Option<SessionEntryId>> {
         let mut inner = self.inner.write().await;
         inner.bases.remove(&target_coordinates.thread_id);
@@ -3164,8 +3176,8 @@ impl SessionStore for InMemorySessionStore {
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        target_coordinates: &ThreadCoordinates,
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         base: ThreadBaseRef,
     ) -> HistoryResult<()> {
         validate_thread_base_ref(source_coordinates, target_coordinates, &base)?;
@@ -3181,7 +3193,7 @@ impl SessionStore for InMemorySessionStore {
                 source_coordinates,
                 Some(parent_leaf),
                 false,
-                &mut HashSet::new(),
+                &mut std::collections::HashSet::new(),
             )?;
         }
         inner.active_leaf.remove(&target_coordinates.thread_id);
@@ -3193,7 +3205,7 @@ impl SessionStore for InMemorySessionStore {
 impl InMemorySessionStore {
     async fn append_inner(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         parent_entry_id: Option<SessionEntryId>,
         kind: SessionEntryKind,
         provenance: Option<EventProvenance>,
@@ -3228,7 +3240,7 @@ impl InMemorySessionStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl EventStore for InMemorySessionStore {
     async fn append_events(
         &self,
@@ -3289,7 +3301,7 @@ fn append_in_memory_events(
     stream_id: &EventStreamId,
     records: Vec<NewEventRecord>,
 ) -> HistoryResult<Vec<EventRecord>> {
-    let mut batch_ids = HashSet::with_capacity(records.len());
+    let mut batch_ids = std::collections::HashSet::with_capacity(records.len());
     for record in &records {
         validate_new_event(record)?;
         if inner.event_ids.contains(&record.id) || !batch_ids.insert(record.id) {
@@ -3321,7 +3333,7 @@ fn append_in_memory_events(
     Ok(appended)
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ObservationStore for InMemorySessionStore {
     async fn append_observation(
         &self,
@@ -3339,7 +3351,7 @@ impl ObservationStore for InMemorySessionStore {
 
     async fn list_observations(
         &self,
-        scope: &ThreadCoordinates,
+        scope: &verlet_runtime_contracts::ThreadCoordinates,
         kind: Option<&str>,
     ) -> HistoryResult<Vec<ObservationRecord>> {
         let inner = self.inner.read().await;
@@ -3357,9 +3369,9 @@ impl ObservationStore for InMemorySessionStore {
 }
 
 fn branch_path(
-    entries_by_id: &HashMap<SessionEntryId, SessionEntry>,
+    entries_by_id: &std::collections::HashMap<SessionEntryId, SessionEntry>,
     leaf_entry_id: SessionEntryId,
-    coordinates: &ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
 ) -> HistoryResult<Vec<SessionEntry>> {
     let mut path = Vec::new();
     let mut cursor = Some(leaf_entry_id);
@@ -3377,10 +3389,10 @@ fn branch_path(
 
 fn build_in_memory_context(
     inner: &InMemorySessionStoreInner,
-    coordinates: &ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     local_leaf_override: Option<SessionEntryId>,
     inherited: bool,
-    visiting: &mut HashSet<ThreadId>,
+    visiting: &mut std::collections::HashSet<verlet_runtime_contracts::ThreadId>,
 ) -> HistoryResult<SessionContext> {
     if !visiting.insert(coordinates.thread_id) {
         return Err(HistoryError::ThreadBaseCycle {
@@ -3442,11 +3454,11 @@ fn build_in_memory_context(
 
 fn validate_in_memory_base_cycle(
     inner: &InMemorySessionStoreInner,
-    child_thread_id: ThreadId,
-    parent_thread_id: ThreadId,
+    child_thread_id: verlet_runtime_contracts::ThreadId,
+    parent_thread_id: verlet_runtime_contracts::ThreadId,
 ) -> HistoryResult<()> {
     let mut cursor = Some(parent_thread_id);
-    let mut visited = HashSet::new();
+    let mut visited = std::collections::HashSet::new();
     while let Some(thread_id) = cursor {
         if thread_id == child_thread_id || !visited.insert(thread_id) {
             return Err(HistoryError::ThreadBaseCycle {
@@ -3463,8 +3475,8 @@ fn validate_in_memory_base_cycle(
 }
 
 pub fn validate_thread_base_ref(
-    source_coordinates: &ThreadCoordinates,
-    target_coordinates: &ThreadCoordinates,
+    source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     base: &ThreadBaseRef,
 ) -> HistoryResult<()> {
     if source_coordinates.scope() != target_coordinates.scope() {
@@ -3496,10 +3508,10 @@ pub fn validate_thread_base_ref(
 }
 
 pub fn coordinates_with_thread_id(
-    coordinates: &ThreadCoordinates,
-    thread_id: ThreadId,
-) -> ThreadCoordinates {
-    ThreadCoordinates {
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    thread_id: verlet_runtime_contracts::ThreadId,
+) -> verlet_runtime_contracts::ThreadCoordinates {
+    verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: coordinates.tenant_id.clone(),
         user_id: coordinates.user_id.clone(),
         session_id: coordinates.session_id.clone(),
@@ -3547,7 +3559,7 @@ pub fn strip_thread_start_identity_entries(
         .iter()
         .filter(|entry| session_entry_is_thread_start_identity(entry))
         .map(|entry| entry.entry_id)
-        .collect::<HashSet<_>>();
+        .collect::<std::collections::HashSet<_>>();
     if identity_entry_ids.is_empty() {
         return;
     }
@@ -3610,7 +3622,10 @@ fn session_entry_event_with_optional_provenance(
     if let Some(turn_id) = &entry.turn_id
         && let Some(object) = payload.as_object_mut()
     {
-        object.insert("turn_id".to_string(), Value::String(turn_id.clone()));
+        object.insert(
+            "turn_id".to_string(),
+            serde_json::Value::String(turn_id.clone()),
+        );
     }
     if let SessionEntryKind::Runtime {
         kind,
@@ -3686,12 +3701,12 @@ fn session_entry_kind_name(kind: &SessionEntryKind) -> &'static str {
     }
 }
 
-pub fn parse_uuid(value: &str) -> HistoryResult<Uuid> {
-    Uuid::parse_str(value).map_err(codec_error)
+pub fn parse_uuid(value: &str) -> HistoryResult<uuid::Uuid> {
+    uuid::Uuid::parse_str(value).map_err(codec_error)
 }
 
-pub fn parse_thread_id(value: &str) -> HistoryResult<ThreadId> {
-    ThreadId::parse_str(value).map_err(codec_error)
+pub fn parse_thread_id(value: &str) -> HistoryResult<verlet_runtime_contracts::ThreadId> {
+    verlet_runtime_contracts::ThreadId::parse_str(value).map_err(codec_error)
 }
 
 pub fn parse_event_origin(value: &str) -> HistoryResult<EventOrigin> {
@@ -3712,7 +3727,7 @@ pub fn validate_new_event(record: &NewEventRecord) -> HistoryResult<()> {
 }
 
 pub fn validate_entry_coordinates(
-    requested: &ThreadCoordinates,
+    requested: &verlet_runtime_contracts::ThreadCoordinates,
     entry: &SessionEntry,
 ) -> HistoryResult<()> {
     if entry.coordinates == *requested {
@@ -3740,8 +3755,8 @@ pub fn codec_error(err: impl std::fmt::Display) -> HistoryError {
 }
 
 pub fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
 }

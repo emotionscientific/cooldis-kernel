@@ -1,50 +1,42 @@
-use crate::{convert_pi, convert_verlet_export, render_diff, write_common_jsonl};
-use serde_json::{Value, json};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::io::BufRead as _;
 
 const PI_PACKAGE: &str = "@mariozechner/pi-coding-agent@0.70.2";
 
 #[derive(Clone, Debug)]
 pub struct RunOptions {
     pub prompt: String,
-    pub workspace: PathBuf,
-    pub output_dir: PathBuf,
+    pub workspace: std::path::PathBuf,
+    pub output_dir: std::path::PathBuf,
     pub provider: String,
     pub model: String,
     pub verlet_agent_ref: String,
     pub verlet_url: String,
-    pub verlet_bin: PathBuf,
-    pub npx_bin: PathBuf,
+    pub verlet_bin: std::path::PathBuf,
+    pub npx_bin: std::path::PathBuf,
     pub max_tool_rounds: String,
-    pub timeout: Duration,
+    pub timeout: std::time::Duration,
 }
 
 #[derive(Clone, Debug)]
 pub struct RunArtifacts {
-    pub pi_trace: PathBuf,
-    pub verlet_trace: PathBuf,
-    pub diff: PathBuf,
-    pub pi_workspace: PathBuf,
-    pub verlet_workspace: PathBuf,
+    pub pi_trace: std::path::PathBuf,
+    pub verlet_trace: std::path::PathBuf,
+    pub diff: std::path::PathBuf,
+    pub pi_workspace: std::path::PathBuf,
+    pub verlet_workspace: std::path::PathBuf,
     pub verlet_thread_id: String,
 }
 
 pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
     validate_options(options)?;
-    let source = fs::canonicalize(&options.workspace).map_err(|err| {
+    let source = std::fs::canonicalize(&options.workspace).map_err(|err| {
         format!(
             "failed to resolve workspace {}: {err}",
             options.workspace.display()
         )
     })?;
     prepare_output_dir(&source, &options.output_dir)?;
-    let output_dir = fs::canonicalize(&options.output_dir).map_err(|err| {
+    let output_dir = std::fs::canonicalize(&options.output_dir).map_err(|err| {
         format!(
             "failed to resolve output directory {}: {err}",
             options.output_dir.display()
@@ -65,9 +57,9 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
         }
     };
     let pi_records = match pi_session {
-        Some(path) => match File::open(&path)
+        Some(path) => match std::fs::File::open(&path)
             .map_err(|err| format!("failed to open pi session {}: {err}", path.display()))
-            .and_then(|file| convert_pi(BufReader::new(file)))
+            .and_then(|file| crate::convert_pi(std::io::BufReader::new(file)))
         {
             Ok(records) => records,
             Err(err) => {
@@ -78,9 +70,9 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
         None => Vec::new(),
     };
     let pi_trace = output_dir.join("pi.common.jsonl");
-    write_common_jsonl(
+    crate::write_common_jsonl(
         &pi_records,
-        File::create(&pi_trace)
+        std::fs::File::create(&pi_trace)
             .map_err(|err| format!("failed to create {}: {err}", pi_trace.display()))?,
     )?;
 
@@ -90,10 +82,10 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
         Err(err) => {
             errors.push(format!("verlet: {err}"));
             let export_path = output_dir.join("verlet.export.json");
-            let export = fs::read(&export_path)
+            let export = std::fs::read(&export_path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-            let thread_id = fs::read_to_string(output_dir.join("cooldis.thread-id"))
+            let thread_id = std::fs::read_to_string(output_dir.join("cooldis.thread-id"))
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
@@ -101,7 +93,7 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
         }
     };
     let verlet_records = match verlet_export {
-        Some(export) => match convert_verlet_export(&export) {
+        Some(export) => match crate::convert_verlet_export(&export) {
             Ok(records) => records,
             Err(err) => {
                 errors.push(format!("verlet conversion: {err}"));
@@ -111,14 +103,14 @@ pub fn run_ab(options: &RunOptions) -> Result<RunArtifacts, String> {
         None => Vec::new(),
     };
     let verlet_trace = output_dir.join("verlet.common.jsonl");
-    write_common_jsonl(
+    crate::write_common_jsonl(
         &verlet_records,
-        File::create(&verlet_trace)
+        std::fs::File::create(&verlet_trace)
             .map_err(|err| format!("failed to create {}: {err}", verlet_trace.display()))?,
     )?;
 
     let diff = output_dir.join("diff.txt");
-    fs::write(&diff, render_diff(&pi_records, &verlet_records))
+    std::fs::write(&diff, crate::render_diff(&pi_records, &verlet_records))
         .map_err(|err| format!("failed to write {}: {err}", diff.display()))?;
     if !errors.is_empty() {
         return Err(format!(
@@ -162,9 +154,9 @@ fn validate_options(options: &RunOptions) -> Result<(), String> {
     }
 }
 
-fn prepare_output_dir(workspace: &Path, output: &Path) -> Result<(), String> {
+fn prepare_output_dir(workspace: &std::path::Path, output: &std::path::Path) -> Result<(), String> {
     if output.exists() {
-        let mut entries = fs::read_dir(output).map_err(|err| {
+        let mut entries = std::fs::read_dir(output).map_err(|err| {
             format!(
                 "failed to inspect output directory {}: {err}",
                 output.display()
@@ -177,14 +169,14 @@ fn prepare_output_dir(workspace: &Path, output: &Path) -> Result<(), String> {
             ));
         }
     } else {
-        fs::create_dir_all(output).map_err(|err| {
+        std::fs::create_dir_all(output).map_err(|err| {
             format!(
                 "failed to create output directory {}: {err}",
                 output.display()
             )
         })?;
     }
-    let output = fs::canonicalize(output).map_err(|err| {
+    let output = std::fs::canonicalize(output).map_err(|err| {
         format!(
             "failed to resolve output directory {}: {err}",
             output.display()
@@ -196,7 +188,7 @@ fn prepare_output_dir(workspace: &Path, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn clone_workspace(source: &Path, destination: &Path) -> Result<(), String> {
+fn clone_workspace(source: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
     if !source.is_dir() {
         return Err(format!(
             "seed workspace {} is not a directory",
@@ -207,18 +199,18 @@ fn clone_workspace(source: &Path, destination: &Path) -> Result<(), String> {
 }
 
 fn copy_workspace_directory(
-    source: &Path,
-    destination: &Path,
-    source_root: &Path,
-    destination_root: &Path,
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    source_root: &std::path::Path,
+    destination_root: &std::path::Path,
 ) -> Result<(), String> {
-    fs::create_dir(destination).map_err(|err| {
+    std::fs::create_dir(destination).map_err(|err| {
         format!(
             "failed to create workspace clone directory {}: {err}",
             destination.display()
         )
     })?;
-    let mut entries = fs::read_dir(source)
+    let mut entries = std::fs::read_dir(source)
         .map_err(|err| {
             format!(
                 "failed to read workspace directory {}: {err}",
@@ -239,7 +231,7 @@ fn copy_workspace_directory(
         }
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path).map_err(|err| {
+        let metadata = std::fs::symlink_metadata(&source_path).map_err(|err| {
             format!(
                 "failed to inspect workspace entry {}: {err}",
                 source_path.display()
@@ -253,21 +245,21 @@ fn copy_workspace_directory(
                 source_root,
                 destination_root,
             )?;
-            fs::set_permissions(&destination_path, metadata.permissions()).map_err(|err| {
+            std::fs::set_permissions(&destination_path, metadata.permissions()).map_err(|err| {
                 format!(
                     "failed to preserve directory permissions on {}: {err}",
                     destination_path.display()
                 )
             })?;
         } else if file_type.is_file() {
-            fs::copy(&source_path, &destination_path).map_err(|err| {
+            std::fs::copy(&source_path, &destination_path).map_err(|err| {
                 format!(
                     "failed to copy workspace file {} to {}: {err}",
                     source_path.display(),
                     destination_path.display()
                 )
             })?;
-            fs::set_permissions(&destination_path, metadata.permissions()).map_err(|err| {
+            std::fs::set_permissions(&destination_path, metadata.permissions()).map_err(|err| {
                 format!(
                     "failed to preserve file permissions on {}: {err}",
                     destination_path.display()
@@ -287,10 +279,10 @@ fn copy_workspace_directory(
             ));
         }
     }
-    let permissions = fs::symlink_metadata(source)
+    let permissions = std::fs::symlink_metadata(source)
         .map_err(|err| format!("failed to inspect {}: {err}", source.display()))?
         .permissions();
-    fs::set_permissions(destination, permissions).map_err(|err| {
+    std::fs::set_permissions(destination, permissions).map_err(|err| {
         format!(
             "failed to preserve directory permissions on {}: {err}",
             destination.display()
@@ -300,14 +292,12 @@ fn copy_workspace_directory(
 
 #[cfg(unix)]
 fn copy_workspace_symlink(
-    source: &Path,
-    destination: &Path,
-    source_root: &Path,
-    destination_root: &Path,
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    source_root: &std::path::Path,
+    destination_root: &std::path::Path,
 ) -> Result<(), String> {
-    use std::os::unix::fs::symlink;
-
-    let target = fs::read_link(source).map_err(|err| {
+    let target = std::fs::read_link(source).map_err(|err| {
         format!(
             "failed to read workspace symlink {}: {err}",
             source.display()
@@ -334,7 +324,7 @@ fn copy_workspace_symlink(
         }
         target
     };
-    symlink(&link_target, destination).map_err(|err| {
+    std::os::unix::fs::symlink(&link_target, destination).map_err(|err| {
         format!(
             "failed to copy workspace symlink {} to {}: {err}",
             source.display(),
@@ -345,10 +335,10 @@ fn copy_workspace_symlink(
 
 #[cfg(not(unix))]
 fn copy_workspace_symlink(
-    source: &Path,
-    _destination: &Path,
-    _source_root: &Path,
-    _destination_root: &Path,
+    source: &std::path::Path,
+    _destination: &std::path::Path,
+    _source_root: &std::path::Path,
+    _destination_root: &std::path::Path,
 ) -> Result<(), String> {
     Err(format!(
         "workspace symlinks are not supported on this platform: {}",
@@ -356,15 +346,17 @@ fn copy_workspace_symlink(
     ))
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
     for component in path.components() {
         match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
                 normalized.pop();
             }
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+            std::path::Component::Prefix(_)
+            | std::path::Component::RootDir
+            | std::path::Component::Normal(_) => {
                 normalized.push(component.as_os_str());
             }
         }
@@ -372,11 +364,15 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn run_pi(options: &RunOptions, workspace: &Path, output: &Path) -> Result<PathBuf, String> {
+fn run_pi(
+    options: &RunOptions,
+    workspace: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     let sessions = output.join("pi-sessions");
-    fs::create_dir_all(&sessions)
+    std::fs::create_dir_all(&sessions)
         .map_err(|err| format!("failed to create {}: {err}", sessions.display()))?;
-    let mut command = Command::new(&options.npx_bin);
+    let mut command = std::process::Command::new(&options.npx_bin);
     command
         .arg("--yes")
         .arg(PI_PACKAGE)
@@ -392,9 +388,9 @@ fn run_pi(options: &RunOptions, workspace: &Path, output: &Path) -> Result<PathB
         .arg("--no-prompt-templates")
         .arg("--no-themes")
         .current_dir(workspace)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     configure_process_group(&mut command);
     let mut child = command
         .spawn()
@@ -411,38 +407,38 @@ fn run_pi(options: &RunOptions, workspace: &Path, output: &Path) -> Result<PathB
         let _ = terminate(&mut child);
         return Err("pi stderr was not piped".to_string());
     };
-    let (sender, receiver) = mpsc::channel();
-    let stdout_handle = thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let stdout_handle = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
             if sender.send(line).is_err() {
                 break;
             }
         }
     });
-    let stderr_handle = thread::spawn(move || read_all(stderr));
+    let stderr_handle = std::thread::spawn(move || read_all(stderr));
     let mut transcript = Vec::new();
-    let interaction = (|| -> Result<PathBuf, String> {
+    let interaction = (|| -> Result<std::path::PathBuf, String> {
         send_rpc(
             &mut stdin,
-            &json!({"id":"trace-ab-prompt","type":"prompt","message":options.prompt}),
+            &serde_json::json!({"id":"trace-ab-prompt","type":"prompt","message":options.prompt}),
         )?;
-        let deadline = Instant::now() + options.timeout;
+        let deadline = std::time::Instant::now() + options.timeout;
         let mut prompt_accepted = false;
         loop {
             let value = receive_pi_value(&receiver, deadline, &mut transcript, &mut child)?;
-            if value.get("id").and_then(Value::as_str) == Some("trace-ab-prompt") {
-                if value.get("success").and_then(Value::as_bool) != Some(true) {
+            if value.get("id").and_then(serde_json::Value::as_str) == Some("trace-ab-prompt") {
+                if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
                     return Err(format!(
                         "pi rejected prompt: {}",
                         value
                             .get("error")
-                            .and_then(Value::as_str)
+                            .and_then(serde_json::Value::as_str)
                             .unwrap_or("unknown error")
                     ));
                 }
                 prompt_accepted = true;
             }
-            if value.get("type").and_then(Value::as_str) == Some("agent_end") {
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("agent_end") {
                 break;
             }
         }
@@ -451,20 +447,20 @@ fn run_pi(options: &RunOptions, workspace: &Path, output: &Path) -> Result<PathB
         }
         send_rpc(
             &mut stdin,
-            &json!({"id":"trace-ab-state","type":"get_state"}),
+            &serde_json::json!({"id":"trace-ab-state","type":"get_state"}),
         )?;
         loop {
             let value = receive_pi_value(&receiver, deadline, &mut transcript, &mut child)?;
-            if value.get("id").and_then(Value::as_str) != Some("trace-ab-state") {
+            if value.get("id").and_then(serde_json::Value::as_str) != Some("trace-ab-state") {
                 continue;
             }
-            if value.get("success").and_then(Value::as_bool) != Some(true) {
+            if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
                 return Err("pi get_state failed".to_string());
             }
             let path = value
                 .pointer("/data/sessionFile")
-                .and_then(Value::as_str)
-                .map(PathBuf::from)
+                .and_then(serde_json::Value::as_str)
+                .map(std::path::PathBuf::from)
                 .ok_or_else(|| "pi get_state returned no sessionFile".to_string())?;
             break Ok(if path.is_absolute() {
                 path
@@ -475,7 +471,7 @@ fn run_pi(options: &RunOptions, workspace: &Path, output: &Path) -> Result<PathB
     })();
     drop(stdin);
     let mut cleanup_errors = Vec::new();
-    if let Err(err) = wait_or_kill(&mut child, Duration::from_secs(10)) {
+    if let Err(err) = wait_or_kill(&mut child, std::time::Duration::from_secs(10)) {
         cleanup_errors.push(err);
     }
     if stdout_handle.join().is_err() {
@@ -492,10 +488,10 @@ fn run_pi(options: &RunOptions, workspace: &Path, output: &Path) -> Result<PathB
             Vec::new()
         }
     };
-    if let Err(err) = fs::write(output.join("pi.stderr.log"), stderr) {
+    if let Err(err) = std::fs::write(output.join("pi.stderr.log"), stderr) {
         cleanup_errors.push(format!("failed to write pi stderr log: {err}"));
     }
-    if let Err(err) = fs::write(output.join("pi.rpc.jsonl"), transcript.concat()) {
+    if let Err(err) = std::fs::write(output.join("pi.rpc.jsonl"), transcript.concat()) {
         cleanup_errors.push(format!("failed to write pi RPC transcript: {err}"));
     }
     let session_file = interaction
@@ -506,7 +502,7 @@ fn run_pi(options: &RunOptions, workspace: &Path, output: &Path) -> Result<PathB
         .or_else(|| newest_jsonl_file(&sessions));
     let stable_session = output.join("pi.session.jsonl");
     if let Some(session_file) = session_file
-        && let Err(err) = fs::copy(&session_file, &stable_session)
+        && let Err(err) = std::fs::copy(&session_file, &stable_session)
     {
         cleanup_errors.push(format!(
             "failed to copy pi session {} to {}: {err}",
@@ -527,11 +523,11 @@ fn run_pi(options: &RunOptions, workspace: &Path, output: &Path) -> Result<PathB
     }
 }
 
-fn newest_jsonl_file(root: &Path) -> Option<PathBuf> {
+fn newest_jsonl_file(root: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut pending = vec![root.to_path_buf()];
     let mut candidates = Vec::new();
     while let Some(directory) = pending.pop() {
-        let mut entries = fs::read_dir(directory)
+        let mut entries = std::fs::read_dir(directory)
             .ok()?
             .collect::<Result<Vec<_>, _>>()
             .ok()?;
@@ -555,15 +551,15 @@ fn newest_jsonl_file(root: &Path) -> Option<PathBuf> {
 
 fn run_verlet(
     options: &RunOptions,
-    workspace: &Path,
-    output: &Path,
-) -> Result<(Value, String), String> {
+    workspace: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<(serde_json::Value, String), String> {
     let max_tool_rounds = options
         .max_tool_rounds
         .parse::<u64>()
-        .map(Value::from)
-        .unwrap_or_else(|_| Value::String("unlimited".to_string()));
-    let start_params = json!({
+        .map(serde_json::Value::from)
+        .unwrap_or_else(|_| serde_json::Value::String("unlimited".to_string()));
+    let start_params = serde_json::json!({
         "agentRef": options.verlet_agent_ref,
         "modelProvider": options.provider,
         "model": options.model,
@@ -575,21 +571,21 @@ fn run_verlet(
         options,
         "thread/start",
         &start_params,
-        Duration::from_secs(60),
+        std::time::Duration::from_secs(60),
     )?;
     write_captured(output, "verlet.start", &start)?;
     ensure_success("thread/start", &start)?;
-    let start_value: Value = serde_json::from_slice(&start.stdout)
+    let start_value: serde_json::Value = serde_json::from_slice(&start.stdout)
         .map_err(|err| format!("thread/start returned invalid JSON: {err}"))?;
     let thread_id = start_value
         .pointer("/thread/id")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "thread/start response has no thread.id".to_string())?;
-    fs::write(output.join("cooldis.thread-id"), format!("{thread_id}\n"))
+    std::fs::write(output.join("cooldis.thread-id"), format!("{thread_id}\n"))
         .map_err(|err| format!("failed to write Verlet thread id: {err}"))?;
 
-    let mut turn_command = Command::new(&options.verlet_bin);
+    let mut turn_command = std::process::Command::new(&options.verlet_bin);
     turn_command
         .arg("debug")
         .arg("rpc")
@@ -602,16 +598,16 @@ fn run_verlet(
         .arg(&options.verlet_url);
     let turn_error = match run_captured(&mut turn_command, options.timeout) {
         Ok(turn) => {
-            fs::write(output.join("verlet.rpc.jsonl"), &turn.stdout)
+            std::fs::write(output.join("verlet.rpc.jsonl"), &turn.stdout)
                 .map_err(|err| format!("failed to write Verlet RPC transcript: {err}"))?;
-            fs::write(output.join("verlet.stderr.log"), &turn.stderr)
+            std::fs::write(output.join("verlet.stderr.log"), &turn.stderr)
                 .map_err(|err| format!("failed to write Verlet stderr log: {err}"))?;
             ensure_success("verlet turn", &turn).err()
         }
         Err(err) => Some(err),
     };
 
-    let export_params = json!({
+    let export_params = serde_json::json!({
         "threadId": thread_id,
         "streams": ["thread", "control"],
         "includeThread": true,
@@ -622,7 +618,7 @@ fn run_verlet(
         options,
         "thread/debug/export",
         &export_params,
-        Duration::from_secs(60),
+        std::time::Duration::from_secs(60),
     );
     let export = match export {
         Ok(export) => export,
@@ -642,10 +638,10 @@ fn run_verlet(
             None => export_error,
         });
     }
-    let export_value: Value = serde_json::from_slice(&export.stdout)
+    let export_value: serde_json::Value = serde_json::from_slice(&export.stdout)
         .map_err(|err| format!("thread/debug/export returned invalid JSON: {err}"))?;
     let export_path = output.join("verlet.export.json");
-    fs::write(
+    std::fs::write(
         &export_path,
         serde_json::to_vec_pretty(&export_value)
             .map_err(|err| format!("failed to encode Verlet export: {err}"))?,
@@ -662,10 +658,10 @@ fn run_verlet(
 fn verlet_call_capture(
     options: &RunOptions,
     method: &str,
-    params: &Value,
-    timeout: Duration,
+    params: &serde_json::Value,
+    timeout: std::time::Duration,
 ) -> Result<Captured, String> {
-    let mut command = Command::new(&options.verlet_bin);
+    let mut command = std::process::Command::new(&options.verlet_bin);
     command
         .arg("debug")
         .arg("rpc")
@@ -677,14 +673,14 @@ fn verlet_call_capture(
     run_captured(&mut command, timeout)
 }
 
-fn write_captured(output: &Path, stem: &str, captured: &Captured) -> Result<(), String> {
-    fs::write(output.join(format!("{stem}.stdout")), &captured.stdout)
+fn write_captured(output: &std::path::Path, stem: &str, captured: &Captured) -> Result<(), String> {
+    std::fs::write(output.join(format!("{stem}.stdout")), &captured.stdout)
         .map_err(|err| format!("failed to write {stem} stdout: {err}"))?;
-    fs::write(output.join(format!("{stem}.stderr")), &captured.stderr)
+    std::fs::write(output.join(format!("{stem}.stderr")), &captured.stderr)
         .map_err(|err| format!("failed to write {stem} stderr: {err}"))
 }
 
-fn send_rpc(stdin: &mut impl Write, value: &Value) -> Result<(), String> {
+fn send_rpc(stdin: &mut impl std::io::Write, value: &serde_json::Value) -> Result<(), String> {
     serde_json::to_writer(&mut *stdin, value)
         .map_err(|err| format!("failed to encode pi RPC command: {err}"))?;
     stdin
@@ -694,19 +690,21 @@ fn send_rpc(stdin: &mut impl Write, value: &Value) -> Result<(), String> {
 }
 
 fn receive_pi_value(
-    receiver: &Receiver<Result<String, std::io::Error>>,
-    deadline: Instant,
+    receiver: &std::sync::mpsc::Receiver<Result<String, std::io::Error>>,
+    deadline: std::time::Instant,
     transcript: &mut Vec<Vec<u8>>,
-    child: &mut Child,
-) -> Result<Value, String> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
+    child: &mut std::process::Child,
+) -> Result<serde_json::Value, String> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
     if remaining.is_zero() {
         return Err("pi RPC timed out".to_string());
     }
     let line = match receiver.recv_timeout(remaining) {
         Ok(line) => line,
-        Err(mpsc::RecvTimeoutError::Timeout) => return Err("pi RPC timed out".to_string()),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            return Err("pi RPC timed out".to_string());
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             let status = child.try_wait().map_err(|err| {
                 format!("pi RPC closed and child status could not be read: {err}")
             })?;
@@ -722,17 +720,20 @@ fn receive_pi_value(
 }
 
 struct Captured {
-    status: ExitStatus,
+    status: std::process::ExitStatus,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     timed_out: bool,
 }
 
-fn run_captured(command: &mut Command, timeout: Duration) -> Result<Captured, String> {
+fn run_captured(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<Captured, String> {
     configure_process_group(command);
     let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|err| format!("failed to start {:?}: {err}", command.get_program()))?;
     let Some(stdout) = child.stdout.take() else {
@@ -743,9 +744,9 @@ fn run_captured(command: &mut Command, timeout: Duration) -> Result<Captured, St
         let _ = terminate(&mut child);
         return Err("child stderr was not piped".to_string());
     };
-    let stdout_handle = thread::spawn(move || read_all(stdout));
-    let stderr_handle = thread::spawn(move || read_all(stderr));
-    let deadline = Instant::now() + timeout;
+    let stdout_handle = std::thread::spawn(move || read_all(stdout));
+    let stderr_handle = std::thread::spawn(move || read_all(stderr));
+    let deadline = std::time::Instant::now() + timeout;
     let (status, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (status, false),
@@ -755,12 +756,12 @@ fn run_captured(command: &mut Command, timeout: Duration) -> Result<Captured, St
                 return Err(format!("failed to poll child: {err}"));
             }
         }
-        if Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline {
             let status = terminate(&mut child)
                 .map_err(|err| format!("failed to reap timed-out child: {err}"))?;
             break (status, true);
         }
-        thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(std::time::Duration::from_millis(25));
     };
     let stdout = stdout_handle
         .join()
@@ -776,7 +777,7 @@ fn run_captured(command: &mut Command, timeout: Duration) -> Result<Captured, St
     })
 }
 
-fn read_all(mut reader: impl Read) -> Result<Vec<u8>, String> {
+fn read_all(mut reader: impl std::io::Read) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
@@ -801,8 +802,11 @@ fn ensure_success(label: &str, captured: &Captured) -> Result<(), String> {
     ))
 }
 
-fn wait_or_kill(child: &mut Child, timeout: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
+fn wait_or_kill(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => return Ok(()),
@@ -812,32 +816,32 @@ fn wait_or_kill(child: &mut Child, timeout: Duration) -> Result<(), String> {
                 return Err(format!("failed to poll child: {err}"));
             }
         }
-        if Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline {
             let _ = terminate(child);
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
 #[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
+fn configure_process_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt as _;
 
     command.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+fn configure_process_group(_command: &mut std::process::Command) {}
 
-fn terminate(child: &mut Child) -> std::io::Result<ExitStatus> {
+fn terminate(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
+        let _ = std::process::Command::new("kill")
             .arg("-KILL")
             .arg(format!("-{}", child.id()))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status();
     }
     let _ = child.kill();
@@ -846,17 +850,12 @@ fn terminate(child: &mut Child) -> std::io::Result<ExitStatus> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{RunOptions, clone_workspace, ensure_success, run_ab, run_captured};
-    use std::fs;
-    use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::process::Command;
-    use std::time::Duration;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn workspace_copy_preserves_safe_links_and_modes_but_excludes_git() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
@@ -865,28 +864,33 @@ mod tests {
         ));
         let source = root.join("source");
         let destination = root.join("destination");
-        fs::create_dir_all(source.join("bin")).unwrap();
-        fs::create_dir(source.join(".git")).unwrap();
-        fs::write(source.join(".git/config"), "must not copy").unwrap();
-        fs::write(source.join("bin/tool"), "fixture").unwrap();
-        fs::set_permissions(source.join("bin/tool"), fs::Permissions::from_mode(0o740)).unwrap();
-        fs::set_permissions(&source, fs::Permissions::from_mode(0o750)).unwrap();
-        symlink("bin/tool", source.join("tool-link")).unwrap();
-        symlink(source.join("bin/tool"), source.join("absolute-tool-link")).unwrap();
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir(source.join(".git")).unwrap();
+        std::fs::write(source.join(".git/config"), "must not copy").unwrap();
+        std::fs::write(source.join("bin/tool"), "fixture").unwrap();
+        std::fs::set_permissions(
+            source.join("bin/tool"),
+            std::fs::Permissions::from_mode(0o740),
+        )
+        .unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::os::unix::fs::symlink("bin/tool", source.join("tool-link")).unwrap();
+        std::os::unix::fs::symlink(source.join("bin/tool"), source.join("absolute-tool-link"))
+            .unwrap();
 
-        clone_workspace(&source, &destination).unwrap();
+        crate::runner::clone_workspace(&source, &destination).unwrap();
 
         assert!(!destination.join(".git").exists());
         assert_eq!(
-            fs::read_link(destination.join("tool-link")).unwrap(),
+            std::fs::read_link(destination.join("tool-link")).unwrap(),
             std::path::PathBuf::from("bin/tool")
         );
         assert_eq!(
-            fs::read_link(destination.join("absolute-tool-link")).unwrap(),
+            std::fs::read_link(destination.join("absolute-tool-link")).unwrap(),
             destination.join("bin/tool")
         );
         assert_eq!(
-            fs::metadata(destination.join("bin/tool"))
+            std::fs::metadata(destination.join("bin/tool"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -894,32 +898,36 @@ mod tests {
             0o740
         );
         assert_eq!(
-            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o750
         );
 
-        fs::write(root.join("outside"), "outside").unwrap();
-        symlink("../outside", source.join("escape-link")).unwrap();
-        let error = clone_workspace(&source, &root.join("rejected")).unwrap_err();
+        std::fs::write(root.join("outside"), "outside").unwrap();
+        std::os::unix::fs::symlink("../outside", source.join("escape-link")).unwrap();
+        let error = crate::runner::clone_workspace(&source, &root.join("rejected")).unwrap_err();
         assert!(error.contains("escapes the seed workspace"));
 
-        fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn captured_timeout_reaps_the_process_group_and_keeps_output() {
-        let captured = run_captured(
-            Command::new("sh")
+        let captured = crate::runner::run_captured(
+            std::process::Command::new("sh")
                 .arg("-c")
                 .arg("printf before-timeout; sleep 5"),
-            Duration::from_millis(50),
+            std::time::Duration::from_millis(50),
         )
         .unwrap();
 
         assert_eq!(captured.stdout, b"before-timeout");
         assert!(captured.timed_out);
         assert!(
-            ensure_success("fixture", &captured)
+            crate::runner::ensure_success("fixture", &captured)
                 .unwrap_err()
                 .contains("timed out")
         );
@@ -927,8 +935,8 @@ mod tests {
 
     #[test]
     fn failed_verlet_turn_still_preserves_both_trace_artifacts() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
@@ -937,8 +945,8 @@ mod tests {
         ));
         let workspace = root.join("seed");
         let output = root.join("output");
-        fs::create_dir_all(&workspace).unwrap();
-        fs::write(workspace.join("fixture.txt"), "seed").unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("fixture.txt"), "seed").unwrap();
 
         let fake_npx = root.join("fake-npx");
         write_script(
@@ -986,7 +994,7 @@ exit 1
 "#,
         );
 
-        let error = run_ab(&RunOptions {
+        let error = crate::runner::run_ab(&crate::runner::RunOptions {
             prompt: "task".to_string(),
             workspace,
             output_dir: output.clone(),
@@ -997,7 +1005,7 @@ exit 1
             verlet_bin: fake_verlet,
             npx_bin: fake_npx,
             max_tool_rounds: "8".to_string(),
-            timeout: Duration::from_secs(5),
+            timeout: std::time::Duration::from_secs(5),
         })
         .unwrap_err();
 
@@ -1011,11 +1019,11 @@ exit 1
         ] {
             assert!(output.join(artifact).is_file(), "missing {artifact}");
         }
-        fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn write_script(path: &std::path::Path, contents: &str) {
-        fs::write(path, contents).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(path, contents).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }

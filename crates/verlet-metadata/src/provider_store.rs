@@ -1,15 +1,3 @@
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::path::Path;
-use thiserror::Error;
-use verlet_history::{ProviderApi, now_ms};
-use verlet_runtime_contracts::{
-    ThreadId, ThreadLifecycleRecord, ThreadLifecycleStatus, ThreadScope,
-};
-use verlet_sqlite::{Connection, Db, DbConfig, params};
-
 pub const OPENAI_COMPATIBLE_PROVIDER_ID: &str = "openai_compatible";
 pub const OPENAI_COMPATIBLE_BASE_URL: &str = "https://api.example.invalid/v1";
 pub const OPENAI_COMPATIBLE_DEFAULT_MODEL: &str = "example-chat-model";
@@ -21,7 +9,7 @@ pub type LlmProviderStoreResult<T> = Result<T, LlmProviderStoreError>;
 pub type MetadataStoreResult<T> = Result<T, MetadataStoreError>;
 
 async fn provider_cancellation_safe<T>(
-    future: impl Future<Output = LlmProviderStoreResult<T>> + Send + 'static,
+    future: impl std::future::Future<Output = LlmProviderStoreResult<T>> + Send + 'static,
 ) -> LlmProviderStoreResult<T>
 where
     T: Send + 'static,
@@ -32,7 +20,7 @@ where
 }
 
 async fn metadata_cancellation_safe<T>(
-    future: impl Future<Output = MetadataStoreResult<T>> + Send + 'static,
+    future: impl std::future::Future<Output = MetadataStoreResult<T>> + Send + 'static,
 ) -> MetadataStoreResult<T>
 where
     T: Send + 'static,
@@ -42,7 +30,7 @@ where
     })?
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum LlmProviderStoreError {
     #[error("LLM provider id cannot be empty")]
     EmptyProviderId,
@@ -60,7 +48,7 @@ pub enum LlmProviderStoreError {
     CommandAuthUnsupported { provider_id: String },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum MetadataStoreError {
     #[error("metadata store failed: {0}")]
     Storage(String),
@@ -74,23 +62,23 @@ impl From<LlmProviderStoreError> for MetadataStoreError {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmProviderRecord {
     pub provider_id: String,
-    pub api: ProviderApi,
+    pub api: verlet_history::ProviderApi,
     pub base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default)]
     pub auth: LlmProviderAuthConfig,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub headers: BTreeMap<String, LlmProviderConfigValue>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, LlmProviderConfigValue>,
     #[serde(default)]
     pub auth_header: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<LlmProviderModelRecord>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -98,20 +86,20 @@ pub struct LlmProviderRecord {
 impl LlmProviderRecord {
     pub fn new(
         provider_id: impl Into<String>,
-        api: ProviderApi,
+        api: verlet_history::ProviderApi,
         base_url: impl Into<String>,
     ) -> Self {
-        let now = now_ms();
+        let now = verlet_history::now_ms();
         Self {
             provider_id: provider_id.into(),
             api,
             base_url: base_url.into(),
             display_name: None,
             auth: LlmProviderAuthConfig::default(),
-            headers: BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
             auth_header: false,
             models: Vec::new(),
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
             created_at_ms: now,
             updated_at_ms: now,
         }
@@ -156,13 +144,13 @@ impl LlmProviderRecord {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmProviderModelRecord {
     pub model_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api: Option<ProviderApi>,
+    pub api: Option<verlet_history::ProviderApi>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,10 +159,10 @@ pub struct LlmProviderModelRecord {
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_modalities: Vec<LlmProviderInputModality>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub headers: BTreeMap<String, LlmProviderConfigValue>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, LlmProviderConfigValue>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl LlmProviderModelRecord {
@@ -187,8 +175,8 @@ impl LlmProviderModelRecord {
             context_window_tokens: None,
             max_output_tokens: None,
             input_modalities: Vec::new(),
-            headers: BTreeMap::new(),
-            metadata: BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -218,7 +206,7 @@ impl LlmProviderModelRecord {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProviderInputModality {
     Text,
@@ -228,7 +216,7 @@ pub enum LlmProviderInputModality {
     Other(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmProviderConfigValue {
     Literal { value: String },
@@ -254,7 +242,7 @@ impl LlmProviderConfigValue {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmProviderAuthConfig {
     #[default]
@@ -271,7 +259,7 @@ pub enum LlmProviderAuthConfig {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmProviderCredential {
     ApiKey {
@@ -284,12 +272,12 @@ pub enum LlmProviderCredential {
     },
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmProviderAuthContext {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub runtime_api_keys: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub environment: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runtime_api_keys: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub environment: std::collections::BTreeMap<String, String>,
 }
 
 impl LlmProviderAuthContext {
@@ -299,7 +287,7 @@ impl LlmProviderAuthContext {
 
     pub fn from_process_env() -> Self {
         Self {
-            runtime_api_keys: BTreeMap::new(),
+            runtime_api_keys: std::collections::BTreeMap::new(),
             environment: std::env::vars().collect(),
         }
     }
@@ -319,7 +307,7 @@ impl LlmProviderAuthContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProviderAuthSourceKind {
     Runtime,
@@ -329,7 +317,7 @@ pub enum LlmProviderAuthSourceKind {
     CatalogCommand,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmProviderAuthStatus {
     pub configured: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -356,13 +344,13 @@ impl LlmProviderAuthStatus {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmProviderResolvedAuth {
     pub api_key: String,
     pub source: LlmProviderAuthSourceKind,
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait LlmProviderCatalogStore: Send + Sync {
     async fn upsert_provider(&self, record: LlmProviderRecord) -> LlmProviderStoreResult<()>;
     async fn get_provider(
@@ -373,7 +361,7 @@ pub trait LlmProviderCatalogStore: Send + Sync {
     async fn delete_provider(&self, provider_id: &str) -> LlmProviderStoreResult<()>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait LlmProviderAuthStore: Send + Sync {
     async fn set_credential(
         &self,
@@ -387,31 +375,31 @@ pub trait LlmProviderAuthStore: Send + Sync {
     async fn delete_credential(&self, provider_id: &str) -> LlmProviderStoreResult<()>;
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ThreadMetadataStore: Send + Sync {
     async fn upsert_thread_lifecycle(
         &self,
-        record: ThreadLifecycleRecord,
+        record: verlet_runtime_contracts::ThreadLifecycleRecord,
     ) -> MetadataStoreResult<()>;
     async fn get_thread_lifecycle(
         &self,
-        thread_id: ThreadId,
-    ) -> MetadataStoreResult<Option<ThreadLifecycleRecord>>;
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> MetadataStoreResult<Option<verlet_runtime_contracts::ThreadLifecycleRecord>>;
     async fn list_thread_lifecycle(
         &self,
-        scope: &ThreadScope,
-    ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>>;
+        scope: &verlet_runtime_contracts::ThreadScope,
+    ) -> MetadataStoreResult<Vec<verlet_runtime_contracts::ThreadLifecycleRecord>>;
     async fn list_thread_lifecycle_for_user(
         &self,
         tenant_id: &str,
         user_id: &str,
-    ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>>;
+    ) -> MetadataStoreResult<Vec<verlet_runtime_contracts::ThreadLifecycleRecord>>;
 }
 
 pub fn default_openai_compatible_llm_provider_record() -> LlmProviderRecord {
     LlmProviderRecord::new(
         OPENAI_COMPATIBLE_PROVIDER_ID,
-        ProviderApi::OpenAIChatCompletions,
+        verlet_history::ProviderApi::OpenAIChatCompletions,
         OPENAI_COMPATIBLE_BASE_URL,
     )
     .with_display_name("OpenAI Compatible")
@@ -454,11 +442,11 @@ pub async fn seed_default_llm_providers(
 
 #[derive(Clone)]
 pub struct SqliteLlmProviderStore {
-    inner: Db,
+    inner: verlet_sqlite::Db,
 }
 
 impl SqliteLlmProviderStore {
-    pub async fn open(path: impl AsRef<Path>) -> LlmProviderStoreResult<Self> {
+    pub async fn open(path: impl AsRef<std::path::Path>) -> LlmProviderStoreResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -466,7 +454,7 @@ impl SqliteLlmProviderStore {
                 restrict_dir_permissions(parent)?;
             }
         }
-        let inner = Db::open(path, DbConfig::default())
+        let inner = verlet_sqlite::Db::open(path, verlet_sqlite::DbConfig::default())
             .await
             .map_err(storage_error)?;
         restrict_file_permissions(path)?;
@@ -474,13 +462,13 @@ impl SqliteLlmProviderStore {
     }
 
     pub async fn in_memory() -> LlmProviderStoreResult<Self> {
-        let inner = Db::in_memory(DbConfig::default())
+        let inner = verlet_sqlite::Db::in_memory(verlet_sqlite::DbConfig::default())
             .await
             .map_err(storage_error)?;
         Self::from_db(inner).await
     }
 
-    async fn from_db(inner: Db) -> LlmProviderStoreResult<Self> {
+    async fn from_db(inner: verlet_sqlite::Db) -> LlmProviderStoreResult<Self> {
         provider_cancellation_safe(async move {
             let store = Self { inner };
             let connection = store.inner.connect().await.map_err(storage_error)?;
@@ -490,7 +478,7 @@ impl SqliteLlmProviderStore {
         .await
     }
 
-    async fn connect(&self) -> LlmProviderStoreResult<Connection> {
+    async fn connect(&self) -> LlmProviderStoreResult<verlet_sqlite::Connection> {
         self.inner.connect().await.map_err(storage_error)
     }
 }
@@ -501,7 +489,7 @@ pub struct SqliteMetadataStore {
 }
 
 impl SqliteMetadataStore {
-    pub async fn open(path: impl AsRef<Path>) -> MetadataStoreResult<Self> {
+    pub async fn open(path: impl AsRef<std::path::Path>) -> MetadataStoreResult<Self> {
         let provider_store = SqliteLlmProviderStore::open(path)
             .await
             .map_err(MetadataStoreError::from)?;
@@ -539,7 +527,7 @@ impl SqliteMetadataStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl LlmProviderCatalogStore for SqliteMetadataStore {
     async fn upsert_provider(&self, record: LlmProviderRecord) -> LlmProviderStoreResult<()> {
         self.provider_store.upsert_provider(record).await
@@ -561,7 +549,7 @@ impl LlmProviderCatalogStore for SqliteMetadataStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl LlmProviderAuthStore for SqliteMetadataStore {
     async fn set_credential(
         &self,
@@ -585,11 +573,11 @@ impl LlmProviderAuthStore for SqliteMetadataStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ThreadMetadataStore for SqliteMetadataStore {
     async fn upsert_thread_lifecycle(
         &self,
-        mut record: ThreadLifecycleRecord,
+        mut record: verlet_runtime_contracts::ThreadLifecycleRecord,
     ) -> MetadataStoreResult<()> {
         let connection = self
             .provider_store
@@ -622,7 +610,7 @@ impl ThreadMetadataStore for SqliteMetadataStore {
                         thread_lifecycle_records.created_at_ms
                     ),
                     updated_at_ms = excluded.updated_at_ms",
-                params![
+                verlet_sqlite::params![
                     thread_id,
                     tenant_id,
                     user_id,
@@ -641,8 +629,8 @@ impl ThreadMetadataStore for SqliteMetadataStore {
 
     async fn get_thread_lifecycle(
         &self,
-        thread_id: ThreadId,
-    ) -> MetadataStoreResult<Option<ThreadLifecycleRecord>> {
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> MetadataStoreResult<Option<verlet_runtime_contracts::ThreadLifecycleRecord>> {
         let connection = self
             .provider_store
             .connect()
@@ -653,8 +641,8 @@ impl ThreadMetadataStore for SqliteMetadataStore {
 
     async fn list_thread_lifecycle(
         &self,
-        scope: &ThreadScope,
-    ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
+        scope: &verlet_runtime_contracts::ThreadScope,
+    ) -> MetadataStoreResult<Vec<verlet_runtime_contracts::ThreadLifecycleRecord>> {
         let connection = self
             .provider_store
             .connect()
@@ -667,7 +655,7 @@ impl ThreadMetadataStore for SqliteMetadataStore {
         &self,
         tenant_id: &str,
         user_id: &str,
-    ) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
+    ) -> MetadataStoreResult<Vec<verlet_runtime_contracts::ThreadLifecycleRecord>> {
         let connection = self
             .provider_store
             .connect()
@@ -677,12 +665,12 @@ impl ThreadMetadataStore for SqliteMetadataStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl LlmProviderCatalogStore for SqliteLlmProviderStore {
     async fn upsert_provider(&self, mut record: LlmProviderRecord) -> LlmProviderStoreResult<()> {
         record.validate()?;
         let connection = self.connect().await?;
-        record.updated_at_ms = now_ms();
+        record.updated_at_ms = verlet_history::now_ms();
         let record_json = serde_json::to_string(&record).map_err(codec_error)?;
         connection
             .execute(
@@ -696,7 +684,7 @@ impl LlmProviderCatalogStore for SqliteLlmProviderStore {
                         llm_provider_records.created_at_ms
                     ),
                     updated_at_ms = excluded.updated_at_ms",
-                params![
+                verlet_sqlite::params![
                     record.provider_id,
                     record_json,
                     record.created_at_ms,
@@ -741,7 +729,7 @@ impl LlmProviderCatalogStore for SqliteLlmProviderStore {
         connection
             .execute(
                 "DELETE FROM llm_provider_records WHERE provider_id = ?1",
-                params![provider_id],
+                verlet_sqlite::params![provider_id],
             )
             .await
             .map_err(storage_error)?;
@@ -749,7 +737,7 @@ impl LlmProviderCatalogStore for SqliteLlmProviderStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl LlmProviderAuthStore for SqliteLlmProviderStore {
     async fn set_credential(
         &self,
@@ -758,7 +746,7 @@ impl LlmProviderAuthStore for SqliteLlmProviderStore {
     ) -> LlmProviderStoreResult<()> {
         validate_provider_id(provider_id)?;
         let credential_json = serde_json::to_string(&credential).map_err(codec_error)?;
-        let now = now_ms();
+        let now = verlet_history::now_ms();
         let connection = self.connect().await?;
         connection
             .execute(
@@ -768,7 +756,7 @@ impl LlmProviderAuthStore for SqliteLlmProviderStore {
                     ON CONFLICT(provider_id) DO UPDATE SET
                         credential_json = excluded.credential_json,
                         updated_at_ms = excluded.updated_at_ms",
-                params![provider_id, credential_json, now],
+                verlet_sqlite::params![provider_id, credential_json, now],
             )
             .await
             .map_err(storage_error)?;
@@ -790,7 +778,7 @@ impl LlmProviderAuthStore for SqliteLlmProviderStore {
         connection
             .execute(
                 "DELETE FROM llm_provider_credentials WHERE provider_id = ?1",
-                params![provider_id],
+                verlet_sqlite::params![provider_id],
             )
             .await
             .map_err(storage_error)?;
@@ -920,7 +908,7 @@ fn credential_to_resolved_auth(
             expires_at_ms,
             ..
         } => {
-            if expires_at_ms <= now_ms() {
+            if expires_at_ms <= verlet_history::now_ms() {
                 Err(LlmProviderStoreError::OAuthRefreshRequired {
                     provider_id: provider_id.to_string(),
                 })
@@ -981,7 +969,9 @@ fn env_prefix(value: &str) -> String {
         .collect()
 }
 
-async fn init_provider_store_schema(connection: &Connection) -> LlmProviderStoreResult<()> {
+async fn init_provider_store_schema(
+    connection: &verlet_sqlite::Connection,
+) -> LlmProviderStoreResult<()> {
     connection
         .execute_batch(
             r#"
@@ -1003,7 +993,9 @@ async fn init_provider_store_schema(connection: &Connection) -> LlmProviderStore
         .map_err(storage_error)
 }
 
-async fn init_thread_metadata_schema(connection: &Connection) -> MetadataStoreResult<()> {
+async fn init_thread_metadata_schema(
+    connection: &verlet_sqlite::Connection,
+) -> MetadataStoreResult<()> {
     connection
         .execute_batch(
             r#"
@@ -1031,13 +1023,13 @@ async fn init_thread_metadata_schema(connection: &Connection) -> MetadataStoreRe
 }
 
 async fn sqlite_get_provider(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     provider_id: &str,
 ) -> LlmProviderStoreResult<Option<LlmProviderRecord>> {
     let mut rows = connection
         .query(
             "SELECT record_json FROM llm_provider_records WHERE provider_id = ?1",
-            params![provider_id],
+            verlet_sqlite::params![provider_id],
         )
         .await
         .map_err(storage_error)?;
@@ -1053,13 +1045,13 @@ async fn sqlite_get_provider(
 }
 
 async fn sqlite_get_credential(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     provider_id: &str,
 ) -> LlmProviderStoreResult<Option<LlmProviderCredential>> {
     let mut rows = connection
         .query(
             "SELECT credential_json FROM llm_provider_credentials WHERE provider_id = ?1",
-            params![provider_id],
+            verlet_sqlite::params![provider_id],
         )
         .await
         .map_err(storage_error)?;
@@ -1075,13 +1067,13 @@ async fn sqlite_get_credential(
 }
 
 async fn sqlite_get_thread_lifecycle(
-    connection: &Connection,
-    thread_id: ThreadId,
-) -> MetadataStoreResult<Option<ThreadLifecycleRecord>> {
+    connection: &verlet_sqlite::Connection,
+    thread_id: verlet_runtime_contracts::ThreadId,
+) -> MetadataStoreResult<Option<verlet_runtime_contracts::ThreadLifecycleRecord>> {
     let mut rows = connection
         .query(
             "SELECT record_json FROM thread_lifecycle_records WHERE thread_id = ?1",
-            params![thread_id.to_string()],
+            verlet_sqlite::params![thread_id.to_string()],
         )
         .await
         .map_err(metadata_storage_error)?;
@@ -1097,15 +1089,15 @@ async fn sqlite_get_thread_lifecycle(
 }
 
 async fn sqlite_list_thread_lifecycle(
-    connection: &Connection,
-    scope: &ThreadScope,
-) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
+    connection: &verlet_sqlite::Connection,
+    scope: &verlet_runtime_contracts::ThreadScope,
+) -> MetadataStoreResult<Vec<verlet_runtime_contracts::ThreadLifecycleRecord>> {
     let mut rows = connection
         .query(
             "SELECT record_json FROM thread_lifecycle_records
             WHERE tenant_id = ?1 AND user_id = ?2 AND session_id = ?3
             ORDER BY created_at_ms, thread_id",
-            params![
+            verlet_sqlite::params![
                 scope.tenant_id.as_str(),
                 scope.user_id.as_str(),
                 scope.session_id.as_str()
@@ -1122,16 +1114,16 @@ async fn sqlite_list_thread_lifecycle(
 }
 
 async fn sqlite_list_thread_lifecycle_for_user(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     tenant_id: &str,
     user_id: &str,
-) -> MetadataStoreResult<Vec<ThreadLifecycleRecord>> {
+) -> MetadataStoreResult<Vec<verlet_runtime_contracts::ThreadLifecycleRecord>> {
     let mut rows = connection
         .query(
             "SELECT record_json FROM thread_lifecycle_records
             WHERE tenant_id = ?1 AND user_id = ?2
             ORDER BY created_at_ms, session_id, thread_id",
-            params![tenant_id, user_id],
+            verlet_sqlite::params![tenant_id, user_id],
         )
         .await
         .map_err(metadata_storage_error)?;
@@ -1147,23 +1139,27 @@ fn decode_provider_record(json: &str) -> LlmProviderStoreResult<LlmProviderRecor
     serde_json::from_str(json).map_err(codec_error)
 }
 
-fn decode_thread_lifecycle_record(json: &str) -> MetadataStoreResult<ThreadLifecycleRecord> {
+fn decode_thread_lifecycle_record(
+    json: &str,
+) -> MetadataStoreResult<verlet_runtime_contracts::ThreadLifecycleRecord> {
     serde_json::from_str(json).map_err(metadata_codec_error)
 }
 
-fn thread_lifecycle_status_string(status: ThreadLifecycleStatus) -> &'static str {
+fn thread_lifecycle_status_string(
+    status: verlet_runtime_contracts::ThreadLifecycleStatus,
+) -> &'static str {
     match status {
-        ThreadLifecycleStatus::Starting => "starting",
-        ThreadLifecycleStatus::Idle => "idle",
-        ThreadLifecycleStatus::Running => "running",
-        ThreadLifecycleStatus::Cancelling => "cancelling",
-        ThreadLifecycleStatus::Stopped => "stopped",
-        ThreadLifecycleStatus::Failed => "failed",
+        verlet_runtime_contracts::ThreadLifecycleStatus::Starting => "starting",
+        verlet_runtime_contracts::ThreadLifecycleStatus::Idle => "idle",
+        verlet_runtime_contracts::ThreadLifecycleStatus::Running => "running",
+        verlet_runtime_contracts::ThreadLifecycleStatus::Cancelling => "cancelling",
+        verlet_runtime_contracts::ThreadLifecycleStatus::Stopped => "stopped",
+        verlet_runtime_contracts::ThreadLifecycleStatus::Failed => "failed",
     }
 }
 
 fn now_ms_u64() -> MetadataStoreResult<u64> {
-    u64::try_from(now_ms()).map_err(|err| {
+    u64::try_from(verlet_history::now_ms()).map_err(|err| {
         MetadataStoreError::Storage(format!("current timestamp cannot fit u64: {err}"))
     })
 }
@@ -1192,10 +1188,10 @@ fn validate_model_id(model_id: &str) -> LlmProviderStoreResult<()> {
     }
 }
 
-fn restrict_dir_permissions(path: &Path) -> LlmProviderStoreResult<()> {
+fn restrict_dir_permissions(path: &std::path::Path) -> LlmProviderStoreResult<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(storage_error)?;
     }
@@ -1206,10 +1202,10 @@ fn restrict_dir_permissions(path: &Path) -> LlmProviderStoreResult<()> {
     Ok(())
 }
 
-fn restrict_file_permissions(path: &Path) -> LlmProviderStoreResult<()> {
+fn restrict_file_permissions(path: &std::path::Path) -> LlmProviderStoreResult<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(storage_error)?;
     }

@@ -1,29 +1,16 @@
-use serde_json::Value;
-use std::net::{SocketAddr, TcpListener};
-use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
-use uuid::Uuid;
-use verlet::daemon::identity::{
-    IdentityAuthority, PrincipalId, PrincipalKind, SqliteIdentityAuthority,
-};
-use verlet::{
-    AppServerListenAddr, CodexTuiConnectConfig, CodexTuiTestClient, EventKind, EventStore,
-    EventStreamId, SqliteSessionStore, SystemDaemonClock, VerletAppServer, VerletAppServerConfig,
-};
+use tokio::io::AsyncBufReadExt as _;
+use verlet::EventStore as _;
+use verlet::daemon::identity::IdentityAuthority as _;
 
-static RPC_PROCESS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+static RPC_PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn rpc_cli_startup_names_websocket_state_home_and_credential_path() {
     let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
-    let root =
-        std::env::temp_dir().join(format!("cdis-rpc-startup-ws-{}", Uuid::now_v7().simple()));
+    let root = std::env::temp_dir().join(format!(
+        "cdis-rpc-startup-ws-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
     let state_home = root.join("state");
     let runtime_home = root.join("runtime");
     let workspace = root.join("workspace");
@@ -49,8 +36,10 @@ async fn rpc_cli_startup_names_websocket_state_home_and_credential_path() {
 #[tokio::test]
 async fn rpc_cli_startup_names_unix_state_home_and_peer_authentication() {
     let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
-    let root =
-        std::env::temp_dir().join(format!("cdis-rpc-startup-unix-{}", Uuid::now_v7().simple()));
+    let root = std::env::temp_dir().join(format!(
+        "cdis-rpc-startup-unix-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
     let state_home = root.join("state");
     let runtime_home = root.join("runtime");
     let workspace = root.join("workspace");
@@ -72,11 +61,11 @@ async fn rpc_cli_startup_names_unix_state_home_and_peer_authentication() {
 
 async fn rpc_startup_lines(
     listen: &str,
-    state_home: &Path,
-    runtime_home: &Path,
-    workspace: &Path,
+    state_home: &std::path::Path,
+    runtime_home: &std::path::Path,
+    workspace: &std::path::Path,
 ) -> Vec<String> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .args([
             "rpc",
             "--listen",
@@ -88,9 +77,9 @@ async fn rpc_startup_lines(
             "--cwd",
             workspace.to_str().unwrap(),
         ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .expect("failed to spawn verlet rpc");
@@ -98,8 +87,8 @@ async fn rpc_startup_lines(
         .stderr
         .take()
         .expect("verlet rpc stderr should be piped");
-    let mut reader = BufReader::new(stderr);
-    let lines = tokio::time::timeout(Duration::from_secs(30), async {
+    let mut reader = tokio::io::BufReader::new(stderr);
+    let lines = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         let mut lines = Vec::new();
         while lines.len() < 3 {
             let mut line = String::new();
@@ -143,7 +132,7 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     )
     .await;
     assert_success(&call);
-    let thread_list: Value = serde_json::from_slice(&call.stdout).unwrap();
+    let thread_list: serde_json::Value = serde_json::from_slice(&call.stdout).unwrap();
     assert!(thread_list["data"].as_array().is_some());
 
     let first = run_verlet(
@@ -195,11 +184,11 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     )
     .await;
     assert_success(&live_bind);
-    let live_explanation: Value = serde_json::from_slice(&live_bind.stdout).unwrap();
+    let live_explanation: serde_json::Value = serde_json::from_slice(&live_bind.stdout).unwrap();
     assert_eq!(live_explanation["thread_id"], thread_id);
     assert_eq!(live_explanation["model"]["origin"], "manifest-default");
 
-    let missing_thread_id = Uuid::now_v7().to_string();
+    let missing_thread_id = uuid::Uuid::now_v7().to_string();
     let missing_bind = run_verlet(
         [
             "debug",
@@ -238,15 +227,21 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         resumed_stdout.contains("second debug rpc turn"),
         "resumed turn output did not include prompt: {resumed_stdout:?}"
     );
-    let store = SqliteSessionStore::open(root.path().join("state/session_history.sqlite3"))
+    let store = verlet::SqliteSessionStore::open(root.path().join("state/session_history.sqlite3"))
         .await
         .unwrap();
     let control_events = store
-        .read_events(&EventStreamId::new(format!("control:{thread_id}")), None)
+        .read_events(
+            &verlet::EventStreamId::new(format!("control:{thread_id}")),
+            None,
+        )
         .await
         .unwrap();
     let thread_events = store
-        .read_events(&EventStreamId::new(format!("thread:{thread_id}")), None)
+        .read_events(
+            &verlet::EventStreamId::new(format!("thread:{thread_id}")),
+            None,
+        )
         .await
         .unwrap();
     assert_admission_precedes_execution(&control_events, &thread_events, "surface:debug-rpc");
@@ -267,7 +262,8 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     )
     .await;
     assert_success(&offline_bind);
-    let offline_explanation: Value = serde_json::from_slice(&offline_bind.stdout).unwrap();
+    let offline_explanation: serde_json::Value =
+        serde_json::from_slice(&offline_bind.stdout).unwrap();
     assert_eq!(offline_explanation, live_explanation);
 }
 
@@ -338,13 +334,14 @@ fn assert_admission_precedes_execution(
     let admission = control_events
         .iter()
         .find(|event| {
-            event.kind == EventKind::AdmissionDecided && event.payload["route_id"] == route_id
+            event.kind == verlet::EventKind::AdmissionDecided
+                && event.payload["route_id"] == route_id
         })
         .expect("control stream missing expected admission.decided");
     let executed = thread_events
         .iter()
         .find(|event| {
-            event.kind == EventKind::SessionEntryAppended
+            event.kind == verlet::EventKind::SessionEntryAppended
                 && event.payload["runtime_kind"] != "thread_started"
         })
         .expect("thread stream missing executed turn session entry");
@@ -365,39 +362,43 @@ fn assert_admission_precedes_execution(
 }
 
 struct DebugRpcServer {
-    addr: SocketAddr,
+    addr: std::net::SocketAddr,
     token: String,
     adapter_token: String,
-    task: Option<JoinHandle<verlet::VerletResult<()>>>,
+    task: Option<tokio::task::JoinHandle<verlet::VerletResult<()>>>,
 }
 
 impl DebugRpcServer {
-    async fn start(root: &Path, workspace: &Path) -> Self {
+    async fn start(root: &std::path::Path, workspace: &std::path::Path) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let listen = AppServerListenAddr::WebSocket(addr);
-        let mut config = VerletAppServerConfig::local(listen, workspace);
+        let listen = verlet::AppServerListenAddr::WebSocket(addr);
+        let mut config = verlet::VerletAppServerConfig::local(listen, workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
-        let app = VerletAppServer::new_local(config).await.unwrap();
-        let store = SqliteSessionStore::open(app.session_store_path())
+        let app = verlet::VerletAppServer::new_local(config).await.unwrap();
+        let store = verlet::SqliteSessionStore::open(app.session_store_path())
             .await
             .unwrap();
-        let authority = SqliteIdentityAuthority::new(store, Arc::new(SystemDaemonClock), None)
-            .await
-            .unwrap();
-        let principal = PrincipalId::new(app.user_id());
+        let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(
+            store,
+            std::sync::Arc::new(verlet::SystemDaemonClock),
+            None,
+        )
+        .await
+        .unwrap();
+        let principal = verlet::daemon::identity::PrincipalId::new(app.user_id());
         let token = authority
             .mint_credential(&principal, &principal, None)
             .await
             .unwrap()
             .1;
-        let adapter = PrincipalId::new("adapter:debug-rpc-error-test");
+        let adapter = verlet::daemon::identity::PrincipalId::new("adapter:debug-rpc-error-test");
         authority
             .declare_principal(
                 &principal,
                 &adapter,
-                PrincipalKind::Adapter,
+                verlet::daemon::identity::PrincipalKind::Adapter,
                 "Debug RPC error test adapter",
             )
             .await
@@ -437,14 +438,14 @@ impl Drop for DebugRpcServer {
     }
 }
 
-struct TestRoot(PathBuf);
+struct TestRoot(std::path::PathBuf);
 
 impl TestRoot {
     fn new(prefix: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("{prefix}-{}", Uuid::now_v7().simple())))
+        Self(std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::now_v7().simple())))
     }
 
-    fn path(&self) -> &Path {
+    fn path(&self) -> &std::path::Path {
         &self.0
     }
 }
@@ -455,8 +456,8 @@ impl Drop for TestRoot {
     }
 }
 
-fn unused_loopback_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+fn unused_loopback_addr() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
     addr
@@ -465,12 +466,12 @@ fn unused_loopback_addr() -> SocketAddr {
 async fn wait_for_websocket(url: &str, token: &str) {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match CodexTuiTestClient::connect_websocket(
+        match verlet::CodexTuiTestClient::connect_websocket(
             url,
-            CodexTuiConnectConfig {
+            verlet::CodexTuiConnectConfig {
                 client_name: "verlet-debug-rpc-test-wait".to_string(),
                 bearer_token: Some(token.to_string()),
-                ..CodexTuiConnectConfig::default()
+                ..verlet::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -481,7 +482,7 @@ async fn wait_for_websocket(url: &str, token: &str) {
             }
             Err(err) => {
                 last_error = Some(err.to_string());
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
     }
@@ -491,9 +492,9 @@ async fn wait_for_websocket(url: &str, token: &str) {
     );
 }
 
-async fn run_verlet<const N: usize>(args: [&str; N], token: Option<&str>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_verlet"));
-    command.args(args).stdin(Stdio::null());
+async fn run_verlet<const N: usize>(args: [&str; N], token: Option<&str>) -> std::process::Output {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    command.args(args).stdin(std::process::Stdio::null());
     if let Some(token) = token {
         command.env("VERLET_APP_SERVER_TOKEN", token);
     } else {
@@ -502,7 +503,7 @@ async fn run_verlet<const N: usize>(args: [&str; N], token: Option<&str>) -> Out
     command.output().await.unwrap()
 }
 
-fn assert_success(output: &Output) {
+fn assert_success(output: &std::process::Output) {
     assert!(
         output.status.success(),
         "command failed: status={:?}\nstdout={}\nstderr={}",
@@ -512,14 +513,14 @@ fn assert_success(output: &Output) {
     );
 }
 
-fn jsonl_lines(bytes: &[u8]) -> Vec<Value> {
+fn jsonl_lines(bytes: &[u8]) -> Vec<serde_json::Value> {
     String::from_utf8_lossy(bytes)
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
 }
 
-fn agent_delta_text(notifications: &[Value]) -> String {
+fn agent_delta_text(notifications: &[serde_json::Value]) -> String {
     notifications
         .iter()
         .filter(|notification| notification["method"].as_str() == Some("item/agentMessage/delta"))
@@ -528,7 +529,7 @@ fn agent_delta_text(notifications: &[Value]) -> String {
         .join("")
 }
 
-fn completed_turn_text(notifications: &[Value]) -> String {
+fn completed_turn_text(notifications: &[serde_json::Value]) -> String {
     notifications
         .iter()
         .find(|notification| notification["method"].as_str() == Some("turn/completed"))
@@ -541,12 +542,14 @@ fn completed_turn_text(notifications: &[Value]) -> String {
         .join("")
 }
 
-fn item_text(item: &Value) -> Option<&str> {
-    item.get("text").and_then(Value::as_str).or_else(|| {
-        item.get("content")
-            .and_then(Value::as_array)
-            .and_then(|content| content.first())
-            .and_then(|content| content.get("text"))
-            .and_then(Value::as_str)
-    })
+fn item_text(item: &serde_json::Value) -> Option<&str> {
+    item.get("text")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            item.get("content")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|content| content.get("text"))
+                .and_then(serde_json::Value::as_str)
+        })
 }

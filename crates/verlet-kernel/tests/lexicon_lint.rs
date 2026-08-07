@@ -4,10 +4,6 @@
 //! settled terminology decisions from quietly drifting in public kernel
 //! surfaces.
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-
 const BASELINE: &str = include_str!("lexicon_lint_baseline.txt");
 const HINT: &str = "see docs/kernel-invariants.md; either rename the kernel surface or add `// lexicon-allow: <word> - <reason>` on the offending line or the line above";
 
@@ -89,10 +85,10 @@ impl Occurrence {
     }
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(Path::parent)
+        .and_then(std::path::Path::parent)
         .expect("kernel crate should live two levels below repo root")
         .to_path_buf()
 }
@@ -105,7 +101,7 @@ fn kernel_source_obeys_lexicon_banned_words() {
     let mut occurrences = Vec::new();
 
     for path in rust_files_under(&source_root) {
-        let source = fs::read_to_string(&path)
+        let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
         let relative_path = path
             .strip_prefix(&root)
@@ -120,10 +116,10 @@ fn kernel_source_obeys_lexicon_banned_words() {
     }
 }
 
-fn rust_files_under(root: &Path) -> Vec<PathBuf> {
-    fn visit(path: &Path, files: &mut Vec<PathBuf>) {
-        for entry in
-            fs::read_dir(path).unwrap_or_else(|err| panic!("read dir {}: {err}", path.display()))
+fn rust_files_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn visit(path: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path)
+            .unwrap_or_else(|err| panic!("read dir {}: {err}", path.display()))
         {
             let path = entry
                 .unwrap_or_else(|err| panic!("read dir entry {}: {err}", path.display()))
@@ -618,8 +614,8 @@ fn allow_marker_matches(line: &str, word: &str) -> bool {
         == Some(word)
 }
 
-fn parse_baseline(text: &str) -> BTreeMap<(String, String), usize> {
-    let mut baseline = BTreeMap::new();
+fn parse_baseline(text: &str) -> std::collections::BTreeMap<(String, String), usize> {
+    let mut baseline = std::collections::BTreeMap::new();
     for (line_index, raw_line) in text.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -669,9 +665,9 @@ fn parse_baseline(text: &str) -> BTreeMap<(String, String), usize> {
 
 fn compare_to_baseline(
     occurrences: &[Occurrence],
-    baseline: &BTreeMap<(String, String), usize>,
+    baseline: &std::collections::BTreeMap<(String, String), usize>,
 ) -> Result<(), String> {
-    let mut actual_counts = BTreeMap::<(String, String), usize>::new();
+    let mut actual_counts = std::collections::BTreeMap::<(String, String), usize>::new();
     let mut new_occurrences = Vec::new();
 
     for occurrence in occurrences {
@@ -729,8 +725,10 @@ fn compare_to_baseline(
     Err(message)
 }
 
-fn baseline_counts(occurrences: &[Occurrence]) -> BTreeMap<(String, String), usize> {
-    let mut counts = BTreeMap::new();
+fn baseline_counts(
+    occurrences: &[Occurrence],
+) -> std::collections::BTreeMap<(String, String), usize> {
+    let mut counts = std::collections::BTreeMap::new();
     for occurrence in occurrences {
         counts
             .entry((
@@ -774,7 +772,7 @@ fn scanner_count_baseline_suppresses_existing_debt() {
 fn count_baseline_reports_shrunk_debt() {
     let source = "pub struct CapsuleRunner;\n";
     let occurrences = scan_source("crates/verlet-kernel/src/example.rs", source);
-    let baseline = BTreeMap::from([(
+    let baseline = std::collections::BTreeMap::from([(
         (
             "crates/verlet-kernel/src/example.rs".to_string(),
             "capsule".to_string(),
@@ -789,7 +787,8 @@ fn count_baseline_reports_shrunk_debt() {
 fn count_baseline_reports_new_debt_with_line_and_hint() {
     let source = "pub struct CapsuleRunner;\n";
     let occurrences = scan_source("crates/verlet-kernel/src/example.rs", source);
-    let message = compare_to_baseline(&occurrences, &BTreeMap::new()).unwrap_err();
+    let message =
+        compare_to_baseline(&occurrences, &std::collections::BTreeMap::new()).unwrap_err();
     assert!(message.contains("crates/verlet-kernel/src/example.rs:1: capsule"));
     assert!(message.contains(HINT));
 }

@@ -1,12 +1,9 @@
 //! The offline `identity` subcommand family.
 
-use super::*;
-use crate::daemon::identity::{
-    IdentityAuthority, PrincipalId, PrincipalKind, SqliteIdentityAuthority,
-};
+use crate::daemon::identity::IdentityAuthority as _;
 
 /// Dispatch an offline identity-store command.
-pub(super) async fn run_identity(mut args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_identity(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -28,7 +25,7 @@ pub(super) async fn run_identity(mut args: Vec<OsString>) -> VerletResult<()> {
             "revoke-principal" => print_identity_revoke_principal_help(),
             "list" => print_identity_list_help(),
             other => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown identity subcommand {other:?}"
                 )));
             }
@@ -42,14 +39,14 @@ pub(super) async fn run_identity(mut args: Vec<OsString>) -> VerletResult<()> {
         "revoke-credential" => identity_revoke_credential(args).await,
         "revoke-principal" => identity_revoke_principal(args).await,
         "list" => identity_list(args).await,
-        other => Err(usage_error(format!(
+        other => Err(crate::cli::usage_error(format!(
             "unknown identity subcommand {other:?}; use `verlet identity --help`"
         ))),
     }
 }
 
 /// Declare the first operator and print its credential once.
-pub(super) async fn identity_bootstrap(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn identity_bootstrap(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_identity_bootstrap_args(args)?;
     if options.help {
         print_identity_bootstrap_help();
@@ -57,13 +54,16 @@ pub(super) async fn identity_bootstrap(args: Vec<OsString>) -> VerletResult<()> 
     }
     let principal_id = options
         .principal_id
-        .ok_or_else(|| usage_error("identity bootstrap requires <principal-id>"))?;
-    let display = options
-        .display
-        .ok_or_else(|| usage_error("identity bootstrap requires --display <display>"))?;
+        .ok_or_else(|| crate::cli::usage_error("identity bootstrap requires <principal-id>"))?;
+    let display = options.display.ok_or_else(|| {
+        crate::cli::usage_error("identity bootstrap requires --display <display>")
+    })?;
     let authority = open_identity_authority(options.state_home).await?;
     let (principal, credential, token) = authority
-        .bootstrap_operator(&PrincipalId::new(principal_id), &display)
+        .bootstrap_operator(
+            &crate::daemon::identity::PrincipalId::new(principal_id),
+            &display,
+        )
         .await
         .map_err(identity_cli_error)?;
     println!("principal_id {}", principal.principal_id);
@@ -74,7 +74,7 @@ pub(super) async fn identity_bootstrap(args: Vec<OsString>) -> VerletResult<()> 
 }
 
 /// Declare an adapter principal in the offline identity store.
-pub(super) async fn identity_declare(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn identity_declare(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_identity_declare_args(args)?;
     if options.help {
         print_identity_declare_help();
@@ -82,21 +82,21 @@ pub(super) async fn identity_declare(args: Vec<OsString>) -> VerletResult<()> {
     }
     let principal_id = options
         .principal_id
-        .ok_or_else(|| usage_error("identity declare requires <principal-id>"))?;
+        .ok_or_else(|| crate::cli::usage_error("identity declare requires <principal-id>"))?;
     let kind = options
         .kind
-        .ok_or_else(|| usage_error("identity declare requires --kind adapter"))?;
+        .ok_or_else(|| crate::cli::usage_error("identity declare requires --kind adapter"))?;
     let display = options
         .display
-        .ok_or_else(|| usage_error("identity declare requires --display <display>"))?;
-    let declared_by = options
-        .declared_by
-        .ok_or_else(|| usage_error("identity declare requires --declared-by <principal-id>"))?;
+        .ok_or_else(|| crate::cli::usage_error("identity declare requires --display <display>"))?;
+    let declared_by = options.declared_by.ok_or_else(|| {
+        crate::cli::usage_error("identity declare requires --declared-by <principal-id>")
+    })?;
     let authority = open_identity_authority(options.state_home).await?;
     let record = authority
         .declare_principal(
-            &PrincipalId::new(declared_by),
-            &PrincipalId::new(principal_id),
+            &crate::daemon::identity::PrincipalId::new(declared_by),
+            &crate::daemon::identity::PrincipalId::new(principal_id),
             kind,
             &display,
         )
@@ -107,7 +107,7 @@ pub(super) async fn identity_declare(args: Vec<OsString>) -> VerletResult<()> {
 }
 
 /// Mint and print one credential for an active principal.
-pub(super) async fn identity_mint(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn identity_mint(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_identity_mint_args(args)?;
     if options.help {
         print_identity_mint_help();
@@ -115,15 +115,15 @@ pub(super) async fn identity_mint(args: Vec<OsString>) -> VerletResult<()> {
     }
     let principal_id = options
         .principal_id
-        .ok_or_else(|| usage_error("identity mint requires <principal-id>"))?;
-    let minted_by = options
-        .minted_by
-        .ok_or_else(|| usage_error("identity mint requires --minted-by <principal-id>"))?;
+        .ok_or_else(|| crate::cli::usage_error("identity mint requires <principal-id>"))?;
+    let minted_by = options.minted_by.ok_or_else(|| {
+        crate::cli::usage_error("identity mint requires --minted-by <principal-id>")
+    })?;
     let authority = open_identity_authority(options.state_home).await?;
     let (credential, token) = authority
         .mint_credential(
-            &PrincipalId::new(minted_by),
-            &PrincipalId::new(principal_id),
+            &crate::daemon::identity::PrincipalId::new(minted_by),
+            &crate::daemon::identity::PrincipalId::new(principal_id),
             options.expires_at_ms,
         )
         .await
@@ -135,21 +135,26 @@ pub(super) async fn identity_mint(args: Vec<OsString>) -> VerletResult<()> {
 }
 
 /// Revoke one credential in the offline identity store.
-pub(super) async fn identity_revoke_credential(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn identity_revoke_credential(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<()> {
     let options = parse_identity_revoke_args(args, "identity revoke-credential")?;
     if options.help {
         print_identity_revoke_credential_help();
         return Ok(());
     }
-    let credential_id = options
-        .subject_id
-        .ok_or_else(|| usage_error("identity revoke-credential requires <credential-id>"))?;
+    let credential_id = options.subject_id.ok_or_else(|| {
+        crate::cli::usage_error("identity revoke-credential requires <credential-id>")
+    })?;
     let revoked_by = options.revoked_by.ok_or_else(|| {
-        usage_error("identity revoke-credential requires --revoked-by <principal-id>")
+        crate::cli::usage_error("identity revoke-credential requires --revoked-by <principal-id>")
     })?;
     let authority = open_identity_authority(options.state_home).await?;
     authority
-        .revoke_credential(&PrincipalId::new(revoked_by), &credential_id)
+        .revoke_credential(
+            &crate::daemon::identity::PrincipalId::new(revoked_by),
+            &credential_id,
+        )
         .await
         .map_err(identity_cli_error)?;
     println!("revoked credential {credential_id}");
@@ -157,23 +162,25 @@ pub(super) async fn identity_revoke_credential(args: Vec<OsString>) -> VerletRes
 }
 
 /// Revoke one principal in the offline identity store.
-pub(super) async fn identity_revoke_principal(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn identity_revoke_principal(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<()> {
     let options = parse_identity_revoke_args(args, "identity revoke-principal")?;
     if options.help {
         print_identity_revoke_principal_help();
         return Ok(());
     }
-    let principal_id = options
-        .subject_id
-        .ok_or_else(|| usage_error("identity revoke-principal requires <principal-id>"))?;
+    let principal_id = options.subject_id.ok_or_else(|| {
+        crate::cli::usage_error("identity revoke-principal requires <principal-id>")
+    })?;
     let revoked_by = options.revoked_by.ok_or_else(|| {
-        usage_error("identity revoke-principal requires --revoked-by <principal-id>")
+        crate::cli::usage_error("identity revoke-principal requires --revoked-by <principal-id>")
     })?;
     let authority = open_identity_authority(options.state_home).await?;
     authority
         .revoke_principal(
-            &PrincipalId::new(revoked_by),
-            &PrincipalId::new(&principal_id),
+            &crate::daemon::identity::PrincipalId::new(revoked_by),
+            &crate::daemon::identity::PrincipalId::new(&principal_id),
         )
         .await
         .map_err(identity_cli_error)?;
@@ -182,7 +189,7 @@ pub(super) async fn identity_revoke_principal(args: Vec<OsString>) -> VerletResu
 }
 
 /// Print redacted principal and credential records from the identity store.
-pub(super) async fn identity_list(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn identity_list(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_identity_list_args(args)?;
     if options.help {
         print_identity_list_help();
@@ -200,7 +207,7 @@ pub(super) async fn identity_list(args: Vec<OsString>) -> VerletResult<()> {
             .await
             .map_err(identity_cli_error)?
         {
-            credentials.push(json!({
+            credentials.push(serde_json::json!({
                 "credential_id": credential.credential_id,
                 "principal_id": credential.principal_id,
                 "minted_by": credential.minted_by,
@@ -213,7 +220,7 @@ pub(super) async fn identity_list(args: Vec<OsString>) -> VerletResult<()> {
     let principals = principals
         .into_iter()
         .map(|principal| {
-            json!({
+            serde_json::json!({
                 "principal_id": principal.principal_id,
                 "kind": principal.kind,
                 "display": principal.display,
@@ -225,12 +232,12 @@ pub(super) async fn identity_list(args: Vec<OsString>) -> VerletResult<()> {
         .collect::<Vec<_>>();
     println!(
         "{}",
-        serde_json::to_string_pretty(&json!({
+        serde_json::to_string_pretty(&serde_json::json!({
             "principals": principals,
             "credentials": credentials,
         }))
         .map_err(|error| {
-            VerletError::RuntimeFactory(format!("failed to encode identity list: {error}"))
+            crate::VerletError::RuntimeFactory(format!("failed to encode identity list: {error}"))
         })?
     );
     Ok(())
@@ -240,17 +247,17 @@ pub(super) async fn identity_list(args: Vec<OsString>) -> VerletResult<()> {
 struct IdentityBootstrapArgs {
     principal_id: Option<String>,
     display: Option<String>,
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 struct IdentityDeclareArgs {
     principal_id: Option<String>,
-    kind: Option<PrincipalKind>,
+    kind: Option<crate::daemon::identity::PrincipalKind>,
     display: Option<String>,
     declared_by: Option<String>,
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
@@ -259,7 +266,7 @@ struct IdentityMintArgs {
     principal_id: Option<String>,
     minted_by: Option<String>,
     expires_at_ms: Option<i64>,
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
@@ -267,17 +274,19 @@ struct IdentityMintArgs {
 struct IdentityRevokeArgs {
     subject_id: Option<String>,
     revoked_by: Option<String>,
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 struct IdentityListArgs {
-    state_home: Option<PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
-fn parse_identity_bootstrap_args(args: Vec<OsString>) -> VerletResult<IdentityBootstrapArgs> {
+fn parse_identity_bootstrap_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<IdentityBootstrapArgs> {
     let mut principal_id = None;
     let mut display = None;
     let mut state_home = None;
@@ -287,9 +296,14 @@ fn parse_identity_bootstrap_args(args: Vec<OsString>) -> VerletResult<IdentityBo
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--display" => display = Some(required_string_value(&mut iter, "--display")?),
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                state_home = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--state-home",
+                )?)
+            }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown identity bootstrap argument {other:?}"
                 )));
             }
@@ -304,7 +318,9 @@ fn parse_identity_bootstrap_args(args: Vec<OsString>) -> VerletResult<IdentityBo
     })
 }
 
-fn parse_identity_declare_args(args: Vec<OsString>) -> VerletResult<IdentityDeclareArgs> {
+fn parse_identity_declare_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<IdentityDeclareArgs> {
     let mut principal_id = None;
     let mut kind = None;
     let mut display = None;
@@ -323,9 +339,14 @@ fn parse_identity_declare_args(args: Vec<OsString>) -> VerletResult<IdentityDecl
             "--declared-by" => {
                 declared_by = Some(required_string_value(&mut iter, "--declared-by")?)
             }
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                state_home = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--state-home",
+                )?)
+            }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown identity declare argument {other:?}"
                 )));
             }
@@ -342,7 +363,9 @@ fn parse_identity_declare_args(args: Vec<OsString>) -> VerletResult<IdentityDecl
     })
 }
 
-fn parse_identity_mint_args(args: Vec<OsString>) -> VerletResult<IdentityMintArgs> {
+fn parse_identity_mint_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<IdentityMintArgs> {
     let mut principal_id = None;
     let mut minted_by = None;
     let mut expires_at_ms = None;
@@ -356,12 +379,17 @@ fn parse_identity_mint_args(args: Vec<OsString>) -> VerletResult<IdentityMintArg
             "--expires-at-ms" => {
                 let value = required_string_value(&mut iter, "--expires-at-ms")?;
                 expires_at_ms = Some(value.parse::<i64>().map_err(|_| {
-                    usage_error("identity mint --expires-at-ms must be an integer")
+                    crate::cli::usage_error("identity mint --expires-at-ms must be an integer")
                 })?);
             }
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                state_home = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--state-home",
+                )?)
+            }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown identity mint argument {other:?}"
                 )));
             }
@@ -378,9 +406,9 @@ fn parse_identity_mint_args(args: Vec<OsString>) -> VerletResult<IdentityMintArg
 }
 
 fn parse_identity_revoke_args(
-    args: Vec<OsString>,
+    args: Vec<std::ffi::OsString>,
     command: &str,
-) -> VerletResult<IdentityRevokeArgs> {
+) -> crate::VerletResult<IdentityRevokeArgs> {
     let mut subject_id = None;
     let mut revoked_by = None;
     let mut state_home = None;
@@ -390,9 +418,16 @@ fn parse_identity_revoke_args(
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--revoked-by" => revoked_by = Some(required_string_value(&mut iter, "--revoked-by")?),
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                state_home = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--state-home",
+                )?)
+            }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown {command} argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown {command} argument {other:?}"
+                )));
             }
             _ => set_identity_subject(&mut subject_id, arg, command)?,
         }
@@ -405,16 +440,23 @@ fn parse_identity_revoke_args(
     })
 }
 
-fn parse_identity_list_args(args: Vec<OsString>) -> VerletResult<IdentityListArgs> {
+fn parse_identity_list_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<IdentityListArgs> {
     let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                state_home = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--state-home",
+                )?)
+            }
             other => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown identity list argument {other:?}"
                 )));
             }
@@ -425,11 +467,11 @@ fn parse_identity_list_args(args: Vec<OsString>) -> VerletResult<IdentityListArg
 
 fn set_identity_subject(
     subject: &mut Option<String>,
-    value: OsString,
+    value: std::ffi::OsString,
     command: &str,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     if subject.is_some() {
-        return Err(usage_error(format!(
+        return Err(crate::cli::usage_error(format!(
             "{command} accepts exactly one positional id"
         )));
     }
@@ -438,51 +480,54 @@ fn set_identity_subject(
 }
 
 fn required_string_value(
-    iter: &mut impl Iterator<Item = OsString>,
+    iter: &mut impl Iterator<Item = std::ffi::OsString>,
     option: &str,
-) -> VerletResult<String> {
+) -> crate::VerletResult<String> {
     iter.next()
         .map(|value| value.to_string_lossy().to_string())
-        .ok_or_else(|| usage_error(format!("{option} requires a value")))
+        .ok_or_else(|| crate::cli::usage_error(format!("{option} requires a value")))
 }
 
-fn parse_declarable_cli_kind(value: &str) -> VerletResult<PrincipalKind> {
+fn parse_declarable_cli_kind(
+    value: &str,
+) -> crate::VerletResult<crate::daemon::identity::PrincipalKind> {
     match value {
-        "adapter" => Ok(PrincipalKind::Adapter),
-        "member" => Err(usage_error(
+        "adapter" => Ok(crate::daemon::identity::PrincipalKind::Adapter),
+        "member" => Err(crate::cli::usage_error(
             "member principals are reserved and cannot be declared in identity plane v0",
         )),
-        "operator" => Err(usage_error(
+        "operator" => Err(crate::cli::usage_error(
             "identity declare only creates adapter principals; use identity bootstrap for the first operator",
         )),
-        other => Err(usage_error(format!(
+        other => Err(crate::cli::usage_error(format!(
             "unknown identity principal kind {other:?}; expected adapter"
         ))),
     }
 }
 
 async fn open_identity_authority(
-    state_home: Option<PathBuf>,
-) -> VerletResult<SqliteIdentityAuthority> {
+    state_home: Option<std::path::PathBuf>,
+) -> crate::VerletResult<crate::daemon::identity::SqliteIdentityAuthority> {
     let state_home = match state_home {
         Some(state_home) => state_home,
-        None => default_user_state_home()?,
+        None => crate::cli::secret::default_user_state_home()?,
     };
-    let store = SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+    let store = crate::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
         .await
         .map_err(identity_cli_error)?;
-    let clock: Arc<dyn crate::DaemonClock> = Arc::new(SystemDaemonClock);
-    SqliteIdentityAuthority::new(store, clock, None)
+    let clock: std::sync::Arc<dyn crate::DaemonClock> =
+        std::sync::Arc::new(crate::SystemDaemonClock);
+    crate::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
         .await
         .map_err(identity_cli_error)
 }
 
-fn identity_cli_error(error: impl std::fmt::Display) -> VerletError {
+fn identity_cli_error(error: impl std::fmt::Display) -> crate::VerletError {
     let message = error.to_string();
-    if turso_cross_process_lock_error(&message) {
-        cross_process_database_guidance("stop the daemon and retry")
+    if crate::cli::secret::turso_cross_process_lock_error(&message) {
+        crate::cli::secret::cross_process_database_guidance("stop the daemon and retry")
     } else {
-        VerletError::RuntimeFactory(format!("identity store failed: {message}"))
+        crate::VerletError::RuntimeFactory(format!("identity store failed: {message}"))
     }
 }
 
@@ -575,14 +620,13 @@ Prints principals and redacted credential metadata.\n"
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn declare_parser_rejects_reserved_member_kind() {
-        let error = parse_identity_declare_args(vec![
-            OsString::from("member:reserved"),
-            OsString::from("--kind"),
-            OsString::from("member"),
+        let error = crate::cli::identity::parse_identity_declare_args(vec![
+            std::ffi::OsString::from("member:reserved"),
+            std::ffi::OsString::from("--kind"),
+            std::ffi::OsString::from("member"),
         ])
         .unwrap_err();
         assert!(error.to_string().contains("member principals are reserved"));

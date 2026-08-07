@@ -1,24 +1,17 @@
-use crate::{
-    VerletOperationsError as VerletError, VerletResult, validate_record_name, wasm_sha256,
-};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use uuid::Uuid;
+use sha2::Digest as _;
+use std::io::Write as _;
 
 const SKILL_PACKAGE_SCHEMA_VERSION: u32 = 1;
 const SKILL_RECORD_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub struct LocalSkillRegistry {
-    root: PathBuf,
+    root: std::path::PathBuf,
     blobs: SkillPackageBlobStore,
 }
 
 impl LocalSkillRegistry {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
         let root = root.into();
         Self {
             blobs: SkillPackageBlobStore::new(root.join("blobs")),
@@ -26,14 +19,14 @@ impl LocalSkillRegistry {
         }
     }
 
-    pub fn root(&self) -> &Path {
+    pub fn root(&self) -> &std::path::Path {
         &self.root
     }
 
     pub fn publish_directory(
         &self,
         request: PublishSkillPackageRequest,
-    ) -> VerletResult<PublishedSkillPackageRecord> {
+    ) -> crate::VerletResult<PublishedSkillPackageRecord> {
         let package = SkillPackage::from_directory(&request.package_dir, request.name.as_deref())?;
         self.publish_package(package)
     }
@@ -41,7 +34,7 @@ impl LocalSkillRegistry {
     pub fn publish_package(
         &self,
         package: SkillPackage,
-    ) -> VerletResult<PublishedSkillPackageRecord> {
+    ) -> crate::VerletResult<PublishedSkillPackageRecord> {
         let bytes = package.to_artifact_bytes()?;
         let hash = self.blobs.put(&bytes)?;
         let record = PublishedSkillPackageRecord {
@@ -56,25 +49,25 @@ impl LocalSkillRegistry {
         Ok(record)
     }
 
-    pub fn load_record(&self, name: &str) -> VerletResult<PublishedSkillPackageRecord> {
-        let name = validate_record_name(name)?;
+    pub fn load_record(&self, name: &str) -> crate::VerletResult<PublishedSkillPackageRecord> {
+        let name = crate::validate_record_name(name)?;
         let path = self.record_path(&name)?;
-        let bytes = fs::read(&path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let bytes = std::fs::read(&path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read skill package record {}: {err}",
                 path.display()
             ))
         })?;
         let record: PublishedSkillPackageRecord =
             serde_json::from_slice(&bytes).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to decode skill package record {}: {err}",
                     path.display()
                 ))
             })?;
         record.validate()?;
         if record.name != name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package record {} names {:?}, expected {:?}",
                 path.display(),
                 record.name,
@@ -88,26 +81,26 @@ impl LocalSkillRegistry {
         &self,
         name: &str,
         artifact_hash: &str,
-    ) -> VerletResult<PublishedSkillPackageRecord> {
-        let name = validate_record_name(name)?;
+    ) -> crate::VerletResult<PublishedSkillPackageRecord> {
+        let name = crate::validate_record_name(name)?;
         validate_skill_hash(artifact_hash)?;
         let path = self.version_record_path(&name, artifact_hash)?;
-        let bytes = fs::read(&path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let bytes = std::fs::read(&path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read skill package version record {}: {err}",
                 path.display()
             ))
         })?;
         let record: PublishedSkillPackageRecord =
             serde_json::from_slice(&bytes).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to decode skill package version record {}: {err}",
                     path.display()
                 ))
             })?;
         record.validate()?;
         if record.name != name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package version record {} names {:?}, expected {:?}",
                 path.display(),
                 record.name,
@@ -115,7 +108,7 @@ impl LocalSkillRegistry {
             )));
         }
         if record.active_artifact_hash != artifact_hash {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package version record {} uses artifact hash {}, expected {}",
                 path.display(),
                 record.active_artifact_hash,
@@ -125,13 +118,17 @@ impl LocalSkillRegistry {
         Ok(record)
     }
 
-    pub fn record_path(&self, name: &str) -> VerletResult<PathBuf> {
-        let name = validate_record_name(name)?;
+    pub fn record_path(&self, name: &str) -> crate::VerletResult<std::path::PathBuf> {
+        let name = crate::validate_record_name(name)?;
         Ok(self.root.join("records").join(format!("{name}.json")))
     }
 
-    pub fn version_record_path(&self, name: &str, artifact_hash: &str) -> VerletResult<PathBuf> {
-        let name = validate_record_name(name)?;
+    pub fn version_record_path(
+        &self,
+        name: &str,
+        artifact_hash: &str,
+    ) -> crate::VerletResult<std::path::PathBuf> {
+        let name = crate::validate_record_name(name)?;
         validate_skill_hash(artifact_hash)?;
         Ok(self
             .root
@@ -140,7 +137,10 @@ impl LocalSkillRegistry {
             .join(format!("{artifact_hash}.json")))
     }
 
-    fn write_record_atomically(&self, record: &PublishedSkillPackageRecord) -> VerletResult<()> {
+    fn write_record_atomically(
+        &self,
+        record: &PublishedSkillPackageRecord,
+    ) -> crate::VerletResult<()> {
         let path = self.record_path(&record.name)?;
         write_json_atomically(
             &path,
@@ -152,7 +152,7 @@ impl LocalSkillRegistry {
     fn write_version_record_atomically(
         &self,
         record: &PublishedSkillPackageRecord,
-    ) -> VerletResult<()> {
+    ) -> crate::VerletResult<()> {
         record.validate()?;
         let path = self.version_record_path(&record.name, &record.active_artifact_hash)?;
         if path.exists() {
@@ -172,91 +172,91 @@ impl LocalSkillRegistry {
 
 #[derive(Clone, Debug)]
 pub struct PublishSkillPackageRequest {
-    pub package_dir: PathBuf,
+    pub package_dir: std::path::PathBuf,
     pub name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 struct SkillPackageBlobStore {
-    root: PathBuf,
+    root: std::path::PathBuf,
 }
 
 impl SkillPackageBlobStore {
-    fn new(root: impl Into<PathBuf>) -> Self {
+    fn new(root: impl Into<std::path::PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    fn put(&self, bytes: &[u8]) -> VerletResult<String> {
-        let hash = wasm_sha256(bytes);
+    fn put(&self, bytes: &[u8]) -> crate::VerletResult<String> {
+        let hash = crate::wasm_sha256(bytes);
         let path = self.artifact_path(&hash)?;
         if path.exists() {
-            let existing = fs::read(&path).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            let existing = std::fs::read(&path).map_err(|err| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to read existing skill package blob {}: {err}",
                     path.display()
                 ))
             })?;
-            if wasm_sha256(&existing) == hash {
+            if crate::wasm_sha256(&existing) == hash {
                 return Ok(hash);
             }
-            fs::remove_file(&path).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            std::fs::remove_file(&path).map_err(|err| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to replace corrupt skill package blob {}: {err}",
                     path.display()
                 ))
             })?;
         }
         let Some(parent) = path.parent() else {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package blob path {} has no parent directory",
                 path.display()
             )));
         };
-        fs::create_dir_all(parent).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        std::fs::create_dir_all(parent).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to create skill package blob directory {}: {err}",
                 parent.display()
             ))
         })?;
-        let tmp_path = parent.join(format!(".{hash}.tmp.{}", Uuid::now_v7()));
+        let tmp_path = parent.join(format!(".{hash}.tmp.{}", uuid::Uuid::now_v7()));
         {
-            let mut file = fs::File::create(&tmp_path).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            let mut file = std::fs::File::create(&tmp_path).map_err(|err| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to create temp skill package blob {}: {err}",
                     tmp_path.display()
                 ))
             })?;
             file.write_all(bytes).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to write temp skill package blob {}: {err}",
                     tmp_path.display()
                 ))
             })?;
             file.sync_all().map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to sync temp skill package blob {}: {err}",
                     tmp_path.display()
                 ))
             })?;
         }
-        match fs::rename(&tmp_path, &path) {
+        match std::fs::rename(&tmp_path, &path) {
             Ok(()) => Ok(hash),
             Err(err) if path.exists() => {
-                let _ = fs::remove_file(&tmp_path);
+                let _ = std::fs::remove_file(&tmp_path);
                 if err.kind() == std::io::ErrorKind::AlreadyExists {
                     Ok(hash)
                 } else {
                     Ok(hash)
                 }
             }
-            Err(err) => Err(VerletError::RuntimeFactory(format!(
+            Err(err) => Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to install skill package blob {}: {err}",
                 path.display()
             ))),
         }
     }
 
-    fn artifact_path(&self, hash: &str) -> VerletResult<PathBuf> {
+    fn artifact_path(&self, hash: &str) -> crate::VerletResult<std::path::PathBuf> {
         validate_skill_hash(hash)?;
         Ok(self
             .root
@@ -265,7 +265,7 @@ impl SkillPackageBlobStore {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PublishedSkillPackageRecord {
     pub schema_version: u32,
     pub name: String,
@@ -278,16 +278,16 @@ impl PublishedSkillPackageRecord {
         format!("skill://{}@sha256:{}", self.name, self.active_artifact_hash)
     }
 
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         if self.schema_version != SKILL_RECORD_SCHEMA_VERSION {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "unsupported skill package record schema version {}",
                 self.schema_version
             )));
         }
-        let name = validate_record_name(&self.name)?;
+        let name = crate::validate_record_name(&self.name)?;
         if name != self.name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package record name {:?} did not normalize to itself",
                 self.name
             )));
@@ -295,15 +295,15 @@ impl PublishedSkillPackageRecord {
         validate_skill_hash(&self.active_artifact_hash)?;
         self.package.validate()?;
         if self.package.name != self.name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package record name {:?} does not match package name {:?}",
                 self.name, self.package.name
             )));
         }
         let bytes = self.package.to_artifact_bytes()?;
-        let expected = wasm_sha256(&bytes);
+        let expected = crate::wasm_sha256(&bytes);
         if expected != self.active_artifact_hash {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package record {:?} artifact hash mismatch: expected {}, got {}",
                 self.name, expected, self.active_artifact_hash
             )));
@@ -312,7 +312,7 @@ impl PublishedSkillPackageRecord {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SkillPackage {
     pub schema_version: u32,
     pub name: String,
@@ -323,54 +323,57 @@ impl SkillPackage {
     pub(crate) fn from_entries(
         name: &str,
         mut skills: Vec<SkillPackageEntry>,
-    ) -> VerletResult<Self> {
+    ) -> crate::VerletResult<Self> {
         skills.sort_by(|left, right| left.name.cmp(&right.name));
         let package = Self {
             schema_version: SKILL_PACKAGE_SCHEMA_VERSION,
-            name: validate_record_name(name)?,
+            name: crate::validate_record_name(name)?,
             skills,
         };
         package.validate()?;
         Ok(package)
     }
 
-    pub fn from_directory(package_dir: &Path, name: Option<&str>) -> VerletResult<Self> {
-        let metadata = fs::metadata(package_dir).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+    pub fn from_directory(
+        package_dir: &std::path::Path,
+        name: Option<&str>,
+    ) -> crate::VerletResult<Self> {
+        let metadata = std::fs::metadata(package_dir).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read skill package directory {}: {err}",
                 package_dir.display()
             ))
         })?;
         if !metadata.is_dir() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill publish input {} is not a directory",
                 package_dir.display()
             )));
         }
         let package_name = match name {
-            Some(name) => validate_record_name(name)?,
+            Some(name) => crate::validate_record_name(name)?,
             None => {
                 let inferred = package_dir
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| {
-                        VerletError::RuntimeFactory(format!(
+                        crate::VerletOperationsError::RuntimeFactory(format!(
                             "skill package directory {} has no package name; pass --name",
                             package_dir.display()
                         ))
                     })?;
-                validate_record_name(inferred)?
+                crate::validate_record_name(inferred)?
             }
         };
         let mut skill_dirs = Vec::new();
-        for entry in fs::read_dir(package_dir).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        for entry in std::fs::read_dir(package_dir).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read skill package directory {}: {err}",
                 package_dir.display()
             ))
         })? {
             let entry = entry.map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletOperationsError::RuntimeFactory(format!(
                     "failed to read skill package directory entry in {}: {err}",
                     package_dir.display()
                 ))
@@ -392,10 +395,10 @@ impl SkillPackage {
         Self::from_entries(&package_name, skills)
     }
 
-    pub fn to_artifact_bytes(&self) -> VerletResult<Vec<u8>> {
+    pub fn to_artifact_bytes(&self) -> crate::VerletResult<Vec<u8>> {
         self.validate()?;
         serde_json::to_vec(self).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to encode skill package artifact {:?}: {err}",
                 self.name
             ))
@@ -413,22 +416,22 @@ impl SkillPackage {
         out
     }
 
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         if self.schema_version != SKILL_PACKAGE_SCHEMA_VERSION {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "unsupported skill package schema version {}",
                 self.schema_version
             )));
         }
-        let name = validate_record_name(&self.name)?;
+        let name = crate::validate_record_name(&self.name)?;
         if name != self.name {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package name {:?} did not normalize to itself",
                 self.name
             )));
         }
         if self.skills.is_empty() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package {:?} contains no <name>/SKILL.md entries",
                 self.name
             )));
@@ -438,7 +441,7 @@ impl SkillPackage {
         for skill in &self.skills {
             skill.validate()?;
             if !names.insert(skill.name.clone()) {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                     "skill package {:?} contains duplicate skill name {:?}",
                     self.name, skill.name
                 )));
@@ -446,7 +449,7 @@ impl SkillPackage {
             if let Some(previous) = previous.replace(skill.name.clone())
                 && previous > skill.name
             {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                     "skill package {:?} skills are not sorted by name",
                     self.name
                 )));
@@ -456,7 +459,7 @@ impl SkillPackage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SkillPackageEntry {
     pub name: String,
     pub description: String,
@@ -467,10 +470,10 @@ pub struct SkillPackageEntry {
 }
 
 impl SkillPackageEntry {
-    fn from_skill_dir(skill_dir: &Path) -> VerletResult<Self> {
+    fn from_skill_dir(skill_dir: &std::path::Path) -> crate::VerletResult<Self> {
         let file = skill_dir.join("SKILL.md");
-        let body = fs::read_to_string(&file).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let body = std::fs::read_to_string(&file).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to read skill file {}: {err}",
                 file.display()
             ))
@@ -480,7 +483,7 @@ impl SkillPackageEntry {
 
     /// Parse already-read `SKILL.md` contents without reopening the path.
     /// Host binders use this after they have confined and pinned the file.
-    pub fn from_skill_body(skill_dir: &Path, body: String) -> VerletResult<Self> {
+    pub fn from_skill_body(skill_dir: &std::path::Path, body: String) -> crate::VerletResult<Self> {
         let file = skill_dir.join("SKILL.md");
         let dirname = skill_dir.file_name().and_then(|name| name.to_str());
         let metadata = parse_skill_metadata(&file, dirname, &body)?;
@@ -495,9 +498,9 @@ impl SkillPackageEntry {
         Ok(entry)
     }
 
-    pub fn validate(&self) -> VerletResult<()> {
+    pub fn validate(&self) -> crate::VerletResult<()> {
         if self.name.trim().is_empty() {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletOperationsError::RuntimeFactory(
                 "skill package entry name cannot be empty".to_string(),
             ));
         }
@@ -506,13 +509,13 @@ impl SkillPackageEntry {
             || self.name == "."
             || self.name == ".."
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package entry name {:?} is not a safe /skills filename",
                 self.name
             )));
         }
         if self.description.trim().is_empty() {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package entry {:?} description cannot be empty",
                 self.name
             )));
@@ -520,7 +523,7 @@ impl SkillPackageEntry {
         validate_skill_hash(self.body_sha256.trim_start_matches("sha256:"))?;
         let expected = sha256_hex(self.body.as_bytes());
         if self.body_sha256 != expected {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package entry {:?} body_sha256 mismatch: expected {}, got {}",
                 self.name, expected, self.body_sha256
             )));
@@ -542,16 +545,18 @@ pub enum DeclaredSkillPackageRef {
 }
 
 impl DeclaredSkillPackageRef {
-    pub fn parse(reference: &str) -> VerletResult<Self> {
+    pub fn parse(reference: &str) -> crate::VerletResult<Self> {
         let body = reference.strip_prefix("skill://").ok_or_else(|| {
-            VerletError::RuntimeFactory(format!("skill ref {reference:?} must start with skill://"))
+            crate::VerletOperationsError::RuntimeFactory(format!(
+                "skill ref {reference:?} must start with skill://"
+            ))
         })?;
         let Some((name, hash)) = body.split_once("@sha256:") else {
             return Ok(Self::Floating {
-                name: validate_record_name(body)?,
+                name: crate::validate_record_name(body)?,
             });
         };
-        let name = validate_record_name(name)?;
+        let name = crate::validate_record_name(name)?;
         validate_skill_hash(hash)?;
         Ok(Self::Pinned(SkillPackageRef {
             name,
@@ -561,12 +566,14 @@ impl DeclaredSkillPackageRef {
 }
 
 impl SkillPackageRef {
-    pub fn parse(reference: &str) -> VerletResult<Self> {
+    pub fn parse(reference: &str) -> crate::VerletResult<Self> {
         match DeclaredSkillPackageRef::parse(reference)? {
             DeclaredSkillPackageRef::Pinned(reference) => Ok(reference),
-            DeclaredSkillPackageRef::Floating { .. } => Err(VerletError::RuntimeFactory(format!(
-                "skill ref {reference:?} must be content-addressed as skill://<package>@sha256:<hash>"
-            ))),
+            DeclaredSkillPackageRef::Floating { .. } => {
+                Err(crate::VerletOperationsError::RuntimeFactory(format!(
+                    "skill ref {reference:?} must be content-addressed as skill://<package>@sha256:<hash>"
+                )))
+            }
         }
     }
 }
@@ -578,12 +585,12 @@ struct ParsedSkillMetadata {
 }
 
 fn parse_skill_metadata(
-    file: &Path,
+    file: &std::path::Path,
     dirname: Option<&str>,
     body: &str,
-) -> VerletResult<ParsedSkillMetadata> {
+) -> crate::VerletResult<ParsedSkillMetadata> {
     if body.trim().is_empty() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "skill file {} is empty",
             file.display()
         )));
@@ -599,10 +606,10 @@ fn parse_skill_metadata(
 }
 
 fn parse_frontmatter(
-    file: &Path,
+    file: &std::path::Path,
     dirname: Option<&str>,
     body: &str,
-) -> VerletResult<ParsedSkillMetadata> {
+) -> crate::VerletResult<ParsedSkillMetadata> {
     let rest = body
         .strip_prefix("---\n")
         .ok_or_else(|| malformed_frontmatter(file, "missing frontmatter body"))?;
@@ -651,17 +658,24 @@ fn parse_frontmatter(
     })
 }
 
-fn fallback_skill_name(file: &Path, dirname: Option<&str>) -> VerletResult<String> {
+fn fallback_skill_name(
+    file: &std::path::Path,
+    dirname: Option<&str>,
+) -> crate::VerletResult<String> {
     dirname.map(str::to_string).ok_or_else(|| {
         let skill_dir = file.parent().unwrap_or(file);
-        VerletError::RuntimeFactory(format!(
+        crate::VerletOperationsError::RuntimeFactory(format!(
             "skill directory {} has no unicode name",
             skill_dir.display()
         ))
     })
 }
 
-fn parse_frontmatter_value(file: &Path, key: &str, raw: &str) -> VerletResult<String> {
+fn parse_frontmatter_value(
+    file: &std::path::Path,
+    key: &str,
+    raw: &str,
+) -> crate::VerletResult<String> {
     if raw.is_empty() {
         return Err(malformed_frontmatter(
             file,
@@ -681,82 +695,87 @@ fn parse_frontmatter_value(file: &Path, key: &str, raw: &str) -> VerletResult<St
     Ok(raw.to_string())
 }
 
-fn first_non_heading_line(file: &Path, body: &str) -> VerletResult<String> {
+fn first_non_heading_line(file: &std::path::Path, body: &str) -> crate::VerletResult<String> {
     body.lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
         .ok_or_else(|| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill file {} has no non-heading description line",
                 file.display()
             ))
         })
 }
 
-fn malformed_frontmatter(file: &Path, reason: &str) -> VerletError {
-    VerletError::RuntimeFactory(format!(
+fn malformed_frontmatter(file: &std::path::Path, reason: &str) -> crate::VerletOperationsError {
+    crate::VerletOperationsError::RuntimeFactory(format!(
         "malformed frontmatter in {}: {reason}",
         file.display()
     ))
 }
 
-fn write_json_atomically<T: Serialize>(path: &Path, label: String, value: &T) -> VerletResult<()> {
+fn write_json_atomically<T: serde::Serialize>(
+    path: &std::path::Path,
+    label: String,
+    value: &T,
+) -> crate::VerletResult<()> {
     let Some(parent) = path.parent() else {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "{label} path {} has no parent directory",
             path.display()
         )));
     };
-    fs::create_dir_all(parent).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    std::fs::create_dir_all(parent).map_err(|err| {
+        crate::VerletOperationsError::RuntimeFactory(format!(
             "failed to create {label} directory {}: {err}",
             parent.display()
         ))
     })?;
-    let tmp_path = parent.join(format!(".verlet.tmp.{}", Uuid::now_v7()));
-    let bytes = serde_json::to_vec_pretty(value)
-        .map_err(|err| VerletError::RuntimeFactory(format!("failed to encode {label}: {err}")))?;
+    let tmp_path = parent.join(format!(".verlet.tmp.{}", uuid::Uuid::now_v7()));
+    let bytes = serde_json::to_vec_pretty(value).map_err(|err| {
+        crate::VerletOperationsError::RuntimeFactory(format!("failed to encode {label}: {err}"))
+    })?;
     {
-        let mut file = fs::File::create(&tmp_path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let mut file = std::fs::File::create(&tmp_path).map_err(|err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to create temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
         file.write_all(&bytes).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to write temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
         file.sync_all().map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletOperationsError::RuntimeFactory(format!(
                 "failed to sync temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
     }
-    fs::rename(&tmp_path, path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    std::fs::rename(&tmp_path, path).map_err(|err| {
+        crate::VerletOperationsError::RuntimeFactory(format!(
             "failed to atomically install {label} {}: {err}",
             path.display()
         ))
     })
 }
 
-fn validate_skill_hash(hash: &str) -> VerletResult<()> {
+fn validate_skill_hash(hash: &str) -> crate::VerletResult<()> {
     if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Ok(())
     } else {
-        Err(VerletError::RuntimeFactory(format!(
+        Err(crate::VerletOperationsError::RuntimeFactory(format!(
             "skill package artifact hash {hash:?} is not a sha256 hex digest"
         )))
     }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    let digest = sha2::Sha256::digest(bytes);
     format!("sha256:{digest:x}")
 }
 

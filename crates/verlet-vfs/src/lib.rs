@@ -1,21 +1,7 @@
-use async_trait::async_trait;
-use bashkit::{
-    DirEntry, FileSystem, FileSystemExt, FileType, FsLimits, FsUsage, InMemoryFs, Metadata,
-    PosixFs, RealFs, RealFsMode,
-};
-use futures_util::TryStreamExt;
-use futures_util::lock::Mutex as AsyncMutex;
-use object_store::aws::AmazonS3Builder;
-use object_store::memory::InMemory as InMemoryObjectStore;
-use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::{Debug, Formatter};
-use std::io::{Error as IoError, ErrorKind};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
-use std::time::SystemTime;
+use bashkit::FileSystem as _;
+use futures_util::TryStreamExt as _;
+use object_store::ObjectStore as _;
+use object_store::ObjectStoreExt as _;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VfsMutationKind {
@@ -32,18 +18,18 @@ pub enum VfsMutationKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VfsMutation {
     pub kind: VfsMutationKind,
-    pub path: PathBuf,
-    pub target: Option<PathBuf>,
+    pub path: std::path::PathBuf,
+    pub target: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
 pub enum ObjectStoreMountBackend {
-    Shared(Arc<dyn ObjectStore>),
+    Shared(std::sync::Arc<dyn object_store::ObjectStore>),
     S3(S3ObjectStoreConfig),
 }
 
-impl Debug for ObjectStoreMountBackend {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl std::fmt::Debug for ObjectStoreMountBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Shared(_) => f.write_str("Shared(<object_store>)"),
             Self::S3(config) => f.debug_tuple("S3").field(config).finish(),
@@ -61,13 +47,18 @@ pub struct ObjectStoreMountConfig {
 impl ObjectStoreMountConfig {
     pub fn in_memory(prefix: impl Into<String>) -> Self {
         Self {
-            backend: ObjectStoreMountBackend::Shared(Arc::new(InMemoryObjectStore::new())),
+            backend: ObjectStoreMountBackend::Shared(std::sync::Arc::new(
+                object_store::memory::InMemory::new(),
+            )),
             prefix: normalize_object_prefix(prefix.into()),
             cache_policy: ObjectStoreCachePolicy::default(),
         }
     }
 
-    pub fn shared(store: Arc<dyn ObjectStore>, prefix: impl Into<String>) -> Self {
+    pub fn shared(
+        store: std::sync::Arc<dyn object_store::ObjectStore>,
+        prefix: impl Into<String>,
+    ) -> Self {
         Self {
             backend: ObjectStoreMountBackend::Shared(store),
             prefix: normalize_object_prefix(prefix.into()),
@@ -92,7 +83,7 @@ impl ObjectStoreMountConfig {
         self
     }
 
-    fn build_store(&self) -> bashkit::Result<Arc<dyn ObjectStore>> {
+    fn build_store(&self) -> bashkit::Result<std::sync::Arc<dyn object_store::ObjectStore>> {
         match &self.backend {
             ObjectStoreMountBackend::Shared(store) => Ok(store.clone()),
             ObjectStoreMountBackend::S3(config) => config.build_store(),
@@ -157,8 +148,8 @@ pub struct S3ObjectStoreConfig {
     pub allow_http: bool,
 }
 
-impl Debug for S3ObjectStoreConfig {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl std::fmt::Debug for S3ObjectStoreConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3ObjectStoreConfig")
             .field("bucket", &self.bucket)
             .field("endpoint", &self.endpoint)
@@ -228,8 +219,8 @@ impl S3ObjectStoreConfig {
         self
     }
 
-    fn build_store(&self) -> bashkit::Result<Arc<dyn ObjectStore>> {
-        let mut builder = AmazonS3Builder::new()
+    fn build_store(&self) -> bashkit::Result<std::sync::Arc<dyn object_store::ObjectStore>> {
+        let mut builder = object_store::aws::AmazonS3Builder::new()
             .with_bucket_name(&self.bucket)
             .with_region(&self.region)
             .with_virtual_hosted_style_request(self.virtual_hosted_style_request)
@@ -250,8 +241,12 @@ impl S3ObjectStoreConfig {
 
         builder
             .build()
-            .map(|store| Arc::new(store) as Arc<dyn ObjectStore>)
-            .map_err(|err| IoError::other(format!("object store config error: {err}")).into())
+            .map(|store| {
+                std::sync::Arc::new(store) as std::sync::Arc<dyn object_store::ObjectStore>
+            })
+            .map_err(|err| {
+                std::io::Error::other(format!("object store config error: {err}")).into()
+            })
     }
 }
 
@@ -322,34 +317,34 @@ impl R2ObjectStoreConfig {
     }
 }
 
-#[async_trait]
-pub trait VerletVfsBackend: FileSystem {
+#[async_trait::async_trait]
+pub trait VerletVfsBackend: bashkit::FileSystem {
     async fn flush(&self) -> bashkit::Result<()> {
         Ok(())
     }
 }
 
-#[async_trait]
-impl VerletVfsBackend for InMemoryFs {}
+#[async_trait::async_trait]
+impl VerletVfsBackend for bashkit::InMemoryFs {}
 
 #[derive(Clone)]
 pub struct ReadOnlyFileSystem {
-    inner: Arc<dyn VerletVfsBackend>,
+    inner: std::sync::Arc<dyn VerletVfsBackend>,
 }
 
 impl ReadOnlyFileSystem {
-    pub fn new(inner: Arc<dyn VerletVfsBackend>) -> Self {
+    pub fn new(inner: std::sync::Arc<dyn VerletVfsBackend>) -> Self {
         Self { inner }
     }
 }
 
-#[async_trait]
-impl FileSystemExt for ReadOnlyFileSystem {
-    fn usage(&self) -> FsUsage {
+#[async_trait::async_trait]
+impl bashkit::FileSystemExt for ReadOnlyFileSystem {
+    fn usage(&self) -> bashkit::FsUsage {
         self.inner.usage()
     }
 
-    fn limits(&self) -> FsLimits {
+    fn limits(&self) -> bashkit::FsLimits {
         self.inner.limits()
     }
 
@@ -358,66 +353,74 @@ impl FileSystemExt for ReadOnlyFileSystem {
     }
 }
 
-#[async_trait]
-impl FileSystem for ReadOnlyFileSystem {
-    async fn read_file(&self, path: &Path) -> bashkit::Result<Vec<u8>> {
+#[async_trait::async_trait]
+impl bashkit::FileSystem for ReadOnlyFileSystem {
+    async fn read_file(&self, path: &std::path::Path) -> bashkit::Result<Vec<u8>> {
         self.inner.read_file(path).await
     }
 
-    async fn write_file(&self, _path: &Path, _content: &[u8]) -> bashkit::Result<()> {
+    async fn write_file(&self, _path: &std::path::Path, _content: &[u8]) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 
-    async fn append_file(&self, _path: &Path, _content: &[u8]) -> bashkit::Result<()> {
+    async fn append_file(&self, _path: &std::path::Path, _content: &[u8]) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 
-    async fn mkdir(&self, _path: &Path, _recursive: bool) -> bashkit::Result<()> {
+    async fn mkdir(&self, _path: &std::path::Path, _recursive: bool) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 
-    async fn remove(&self, _path: &Path, _recursive: bool) -> bashkit::Result<()> {
+    async fn remove(&self, _path: &std::path::Path, _recursive: bool) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 
-    async fn stat(&self, path: &Path) -> bashkit::Result<Metadata> {
+    async fn stat(&self, path: &std::path::Path) -> bashkit::Result<bashkit::Metadata> {
         self.inner.stat(path).await
     }
 
-    async fn read_dir(&self, path: &Path) -> bashkit::Result<Vec<DirEntry>> {
+    async fn read_dir(&self, path: &std::path::Path) -> bashkit::Result<Vec<bashkit::DirEntry>> {
         self.inner.read_dir(path).await
     }
 
-    async fn exists(&self, path: &Path) -> bashkit::Result<bool> {
+    async fn exists(&self, path: &std::path::Path) -> bashkit::Result<bool> {
         self.inner.exists(path).await
     }
 
-    async fn rename(&self, _from: &Path, _to: &Path) -> bashkit::Result<()> {
+    async fn rename(&self, _from: &std::path::Path, _to: &std::path::Path) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 
-    async fn copy(&self, _from: &Path, _to: &Path) -> bashkit::Result<()> {
+    async fn copy(&self, _from: &std::path::Path, _to: &std::path::Path) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 
-    async fn symlink(&self, _target: &Path, _link: &Path) -> bashkit::Result<()> {
+    async fn symlink(
+        &self,
+        _target: &std::path::Path,
+        _link: &std::path::Path,
+    ) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 
-    async fn read_link(&self, path: &Path) -> bashkit::Result<PathBuf> {
+    async fn read_link(&self, path: &std::path::Path) -> bashkit::Result<std::path::PathBuf> {
         self.inner.read_link(path).await
     }
 
-    async fn chmod(&self, _path: &Path, _mode: u32) -> bashkit::Result<()> {
+    async fn chmod(&self, _path: &std::path::Path, _mode: u32) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 
-    async fn set_modified_time(&self, _path: &Path, _time: SystemTime) -> bashkit::Result<()> {
+    async fn set_modified_time(
+        &self,
+        _path: &std::path::Path,
+        _time: std::time::SystemTime,
+    ) -> bashkit::Result<()> {
         Err(readonly_error())
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl VerletVfsBackend for ReadOnlyFileSystem {
     async fn flush(&self) -> bashkit::Result<()> {
         self.inner.flush().await
@@ -431,19 +434,19 @@ pub enum HostFileSystemMode {
 }
 
 impl HostFileSystemMode {
-    fn as_realfs_mode(self) -> RealFsMode {
+    fn as_realfs_mode(self) -> bashkit::RealFsMode {
         match self {
-            Self::ReadOnly => RealFsMode::ReadOnly,
-            Self::ReadWrite => RealFsMode::ReadWrite,
+            Self::ReadOnly => bashkit::RealFsMode::ReadOnly,
+            Self::ReadWrite => bashkit::RealFsMode::ReadWrite,
         }
     }
 }
 
 pub struct HostFileSystem {
-    root: PathBuf,
+    root: std::path::PathBuf,
     mode: HostFileSystemMode,
-    inner: PosixFs<RealFs>,
-    operation_lock: Arc<AsyncMutex<()>>,
+    inner: bashkit::PosixFs<bashkit::RealFs>,
+    operation_lock: std::sync::Arc<futures_util::lock::Mutex<()>>,
 }
 
 #[cfg(unix)]
@@ -454,16 +457,21 @@ struct HostFileSystemLockKey {
 }
 
 #[cfg(not(unix))]
-type HostFileSystemLockKey = PathBuf;
+type HostFileSystemLockKey = std::path::PathBuf;
 
-type HostFileSystemOperationLock = AsyncMutex<()>;
+type HostFileSystemOperationLock = futures_util::lock::Mutex<()>;
 
 fn shared_host_filesystem_operation_lock(
-    root: &Path,
-) -> std::io::Result<Arc<HostFileSystemOperationLock>> {
-    static LOCKS: OnceLock<
-        Mutex<HashMap<HostFileSystemLockKey, Weak<HostFileSystemOperationLock>>>,
-    > = OnceLock::new();
+    root: &std::path::Path,
+) -> std::io::Result<std::sync::Arc<HostFileSystemOperationLock>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                HostFileSystemLockKey,
+                std::sync::Weak<HostFileSystemOperationLock>,
+            >,
+        >,
+    > = std::sync::OnceLock::new();
     #[cfg(unix)]
     let key = {
         use std::os::unix::fs::MetadataExt as _;
@@ -477,40 +485,43 @@ fn shared_host_filesystem_operation_lock(
     let key = root.to_path_buf();
 
     let mut locks = LOCKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+    if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
         return Ok(lock);
     }
-    let lock = Arc::new(AsyncMutex::new(()));
-    locks.insert(key, Arc::downgrade(&lock));
+    let lock = std::sync::Arc::new(futures_util::lock::Mutex::new(()));
+    locks.insert(key, std::sync::Arc::downgrade(&lock));
     Ok(lock)
 }
 
 impl HostFileSystem {
-    pub fn new(root: impl AsRef<Path>, mode: HostFileSystemMode) -> bashkit::Result<Self> {
-        let realfs = RealFs::new(root, mode.as_realfs_mode())?;
+    pub fn new(
+        root: impl AsRef<std::path::Path>,
+        mode: HostFileSystemMode,
+    ) -> bashkit::Result<Self> {
+        let realfs = bashkit::RealFs::new(root, mode.as_realfs_mode())?;
         let root = realfs.root().to_path_buf();
         let operation_lock = shared_host_filesystem_operation_lock(&root)?;
         Ok(Self {
             root,
             mode,
-            inner: PosixFs::new(realfs),
+            inner: bashkit::PosixFs::new(realfs),
             operation_lock,
         })
     }
 
-    pub fn read_only(root: impl AsRef<Path>) -> bashkit::Result<Self> {
+    pub fn read_only(root: impl AsRef<std::path::Path>) -> bashkit::Result<Self> {
         Self::new(root, HostFileSystemMode::ReadOnly)
     }
 
-    pub fn read_write(root: impl AsRef<Path>) -> bashkit::Result<Self> {
+    pub fn read_write(root: impl AsRef<std::path::Path>) -> bashkit::Result<Self> {
         Self::new(root, HostFileSystemMode::ReadWrite)
     }
 
-    pub fn root(&self) -> &Path {
+    pub fn root(&self) -> &std::path::Path {
         &self.root
     }
 
@@ -518,7 +529,7 @@ impl HostFileSystem {
         self.mode
     }
 
-    fn reject_external_hard_link_mutation(&self, path: &Path) -> std::io::Result<()> {
+    fn reject_external_hard_link_mutation(&self, path: &std::path::Path) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
@@ -531,15 +542,15 @@ impl HostFileSystem {
             }
             let canonical = std::fs::canonicalize(&joined)?;
             if !canonical.starts_with(&self.root) {
-                return Err(IoError::new(
-                    ErrorKind::PermissionDenied,
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
                     "path escapes host filesystem root",
                 ));
             }
             let metadata = std::fs::metadata(&canonical)?;
             if metadata.is_file() && metadata.nlink() > 1 {
-                return Err(IoError::new(
-                    ErrorKind::PermissionDenied,
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
                     "refusing to mutate a multiply-linked host file outside the mount boundary",
                 ));
             }
@@ -551,7 +562,7 @@ impl HostFileSystem {
 }
 
 impl std::fmt::Debug for HostFileSystem {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostFileSystem")
             .field("root", &self.root)
             .field("mode", &self.mode)
@@ -559,130 +570,140 @@ impl std::fmt::Debug for HostFileSystem {
     }
 }
 
-#[async_trait]
-impl FileSystemExt for HostFileSystem {
-    fn usage(&self) -> FsUsage {
+#[async_trait::async_trait]
+impl bashkit::FileSystemExt for HostFileSystem {
+    fn usage(&self) -> bashkit::FsUsage {
         self.inner.usage()
     }
 
-    fn limits(&self) -> FsLimits {
+    fn limits(&self) -> bashkit::FsLimits {
         self.inner.limits()
     }
 }
 
-#[async_trait]
-impl FileSystem for HostFileSystem {
-    async fn read_file(&self, path: &Path) -> bashkit::Result<Vec<u8>> {
+#[async_trait::async_trait]
+impl bashkit::FileSystem for HostFileSystem {
+    async fn read_file(&self, path: &std::path::Path) -> bashkit::Result<Vec<u8>> {
         let _guard = self.operation_lock.lock().await;
         self.inner.read_file(path).await
     }
 
-    async fn write_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+    async fn write_file(&self, path: &std::path::Path, content: &[u8]) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(path)?;
         self.inner.write_file(path, content).await
     }
 
-    async fn append_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+    async fn append_file(&self, path: &std::path::Path, content: &[u8]) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(path)?;
         self.inner.append_file(path, content).await
     }
 
-    async fn mkdir(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+    async fn mkdir(&self, path: &std::path::Path, recursive: bool) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.inner.mkdir(path, recursive).await
     }
 
-    async fn remove(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+    async fn remove(&self, path: &std::path::Path, recursive: bool) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.inner.remove(path, recursive).await
     }
 
-    async fn stat(&self, path: &Path) -> bashkit::Result<Metadata> {
+    async fn stat(&self, path: &std::path::Path) -> bashkit::Result<bashkit::Metadata> {
         let _guard = self.operation_lock.lock().await;
         self.inner.stat(path).await
     }
 
-    async fn read_dir(&self, path: &Path) -> bashkit::Result<Vec<DirEntry>> {
+    async fn read_dir(&self, path: &std::path::Path) -> bashkit::Result<Vec<bashkit::DirEntry>> {
         let _guard = self.operation_lock.lock().await;
         self.inner.read_dir(path).await
     }
 
-    async fn exists(&self, path: &Path) -> bashkit::Result<bool> {
+    async fn exists(&self, path: &std::path::Path) -> bashkit::Result<bool> {
         let _guard = self.operation_lock.lock().await;
         self.inner.exists(path).await
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+    async fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.inner.rename(from, to).await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+    async fn copy(&self, from: &std::path::Path, to: &std::path::Path) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(to)?;
         self.inner.copy(from, to).await
     }
 
-    async fn symlink(&self, target: &Path, link: &Path) -> bashkit::Result<()> {
+    async fn symlink(
+        &self,
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.inner.symlink(target, link).await
     }
 
-    async fn read_link(&self, path: &Path) -> bashkit::Result<PathBuf> {
+    async fn read_link(&self, path: &std::path::Path) -> bashkit::Result<std::path::PathBuf> {
         let _guard = self.operation_lock.lock().await;
         self.inner.read_link(path).await
     }
 
-    async fn chmod(&self, path: &Path, mode: u32) -> bashkit::Result<()> {
+    async fn chmod(&self, path: &std::path::Path, mode: u32) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(path)?;
         self.inner.chmod(path, mode).await
     }
 
-    async fn set_modified_time(&self, path: &Path, time: SystemTime) -> bashkit::Result<()> {
+    async fn set_modified_time(
+        &self,
+        path: &std::path::Path,
+        time: std::time::SystemTime,
+    ) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(path)?;
         self.inner.set_modified_time(path, time).await
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl VerletVfsBackend for HostFileSystem {}
 
 pub struct VerletVfs {
-    root: Arc<dyn VerletVfsBackend>,
-    mounts: RwLock<BTreeMap<PathBuf, Arc<dyn VerletVfsBackend>>>,
-    journal: Mutex<Vec<VfsMutation>>,
+    root: std::sync::Arc<dyn VerletVfsBackend>,
+    mounts: std::sync::RwLock<
+        std::collections::BTreeMap<std::path::PathBuf, std::sync::Arc<dyn VerletVfsBackend>>,
+    >,
+    journal: std::sync::Mutex<Vec<VfsMutation>>,
 }
 
 impl VerletVfs {
-    pub fn new(root: Arc<dyn VerletVfsBackend>) -> Self {
+    pub fn new(root: std::sync::Arc<dyn VerletVfsBackend>) -> Self {
         Self {
             root,
-            mounts: RwLock::new(BTreeMap::new()),
-            journal: Mutex::new(Vec::new()),
+            mounts: std::sync::RwLock::new(std::collections::BTreeMap::new()),
+            journal: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     pub fn mount(
         &self,
-        path: impl AsRef<Path>,
-        fs: Arc<dyn VerletVfsBackend>,
+        path: impl AsRef<std::path::Path>,
+        fs: std::sync::Arc<dyn VerletVfsBackend>,
     ) -> bashkit::Result<()> {
         if !path.as_ref().has_root() {
-            return Err(IoError::other("mount path must be absolute").into());
+            return Err(std::io::Error::other("mount path must be absolute").into());
         }
         let path = normalize_vfs_path(path.as_ref());
-        if path == Path::new("/") {
-            return Err(IoError::other("mount path must not be /").into());
+        if path == std::path::Path::new("/") {
+            return Err(std::io::Error::other("mount path must not be /").into());
         }
         self.mounts.write().unwrap().insert(path, fs);
         Ok(())
     }
 
-    pub fn has_mount(&self, path: impl AsRef<Path>) -> bool {
+    pub fn has_mount(&self, path: impl AsRef<std::path::Path>) -> bool {
         let path = normalize_vfs_path(path.as_ref());
         self.mounts
             .read()
@@ -713,14 +734,22 @@ impl VerletVfs {
         Ok(())
     }
 
-    fn record(&self, kind: VfsMutationKind, path: PathBuf, target: Option<PathBuf>) {
+    fn record(
+        &self,
+        kind: VfsMutationKind,
+        path: std::path::PathBuf,
+        target: Option<std::path::PathBuf>,
+    ) {
         self.journal
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .push(VfsMutation { kind, path, target });
     }
 
-    fn resolve(&self, path: &Path) -> (Arc<dyn VerletVfsBackend>, PathBuf) {
+    fn resolve(
+        &self,
+        path: &std::path::Path,
+    ) -> (std::sync::Arc<dyn VerletVfsBackend>, std::path::PathBuf) {
         let path = normalize_vfs_path(path);
         let mounts = self.mounts.read().unwrap();
         let best = mounts
@@ -730,11 +759,13 @@ impl VerletVfs {
 
         match best {
             Some((mount_path, fs)) => {
-                let relative = path.strip_prefix(mount_path).unwrap_or(Path::new(""));
+                let relative = path
+                    .strip_prefix(mount_path)
+                    .unwrap_or(std::path::Path::new(""));
                 let resolved = if relative.as_os_str().is_empty() {
-                    PathBuf::from("/")
+                    std::path::PathBuf::from("/")
                 } else {
-                    PathBuf::from("/").join(relative)
+                    std::path::PathBuf::from("/").join(relative)
                 };
                 (fs.clone(), resolved)
             }
@@ -742,14 +773,13 @@ impl VerletVfs {
         }
     }
 
-    fn validate_path(&self, path: &Path) -> bashkit::Result<()> {
-        self.root
-            .limits()
-            .validate_path(path)
-            .map_err(|err| IoError::new(ErrorKind::InvalidInput, err.to_string()).into())
+    fn validate_path(&self, path: &std::path::Path) -> bashkit::Result<()> {
+        self.root.limits().validate_path(path).map_err(|err| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()).into()
+        })
     }
 
-    fn direct_child_mount_names(&self, path: &Path) -> Vec<String> {
+    fn direct_child_mount_names(&self, path: &std::path::Path) -> Vec<String> {
         self.mounts
             .read()
             .unwrap()
@@ -768,25 +798,25 @@ impl VerletVfs {
     }
 }
 
-#[async_trait]
-impl FileSystemExt for VerletVfs {
-    fn usage(&self) -> FsUsage {
+#[async_trait::async_trait]
+impl bashkit::FileSystemExt for VerletVfs {
+    fn usage(&self) -> bashkit::FsUsage {
         self.root.usage()
     }
 
-    fn limits(&self) -> FsLimits {
+    fn limits(&self) -> bashkit::FsLimits {
         self.root.limits()
     }
 }
 
-#[async_trait]
-impl FileSystem for VerletVfs {
-    async fn read_file(&self, path: &Path) -> bashkit::Result<Vec<u8>> {
+#[async_trait::async_trait]
+impl bashkit::FileSystem for VerletVfs {
+    async fn read_file(&self, path: &std::path::Path) -> bashkit::Result<Vec<u8>> {
         let (fs, resolved) = self.resolve(path);
         fs.read_file(&resolved).await
     }
 
-    async fn write_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+    async fn write_file(&self, path: &std::path::Path, content: &[u8]) -> bashkit::Result<()> {
         self.validate_path(path)?;
         let path = normalize_vfs_path(path);
         let (fs, resolved) = self.resolve(&path);
@@ -795,7 +825,7 @@ impl FileSystem for VerletVfs {
         Ok(())
     }
 
-    async fn append_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+    async fn append_file(&self, path: &std::path::Path, content: &[u8]) -> bashkit::Result<()> {
         self.validate_path(path)?;
         let path = normalize_vfs_path(path);
         let (fs, resolved) = self.resolve(&path);
@@ -804,7 +834,7 @@ impl FileSystem for VerletVfs {
         Ok(())
     }
 
-    async fn mkdir(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+    async fn mkdir(&self, path: &std::path::Path, recursive: bool) -> bashkit::Result<()> {
         self.validate_path(path)?;
         let path = normalize_vfs_path(path);
         let (fs, resolved) = self.resolve(&path);
@@ -813,7 +843,7 @@ impl FileSystem for VerletVfs {
         Ok(())
     }
 
-    async fn remove(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+    async fn remove(&self, path: &std::path::Path, recursive: bool) -> bashkit::Result<()> {
         self.validate_path(path)?;
         let path = normalize_vfs_path(path);
         let (fs, resolved) = self.resolve(&path);
@@ -822,7 +852,7 @@ impl FileSystem for VerletVfs {
         Ok(())
     }
 
-    async fn stat(&self, path: &Path) -> bashkit::Result<Metadata> {
+    async fn stat(&self, path: &std::path::Path) -> bashkit::Result<bashkit::Metadata> {
         let path = normalize_vfs_path(path);
         if self.mounts.read().unwrap().contains_key(&path)
             || !self.direct_child_mount_names(&path).is_empty()
@@ -833,7 +863,7 @@ impl FileSystem for VerletVfs {
         fs.stat(&resolved).await
     }
 
-    async fn read_dir(&self, path: &Path) -> bashkit::Result<Vec<DirEntry>> {
+    async fn read_dir(&self, path: &std::path::Path) -> bashkit::Result<Vec<bashkit::DirEntry>> {
         let path = normalize_vfs_path(path);
         let (fs, resolved) = self.resolve(&path);
         let child_mounts = self.direct_child_mount_names(&path);
@@ -845,11 +875,11 @@ impl FileSystem for VerletVfs {
         let mut names = entries
             .iter()
             .map(|entry| entry.name.clone())
-            .collect::<BTreeSet<_>>();
+            .collect::<std::collections::BTreeSet<_>>();
 
         for name in child_mounts {
             if names.insert(name.clone()) {
-                entries.push(DirEntry {
+                entries.push(bashkit::DirEntry {
                     name,
                     metadata: directory_metadata(),
                 });
@@ -859,7 +889,7 @@ impl FileSystem for VerletVfs {
         Ok(entries)
     }
 
-    async fn exists(&self, path: &Path) -> bashkit::Result<bool> {
+    async fn exists(&self, path: &std::path::Path) -> bashkit::Result<bool> {
         let path = normalize_vfs_path(path);
         if self.mounts.read().unwrap().contains_key(&path)
             || !self.direct_child_mount_names(&path).is_empty()
@@ -870,7 +900,7 @@ impl FileSystem for VerletVfs {
         fs.exists(&resolved).await
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+    async fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> bashkit::Result<()> {
         self.validate_path(from)?;
         self.validate_path(to)?;
         let from = normalize_vfs_path(from);
@@ -878,11 +908,11 @@ impl FileSystem for VerletVfs {
         let (from_fs, from_resolved) = self.resolve(&from);
         let (to_fs, to_resolved) = self.resolve(&to);
 
-        if Arc::ptr_eq(&from_fs, &to_fs) {
+        if std::sync::Arc::ptr_eq(&from_fs, &to_fs) {
             from_fs.rename(&from_resolved, &to_resolved).await?;
         } else {
             let meta = from_fs.stat(&from_resolved).await?;
-            if meta.file_type == FileType::Symlink {
+            if meta.file_type == bashkit::FileType::Symlink {
                 let target = from_fs.read_link(&from_resolved).await?;
                 to_fs.symlink(&target, &to_resolved).await?;
             } else {
@@ -896,7 +926,7 @@ impl FileSystem for VerletVfs {
         Ok(())
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+    async fn copy(&self, from: &std::path::Path, to: &std::path::Path) -> bashkit::Result<()> {
         self.validate_path(from)?;
         self.validate_path(to)?;
         let from = normalize_vfs_path(from);
@@ -904,11 +934,11 @@ impl FileSystem for VerletVfs {
         let (from_fs, from_resolved) = self.resolve(&from);
         let (to_fs, to_resolved) = self.resolve(&to);
 
-        if Arc::ptr_eq(&from_fs, &to_fs) {
+        if std::sync::Arc::ptr_eq(&from_fs, &to_fs) {
             from_fs.copy(&from_resolved, &to_resolved).await?;
         } else {
             let meta = from_fs.stat(&from_resolved).await?;
-            if meta.file_type == FileType::Symlink {
+            if meta.file_type == bashkit::FileType::Symlink {
                 let target = from_fs.read_link(&from_resolved).await?;
                 to_fs.symlink(&target, &to_resolved).await?;
             } else {
@@ -921,18 +951,22 @@ impl FileSystem for VerletVfs {
         Ok(())
     }
 
-    async fn symlink(&self, target: &Path, link: &Path) -> bashkit::Result<()> {
+    async fn symlink(
+        &self,
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> bashkit::Result<()> {
         self.validate_path(link)?;
         let (fs, resolved) = self.resolve(link);
         fs.symlink(target, &resolved).await
     }
 
-    async fn read_link(&self, path: &Path) -> bashkit::Result<PathBuf> {
+    async fn read_link(&self, path: &std::path::Path) -> bashkit::Result<std::path::PathBuf> {
         let (fs, resolved) = self.resolve(path);
         fs.read_link(&resolved).await
     }
 
-    async fn chmod(&self, path: &Path, mode: u32) -> bashkit::Result<()> {
+    async fn chmod(&self, path: &std::path::Path, mode: u32) -> bashkit::Result<()> {
         self.validate_path(path)?;
         let path = normalize_vfs_path(path);
         let (fs, resolved) = self.resolve(&path);
@@ -941,7 +975,11 @@ impl FileSystem for VerletVfs {
         Ok(())
     }
 
-    async fn set_modified_time(&self, path: &Path, time: SystemTime) -> bashkit::Result<()> {
+    async fn set_modified_time(
+        &self,
+        path: &std::path::Path,
+        time: std::time::SystemTime,
+    ) -> bashkit::Result<()> {
         self.validate_path(path)?;
         let path = normalize_vfs_path(path);
         let (fs, resolved) = self.resolve(&path);
@@ -952,15 +990,15 @@ impl FileSystem for VerletVfs {
 }
 
 pub struct ManagedObjectStoreFs {
-    store: Arc<dyn ObjectStore>,
+    store: std::sync::Arc<dyn object_store::ObjectStore>,
     prefix: String,
-    state: Arc<InMemoryFs>,
+    state: std::sync::Arc<bashkit::InMemoryFs>,
     cache_policy: ObjectStoreCachePolicy,
-    cache: Mutex<BTreeMap<PathBuf, CachedCleanFile>>,
-    cache_clock: AtomicU64,
-    dirty: Mutex<Vec<QueuedObjectStoreWriteback>>,
-    dirty_clock: AtomicU64,
-    deleted: Mutex<BTreeSet<PathBuf>>,
+    cache: std::sync::Mutex<std::collections::BTreeMap<std::path::PathBuf, CachedCleanFile>>,
+    cache_clock: std::sync::atomic::AtomicU64,
+    dirty: std::sync::Mutex<Vec<QueuedObjectStoreWriteback>>,
+    dirty_clock: std::sync::atomic::AtomicU64,
+    deleted: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -977,10 +1015,10 @@ struct QueuedObjectStoreWriteback {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObjectStoreWriteback {
-    PutFile(PathBuf),
-    PutDir(PathBuf),
-    DeleteFile(PathBuf),
-    DeleteDir(PathBuf),
+    PutFile(std::path::PathBuf),
+    PutDir(std::path::PathBuf),
+    DeleteFile(std::path::PathBuf),
+    DeleteDir(std::path::PathBuf),
 }
 
 impl ManagedObjectStoreFs {
@@ -988,27 +1026,30 @@ impl ManagedObjectStoreFs {
         Ok(Self {
             store: config.build_store()?,
             prefix: normalize_object_prefix(config.prefix),
-            state: Arc::new(InMemoryFs::new()),
+            state: std::sync::Arc::new(bashkit::InMemoryFs::new()),
             cache_policy: config.cache_policy,
-            cache: Mutex::new(BTreeMap::new()),
-            cache_clock: AtomicU64::new(0),
-            dirty: Mutex::new(Vec::new()),
-            dirty_clock: AtomicU64::new(0),
-            deleted: Mutex::new(BTreeSet::new()),
+            cache: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            cache_clock: std::sync::atomic::AtomicU64::new(0),
+            dirty: std::sync::Mutex::new(Vec::new()),
+            dirty_clock: std::sync::atomic::AtomicU64::new(0),
+            deleted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         })
     }
 
-    pub fn from_store(store: Arc<dyn ObjectStore>, prefix: impl Into<String>) -> Self {
+    pub fn from_store(
+        store: std::sync::Arc<dyn object_store::ObjectStore>,
+        prefix: impl Into<String>,
+    ) -> Self {
         Self {
             store,
             prefix: normalize_object_prefix(prefix.into()),
-            state: Arc::new(InMemoryFs::new()),
+            state: std::sync::Arc::new(bashkit::InMemoryFs::new()),
             cache_policy: ObjectStoreCachePolicy::default(),
-            cache: Mutex::new(BTreeMap::new()),
-            cache_clock: AtomicU64::new(0),
-            dirty: Mutex::new(Vec::new()),
-            dirty_clock: AtomicU64::new(0),
-            deleted: Mutex::new(BTreeSet::new()),
+            cache: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            cache_clock: std::sync::atomic::AtomicU64::new(0),
+            dirty: std::sync::Mutex::new(Vec::new()),
+            dirty_clock: std::sync::atomic::AtomicU64::new(0),
+            deleted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -1018,7 +1059,10 @@ impl ManagedObjectStoreFs {
     }
 
     fn push_dirty(&self, op: ObjectStoreWriteback) {
-        let id = self.dirty_clock.fetch_add(1, Ordering::Relaxed) + 1;
+        let id = self
+            .dirty_clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         self.dirty
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -1026,10 +1070,12 @@ impl ManagedObjectStoreFs {
     }
 
     fn next_cache_access(&self) -> u64 {
-        self.cache_clock.fetch_add(1, Ordering::Relaxed) + 1
+        self.cache_clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
     }
 
-    fn dirty_paths(&self) -> BTreeSet<PathBuf> {
+    fn dirty_paths(&self) -> std::collections::BTreeSet<std::path::PathBuf> {
         self.dirty
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -1045,7 +1091,7 @@ impl ManagedObjectStoreFs {
             .collect()
     }
 
-    fn rewrite_pending_puts_for_rename(&self, from: &Path, to: &Path) {
+    fn rewrite_pending_puts_for_rename(&self, from: &std::path::Path, to: &std::path::Path) {
         let from = normalize_vfs_path(from);
         let to = normalize_vfs_path(to);
         for queued in self
@@ -1065,7 +1111,7 @@ impl ManagedObjectStoreFs {
         }
     }
 
-    fn mark_clean_cached(&self, path: &Path, size: u64) {
+    fn mark_clean_cached(&self, path: &std::path::Path, size: u64) {
         let path = normalize_vfs_path(path);
         let mut cache = self.cache.lock().unwrap_or_else(|err| err.into_inner());
         if self.cache_policy.should_track(size) {
@@ -1081,7 +1127,7 @@ impl ManagedObjectStoreFs {
         }
     }
 
-    fn touch_clean_cached(&self, path: &Path) {
+    fn touch_clean_cached(&self, path: &std::path::Path) {
         let access = self.next_cache_access();
         if let Some(entry) = self
             .cache
@@ -1093,7 +1139,7 @@ impl ManagedObjectStoreFs {
         }
     }
 
-    fn untrack_clean_cached(&self, path: &Path) {
+    fn untrack_clean_cached(&self, path: &std::path::Path) {
         let path = normalize_vfs_path(path);
         self.cache
             .lock()
@@ -1157,7 +1203,7 @@ impl ManagedObjectStoreFs {
         Ok(())
     }
 
-    fn is_deleted(&self, path: &Path) -> bool {
+    fn is_deleted(&self, path: &std::path::Path) -> bool {
         let path = normalize_vfs_path(path);
         self.deleted
             .lock()
@@ -1166,14 +1212,14 @@ impl ManagedObjectStoreFs {
             .any(|deleted| path == *deleted || path.starts_with(deleted))
     }
 
-    fn mark_deleted(&self, path: &Path) {
+    fn mark_deleted(&self, path: &std::path::Path) {
         self.deleted
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .insert(normalize_vfs_path(path));
     }
 
-    fn unmark_deleted(&self, path: &Path) {
+    fn unmark_deleted(&self, path: &std::path::Path) {
         let path = normalize_vfs_path(path);
         self.deleted
             .lock()
@@ -1181,7 +1227,7 @@ impl ManagedObjectStoreFs {
             .remove(&path);
     }
 
-    async fn ensure_parent_dirs(&self, path: &Path) -> bashkit::Result<()> {
+    async fn ensure_parent_dirs(&self, path: &std::path::Path) -> bashkit::Result<()> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
             && !self.state.exists(parent).await?
@@ -1191,9 +1237,17 @@ impl ManagedObjectStoreFs {
         Ok(())
     }
 
-    async fn rename_local_directory_tree(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+    async fn rename_local_directory_tree(
+        &self,
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> bashkit::Result<()> {
         if self.state.exists(to).await.unwrap_or(false) {
-            return Err(IoError::new(ErrorKind::AlreadyExists, "destination exists").into());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "destination exists",
+            )
+            .into());
         }
         self.ensure_parent_dirs(to).await?;
         self.state.mkdir(to, true).await?;
@@ -1204,15 +1258,15 @@ impl ManagedObjectStoreFs {
                 let source = source_dir.join(&entry.name);
                 let target = target_dir.join(&entry.name);
                 match entry.metadata.file_type {
-                    FileType::Directory => {
+                    bashkit::FileType::Directory => {
                         self.state.mkdir(&target, true).await?;
                         pending.push((source, target));
                     }
-                    FileType::Symlink => {
+                    bashkit::FileType::Symlink => {
                         let link_target = self.state.read_link(&source).await?;
                         self.state.symlink(&link_target, &target).await?;
                     }
-                    FileType::File | FileType::Fifo => {
+                    bashkit::FileType::File | bashkit::FileType::Fifo => {
                         let bytes = self.state.read_file(&source).await?;
                         self.ensure_parent_dirs(&target).await?;
                         self.state.write_file(&target, &bytes).await?;
@@ -1225,7 +1279,7 @@ impl ManagedObjectStoreFs {
         Ok(())
     }
 
-    async fn hydrate_file(&self, path: &Path) -> bashkit::Result<Option<Vec<u8>>> {
+    async fn hydrate_file(&self, path: &std::path::Path) -> bashkit::Result<Option<Vec<u8>>> {
         let key = self.key_for_file(path);
         let object_path = object_path(key);
         let result = match self.store.get(&object_path).await {
@@ -1245,7 +1299,7 @@ impl ManagedObjectStoreFs {
         Ok(Some(bytes))
     }
 
-    async fn remote_file_exists(&self, path: &Path) -> bashkit::Result<bool> {
+    async fn remote_file_exists(&self, path: &std::path::Path) -> bashkit::Result<bool> {
         if self.is_deleted(path) {
             return Ok(false);
         }
@@ -1256,11 +1310,11 @@ impl ManagedObjectStoreFs {
         }
     }
 
-    async fn remote_dir_exists(&self, path: &Path) -> bashkit::Result<bool> {
+    async fn remote_dir_exists(&self, path: &std::path::Path) -> bashkit::Result<bool> {
         if self.is_deleted(path) {
             return Ok(false);
         }
-        if path == Path::new("/") {
+        if path == std::path::Path::new("/") {
             return Ok(true);
         }
         if self
@@ -1280,7 +1334,7 @@ impl ManagedObjectStoreFs {
         Ok(!listed.objects.is_empty() || !listed.common_prefixes.is_empty())
     }
 
-    fn key_for_file(&self, path: &Path) -> String {
+    fn key_for_file(&self, path: &std::path::Path) -> String {
         let rel = relative_vfs_key(path);
         if rel.is_empty() {
             self.prefix.trim_end_matches('/').to_string()
@@ -1289,7 +1343,7 @@ impl ManagedObjectStoreFs {
         }
     }
 
-    fn key_for_dir_prefix(&self, path: &Path) -> String {
+    fn key_for_dir_prefix(&self, path: &std::path::Path) -> String {
         let rel = relative_vfs_key(path);
         if rel.is_empty() {
             self.prefix.clone()
@@ -1298,11 +1352,14 @@ impl ManagedObjectStoreFs {
         }
     }
 
-    fn key_for_dir_marker(&self, path: &Path) -> String {
+    fn key_for_dir_marker(&self, path: &std::path::Path) -> String {
         format!("{}.dir", self.key_for_dir_prefix(path))
     }
 
-    async fn remote_entries(&self, path: &Path) -> bashkit::Result<Vec<DirEntry>> {
+    async fn remote_entries(
+        &self,
+        path: &std::path::Path,
+    ) -> bashkit::Result<Vec<bashkit::DirEntry>> {
         let prefix = object_prefix_path(self.key_for_dir_prefix(path));
         let result = self
             .store
@@ -1311,7 +1368,7 @@ impl ManagedObjectStoreFs {
             .map_err(object_error)?;
         let prefix_raw = self.key_for_dir_prefix(path);
         let mut entries = Vec::new();
-        let mut seen = BTreeSet::new();
+        let mut seen = std::collections::BTreeSet::new();
 
         for object in result.objects {
             let key = object.location.to_string();
@@ -1325,10 +1382,10 @@ impl ManagedObjectStoreFs {
                 continue;
             }
             if seen.insert(name.to_string()) {
-                entries.push(DirEntry {
+                entries.push(bashkit::DirEntry {
                     name: name.to_string(),
-                    metadata: Metadata {
-                        file_type: FileType::File,
+                    metadata: bashkit::Metadata {
+                        file_type: bashkit::FileType::File,
                         size: object.size,
                         mode: 0o644,
                         modified: object.last_modified.into(),
@@ -1348,7 +1405,7 @@ impl ManagedObjectStoreFs {
                 continue;
             }
             if !name.is_empty() && !name.contains('/') && seen.insert(name.clone()) {
-                entries.push(DirEntry {
+                entries.push(bashkit::DirEntry {
                     name,
                     metadata: directory_metadata(),
                 });
@@ -1360,34 +1417,36 @@ impl ManagedObjectStoreFs {
     }
 }
 
-#[async_trait]
-impl FileSystemExt for ManagedObjectStoreFs {
+#[async_trait::async_trait]
+impl bashkit::FileSystemExt for ManagedObjectStoreFs {
     fn vfs_snapshot(&self) -> Option<bashkit::VfsSnapshot> {
         self.state.vfs_snapshot()
     }
 }
 
-#[async_trait]
-impl FileSystem for ManagedObjectStoreFs {
-    async fn read_file(&self, path: &Path) -> bashkit::Result<Vec<u8>> {
+#[async_trait::async_trait]
+impl bashkit::FileSystem for ManagedObjectStoreFs {
+    async fn read_file(&self, path: &std::path::Path) -> bashkit::Result<Vec<u8>> {
         let path = normalize_vfs_path(path);
         if self.state.exists(&path).await.unwrap_or(false) {
             self.touch_clean_cached(&path);
             return self.state.read_file(&path).await;
         }
         if self.is_deleted(&path) {
-            return Err(IoError::new(ErrorKind::NotFound, "file not found").into());
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "file not found").into());
         }
         if let Some(bytes) = self.hydrate_file(&path).await? {
             return Ok(bytes);
         }
         if self.remote_dir_exists(&path).await? {
-            return Err(IoError::new(ErrorKind::IsADirectory, "is a directory").into());
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::IsADirectory, "is a directory").into(),
+            );
         }
-        Err(IoError::new(ErrorKind::NotFound, "file not found").into())
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "file not found").into())
     }
 
-    async fn write_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+    async fn write_file(&self, path: &std::path::Path, content: &[u8]) -> bashkit::Result<()> {
         let path = normalize_vfs_path(path);
         self.ensure_parent_dirs(&path).await?;
         self.state.write_file(&path, content).await?;
@@ -1398,7 +1457,7 @@ impl FileSystem for ManagedObjectStoreFs {
         Ok(())
     }
 
-    async fn append_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
+    async fn append_file(&self, path: &std::path::Path, content: &[u8]) -> bashkit::Result<()> {
         let path = normalize_vfs_path(path);
         let mut existing = if self.exists(&path).await? {
             self.read_file(&path).await?
@@ -1410,7 +1469,7 @@ impl FileSystem for ManagedObjectStoreFs {
         Ok(())
     }
 
-    async fn mkdir(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+    async fn mkdir(&self, path: &std::path::Path, recursive: bool) -> bashkit::Result<()> {
         let path = normalize_vfs_path(path);
         self.state.mkdir(&path, recursive).await?;
         self.untrack_clean_cached(&path);
@@ -1419,14 +1478,18 @@ impl FileSystem for ManagedObjectStoreFs {
         Ok(())
     }
 
-    async fn remove(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
+    async fn remove(&self, path: &std::path::Path, recursive: bool) -> bashkit::Result<()> {
         let path = normalize_vfs_path(path);
         let meta = self.stat(&path).await?;
-        if meta.file_type == FileType::Directory
+        if meta.file_type == bashkit::FileType::Directory
             && !recursive
             && !self.read_dir(&path).await?.is_empty()
         {
-            return Err(IoError::new(ErrorKind::DirectoryNotEmpty, "directory not empty").into());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::DirectoryNotEmpty,
+                "directory not empty",
+            )
+            .into());
         }
         if self.state.exists(&path).await.unwrap_or(false) {
             self.state.remove(&path, recursive).await?;
@@ -1434,19 +1497,19 @@ impl FileSystem for ManagedObjectStoreFs {
         self.untrack_clean_cached(&path);
         self.mark_deleted(&path);
         match meta.file_type {
-            FileType::Directory => self.push_dirty(ObjectStoreWriteback::DeleteDir(path)),
+            bashkit::FileType::Directory => self.push_dirty(ObjectStoreWriteback::DeleteDir(path)),
             _ => self.push_dirty(ObjectStoreWriteback::DeleteFile(path)),
         }
         Ok(())
     }
 
-    async fn stat(&self, path: &Path) -> bashkit::Result<Metadata> {
+    async fn stat(&self, path: &std::path::Path) -> bashkit::Result<bashkit::Metadata> {
         let path = normalize_vfs_path(path);
         if self.state.exists(&path).await.unwrap_or(false) {
             return self.state.stat(&path).await;
         }
         if self.is_deleted(&path) {
-            return Err(IoError::new(ErrorKind::NotFound, "not found").into());
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found").into());
         }
         match self
             .store
@@ -1454,8 +1517,8 @@ impl FileSystem for ManagedObjectStoreFs {
             .await
         {
             Ok(meta) => {
-                return Ok(Metadata {
-                    file_type: FileType::File,
+                return Ok(bashkit::Metadata {
+                    file_type: bashkit::FileType::File,
                     size: meta.size,
                     mode: 0o644,
                     modified: meta.last_modified.into(),
@@ -1468,26 +1531,30 @@ impl FileSystem for ManagedObjectStoreFs {
         if self.remote_dir_exists(&path).await? {
             return Ok(directory_metadata());
         }
-        Err(IoError::new(ErrorKind::NotFound, "not found").into())
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found").into())
     }
 
-    async fn read_dir(&self, path: &Path) -> bashkit::Result<Vec<DirEntry>> {
+    async fn read_dir(&self, path: &std::path::Path) -> bashkit::Result<Vec<bashkit::DirEntry>> {
         let path = normalize_vfs_path(path);
         let local_exists = self.state.exists(&path).await.unwrap_or(false);
         if self.is_deleted(&path) && !local_exists {
-            return Err(IoError::new(ErrorKind::NotFound, "directory not found").into());
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "directory not found").into(),
+            );
         }
         let mut entries = if local_exists {
             self.state.read_dir(&path).await?
         } else if self.remote_dir_exists(&path).await? {
             Vec::new()
         } else {
-            return Err(IoError::new(ErrorKind::NotFound, "directory not found").into());
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "directory not found").into(),
+            );
         };
         let mut seen = entries
             .iter()
             .map(|entry| entry.name.clone())
-            .collect::<BTreeSet<_>>();
+            .collect::<std::collections::BTreeSet<_>>();
         for entry in self.remote_entries(&path).await? {
             if seen.insert(entry.name.clone()) {
                 entries.push(entry);
@@ -1497,7 +1564,7 @@ impl FileSystem for ManagedObjectStoreFs {
         Ok(entries)
     }
 
-    async fn exists(&self, path: &Path) -> bashkit::Result<bool> {
+    async fn exists(&self, path: &std::path::Path) -> bashkit::Result<bool> {
         let path = normalize_vfs_path(path);
         if self.state.exists(&path).await.unwrap_or(false) {
             return Ok(true);
@@ -1508,22 +1575,22 @@ impl FileSystem for ManagedObjectStoreFs {
         Ok(self.remote_file_exists(&path).await? || self.remote_dir_exists(&path).await?)
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+    async fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> bashkit::Result<()> {
         let from = normalize_vfs_path(from);
         let to = normalize_vfs_path(to);
         let meta = self.stat(&from).await?;
         match meta.file_type {
-            FileType::Directory => {
+            bashkit::FileType::Directory => {
                 if self.remote_dir_exists(&from).await? {
-                    return Err(IoError::new(
-                        ErrorKind::Unsupported,
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
                         "remote directory rename not supported",
                     )
                     .into());
                 }
                 if !self.state.exists(&from).await.unwrap_or(false) {
-                    return Err(IoError::new(
-                        ErrorKind::Unsupported,
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
                         "remote directory rename not supported",
                     )
                     .into());
@@ -1546,38 +1613,48 @@ impl FileSystem for ManagedObjectStoreFs {
         Ok(())
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
+    async fn copy(&self, from: &std::path::Path, to: &std::path::Path) -> bashkit::Result<()> {
         let from = normalize_vfs_path(from);
         let to = normalize_vfs_path(to);
         let meta = self.stat(&from).await?;
-        if meta.file_type == FileType::Directory {
-            return Err(
-                IoError::new(ErrorKind::Unsupported, "directory copy not supported").into(),
-            );
+        if meta.file_type == bashkit::FileType::Directory {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory copy not supported",
+            )
+            .into());
         }
         let bytes = self.read_file(&from).await?;
         self.write_file(&to, &bytes).await?;
         Ok(())
     }
 
-    async fn symlink(&self, _target: &Path, _link: &Path) -> bashkit::Result<()> {
-        Err(IoError::new(ErrorKind::Unsupported, "symlink not supported").into())
+    async fn symlink(
+        &self,
+        _target: &std::path::Path,
+        _link: &std::path::Path,
+    ) -> bashkit::Result<()> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "symlink not supported").into())
     }
 
-    async fn read_link(&self, _path: &Path) -> bashkit::Result<PathBuf> {
-        Err(IoError::new(ErrorKind::Unsupported, "symlink not supported").into())
+    async fn read_link(&self, _path: &std::path::Path) -> bashkit::Result<std::path::PathBuf> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "symlink not supported").into())
     }
 
-    async fn chmod(&self, _path: &Path, _mode: u32) -> bashkit::Result<()> {
+    async fn chmod(&self, _path: &std::path::Path, _mode: u32) -> bashkit::Result<()> {
         Ok(())
     }
 
-    async fn set_modified_time(&self, _path: &Path, _time: SystemTime) -> bashkit::Result<()> {
+    async fn set_modified_time(
+        &self,
+        _path: &std::path::Path,
+        _time: std::time::SystemTime,
+    ) -> bashkit::Result<()> {
         Ok(())
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl VerletVfsBackend for ManagedObjectStoreFs {
     async fn flush(&self) -> bashkit::Result<()> {
         let ops = {
@@ -1651,7 +1728,10 @@ impl VerletVfsBackend for ManagedObjectStoreFs {
             }
         }
 
-        let processed = ops.iter().map(|queued| queued.id).collect::<BTreeSet<_>>();
+        let processed = ops
+            .iter()
+            .map(|queued| queued.id)
+            .collect::<std::collections::BTreeSet<_>>();
         self.dirty
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -1670,15 +1750,19 @@ impl VerletVfsBackend for ManagedObjectStoreFs {
     }
 }
 
-fn normalize_vfs_path(path: &Path) -> PathBuf {
+fn normalize_vfs_path(path: &std::path::Path) -> std::path::PathBuf {
     if path.has_root() {
         bashkit::normalize_path(path)
     } else {
-        bashkit::normalize_path(&PathBuf::from("/").join(path))
+        bashkit::normalize_path(&std::path::PathBuf::from("/").join(path))
     }
 }
 
-fn rebase_path(path: &Path, from: &Path, to: &Path) -> PathBuf {
+fn rebase_path(
+    path: &std::path::Path,
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::path::PathBuf {
     let path = normalize_vfs_path(path);
     let from = normalize_vfs_path(from);
     let to = normalize_vfs_path(to);
@@ -1699,43 +1783,43 @@ fn normalize_object_prefix(mut prefix: String) -> String {
     prefix
 }
 
-fn relative_vfs_key(path: &Path) -> String {
+fn relative_vfs_key(path: &std::path::Path) -> String {
     normalize_vfs_path(path)
         .to_string_lossy()
         .trim_start_matches('/')
         .to_string()
 }
 
-fn object_path(key: String) -> ObjectPath {
+fn object_path(key: String) -> object_store::path::Path {
     if key.is_empty() {
-        ObjectPath::default()
+        object_store::path::Path::default()
     } else {
-        ObjectPath::from(key)
+        object_store::path::Path::from(key)
     }
 }
 
-fn object_prefix_path(key: String) -> Option<ObjectPath> {
+fn object_prefix_path(key: String) -> Option<object_store::path::Path> {
     let key = key.trim_end_matches('/').to_string();
     if key.is_empty() {
         None
     } else {
-        Some(ObjectPath::from(key))
+        Some(object_store::path::Path::from(key))
     }
 }
 
-fn directory_metadata() -> Metadata {
-    Metadata {
-        file_type: FileType::Directory,
+fn directory_metadata() -> bashkit::Metadata {
+    bashkit::Metadata {
+        file_type: bashkit::FileType::Directory,
         size: 0,
         mode: 0o755,
-        modified: SystemTime::now(),
-        created: SystemTime::now(),
+        modified: std::time::SystemTime::now(),
+        created: std::time::SystemTime::now(),
     }
 }
 
 fn readonly_error() -> bashkit::Error {
-    IoError::new(
-        ErrorKind::PermissionDenied,
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
         "filesystem is mounted read-only",
     )
     .into()
@@ -1743,10 +1827,10 @@ fn readonly_error() -> bashkit::Error {
 
 fn object_error(err: object_store::Error) -> bashkit::Error {
     let kind = match err {
-        object_store::Error::NotFound { .. } => ErrorKind::NotFound,
-        _ => ErrorKind::Other,
+        object_store::Error::NotFound { .. } => std::io::ErrorKind::NotFound,
+        _ => std::io::ErrorKind::Other,
     };
-    IoError::new(kind, err.to_string()).into()
+    std::io::Error::new(kind, err.to_string()).into()
 }
 
 fn ignore_not_found(result: object_store::Result<()>) -> bashkit::Result<()> {

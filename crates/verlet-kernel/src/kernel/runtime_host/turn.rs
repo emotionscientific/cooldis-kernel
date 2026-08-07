@@ -1,81 +1,69 @@
-use crate::ThinkingConfig;
-use crate::kernel::history::CanonicalContent;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::fmt;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{OwnedSemaphorePermit, watch};
-use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
-use verlet_runtime_contracts::{
-    ThreadContext, ThreadCoordinates, ThreadId, ThreadTopology, TurnBudget,
-};
-
 #[derive(Clone, Debug)]
 pub struct TurnContext {
     pub turn_id: String,
     pub trace_id: String,
-    pub thread: ThreadContext,
-    pub cwd: Option<PathBuf>,
-    pub workspace_roots: Vec<PathBuf>,
+    pub thread: verlet_runtime_contracts::ThreadContext,
+    pub cwd: Option<std::path::PathBuf>,
+    pub workspace_roots: Vec<std::path::PathBuf>,
     pub model: Option<String>,
     pub provider: Option<String>,
-    pub thinking: Option<ThinkingConfig>,
+    pub thinking: Option<crate::ThinkingConfig>,
     pub permission_profile: Option<String>,
-    pub provider_metadata: BTreeMap<String, String>,
-    pub metadata: BTreeMap<String, String>,
-    pub environment: BTreeMap<String, String>,
+    pub provider_metadata: std::collections::BTreeMap<String, String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
+    pub environment: std::collections::BTreeMap<String, String>,
     pub model_visible_context: Vec<String>,
-    pub budget: TurnBudget,
-    pub cancellation: CancellationToken,
+    pub budget: verlet_runtime_contracts::TurnBudget,
+    pub cancellation: tokio_util::sync::CancellationToken,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnContextSnapshot {
     pub turn_id: String,
     pub trace_id: String,
-    pub coordinates: ThreadCoordinates,
-    pub parent_thread_id: Option<ThreadId>,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    pub parent_thread_id: Option<verlet_runtime_contracts::ThreadId>,
     #[serde(default)]
-    pub topology: ThreadTopology,
+    pub topology: verlet_runtime_contracts::ThreadTopology,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_roots: Vec<PathBuf>,
+    pub workspace_roots: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingConfig>,
+    pub thinking: Option<crate::ThinkingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub provider_metadata: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub environment: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub provider_metadata: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub environment: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_visible_context: Vec<String>,
-    #[serde(default, skip_serializing_if = "TurnBudget::is_empty")]
-    pub budget: TurnBudget,
+    #[serde(
+        default,
+        skip_serializing_if = "verlet_runtime_contracts::TurnBudget::is_empty"
+    )]
+    pub budget: verlet_runtime_contracts::TurnBudget,
     #[serde(default)]
     pub cancellation_requested: bool,
 }
 
 impl TurnContext {
     pub fn new(
-        thread: ThreadContext,
+        thread: verlet_runtime_contracts::ThreadContext,
         turn_id: impl Into<String>,
         input: &TurnInput,
-        cancellation: CancellationToken,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
             turn_id: turn_id.into(),
-            trace_id: Uuid::now_v7().to_string(),
+            trace_id: uuid::Uuid::now_v7().to_string(),
             thread,
             cwd: input.cwd.clone(),
             workspace_roots: input.workspace_roots.clone(),
@@ -85,18 +73,18 @@ impl TurnContext {
             permission_profile: input.permission_profile.clone(),
             provider_metadata: input.provider_metadata.clone(),
             metadata: input.metadata.clone(),
-            environment: BTreeMap::new(),
+            environment: std::collections::BTreeMap::new(),
             model_visible_context: Vec::new(),
-            budget: TurnBudget::default(),
+            budget: verlet_runtime_contracts::TurnBudget::default(),
             cancellation,
         }
     }
 
-    pub fn coordinates(&self) -> &ThreadCoordinates {
+    pub fn coordinates(&self) -> &verlet_runtime_contracts::ThreadCoordinates {
         &self.thread.coordinates
     }
 
-    pub fn parent_thread_id(&self) -> Option<ThreadId> {
+    pub fn parent_thread_id(&self) -> Option<verlet_runtime_contracts::ThreadId> {
         self.thread.parent_thread_id
     }
 
@@ -114,7 +102,7 @@ impl TurnContext {
         self
     }
 
-    pub fn with_budget(mut self, budget: TurnBudget) -> Self {
+    pub fn with_budget(mut self, budget: verlet_runtime_contracts::TurnBudget) -> Self {
         self.budget = budget;
         self
     }
@@ -168,30 +156,30 @@ enum TurnWatchdogPhase {
 /// finishes when the corresponding input leaves the runtime.
 pub(super) struct TurnWatchdogToken {
     id: u64,
-    lease: Arc<TurnWatchdogLease>,
+    lease: std::sync::Arc<TurnWatchdogLease>,
 }
 
 struct TurnWatchdogLease {
-    state: Arc<TurnWatchdogState>,
+    state: std::sync::Arc<TurnWatchdogState>,
 }
 
 struct TurnWatchdogState {
-    phase: AtomicU8,
-    updates: watch::Sender<TurnWatchdogPhase>,
+    phase: std::sync::atomic::AtomicU8,
+    updates: tokio::sync::watch::Sender<TurnWatchdogPhase>,
 }
 
 impl TurnWatchdogToken {
     pub(super) fn new(id: u64) -> (Self, TurnWatchdogHandle) {
-        let (phase, phase_rx) = watch::channel(TurnWatchdogPhase::Pending);
-        let state = Arc::new(TurnWatchdogState {
-            phase: AtomicU8::new(TurnWatchdogPhase::Pending as u8),
+        let (phase, phase_rx) = tokio::sync::watch::channel(TurnWatchdogPhase::Pending);
+        let state = std::sync::Arc::new(TurnWatchdogState {
+            phase: std::sync::atomic::AtomicU8::new(TurnWatchdogPhase::Pending as u8),
             updates: phase,
         });
         (
             Self {
                 id,
-                lease: Arc::new(TurnWatchdogLease {
-                    state: Arc::clone(&state),
+                lease: std::sync::Arc::new(TurnWatchdogLease {
+                    state: std::sync::Arc::clone(&state),
                 }),
             },
             TurnWatchdogHandle {
@@ -210,8 +198,8 @@ impl TurnWatchdogToken {
             .compare_exchange(
                 TurnWatchdogPhase::Pending as u8,
                 TurnWatchdogPhase::Active as u8,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
             )
             .is_ok()
         {
@@ -227,13 +215,13 @@ impl Clone for TurnWatchdogToken {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
-            lease: Arc::clone(&self.lease),
+            lease: std::sync::Arc::clone(&self.lease),
         }
     }
 }
 
-impl fmt::Debug for TurnWatchdogToken {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Debug for TurnWatchdogToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TurnWatchdogToken")
             .field("id", &self.id)
@@ -251,17 +239,18 @@ impl Eq for TurnWatchdogToken {}
 
 impl Drop for TurnWatchdogLease {
     fn drop(&mut self) {
-        self.state
-            .phase
-            .store(TurnWatchdogPhase::Finished as u8, Ordering::SeqCst);
+        self.state.phase.store(
+            TurnWatchdogPhase::Finished as u8,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         self.state.updates.send_replace(TurnWatchdogPhase::Finished);
     }
 }
 
 pub(super) struct TurnWatchdogHandle {
     id: u64,
-    state: Arc<TurnWatchdogState>,
-    phase: watch::Receiver<TurnWatchdogPhase>,
+    state: std::sync::Arc<TurnWatchdogState>,
+    phase: tokio::sync::watch::Receiver<TurnWatchdogPhase>,
 }
 
 impl TurnWatchdogHandle {
@@ -289,8 +278,8 @@ impl TurnWatchdogHandle {
             .compare_exchange(
                 TurnWatchdogPhase::Active as u8,
                 TurnWatchdogPhase::TimedOut as u8,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
             )
             .is_ok()
         {
@@ -302,23 +291,24 @@ impl TurnWatchdogHandle {
     }
 
     pub(super) fn is_timed_out(&self) -> bool {
-        self.state.phase.load(Ordering::SeqCst) == TurnWatchdogPhase::TimedOut as u8
+        self.state.phase.load(std::sync::atomic::Ordering::SeqCst)
+            == TurnWatchdogPhase::TimedOut as u8
     }
 }
 
 struct PendingInputPermitToken {
-    lease: Arc<PendingInputPermitLease>,
+    lease: std::sync::Arc<PendingInputPermitLease>,
 }
 
 struct PendingInputPermitLease {
-    permit: StdMutex<Option<OwnedSemaphorePermit>>,
+    permit: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl PendingInputPermitToken {
-    fn new(permit: OwnedSemaphorePermit) -> Self {
+    fn new(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
         Self {
-            lease: Arc::new(PendingInputPermitLease {
-                permit: StdMutex::new(Some(permit)),
+            lease: std::sync::Arc::new(PendingInputPermitLease {
+                permit: std::sync::Mutex::new(Some(permit)),
             }),
         }
     }
@@ -335,13 +325,13 @@ impl PendingInputPermitToken {
 impl Clone for PendingInputPermitToken {
     fn clone(&self) -> Self {
         Self {
-            lease: Arc::clone(&self.lease),
+            lease: std::sync::Arc::clone(&self.lease),
         }
     }
 }
 
-impl fmt::Debug for PendingInputPermitToken {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Debug for PendingInputPermitToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PendingInputPermitToken")
             .finish_non_exhaustive()
@@ -354,25 +344,25 @@ struct TurnRuntimeState {
     pending_input_permit: Option<PendingInputPermitToken>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnInput {
     pub content: Vec<TurnContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_roots: Vec<PathBuf>,
+    pub workspace_roots: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingConfig>,
+    pub thinking: Option<crate::ThinkingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub provider_metadata: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub provider_metadata: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
     #[serde(skip)]
     runtime_state: Option<Box<TurnRuntimeState>>,
 }
@@ -403,8 +393,8 @@ impl TurnInput {
             provider: None,
             thinking: None,
             permission_profile: None,
-            provider_metadata: BTreeMap::new(),
-            metadata: BTreeMap::new(),
+            provider_metadata: std::collections::BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
             runtime_state: None,
         }
     }
@@ -415,7 +405,7 @@ impl TurnInput {
             .turn_watchdog = Some(turn_watchdog);
     }
 
-    pub(super) fn set_pending_input_permit(&mut self, permit: OwnedSemaphorePermit) {
+    pub(super) fn set_pending_input_permit(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
         self.runtime_state
             .get_or_insert_with(Default::default)
             .pending_input_permit = Some(PendingInputPermitToken::new(permit));
@@ -444,12 +434,12 @@ impl TurnInput {
         Self::new([TurnContent::text(text)])
     }
 
-    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+    pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
         self
     }
 
-    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+    pub fn with_workspace_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
         self.workspace_roots.push(root.into());
         self
     }
@@ -464,7 +454,7 @@ impl TurnInput {
         self
     }
 
-    pub fn with_thinking(mut self, thinking: ThinkingConfig) -> Self {
+    pub fn with_thinking(mut self, thinking: crate::ThinkingConfig) -> Self {
         self.thinking = Some(thinking);
         self
     }
@@ -500,15 +490,19 @@ impl TurnInput {
             .join("\n")
     }
 
-    pub fn canonical_content(&self) -> Vec<CanonicalContent> {
+    pub fn canonical_content(&self) -> Vec<crate::kernel::history::CanonicalContent> {
         self.content
             .iter()
             .filter_map(|content| match content {
-                TurnContent::Text { text } => Some(CanonicalContent::text(text.clone())),
-                TurnContent::Image { data, mime_type } => Some(CanonicalContent::Image {
-                    data: data.clone(),
-                    mime_type: mime_type.clone(),
-                }),
+                TurnContent::Text { text } => {
+                    Some(crate::kernel::history::CanonicalContent::text(text.clone()))
+                }
+                TurnContent::Image { data, mime_type } => {
+                    Some(crate::kernel::history::CanonicalContent::Image {
+                        data: data.clone(),
+                        mime_type: mime_type.clone(),
+                    })
+                }
                 TurnContent::FileRef { .. } => None,
             })
             .collect()
@@ -527,7 +521,7 @@ impl From<&str> for TurnInput {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnContent {
     Text {
@@ -538,15 +532,15 @@ pub enum TurnContent {
         mime_type: String,
     },
     FileRef {
-        path: PathBuf,
+        path: std::path::PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size_bytes: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sha256: Option<String>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        metadata: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        metadata: std::collections::BTreeMap<String, String>,
     },
 }
 
@@ -562,13 +556,13 @@ impl TurnContent {
         }
     }
 
-    pub fn file_ref(path: impl Into<PathBuf>) -> Self {
+    pub fn file_ref(path: impl Into<std::path::PathBuf>) -> Self {
         Self::FileRef {
             path: path.into(),
             mime_type: None,
             size_bytes: None,
             sha256: None,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 

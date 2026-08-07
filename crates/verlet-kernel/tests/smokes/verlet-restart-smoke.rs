@@ -1,17 +1,6 @@
-use rusqlite::{Connection, params};
-use serde_json::{Value, json};
-use std::fs::{File, OpenOptions};
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use uuid::Uuid;
-use verlet_sqlite::{Db, DbConfig};
+use std::io::Read as _;
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt as _;
 
 const ROUTE_ID: &str = "restart-smoke";
 const WEBHOOK_PATH: &str = "/ingress";
@@ -26,7 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn continuity_after_idle_kill(daemon_bin: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn continuity_after_idle_kill(
+    daemon_bin: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new("idle")?;
     let mut telegram = fixture.start_telegram_api().await?;
     let mut daemon = fixture.spawn_daemon(daemon_bin, None).await?;
@@ -86,7 +77,7 @@ async fn continuity_after_idle_kill(daemon_bin: &Path) -> Result<(), Box<dyn std
 }
 
 async fn continuity_after_binding_crash_cut(
-    daemon_bin: &Path,
+    daemon_bin: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new("binding-cut")?;
     let mut telegram = fixture.start_telegram_api().await?;
@@ -96,7 +87,7 @@ async fn continuity_after_binding_crash_cut(
     let addr = fixture.webhook_addr;
     let pending_request =
         tokio::spawn(async move { post_update(addr, 2001, 1, "crash before first turn").await });
-    wait_for_path(&marker, Duration::from_secs(5)).await?;
+    wait_for_path(&marker, std::time::Duration::from_secs(5)).await?;
     let bound_before_kill = fixture.wait_for_single_bound_thread().await?;
     daemon.sigkill().await?;
     if fixture
@@ -131,18 +122,19 @@ async fn continuity_after_binding_crash_cut(
 }
 
 struct Fixture {
-    root: PathBuf,
-    config_path: PathBuf,
-    io_db: PathBuf,
-    history_db: PathBuf,
+    root: std::path::PathBuf,
+    config_path: std::path::PathBuf,
+    io_db: std::path::PathBuf,
+    history_db: std::path::PathBuf,
     webhook_addr: std::net::SocketAddr,
     telegram_api_addr: std::net::SocketAddr,
 }
 
 impl Fixture {
     fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let id = Uuid::now_v7().simple().to_string();
-        let root = PathBuf::from("/tmp").join(format!("cdis-restart-{name}-{}", &id[..12]));
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        let root =
+            std::path::PathBuf::from("/tmp").join(format!("cdis-restart-{name}-{}", &id[..12]));
         std::fs::create_dir_all(&root)?;
         let webhook_addr = unused_loopback_addr()?;
         let telegram_api_addr = unused_loopback_addr()?;
@@ -166,21 +158,21 @@ impl Fixture {
 
     async fn spawn_daemon(
         &self,
-        daemon_bin: &Path,
-        binding_marker: Option<&Path>,
+        daemon_bin: &std::path::Path,
+        binding_marker: Option<&std::path::Path>,
     ) -> Result<DaemonChild, Box<dyn std::error::Error>> {
         let log_path = self.root.join("daemon.log");
         let stdout = append_file(&log_path)?;
         let stderr = append_file(&log_path)?;
-        let mut command = Command::new(daemon_bin);
+        let mut command = tokio::process::Command::new(daemon_bin);
         command
             .arg("daemon")
             .arg("run")
             .arg("--config")
             .arg(&self.config_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(stdout))
+            .stderr(std::process::Stdio::from(stderr));
         if let Some(marker) = binding_marker {
             command.env("VERLET_TEST_PAUSE_AFTER_INGRESS_BINDING", marker);
         }
@@ -189,7 +181,9 @@ impl Fixture {
             child: Some(child),
             log_path,
         };
-        if let Err(err) = wait_for_listener(self.webhook_addr, Duration::from_secs(8)).await {
+        if let Err(err) =
+            wait_for_listener(self.webhook_addr, std::time::Duration::from_secs(8)).await
+        {
             return Err(format!("{err}; daemon log:\n{}", daemon.read_log()).into());
         }
         Ok(daemon)
@@ -211,7 +205,7 @@ impl Fixture {
     }
 
     async fn wait_for_single_bound_thread(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let threads = self.bound_threads()?;
             if threads.len() == 1 {
@@ -220,10 +214,10 @@ impl Fixture {
             if threads.len() > 1 {
                 return Err(format!("routing key has duplicate bound threads: {threads:?}").into());
             }
-            if Instant::now() >= deadline {
+            if std::time::Instant::now() >= deadline {
                 return Err("timed out waiting for durable thread binding".into());
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 
@@ -231,19 +225,21 @@ impl Fixture {
         if !self.io_db.exists() {
             return Ok(Vec::new());
         }
-        let connection = Connection::open(&self.io_db)?;
+        let connection = rusqlite::Connection::open(&self.io_db)?;
         let mut statement = connection.prepare(
             "SELECT DISTINCT thread_id FROM cooldis_daemon_egress_threads WHERE route_id = ?1 ORDER BY thread_id",
         )?;
-        let rows = statement.query_map(params![ROUTE_ID], |row| row.get::<_, String>(0))?;
+        let rows =
+            statement.query_map(rusqlite::params![ROUTE_ID], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     async fn context_receipts(
         &self,
         thread_id: &str,
-    ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-        let db = Db::open(&self.history_db, DbConfig::default()).await?;
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+        let db =
+            verlet_sqlite::Db::open(&self.history_db, verlet_sqlite::DbConfig::default()).await?;
         let connection = db.connect().await?;
         let mut rows = connection
             .query(
@@ -264,7 +260,8 @@ impl Fixture {
         thread_id: &str,
         kind: &str,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        let db = Db::open(&self.history_db, DbConfig::default()).await?;
+        let db =
+            verlet_sqlite::Db::open(&self.history_db, verlet_sqlite::DbConfig::default()).await?;
         let connection = db.connect().await?;
         let mut rows = connection
             .query(
@@ -288,14 +285,14 @@ impl Drop for Fixture {
 }
 
 struct TelegramApiFixture {
-    deliveries: mpsc::UnboundedReceiver<String>,
-    task: JoinHandle<()>,
+    deliveries: tokio::sync::mpsc::UnboundedReceiver<String>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl TelegramApiFixture {
     async fn start(addr: std::net::SocketAddr) -> Result<Self, Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind(addr).await?;
-        let (deliveries_tx, deliveries) = mpsc::unbounded_channel();
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let (deliveries_tx, deliveries) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 if let Ok(delivered_text) = serve_telegram_api_connection(stream).await {
@@ -310,10 +307,10 @@ impl TelegramApiFixture {
         &mut self,
         expected_text: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut observed = Vec::new();
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             let delivered_text = match tokio::time::timeout(remaining, self.deliveries.recv()).await
             {
                 Ok(Some(delivered_text)) => delivered_text,
@@ -339,7 +336,9 @@ impl Drop for TelegramApiFixture {
     }
 }
 
-async fn serve_telegram_api_connection(mut stream: TcpStream) -> Result<String, String> {
+async fn serve_telegram_api_connection(
+    mut stream: tokio::net::TcpStream,
+) -> Result<String, String> {
     let mut request = Vec::new();
     let mut buffer = [0u8; 4096];
     let (header_end, expected_len) = loop {
@@ -383,12 +382,13 @@ async fn serve_telegram_api_connection(mut stream: TcpStream) -> Result<String, 
         }
         request.extend_from_slice(&buffer[..read]);
     }
-    let delivered_text = serde_json::from_slice::<Value>(&request[header_end..expected_len])
-        .map_err(|err| format!("Telegram API request body was not JSON: {err}"))?
-        .get("text")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Telegram API request body omitted text".to_string())?
-        .to_string();
+    let delivered_text =
+        serde_json::from_slice::<serde_json::Value>(&request[header_end..expected_len])
+            .map_err(|err| format!("Telegram API request body was not JSON: {err}"))?
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Telegram API request body omitted text".to_string())?
+            .to_string();
 
     let body = r#"{"ok":true,"result":{"message_id":9001,"chat":{"id":777,"type":"private"},"date":1700000000,"text":"delivered"}}"#;
     let response = format!(
@@ -403,22 +403,22 @@ async fn serve_telegram_api_connection(mut stream: TcpStream) -> Result<String, 
 }
 
 struct DaemonChild {
-    child: Option<Child>,
-    log_path: PathBuf,
+    child: Option<tokio::process::Child>,
+    log_path: std::path::PathBuf,
 }
 
 impl DaemonChild {
     async fn sigkill(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(mut child) = self.child.take() {
             child.start_kill()?;
-            tokio::time::timeout(Duration::from_secs(30), child.wait()).await??;
+            tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await??;
         }
         Ok(())
     }
 
     fn read_log(&self) -> String {
         let mut log = String::new();
-        if let Ok(mut file) = File::open(&self.log_path) {
+        if let Ok(mut file) = std::fs::File::open(&self.log_path) {
             let _ = file.read_to_string(&mut log);
         }
         log
@@ -433,9 +433,9 @@ impl Drop for DaemonChild {
     }
 }
 
-fn daemon_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn daemon_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     if let Some(path) = verlet_runtime_contracts::env_compat::var_os("VERLET_DAEMON_BIN") {
-        return Ok(PathBuf::from(path));
+        return Ok(std::path::PathBuf::from(path));
     }
     let sibling = std::env::current_exe()?
         .parent()
@@ -453,8 +453,8 @@ fn daemon_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 fn write_config(
-    path: &Path,
-    root: &Path,
+    path: &std::path::Path,
+    root: &std::path::Path,
     webhook_addr: std::net::SocketAddr,
     telegram_api_addr: std::net::SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -498,15 +498,18 @@ api_base = "http://{telegram_api_addr}"
     Ok(())
 }
 
-fn toml_path(path: &Path) -> String {
+fn toml_path(path: &std::path::Path) -> String {
     path.display()
         .to_string()
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
 }
 
-fn append_file(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().create(true).append(true).open(path)
+fn append_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 fn unused_loopback_addr() -> std::io::Result<std::net::SocketAddr> {
@@ -514,33 +517,39 @@ fn unused_loopback_addr() -> std::io::Result<std::net::SocketAddr> {
     listener.local_addr()
 }
 
-async fn wait_for_listener(addr: std::net::SocketAddr, wait: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + wait;
+async fn wait_for_listener(
+    addr: std::net::SocketAddr,
+    wait: std::time::Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + wait;
     loop {
-        if TcpStream::connect(addr).await.is_ok() {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline {
             return Err(format!(
                 "timed out waiting for daemon HTTP ingress at {addr}"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
-async fn wait_for_path(path: &Path, wait: Duration) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + wait;
+async fn wait_for_path(
+    path: &std::path::Path,
+    wait: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + wait;
     loop {
         if path.exists() {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline {
             return Err(
                 format!("timed out waiting for crash-cut marker {}", path.display()).into(),
             );
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
@@ -550,7 +559,7 @@ async fn post_update(
     message_id: i64,
     text: &str,
 ) -> Result<String, String> {
-    let body = serde_json::to_vec(&json!({
+    let body = serde_json::to_vec(&serde_json::json!({
         "update_id": update_id,
         "message": {
             "message_id": message_id,
@@ -561,7 +570,7 @@ async fn post_update(
         }
     }))
     .map_err(|err| err.to_string())?;
-    let mut stream = TcpStream::connect(addr)
+    let mut stream = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|err| err.to_string())?;
     let request = format!(
@@ -584,10 +593,12 @@ async fn post_update(
     Ok(response)
 }
 
-fn receipt_entry_ids(receipt: &Value) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn receipt_entry_ids(
+    receipt: &serde_json::Value,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let entries = receipt
         .get("session_entry_ids")
-        .and_then(Value::as_array)
+        .and_then(serde_json::Value::as_array)
         .ok_or("compiled context receipt did not contain session_entry_ids")?;
     entries
         .iter()

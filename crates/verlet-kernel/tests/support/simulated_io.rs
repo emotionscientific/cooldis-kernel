@@ -14,16 +14,6 @@
 //! triggering write into the durable image. Recovery clears in-process locks
 //! and creates a fresh IO generation over those durable images.
 
-use super::fault_plan::{FaultTiming, SplitMix64};
-use serde::Serialize;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use verlet_sqlite::io::{
-    Buffer, Clock, Completion, CompletionError, File, FileId, FileSyncType, IO, LimboError,
-    MonotonicInstant, OpenFlags, WallClockInstant,
-};
-
 pub const IO_READ: &str = "read";
 pub const IO_WRITE: &str = "write";
 pub const IO_SYNC: &str = "sync";
@@ -33,7 +23,7 @@ pub const IO_REMOVE: &str = "remove";
 pub const IO_LOCK: &str = "lock";
 pub const IO_UNLOCK: &str = "unlock";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum CrashSurvival {
     /// Only writes covered by the last truthful sync survive.
     DiscardUnsynced,
@@ -42,13 +32,13 @@ pub enum CrashSurvival {
     TornWrite { max_bytes: usize },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum IoFaultAction {
     Fail,
     /// Present only to fail plan validation explicitly. `IO` methods are
     /// synchronous, so the async FaultScript delay vocabulary cannot be
     /// projected without blocking or wall-clock dependence.
-    Delay(Duration),
+    Delay(std::time::Duration),
     Short {
         max_bytes: usize,
     },
@@ -56,15 +46,15 @@ pub enum IoFaultAction {
     Crash(CrashSurvival),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct IoFaultRule {
     pub operation: &'static str,
     pub nth: usize,
-    pub timing: FaultTiming,
+    pub timing: crate::support::fault_plan::FaultTiming,
     pub action: IoFaultAction,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct IoFaultPlan {
     pub seed: u64,
     pub rules: Vec<IoFaultRule>,
@@ -83,7 +73,7 @@ impl IoFaultPlan {
             vec![IoFaultRule {
                 operation: IO_WRITE,
                 nth,
-                timing: FaultTiming::After,
+                timing: crate::support::fault_plan::FaultTiming::After,
                 action: IoFaultAction::Crash(survival),
             }],
         )
@@ -120,7 +110,7 @@ impl IoFaultPlan {
             match &rule.action {
                 IoFaultAction::Short { max_bytes } => {
                     if !matches!(rule.operation, IO_READ | IO_WRITE)
-                        || rule.timing != FaultTiming::After
+                        || rule.timing != crate::support::fault_plan::FaultTiming::After
                         || *max_bytes == 0
                     {
                         return Err(format!(
@@ -129,7 +119,8 @@ impl IoFaultPlan {
                     }
                 }
                 IoFaultAction::SyncLie
-                    if rule.operation != IO_SYNC || rule.timing != FaultTiming::After =>
+                    if rule.operation != IO_SYNC
+                        || rule.timing != crate::support::fault_plan::FaultTiming::After =>
                 {
                     return Err(format!(
                         "IO fault rule {index} sync lie must target sync after the call"
@@ -137,7 +128,7 @@ impl IoFaultPlan {
                 }
                 IoFaultAction::Crash(CrashSurvival::TornWrite { max_bytes }) => {
                     if rule.operation != IO_WRITE
-                        || rule.timing != FaultTiming::After
+                        || rule.timing != crate::support::fault_plan::FaultTiming::After
                         || *max_bytes == 0
                     {
                         return Err(format!(
@@ -146,7 +137,8 @@ impl IoFaultPlan {
                     }
                 }
                 IoFaultAction::Crash(CrashSurvival::DiscardUnsynced)
-                    if rule.operation != IO_WRITE || rule.timing != FaultTiming::After =>
+                    if rule.operation != IO_WRITE
+                        || rule.timing != crate::support::fault_plan::FaultTiming::After =>
                 {
                     return Err(format!(
                         "IO fault rule {index} crash must fire after a write"
@@ -159,7 +151,7 @@ impl IoFaultPlan {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct IoTranscriptEntry {
     pub ordinal: usize,
     pub generation: usize,
@@ -180,15 +172,15 @@ struct FileState {
 }
 
 struct SimulatedState {
-    files: BTreeMap<String, FileState>,
-    calls: BTreeMap<&'static str, usize>,
+    files: std::collections::BTreeMap<String, FileState>,
+    calls: std::collections::BTreeMap<&'static str, usize>,
     rules: Vec<IoFaultRule>,
     transcript: Vec<IoTranscriptEntry>,
     ordinal: usize,
     generation: usize,
     next_handle: u64,
     crashed: bool,
-    rng: SplitMix64,
+    rng: crate::support::fault_plan::SplitMix64,
     clock_tick: u128,
 }
 
@@ -227,7 +219,7 @@ impl SimulatedState {
         generation: usize,
         operation: &'static str,
         path: &str,
-    ) -> Result<(), CompletionError> {
+    ) -> Result<(), verlet_sqlite::io::CompletionError> {
         if generation != self.generation {
             self.record(operation, path, None, None, "rejected-stale-generation");
             return Err(completion_failure(
@@ -250,7 +242,7 @@ impl SimulatedState {
 pub struct SimulatedIo {
     seed: u64,
     generation: usize,
-    state: Arc<Mutex<SimulatedState>>,
+    state: std::sync::Arc<std::sync::Mutex<SimulatedState>>,
 }
 
 impl SimulatedIo {
@@ -258,16 +250,16 @@ impl SimulatedIo {
         Self {
             seed,
             generation: 0,
-            state: Arc::new(Mutex::new(SimulatedState {
-                files: BTreeMap::new(),
-                calls: BTreeMap::new(),
+            state: std::sync::Arc::new(std::sync::Mutex::new(SimulatedState {
+                files: std::collections::BTreeMap::new(),
+                calls: std::collections::BTreeMap::new(),
                 rules: Vec::new(),
                 transcript: Vec::new(),
                 ordinal: 0,
                 generation: 0,
                 next_handle: 1,
                 crashed: false,
-                rng: SplitMix64::new(seed),
+                rng: crate::support::fault_plan::SplitMix64::new(seed),
                 clock_tick: u128::from(seed),
             })),
         }
@@ -328,57 +320,63 @@ impl SimulatedIo {
         Ok(Self {
             seed: self.seed,
             generation,
-            state: Arc::clone(&self.state),
+            state: std::sync::Arc::clone(&self.state),
         })
     }
 }
 
-impl Clock for SimulatedIo {
-    fn current_time_monotonic(&self) -> MonotonicInstant {
+impl verlet_sqlite::io::Clock for SimulatedIo {
+    fn current_time_monotonic(&self) -> verlet_sqlite::io::MonotonicInstant {
         let mut state = self.state.lock().unwrap();
         state.clock_tick = state.clock_tick.wrapping_add(1_000_000);
-        MonotonicInstant::from_nanos(state.clock_tick)
+        verlet_sqlite::io::MonotonicInstant::from_nanos(state.clock_tick)
     }
 
-    fn current_time_wall_clock(&self) -> WallClockInstant {
-        WallClockInstant {
+    fn current_time_wall_clock(&self) -> verlet_sqlite::io::WallClockInstant {
+        verlet_sqlite::io::WallClockInstant {
             secs: (self.seed & i64::MAX as u64) as i64,
             micros: (self.seed % 1_000_000) as u32,
         }
     }
 }
 
-impl IO for SimulatedIo {
+impl verlet_sqlite::io::IO for SimulatedIo {
     fn open_file(
         &self,
         path: &str,
-        flags: OpenFlags,
+        flags: verlet_sqlite::io::OpenFlags,
         _direct: bool,
-    ) -> Result<Arc<dyn File>, LimboError> {
+    ) -> Result<std::sync::Arc<dyn verlet_sqlite::io::File>, verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         state
             .ensure_live(self.generation, IO_OPEN, path)
-            .map_err(LimboError::from)?;
+            .map_err(verlet_sqlite::io::LimboError::from)?;
         let rule = state.take_rule(IO_OPEN);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::Before, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::Before,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_OPEN, path, None, None, "fail-before");
             return Err(io_failure(IO_OPEN, std::io::ErrorKind::Other));
         }
-        if !state.files.contains_key(path) && !flags.contains(OpenFlags::Create) {
+        if !state.files.contains_key(path) && !flags.contains(verlet_sqlite::io::OpenFlags::Create)
+        {
             state.record(IO_OPEN, path, None, None, "not-found");
             return Err(io_failure(IO_OPEN, std::io::ErrorKind::NotFound));
         }
         state.files.entry(path.to_string()).or_default();
         let owner = state.next_handle;
         state.next_handle += 1;
-        if !flags.intersects(OpenFlags::ReadOnly | OpenFlags::NoLock) {
+        if !flags.intersects(
+            verlet_sqlite::io::OpenFlags::ReadOnly | verlet_sqlite::io::OpenFlags::NoLock,
+        ) {
             let file = state.files.get_mut(path).unwrap();
             if file.lock_owner.is_some() {
                 state.record(IO_OPEN, path, None, None, "lock-busy");
-                return Err(LimboError::LockingError(format!(
+                return Err(verlet_sqlite::io::LimboError::LockingError(format!(
                     "simulated file {path:?} is already exclusively locked"
                 )));
             }
@@ -386,7 +384,10 @@ impl IO for SimulatedIo {
         }
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::After, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::After,
+                IoFaultAction::Fail
+            ))
         ) {
             if let Some(file) = state.files.get_mut(path)
                 && file.lock_owner == Some(owner)
@@ -397,23 +398,26 @@ impl IO for SimulatedIo {
             return Err(io_failure(IO_OPEN, std::io::ErrorKind::Other));
         }
         state.record(IO_OPEN, path, None, None, "ok");
-        Ok(Arc::new(SimulatedFile {
+        Ok(std::sync::Arc::new(SimulatedFile {
             path: path.to_string(),
             owner,
             generation: self.generation,
-            state: Arc::clone(&self.state),
+            state: std::sync::Arc::clone(&self.state),
         }))
     }
 
-    fn remove_file(&self, path: &str) -> Result<(), LimboError> {
+    fn remove_file(&self, path: &str) -> Result<(), verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         state
             .ensure_live(self.generation, IO_REMOVE, path)
-            .map_err(LimboError::from)?;
+            .map_err(verlet_sqlite::io::LimboError::from)?;
         let rule = state.take_rule(IO_REMOVE);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::Before, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::Before,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_REMOVE, path, None, None, "fail-before");
             return Err(io_failure(IO_REMOVE, std::io::ErrorKind::Other));
@@ -421,7 +425,10 @@ impl IO for SimulatedIo {
         state.files.remove(path);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::After, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::After,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_REMOVE, path, None, None, "fail-after");
             return Err(io_failure(IO_REMOVE, std::io::ErrorKind::Other));
@@ -442,18 +449,21 @@ impl IO for SimulatedIo {
         }
     }
 
-    fn file_id(&self, path: &str) -> Result<FileId, LimboError> {
+    fn file_id(
+        &self,
+        path: &str,
+    ) -> Result<verlet_sqlite::io::FileId, verlet_sqlite::io::LimboError> {
         self.state
             .lock()
             .unwrap()
             .ensure_live(self.generation, "file-id", path)
-            .map_err(LimboError::from)?;
+            .map_err(verlet_sqlite::io::LimboError::from)?;
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         for byte in path.as_bytes() {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        Ok(FileId {
+        Ok(verlet_sqlite::io::FileId {
             dev: self.seed,
             ino: hash,
         })
@@ -464,7 +474,7 @@ struct SimulatedFile {
     path: String,
     owner: u64,
     generation: usize,
-    state: Arc<Mutex<SimulatedState>>,
+    state: std::sync::Arc<std::sync::Mutex<SimulatedState>>,
 }
 
 impl SimulatedFile {
@@ -473,7 +483,7 @@ impl SimulatedFile {
         path: &str,
         pos: u64,
         bytes: &[u8],
-    ) -> Result<usize, CompletionError> {
+    ) -> Result<usize, verlet_sqlite::io::CompletionError> {
         let start = usize::try_from(pos)
             .map_err(|_| completion_failure(IO_WRITE, std::io::ErrorKind::InvalidInput))?;
         let end = start
@@ -496,7 +506,7 @@ impl SimulatedFile {
         pos: u64,
         bytes: &[u8],
         max_bytes: usize,
-    ) -> Result<usize, CompletionError> {
+    ) -> Result<usize, verlet_sqlite::io::CompletionError> {
         let bound = bytes.len().min(max_bytes);
         if bound == 0 {
             return Ok(0);
@@ -518,7 +528,12 @@ impl SimulatedFile {
         Ok(prefix)
     }
 
-    fn write(&self, pos: u64, bytes: &[u8], c: Completion) -> Result<Completion, LimboError> {
+    fn write(
+        &self,
+        pos: u64,
+        bytes: &[u8],
+        c: verlet_sqlite::io::Completion,
+    ) -> Result<verlet_sqlite::io::Completion, verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         if let Err(error) = state.ensure_live(self.generation, IO_WRITE, &self.path) {
             c.error(error);
@@ -527,7 +542,10 @@ impl SimulatedFile {
         let rule = state.take_rule(IO_WRITE);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::Before, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::Before,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(
                 IO_WRITE,
@@ -549,7 +567,7 @@ impl SimulatedFile {
             return Ok(c);
         }
         match rule.as_ref().map(|rule| (&rule.timing, &rule.action)) {
-            Some((FaultTiming::After, IoFaultAction::Fail)) => {
+            Some((crate::support::fault_plan::FaultTiming::After, IoFaultAction::Fail)) => {
                 state.record(
                     IO_WRITE,
                     &self.path,
@@ -557,7 +575,7 @@ impl SimulatedFile {
                     Some(bytes.len()),
                     "fail-after",
                 );
-                c.error(CompletionError::IOError(
+                c.error(verlet_sqlite::io::CompletionError::IOError(
                     std::io::ErrorKind::Other,
                     IO_WRITE,
                 ));
@@ -572,7 +590,10 @@ impl SimulatedFile {
                 );
                 c.complete(write_len as i32);
             }
-            Some((FaultTiming::After, IoFaultAction::Crash(survival))) => {
+            Some((
+                crate::support::fault_plan::FaultTiming::After,
+                IoFaultAction::Crash(survival),
+            )) => {
                 let outcome = match survival {
                     CrashSurvival::DiscardUnsynced => "crash:discard-unsynced".to_string(),
                     CrashSurvival::TornWrite { max_bytes } => {
@@ -597,7 +618,7 @@ impl SimulatedFile {
                 };
                 state.crashed = true;
                 state.record(IO_WRITE, &self.path, Some(pos), Some(bytes.len()), outcome);
-                c.error(CompletionError::IOError(
+                c.error(verlet_sqlite::io::CompletionError::IOError(
                     std::io::ErrorKind::ConnectionReset,
                     IO_WRITE,
                 ));
@@ -611,16 +632,19 @@ impl SimulatedFile {
     }
 }
 
-impl File for SimulatedFile {
-    fn lock_file(&self, _exclusive: bool) -> Result<(), LimboError> {
+impl verlet_sqlite::io::File for SimulatedFile {
+    fn lock_file(&self, _exclusive: bool) -> Result<(), verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         state
             .ensure_live(self.generation, IO_LOCK, &self.path)
-            .map_err(LimboError::from)?;
+            .map_err(verlet_sqlite::io::LimboError::from)?;
         let rule = state.take_rule(IO_LOCK);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::Before, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::Before,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_LOCK, &self.path, None, None, "fail-before");
             return Err(io_failure(IO_LOCK, std::io::ErrorKind::Other));
@@ -641,14 +665,17 @@ impl File for SimulatedFile {
         };
         let Some(newly_acquired) = newly_acquired else {
             state.record(IO_LOCK, &self.path, None, None, "lock-busy");
-            return Err(LimboError::LockingError(format!(
+            return Err(verlet_sqlite::io::LimboError::LockingError(format!(
                 "simulated file {:?} is already locked",
                 self.path
             )));
         };
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::After, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::After,
+                IoFaultAction::Fail
+            ))
         ) {
             if newly_acquired
                 && let Some(file) = state.files.get_mut(&self.path)
@@ -663,15 +690,18 @@ impl File for SimulatedFile {
         Ok(())
     }
 
-    fn unlock_file(&self) -> Result<(), LimboError> {
+    fn unlock_file(&self) -> Result<(), verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         state
             .ensure_live(self.generation, IO_UNLOCK, &self.path)
-            .map_err(LimboError::from)?;
+            .map_err(verlet_sqlite::io::LimboError::from)?;
         let rule = state.take_rule(IO_UNLOCK);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::Before, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::Before,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_UNLOCK, &self.path, None, None, "fail-before");
             return Err(io_failure(IO_UNLOCK, std::io::ErrorKind::Other));
@@ -683,7 +713,10 @@ impl File for SimulatedFile {
         }
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::After, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::After,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_UNLOCK, &self.path, None, None, "fail-after");
             return Err(io_failure(IO_UNLOCK, std::io::ErrorKind::Other));
@@ -692,7 +725,11 @@ impl File for SimulatedFile {
         Ok(())
     }
 
-    fn pread(&self, pos: u64, c: Completion) -> Result<Completion, LimboError> {
+    fn pread(
+        &self,
+        pos: u64,
+        c: verlet_sqlite::io::Completion,
+    ) -> Result<verlet_sqlite::io::Completion, verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         if let Err(error) = state.ensure_live(self.generation, IO_READ, &self.path) {
             c.error(error);
@@ -701,7 +738,10 @@ impl File for SimulatedFile {
         let rule = state.take_rule(IO_READ);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::Before, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::Before,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(
                 IO_READ,
@@ -740,7 +780,7 @@ impl File for SimulatedFile {
                 .copy_from_slice(&file.volatile[start..start + read_len]);
         }
         match rule.as_ref().map(|rule| (&rule.timing, &rule.action)) {
-            Some((FaultTiming::After, IoFaultAction::Fail)) => {
+            Some((crate::support::fault_plan::FaultTiming::After, IoFaultAction::Fail)) => {
                 state.record(
                     IO_READ,
                     &self.path,
@@ -748,7 +788,10 @@ impl File for SimulatedFile {
                     Some(requested),
                     "fail-after",
                 );
-                c.error(CompletionError::IOError(std::io::ErrorKind::Other, IO_READ));
+                c.error(verlet_sqlite::io::CompletionError::IOError(
+                    std::io::ErrorKind::Other,
+                    IO_READ,
+                ));
             }
             Some((_, IoFaultAction::Short { .. })) => {
                 state.record(
@@ -777,18 +820,18 @@ impl File for SimulatedFile {
     fn pwrite(
         &self,
         pos: u64,
-        buffer: Arc<Buffer>,
-        c: Completion,
-    ) -> Result<Completion, LimboError> {
+        buffer: std::sync::Arc<verlet_sqlite::io::Buffer>,
+        c: verlet_sqlite::io::Completion,
+    ) -> Result<verlet_sqlite::io::Completion, verlet_sqlite::io::LimboError> {
         self.write(pos, buffer.as_slice(), c)
     }
 
     fn pwritev(
         &self,
         pos: u64,
-        buffers: Vec<Arc<Buffer>>,
-        c: Completion,
-    ) -> Result<Completion, LimboError> {
+        buffers: Vec<std::sync::Arc<verlet_sqlite::io::Buffer>>,
+        c: verlet_sqlite::io::Completion,
+    ) -> Result<verlet_sqlite::io::Completion, verlet_sqlite::io::LimboError> {
         let Some(total) = buffers
             .iter()
             .try_fold(0usize, |total, buffer| total.checked_add(buffer.len()))
@@ -810,7 +853,11 @@ impl File for SimulatedFile {
         self.write(pos, &bytes, c)
     }
 
-    fn sync(&self, c: Completion, _sync_type: FileSyncType) -> Result<Completion, LimboError> {
+    fn sync(
+        &self,
+        c: verlet_sqlite::io::Completion,
+        _sync_type: verlet_sqlite::io::FileSyncType,
+    ) -> Result<verlet_sqlite::io::Completion, verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         if let Err(error) = state.ensure_live(self.generation, IO_SYNC, &self.path) {
             c.error(error);
@@ -819,7 +866,10 @@ impl File for SimulatedFile {
         let rule = state.take_rule(IO_SYNC);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::Before, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::Before,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_SYNC, &self.path, None, None, "fail-before");
             c.error(completion_failure(IO_SYNC, std::io::ErrorKind::Other));
@@ -840,10 +890,16 @@ impl File for SimulatedFile {
         file.durable = file.volatile.clone();
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::After, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::After,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_SYNC, &self.path, None, None, "fail-after-durable");
-            c.error(CompletionError::IOError(std::io::ErrorKind::Other, IO_SYNC));
+            c.error(verlet_sqlite::io::CompletionError::IOError(
+                std::io::ErrorKind::Other,
+                IO_SYNC,
+            ));
         } else {
             state.record(IO_SYNC, &self.path, None, None, "ok");
             c.complete(0);
@@ -851,11 +907,11 @@ impl File for SimulatedFile {
         Ok(c)
     }
 
-    fn size(&self) -> Result<u64, LimboError> {
+    fn size(&self) -> Result<u64, verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         state
             .ensure_live(self.generation, "size", &self.path)
-            .map_err(LimboError::from)?;
+            .map_err(verlet_sqlite::io::LimboError::from)?;
         let size = state
             .files
             .get(&self.path)
@@ -866,7 +922,11 @@ impl File for SimulatedFile {
         Ok(size)
     }
 
-    fn truncate(&self, len: u64, c: Completion) -> Result<Completion, LimboError> {
+    fn truncate(
+        &self,
+        len: u64,
+        c: verlet_sqlite::io::Completion,
+    ) -> Result<verlet_sqlite::io::Completion, verlet_sqlite::io::LimboError> {
         let mut state = self.state.lock().unwrap();
         if let Err(error) = state.ensure_live(self.generation, IO_TRUNCATE, &self.path) {
             c.error(error);
@@ -875,7 +935,10 @@ impl File for SimulatedFile {
         let rule = state.take_rule(IO_TRUNCATE);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::Before, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::Before,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(
                 IO_TRUNCATE,
@@ -907,10 +970,13 @@ impl File for SimulatedFile {
         file.volatile.resize(len, 0);
         if matches!(
             rule.as_ref().map(|rule| (&rule.timing, &rule.action)),
-            Some((FaultTiming::After, IoFaultAction::Fail))
+            Some((
+                crate::support::fault_plan::FaultTiming::After,
+                IoFaultAction::Fail
+            ))
         ) {
             state.record(IO_TRUNCATE, &self.path, None, Some(len), "fail-after");
-            c.error(CompletionError::IOError(
+            c.error(verlet_sqlite::io::CompletionError::IOError(
                 std::io::ErrorKind::Other,
                 IO_TRUNCATE,
             ));
@@ -935,113 +1001,131 @@ impl Drop for SimulatedFile {
     }
 }
 
-fn io_failure(operation: &'static str, kind: std::io::ErrorKind) -> LimboError {
+fn io_failure(operation: &'static str, kind: std::io::ErrorKind) -> verlet_sqlite::io::LimboError {
     completion_failure(operation, kind).into()
 }
 
-fn completion_failure(operation: &'static str, kind: std::io::ErrorKind) -> CompletionError {
-    CompletionError::IOError(kind, operation)
+fn completion_failure(
+    operation: &'static str,
+    kind: std::io::ErrorKind,
+) -> verlet_sqlite::io::CompletionError {
+    verlet_sqlite::io::CompletionError::IOError(kind, operation)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use verlet_sqlite::io::IO as _;
 
-    fn write_completion() -> Completion {
-        Completion::new_write(|_| {})
+    fn write_completion() -> verlet_sqlite::io::Completion {
+        verlet_sqlite::io::Completion::new_write(|_| {})
     }
 
-    fn sync_completion() -> Completion {
-        Completion::new_sync(|_| {})
+    fn sync_completion() -> verlet_sqlite::io::Completion {
+        verlet_sqlite::io::Completion::new_sync(|_| {})
     }
 
-    fn counted_write_completion(calls: Arc<AtomicUsize>) -> Completion {
-        Completion::new_write(move |result| {
-            calls.fetch_add(1, Ordering::SeqCst);
+    fn counted_write_completion(
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> verlet_sqlite::io::Completion {
+        verlet_sqlite::io::Completion::new_write(move |result| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert!(result.is_err());
         })
     }
 
     #[test]
     fn delay_rule_is_rejected_instead_of_using_wall_clock_time() {
-        let error = IoFaultPlan::new(
+        let error = crate::support::simulated_io::IoFaultPlan::new(
             1,
-            vec![IoFaultRule {
+            vec![crate::support::simulated_io::IoFaultRule {
                 operation: "typo-operation",
                 nth: 1,
-                timing: FaultTiming::Before,
-                action: IoFaultAction::Fail,
+                timing: crate::support::fault_plan::FaultTiming::Before,
+                action: crate::support::simulated_io::IoFaultAction::Fail,
             }],
         )
         .unwrap_err();
         assert!(error.contains("unknown operation"));
 
-        let error = IoFaultPlan::new(
+        let error = crate::support::simulated_io::IoFaultPlan::new(
             1,
-            vec![IoFaultRule {
-                operation: IO_WRITE,
+            vec![crate::support::simulated_io::IoFaultRule {
+                operation: crate::support::simulated_io::IO_WRITE,
                 nth: 1,
-                timing: FaultTiming::Before,
-                action: IoFaultAction::Delay(Duration::from_millis(1)),
+                timing: crate::support::fault_plan::FaultTiming::Before,
+                action: crate::support::simulated_io::IoFaultAction::Delay(
+                    std::time::Duration::from_millis(1),
+                ),
             }],
         )
         .unwrap_err();
         assert!(error.contains("operations are synchronous"));
 
         let seed = 0x4150_1000;
-        let io = SimulatedIo::new(seed);
+        let io = crate::support::simulated_io::SimulatedIo::new(seed);
         let file = io
-            .open_file("completion-error.sqlite3", OpenFlags::Create, false)
+            .open_file(
+                "completion-error.sqlite3",
+                verlet_sqlite::io::OpenFlags::Create,
+                false,
+            )
             .unwrap();
         io.arm(
-            IoFaultPlan::new(
+            crate::support::simulated_io::IoFaultPlan::new(
                 seed,
-                vec![IoFaultRule {
-                    operation: IO_WRITE,
+                vec![crate::support::simulated_io::IoFaultRule {
+                    operation: crate::support::simulated_io::IO_WRITE,
                     nth: 1,
-                    timing: FaultTiming::Before,
-                    action: IoFaultAction::Fail,
+                    timing: crate::support::fault_plan::FaultTiming::Before,
+                    action: crate::support::simulated_io::IoFaultAction::Fail,
                 }],
             )
             .unwrap(),
         )
         .unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let completion = file
             .pwrite(
                 0,
-                Arc::new(Buffer::new(vec![1])),
-                counted_write_completion(Arc::clone(&calls)),
+                std::sync::Arc::new(verlet_sqlite::io::Buffer::new(vec![1])),
+                counted_write_completion(std::sync::Arc::clone(&calls)),
             )
             .expect("injected IO failures are delivered through the completion");
         assert!(completion.finished() && completion.failed());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
     fn sync_lie_reports_success_without_promoting_volatile_bytes() {
-        fn run(truthful_sync_after_lie: bool) -> (u64, Vec<IoTranscriptEntry>) {
+        fn run(
+            truthful_sync_after_lie: bool,
+        ) -> (u64, Vec<crate::support::simulated_io::IoTranscriptEntry>) {
             let seed = 0x4150_1001;
-            let io = SimulatedIo::new(seed);
+            let io = crate::support::simulated_io::SimulatedIo::new(seed);
             let stale_file = io
-                .open_file("sync-lie.sqlite3", OpenFlags::Create, false)
+                .open_file(
+                    "sync-lie.sqlite3",
+                    verlet_sqlite::io::OpenFlags::Create,
+                    false,
+                )
                 .unwrap();
             io.arm(
-                IoFaultPlan::new(
+                crate::support::simulated_io::IoFaultPlan::new(
                     seed,
                     vec![
-                        IoFaultRule {
-                            operation: IO_SYNC,
+                        crate::support::simulated_io::IoFaultRule {
+                            operation: crate::support::simulated_io::IO_SYNC,
                             nth: 1,
-                            timing: FaultTiming::After,
-                            action: IoFaultAction::SyncLie,
+                            timing: crate::support::fault_plan::FaultTiming::After,
+                            action: crate::support::simulated_io::IoFaultAction::SyncLie,
                         },
-                        IoFaultRule {
-                            operation: IO_WRITE,
+                        crate::support::simulated_io::IoFaultRule {
+                            operation: crate::support::simulated_io::IO_WRITE,
                             nth: 2,
-                            timing: FaultTiming::After,
-                            action: IoFaultAction::Crash(CrashSurvival::DiscardUnsynced),
+                            timing: crate::support::fault_plan::FaultTiming::After,
+                            action: crate::support::simulated_io::IoFaultAction::Crash(
+                                crate::support::simulated_io::CrashSurvival::DiscardUnsynced,
+                            ),
                         },
                     ],
                 )
@@ -1051,11 +1135,15 @@ mod tests {
 
             drop(
                 stale_file
-                    .pwrite(0, Arc::new(Buffer::new(vec![1, 2, 3])), write_completion())
+                    .pwrite(
+                        0,
+                        std::sync::Arc::new(verlet_sqlite::io::Buffer::new(vec![1, 2, 3])),
+                        write_completion(),
+                    )
                     .unwrap(),
             );
             let sync = stale_file
-                .sync(sync_completion(), FileSyncType::Fsync)
+                .sync(sync_completion(), verlet_sqlite::io::FileSyncType::Fsync)
                 .unwrap();
             assert!(
                 sync.succeeded(),
@@ -1063,75 +1151,97 @@ mod tests {
             );
             if truthful_sync_after_lie {
                 let sync = stale_file
-                    .sync(sync_completion(), FileSyncType::Fsync)
+                    .sync(sync_completion(), verlet_sqlite::io::FileSyncType::Fsync)
                     .unwrap();
                 assert!(sync.succeeded());
             }
             drop(
                 stale_file
-                    .pwrite(3, Arc::new(Buffer::new(vec![4])), write_completion())
+                    .pwrite(
+                        3,
+                        std::sync::Arc::new(verlet_sqlite::io::Buffer::new(vec![4])),
+                        write_completion(),
+                    )
                     .unwrap(),
             );
             assert!(io.crashed());
 
             let recovered = io.recover().unwrap();
             let stale_completion = stale_file
-                .truncate(0, Completion::new_trunc(|result| assert!(result.is_err())))
+                .truncate(
+                    0,
+                    verlet_sqlite::io::Completion::new_trunc(|result| assert!(result.is_err())),
+                )
                 .expect("a stale handle reports generation failure through its completion");
             assert!(stale_completion.finished() && stale_completion.failed());
             drop(stale_file);
             let file = recovered
-                .open_file("sync-lie.sqlite3", OpenFlags::Create, false)
+                .open_file(
+                    "sync-lie.sqlite3",
+                    verlet_sqlite::io::OpenFlags::Create,
+                    false,
+                )
                 .unwrap();
             (file.size().unwrap(), recovered.transcript())
         }
 
         let without_repair = run(false);
         assert_eq!(without_repair.0, 0);
-        assert!(
-            without_repair
-                .1
-                .iter()
-                .any(|entry| entry.operation == IO_SYNC && entry.outcome == "lie-success")
-        );
+        assert!(without_repair.1.iter().any(|entry| entry.operation
+            == crate::support::simulated_io::IO_SYNC
+            && entry.outcome == "lie-success"));
 
         let with_repair = run(true);
         assert_eq!(with_repair.0, 3);
-        assert!(
-            with_repair
-                .1
-                .iter()
-                .any(|entry| entry.operation == IO_SYNC && entry.outcome == "ok")
-        );
+        assert!(with_repair.1.iter().any(|entry| entry.operation
+            == crate::support::simulated_io::IO_SYNC
+            && entry.outcome == "ok"));
     }
 
     #[test]
     fn torn_crash_persists_only_a_seeded_bounded_write_prefix() {
-        fn run(seed: u64, bytes: Vec<u8>, max_bytes: usize) -> (usize, Vec<IoTranscriptEntry>) {
-            let io = SimulatedIo::new(seed);
+        fn run(
+            seed: u64,
+            bytes: Vec<u8>,
+            max_bytes: usize,
+        ) -> (usize, Vec<crate::support::simulated_io::IoTranscriptEntry>) {
+            let io = crate::support::simulated_io::SimulatedIo::new(seed);
             let file = io
-                .open_file("torn.sqlite3", OpenFlags::Create, false)
+                .open_file("torn.sqlite3", verlet_sqlite::io::OpenFlags::Create, false)
                 .unwrap();
             drop(
-                file.pwrite(0, Arc::new(Buffer::new(vec![1, 2, 3])), write_completion())
+                file.pwrite(
+                    0,
+                    std::sync::Arc::new(verlet_sqlite::io::Buffer::new(vec![1, 2, 3])),
+                    write_completion(),
+                )
+                .unwrap(),
+            );
+            drop(
+                file.sync(sync_completion(), verlet_sqlite::io::FileSyncType::Fsync)
                     .unwrap(),
             );
-            drop(file.sync(sync_completion(), FileSyncType::Fsync).unwrap());
-            io.arm(IoFaultPlan::crash_after_write(
-                seed,
-                1,
-                CrashSurvival::TornWrite { max_bytes },
-            ))
+            io.arm(
+                crate::support::simulated_io::IoFaultPlan::crash_after_write(
+                    seed,
+                    1,
+                    crate::support::simulated_io::CrashSurvival::TornWrite { max_bytes },
+                ),
+            )
             .unwrap();
             drop(
-                file.pwrite(3, Arc::new(Buffer::new(bytes)), write_completion())
-                    .unwrap(),
+                file.pwrite(
+                    3,
+                    std::sync::Arc::new(verlet_sqlite::io::Buffer::new(bytes)),
+                    write_completion(),
+                )
+                .unwrap(),
             );
             drop(file);
 
             let recovered = io.recover().unwrap();
             let file = recovered
-                .open_file("torn.sqlite3", OpenFlags::Create, false)
+                .open_file("torn.sqlite3", verlet_sqlite::io::OpenFlags::Create, false)
                 .unwrap();
             let size = file.size().unwrap() as usize;
             (size, recovered.transcript())
@@ -1142,19 +1252,22 @@ mod tests {
         assert_eq!(first, second);
         assert!((4..=5).contains(&first.0));
         assert!(first.1.iter().any(|entry| {
-            entry.operation == IO_WRITE && entry.outcome.starts_with("crash:torn-prefix:")
+            entry.operation == crate::support::simulated_io::IO_WRITE
+                && entry.outcome.starts_with("crash:torn-prefix:")
         }));
 
         let empty = run(0x4150_1003, Vec::new(), 4);
         assert_eq!(empty.0, 3);
         assert!(empty.1.iter().any(|entry| {
-            entry.operation == IO_WRITE && entry.outcome == "crash:torn-prefix:0"
+            entry.operation == crate::support::simulated_io::IO_WRITE
+                && entry.outcome == "crash:torn-prefix:0"
         }));
 
         let full = run(0x4150_1004, vec![4], 1);
         assert_eq!(full.0, 4);
         assert!(full.1.iter().any(|entry| {
-            entry.operation == IO_WRITE && entry.outcome == "crash:torn-prefix:1"
+            entry.operation == crate::support::simulated_io::IO_WRITE
+                && entry.outcome == "crash:torn-prefix:1"
         }));
     }
 }

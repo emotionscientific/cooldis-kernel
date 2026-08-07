@@ -1,20 +1,19 @@
 #![allow(dead_code)]
 
-use super::{InvariantViolation, ScenarioInvariant, ScenarioWorld};
-use async_trait::async_trait;
-use std::collections::BTreeMap;
-
 /// ADR 0004 invariant 6: once a scenario is quiescent, every ingress claim
 /// visible anywhere in the normalized transcript has exactly one settle.
 pub struct Inv6ClaimsSettle;
 
-#[async_trait]
-impl ScenarioInvariant for Inv6ClaimsSettle {
+#[async_trait::async_trait]
+impl crate::support::scenario::ScenarioInvariant for Inv6ClaimsSettle {
     fn name(&self) -> &'static str {
         "inv6-claims-settle"
     }
 
-    async fn check(&self, world: &ScenarioWorld<'_>) -> Vec<InvariantViolation> {
+    async fn check(
+        &self,
+        world: &crate::support::scenario::ScenarioWorld<'_>,
+    ) -> Vec<crate::support::scenario::InvariantViolation> {
         // The skeleton exposes shutdown as its only explicit quiescence bit.
         // Intermediate steps may legitimately contain a live unsettled claim.
         if !world.shut_down || world.queue.is_none() {
@@ -23,7 +22,7 @@ impl ScenarioInvariant for Inv6ClaimsSettle {
 
         claim_settle_violations(world.transcript)
             .into_iter()
-            .map(|detail| InvariantViolation {
+            .map(|detail| crate::support::scenario::InvariantViolation {
                 invariant: self.name(),
                 detail,
             })
@@ -31,8 +30,10 @@ impl ScenarioInvariant for Inv6ClaimsSettle {
     }
 }
 
-fn claim_settle_violations(transcript: &super::transcript::NormalizedTranscript) -> Vec<String> {
-    let mut claim_settles = BTreeMap::<String, usize>::new();
+fn claim_settle_violations(
+    transcript: &crate::support::transcript::NormalizedTranscript,
+) -> Vec<String> {
+    let mut claim_settles = std::collections::BTreeMap::<String, usize>::new();
     for item in &transcript.items {
         if item.kind != "event" {
             continue;
@@ -73,38 +74,35 @@ fn claim_settle_violations(transcript: &super::transcript::NormalizedTranscript)
 
 #[cfg(test)]
 mod tests {
-    use super::super::transcript::{NormalizedTranscript, NormalizedTranscriptItem};
-    use super::*;
-    use serde_json::json;
 
     #[test]
     fn inv6_scans_claims_globally_across_streams() {
-        let transcript = NormalizedTranscript {
+        let transcript = crate::support::transcript::NormalizedTranscript {
             items: vec![
-                NormalizedTranscriptItem {
+                crate::support::transcript::NormalizedTranscriptItem {
                     kind: "event".to_string(),
                     label: "parent".to_string(),
-                    value: json!({
+                    value: serde_json::json!({
                         "id": "$event-1",
                         "kind": "io.ingress.claimed",
                         "stream_id": "control:$thread-1",
                         "payload": {},
                     }),
                 },
-                NormalizedTranscriptItem {
+                crate::support::transcript::NormalizedTranscriptItem {
                     kind: "event".to_string(),
                     label: "child".to_string(),
-                    value: json!({
+                    value: serde_json::json!({
                         "id": "$event-2",
                         "kind": "io.ingress.claimed",
                         "stream_id": "control:$thread-2",
                         "payload": {},
                     }),
                 },
-                NormalizedTranscriptItem {
+                crate::support::transcript::NormalizedTranscriptItem {
                     kind: "event".to_string(),
                     label: "parent".to_string(),
-                    value: json!({
+                    value: serde_json::json!({
                         "id": "$event-3",
                         "kind": "io.ingress.settled",
                         "stream_id": "control:$thread-1",
@@ -115,7 +113,7 @@ mod tests {
         };
 
         assert_eq!(
-            claim_settle_violations(&transcript),
+            crate::support::invariant_claims::claim_settle_violations(&transcript),
             vec!["claim $event-2 remains unsettled after global quiescence"]
         );
     }

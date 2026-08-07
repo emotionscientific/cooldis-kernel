@@ -1,14 +1,5 @@
 mod support;
 
-use serde_json::json;
-use std::sync::Arc;
-use verlet::{
-    RuntimeHost, THREAD_HANDLE_KIND, ThreadContractReference, ThreadCoordinates, ThreadDeclaration,
-    ThreadInitialTurn, ThreadPropagatorSelection, ThreadTopology, VirtualBashRuntimeFactory,
-};
-
-use support::text_from_message;
-
 const RELEASE_VERIFIER_CONTRACT: &str = r#"---
 name: release-verifier
 kind: thread
@@ -47,24 +38,29 @@ Run the declared checks and print the verdict.
 
 #[tokio::test]
 async fn kernel_declaration_runs_thread_contract_and_records_child_history() {
-    let host = RuntimeHost::new(Arc::new(VirtualBashRuntimeFactory::default()));
+    let host = verlet::RuntimeHost::new(std::sync::Arc::new(
+        verlet::VirtualBashRuntimeFactory::default(),
+    ));
     let root = host
         .start_thread(
-            ThreadCoordinates::new("tenant", "user", "session"),
-            ThreadTopology::root(),
+            verlet::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet::ThreadTopology::root(),
         )
         .await
         .unwrap();
 
-    let mut declaration = ThreadDeclaration::new(
-        ThreadContractReference::inline_markdown(RELEASE_VERIFIER_CONTRACT),
-        ThreadInitialTurn::user("printf 'verdict=ship\\nreport=direct-run\\n'"),
+    let mut declaration = verlet::ThreadDeclaration::new(
+        verlet::ThreadContractReference::inline_markdown(RELEASE_VERIFIER_CONTRACT),
+        verlet::ThreadInitialTurn::user("printf 'verdict=ship\\nreport=direct-run\\n'"),
     );
-    declaration.inputs = json!({
+    declaration.inputs = serde_json::json!({
         "branch": "main",
         "checks": ["printf ok"],
     });
-    declaration.propagator = Some(ThreadPropagatorSelection::named("llm", "virtual-bash"));
+    declaration.propagator = Some(verlet::ThreadPropagatorSelection::named(
+        "llm",
+        "virtual-bash",
+    ));
     declaration
         .metadata
         .insert("task_name".to_string(), "release-verifier".to_string());
@@ -75,7 +71,7 @@ async fn kernel_declaration_runs_thread_contract_and_records_child_history() {
         .await
         .unwrap();
 
-    assert_eq!(handle.kind, THREAD_HANDLE_KIND);
+    assert_eq!(handle.kind, verlet::THREAD_HANDLE_KIND);
     assert_eq!(handle.propagator.kind, "llm");
     assert_eq!(handle.propagator.name.as_deref(), Some("virtual-bash"));
     assert!(handle.contract_hash.starts_with("sha256:"));
@@ -145,7 +141,7 @@ async fn kernel_declaration_runs_thread_contract_and_records_child_history() {
     let messages = context
         .messages
         .iter()
-        .map(text_from_message)
+        .map(crate::support::text_from_message)
         .collect::<Vec<_>>();
     assert_eq!(messages[0], "printf 'verdict=ship\\nreport=direct-run\\n'");
     assert!(messages[1].contains("verdict=ship"));

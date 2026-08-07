@@ -1,12 +1,6 @@
 //! Receipt-backed effective bind inspection.
 
-use super::*;
-use crate::{
-    AgentManifestBindReceipt, AgentManifestBindingOrigin, AgentManifestCompileReceipt,
-    AgentManifestModelProfileOrigin,
-};
-use chrono::{SecondsFormat, TimeZone, Utc};
-
+use chrono::TimeZone as _;
 #[cfg(test)]
 mod tests;
 
@@ -14,15 +8,15 @@ mod tests;
 pub(super) struct DebugBindArgs {
     thread_id: String,
     json: bool,
-    journal: Option<PathBuf>,
-    endpoint: DebugRpcEndpointArgs,
+    journal: Option<std::path::PathBuf>,
+    endpoint: crate::cli::debug_rpc::DebugRpcEndpointArgs,
 }
 
 /// A projection of recorded compile and bind receipts. Under the receipt law
 /// in `formalism/lexicon.md`, this explanation never recomputes resolution or
 /// fills gaps from current configuration; absent receipt facts remain
 /// unrecorded.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindExplanation {
     pub thread_id: String,
     pub manifest: BindManifestExplanation,
@@ -38,7 +32,7 @@ pub struct BindExplanation {
     pub context: Vec<BindContextExplanation>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindManifestExplanation {
     pub ref_uri: String,
     pub manifest_hash: String,
@@ -48,44 +42,44 @@ pub struct BindManifestExplanation {
     pub bind_event_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindAliasExplanation {
     pub alias: String,
     pub version: String,
     pub resolved_at: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindModelExplanation {
     pub profile_id: String,
     pub provider_id: String,
     pub model_id: String,
-    pub origin: Option<AgentManifestModelProfileOrigin>,
+    pub origin: Option<crate::AgentManifestModelProfileOrigin>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindPlacementExplanation {
     pub target: String,
     pub executor_ref: Option<String>,
-    pub origin: Option<AgentManifestBindingOrigin>,
+    pub origin: Option<crate::AgentManifestBindingOrigin>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindWorkspaceExplanation {
-    pub guest_path: PathBuf,
-    pub host_path: PathBuf,
+    pub guest_path: std::path::PathBuf,
+    pub host_path: std::path::PathBuf,
     pub mode: String,
-    pub origin: Option<AgentManifestBindingOrigin>,
+    pub origin: Option<crate::AgentManifestBindingOrigin>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindRuntimeExplanation {
     pub key: String,
-    pub value: Value,
+    pub value: serde_json::Value,
     pub overridden: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindToolExplanation {
     pub tool_id: String,
     pub origin: Option<String>,
@@ -95,7 +89,7 @@ pub struct BindToolExplanation {
     pub artifact_hash: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindUniverseExplanation {
     pub import_id: String,
     pub server_ref: String,
@@ -104,7 +98,7 @@ pub struct BindUniverseExplanation {
     pub pinned_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindCouplingExplanation {
     pub id: String,
     pub role: String,
@@ -113,7 +107,7 @@ pub struct BindCouplingExplanation {
     pub config_hash: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindGrantExplanation {
     pub capability: String,
     pub subject_kind: String,
@@ -123,13 +117,13 @@ pub struct BindGrantExplanation {
     pub excluded: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindSkillExplanation {
     pub package: String,
     pub artifact_hash: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BindContextExplanation {
     pub ref_uri: String,
     pub content_sha256: String,
@@ -141,10 +135,10 @@ struct RecordedReceiptEvent {
     sequence: i64,
     kind: String,
     source_event_ids: Vec<String>,
-    payload: Value,
+    payload: serde_json::Value,
 }
 
-pub(super) async fn run_debug_bind(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_debug_bind(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args
         .first()
         .is_some_and(|arg| arg == "--help" || arg == "-h")
@@ -158,14 +152,16 @@ pub(super) async fn run_debug_bind(args: Vec<OsString>) -> VerletResult<()> {
         None => load_debug_bind_daemon_events(&options.endpoint, &options.thread_id).await?,
     };
     let (compile_event, bind_event) = active_receipt_events(&events)?;
-    let compile: AgentManifestCompileReceipt =
+    let compile: crate::AgentManifestCompileReceipt =
         serde_json::from_value(compile_event.payload.clone()).map_err(|err| {
-            usage_error(format!(
+            crate::cli::usage_error(format!(
                 "manifest.compile.completed payload is invalid: {err}"
             ))
         })?;
-    let bind: AgentManifestBindReceipt = serde_json::from_value(bind_event.payload.clone())
-        .map_err(|err| usage_error(format!("manifest.bind.completed payload is invalid: {err}")))?;
+    let bind: crate::AgentManifestBindReceipt = serde_json::from_value(bind_event.payload.clone())
+        .map_err(|err| {
+            crate::cli::usage_error(format!("manifest.bind.completed payload is invalid: {err}"))
+        })?;
     let explanation = assemble_bind_explanation(
         &options.thread_id,
         &compile_event.event_id,
@@ -174,8 +170,9 @@ pub(super) async fn run_debug_bind(args: Vec<OsString>) -> VerletResult<()> {
         &bind,
     )?;
     if options.json {
-        serde_json::to_writer_pretty(std::io::stdout(), &explanation)
-            .map_err(|err| usage_error(format!("failed to encode bind explanation: {err}")))?;
+        serde_json::to_writer_pretty(std::io::stdout(), &explanation).map_err(|err| {
+            crate::cli::usage_error(format!("failed to encode bind explanation: {err}"))
+        })?;
         println!();
     } else {
         print!("{}", render_bind_explanation(&explanation));
@@ -183,8 +180,10 @@ pub(super) async fn run_debug_bind(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) fn parse_debug_bind_args(args: Vec<OsString>) -> VerletResult<DebugBindArgs> {
-    let mut endpoint = DebugRpcEndpointArgs {
+pub(super) fn parse_debug_bind_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<DebugBindArgs> {
+    let mut endpoint = crate::cli::debug_rpc::DebugRpcEndpointArgs {
         url: None,
         config: None,
     };
@@ -228,60 +227,60 @@ pub(super) fn parse_debug_bind_args(args: Vec<OsString>) -> VerletResult<DebugBi
 }
 
 fn required_debug_bind_string(
-    iter: &mut impl Iterator<Item = OsString>,
+    iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
-) -> VerletResult<String> {
+) -> crate::VerletResult<String> {
     required_debug_bind_value(iter, flag).map(|value| value.to_string_lossy().to_string())
 }
 
 fn required_debug_bind_path(
-    iter: &mut impl Iterator<Item = OsString>,
+    iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
-) -> VerletResult<PathBuf> {
-    required_debug_bind_value(iter, flag).map(PathBuf::from)
+) -> crate::VerletResult<std::path::PathBuf> {
+    required_debug_bind_value(iter, flag).map(std::path::PathBuf::from)
 }
 
 fn required_debug_bind_value(
-    iter: &mut impl Iterator<Item = OsString>,
+    iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
-) -> VerletResult<OsString> {
+) -> crate::VerletResult<std::ffi::OsString> {
     let value = iter
         .next()
-        .ok_or_else(|| usage_error(format!("{flag} requires a value")))?;
+        .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))?;
     if value.to_string_lossy().starts_with('-') {
-        return Err(usage_error(format!("{flag} requires a value")));
+        return Err(crate::cli::usage_error(format!("{flag} requires a value")));
     }
     Ok(value)
 }
 
 async fn load_debug_bind_daemon_events(
-    endpoint: &DebugRpcEndpointArgs,
+    endpoint: &crate::cli::debug_rpc::DebugRpcEndpointArgs,
     thread_id: &str,
-) -> VerletResult<Vec<RecordedReceiptEvent>> {
-    let url = resolve_debug_rpc_endpoint(endpoint)?;
-    let mut client = connect_debug_rpc_client(&url).await?;
+) -> crate::VerletResult<Vec<RecordedReceiptEvent>> {
+    let url = crate::cli::debug_rpc::resolve_debug_rpc_endpoint(endpoint)?;
+    let mut client = crate::cli::debug_rpc::connect_debug_rpc_client(&url).await?;
     let mut cursor: Option<String> = None;
     let mut events = Vec::new();
     loop {
-        let mut params = json!({
+        let mut params = serde_json::json!({
             "threadId": thread_id,
             "limit": 500,
             "kinds": [
-                EventKind::ManifestCompileCompleted.as_str(),
-                EventKind::ManifestBindCompleted.as_str(),
+                crate::EventKind::ManifestCompileCompleted.as_str(),
+                crate::EventKind::ManifestBindCompleted.as_str(),
             ],
         });
         if let Some(cursor) = cursor.as_ref() {
-            params["cursor"] = Value::String(cursor.clone());
+            params["cursor"] = serde_json::Value::String(cursor.clone());
         }
         let result = client.request("thread/events/list", params).await?;
-        let page = result["data"]
-            .as_array()
-            .ok_or_else(|| usage_error("thread/events/list response missing data array"))?;
+        let page = result["data"].as_array().ok_or_else(|| {
+            crate::cli::usage_error("thread/events/list response missing data array")
+        })?;
         events.extend(
             page.iter()
                 .map(recorded_receipt_event_from_rpc)
-                .collect::<VerletResult<Vec<_>>>()?,
+                .collect::<crate::VerletResult<Vec<_>>>()?,
         );
         cursor = result["cursor"].as_str().map(str::to_string);
         if cursor.is_none() {
@@ -293,16 +292,18 @@ async fn load_debug_bind_daemon_events(
 }
 
 async fn load_debug_bind_journal_events(
-    journal: &Path,
+    journal: &std::path::Path,
     thread_id: &str,
-) -> VerletResult<Vec<RecordedReceiptEvent>> {
-    let thread_id = ThreadId::parse_str(thread_id)
+) -> crate::VerletResult<Vec<RecordedReceiptEvent>> {
+    let thread_id = crate::ThreadId::parse_str(thread_id)
         .map_err(|err| debug_bind_usage_error(format!("invalid thread id {thread_id:?}: {err}")))?;
-    let store = SqliteSessionStore::open_read_only(journal)
+    let store = crate::SqliteSessionStore::open_read_only(journal)
         .await
-        .map_err(|err| usage_error(format!("failed to open journal read-only: {err}")))?;
+        .map_err(|err| {
+            crate::cli::usage_error(format!("failed to open journal read-only: {err}"))
+        })?;
     let events = store.list_thread_events(thread_id).await.map_err(|err| {
-        usage_error(format!(
+        crate::cli::usage_error(format!(
             "failed to read recorded events for thread {thread_id}: {err}"
         ))
     })?;
@@ -311,7 +312,8 @@ async fn load_debug_bind_journal_events(
         .filter(|event| {
             matches!(
                 event.kind,
-                EventKind::ManifestCompileCompleted | EventKind::ManifestBindCompleted
+                crate::EventKind::ManifestCompileCompleted
+                    | crate::EventKind::ManifestBindCompleted
             )
         })
         .map(|event| RecordedReceiptEvent {
@@ -329,21 +331,23 @@ async fn load_debug_bind_journal_events(
         .collect())
 }
 
-fn recorded_receipt_event_from_rpc(value: &Value) -> VerletResult<RecordedReceiptEvent> {
+fn recorded_receipt_event_from_rpc(
+    value: &serde_json::Value,
+) -> crate::VerletResult<RecordedReceiptEvent> {
     let event_id = value["eventId"]
         .as_str()
-        .ok_or_else(|| usage_error("thread/events/list event missing eventId"))?;
+        .ok_or_else(|| crate::cli::usage_error("thread/events/list event missing eventId"))?;
     let sequence = value["sequence"]
         .as_i64()
-        .ok_or_else(|| usage_error("thread/events/list event missing sequence"))?;
+        .ok_or_else(|| crate::cli::usage_error("thread/events/list event missing sequence"))?;
     let kind = value["kind"]
         .as_str()
-        .ok_or_else(|| usage_error("thread/events/list event missing kind"))?;
+        .ok_or_else(|| crate::cli::usage_error("thread/events/list event missing kind"))?;
     let source_event_ids = value["provenance"]["source_event_ids"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(Value::as_str)
+        .filter_map(serde_json::Value::as_str)
         .map(str::to_string)
         .collect();
     Ok(RecordedReceiptEvent {
@@ -357,23 +361,27 @@ fn recorded_receipt_event_from_rpc(value: &Value) -> VerletResult<RecordedReceip
 
 fn active_receipt_events(
     events: &[RecordedReceiptEvent],
-) -> VerletResult<(&RecordedReceiptEvent, &RecordedReceiptEvent)> {
+) -> crate::VerletResult<(&RecordedReceiptEvent, &RecordedReceiptEvent)> {
     let bind = events
         .iter()
-        .filter(|event| event.kind == EventKind::ManifestBindCompleted.as_str())
+        .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted.as_str())
         .max_by_key(|event| event.sequence)
-        .ok_or_else(|| usage_error("manifest.bind.completed receipt event was not found"))?;
+        .ok_or_else(|| {
+            crate::cli::usage_error("manifest.bind.completed receipt event was not found")
+        })?;
     let compile_id = bind.source_event_ids.first().ok_or_else(|| {
-        usage_error("active manifest bind receipt does not witness a compile receipt")
+        crate::cli::usage_error("active manifest bind receipt does not witness a compile receipt")
     })?;
     let compile = events
         .iter()
         .find(|event| {
             event.event_id == *compile_id
-                && event.kind == EventKind::ManifestCompileCompleted.as_str()
+                && event.kind == crate::EventKind::ManifestCompileCompleted.as_str()
         })
         .ok_or_else(|| {
-            usage_error("active manifest bind receipt references an unavailable compile receipt")
+            crate::cli::usage_error(
+                "active manifest bind receipt references an unavailable compile receipt",
+            )
         })?;
     Ok((compile, bind))
 }
@@ -382,20 +390,23 @@ pub fn assemble_bind_explanation(
     thread_id: &str,
     compile_event_id: &str,
     bind_event_id: &str,
-    compile: &AgentManifestCompileReceipt,
-    bind: &AgentManifestBindReceipt,
-) -> VerletResult<BindExplanation> {
+    compile: &crate::AgentManifestCompileReceipt,
+    bind: &crate::AgentManifestBindReceipt,
+) -> crate::VerletResult<BindExplanation> {
     let alias = compile
         .alias
         .as_ref()
-        .map(|alias| -> VerletResult<BindAliasExplanation> {
-            let resolved_at_ms = i64::try_from(alias.resolved_at_ms)
-                .map_err(|_| usage_error("alias receipt resolved_at_ms is out of range"))?;
-            let resolved_at = Utc
+        .map(|alias| -> crate::VerletResult<BindAliasExplanation> {
+            let resolved_at_ms = i64::try_from(alias.resolved_at_ms).map_err(|_| {
+                crate::cli::usage_error("alias receipt resolved_at_ms is out of range")
+            })?;
+            let resolved_at = chrono::Utc
                 .timestamp_millis_opt(resolved_at_ms)
                 .single()
-                .ok_or_else(|| usage_error("alias receipt resolved_at_ms is out of range"))?
-                .to_rfc3339_opts(SecondsFormat::Millis, true);
+                .ok_or_else(|| {
+                    crate::cli::usage_error("alias receipt resolved_at_ms is out of range")
+                })?
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             Ok(BindAliasExplanation {
                 alias: alias.alias.clone(),
                 version: alias.version.clone(),
@@ -403,25 +414,34 @@ pub fn assemble_bind_explanation(
             })
         })
         .transpose()?;
-    let overridden = bind.overridden_keys.iter().collect::<BTreeSet<_>>();
+    let overridden = bind
+        .overridden_keys
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
     let runtime_values = [
-        ("default_cwd", json!(bind.effective_runtime.default_cwd)),
-        ("streaming", json!(bind.effective_runtime.streaming)),
+        (
+            "default_cwd",
+            serde_json::json!(bind.effective_runtime.default_cwd),
+        ),
+        (
+            "streaming",
+            serde_json::json!(bind.effective_runtime.streaming),
+        ),
         (
             "turn_timeout_ms",
-            json!(bind.effective_runtime.turn_timeout_ms),
+            serde_json::json!(bind.effective_runtime.turn_timeout_ms),
         ),
         (
             "cancellation_grace_ms",
-            json!(bind.effective_runtime.cancellation_grace_ms),
+            serde_json::json!(bind.effective_runtime.cancellation_grace_ms),
         ),
         (
             "max_tool_rounds",
-            json!(bind.effective_runtime.max_tool_rounds),
+            serde_json::json!(bind.effective_runtime.max_tool_rounds),
         ),
         (
             "compaction.auto_at_text_bytes",
-            json!(bind.effective_runtime.compaction.auto_at_text_bytes),
+            serde_json::json!(bind.effective_runtime.compaction.auto_at_text_bytes),
         ),
     ];
     let runtime = runtime_values
@@ -455,7 +475,7 @@ pub fn assemble_bind_explanation(
                 .as_ref()
                 .map(|placement| &placement.target)
                 .map(|target| serde_json::to_value(target).expect("placement target serializes"))
-                .unwrap_or_else(|| json!("local"))
+                .unwrap_or_else(|| serde_json::json!("local"))
                 .as_str()
                 .expect("placement target is a string")
                 .to_string(),
@@ -537,7 +557,7 @@ pub fn assemble_bind_explanation(
     })
 }
 
-fn assemble_tools(bind: &AgentManifestBindReceipt) -> Vec<BindToolExplanation> {
+fn assemble_tools(bind: &crate::AgentManifestBindReceipt) -> Vec<BindToolExplanation> {
     let mut tools = Vec::new();
     for tool_id in &bind.tool_ids {
         if let Some(universe) = bind
@@ -743,7 +763,7 @@ pub fn render_bind_explanation(explanation: &BindExplanation) -> String {
     out
 }
 
-fn runtime_value_text(value: &Value) -> String {
+fn runtime_value_text(value: &serde_json::Value) -> String {
     value
         .as_str()
         .map(str::to_string)
@@ -774,19 +794,19 @@ fn short_hash(value: &str) -> String {
     }
 }
 
-fn model_origin_text(origin: Option<AgentManifestModelProfileOrigin>) -> &'static str {
+fn model_origin_text(origin: Option<crate::AgentManifestModelProfileOrigin>) -> &'static str {
     match origin {
-        Some(AgentManifestModelProfileOrigin::ManifestDefault) => "manifest-default",
-        Some(AgentManifestModelProfileOrigin::SelectedAtStart) => "selected-at-start",
+        Some(crate::AgentManifestModelProfileOrigin::ManifestDefault) => "manifest-default",
+        Some(crate::AgentManifestModelProfileOrigin::SelectedAtStart) => "selected-at-start",
         None => "unrecorded",
     }
 }
 
-fn binding_origin_text(origin: Option<AgentManifestBindingOrigin>) -> &'static str {
+fn binding_origin_text(origin: Option<crate::AgentManifestBindingOrigin>) -> &'static str {
     match origin {
-        Some(AgentManifestBindingOrigin::DaemonDefault) => "daemon-default",
-        Some(AgentManifestBindingOrigin::BindOverride) => "bind-override",
-        Some(AgentManifestBindingOrigin::Manifest) => "manifest",
+        Some(crate::AgentManifestBindingOrigin::DaemonDefault) => "daemon-default",
+        Some(crate::AgentManifestBindingOrigin::BindOverride) => "bind-override",
+        Some(crate::AgentManifestBindingOrigin::Manifest) => "manifest",
         None => "unrecorded",
     }
 }
@@ -803,8 +823,8 @@ receipts. Daemon mode uses thread/events/list; --journal reads SQLite offline.\n
     );
 }
 
-fn debug_bind_usage_error(message: impl Into<String>) -> VerletError {
-    usage_error(format!(
+fn debug_bind_usage_error(message: impl Into<String>) -> crate::VerletError {
+    crate::cli::usage_error(format!(
         "{}\nUsage: verlet debug bind --help",
         message.into()
     ))

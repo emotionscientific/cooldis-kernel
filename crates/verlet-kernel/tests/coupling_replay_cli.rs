@@ -1,20 +1,8 @@
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
-use uuid::Uuid;
-use verlet::{
-    AgentManifestCouplingBudget, AgentManifestCouplingQuota, BoundCoupling, BoundCouplingFunction,
-    BoundCouplingSelector, BoundCouplingSet, BoundCouplingSink, CouplingRole, CouplingScheduler,
-    EventKind, EventStore, EventStreamId, LocalOperationRegistry, NewEventRecord,
-    PublishOperationRequest, PublishedOperationSource, RustWasmBuildOptions, SqliteSessionStore,
-    ThreadCoordinates, WasmCouplingExecutor, build_rust_wasm_module,
-};
+use verlet::EventStore as _;
 
 #[tokio::test]
 async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let example_module = repo.join("../../examples/wasm-counter-coupling");
     let root = temp_dir("coupling-replay-counter");
     let registry_root = root.join("operations");
@@ -22,18 +10,19 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     let coupling_path = root.join("coupling.json");
     let quota_coupling_path = root.join("quota-coupling.json");
 
-    let build = build_rust_wasm_module(RustWasmBuildOptions::new(&example_module)).unwrap();
-    let operation = LocalOperationRegistry::new(&registry_root)
-        .publish_artifact(PublishOperationRequest {
+    let build =
+        verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(&example_module)).unwrap();
+    let operation = verlet::LocalOperationRegistry::new(&registry_root)
+        .publish_artifact(verlet::PublishOperationRequest {
             name: "counter".to_string(),
             artifact_path: build.artifact_path.clone(),
-            source: PublishedOperationSource::Rust {
+            source: verlet::PublishedOperationSource::Rust {
                 module_path: example_module,
                 release: true,
             },
             interface: None,
-            capability_grants: BTreeSet::new(),
-            metadata: BTreeMap::new(),
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
         })
         .await
         .unwrap();
@@ -42,35 +31,37 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
         operation.active_artifact_hash
     );
 
-    let coordinates = ThreadCoordinates::new("tenant", "user", "counter-session");
-    let store = SqliteSessionStore::open(&recording_path).await.unwrap();
+    let coordinates = verlet::ThreadCoordinates::new("tenant", "user", "counter-session");
+    let store = verlet::SqliteSessionStore::open(&recording_path)
+        .await
+        .unwrap();
     let coupling = counter_coupling("org.example.counter", &artifact_ref, None);
-    fs::write(
+    std::fs::write(
         &coupling_path,
-        serde_json::to_vec_pretty(&BoundCouplingSet::new(
+        serde_json::to_vec_pretty(&verlet::BoundCouplingSet::new(
             "snapshot-counter",
             vec![coupling.clone()],
         ))
         .unwrap(),
     )
     .unwrap();
-    let executor = WasmCouplingExecutor::new(&registry_root);
-    let scheduler = CouplingScheduler::new(&store, &executor);
+    let executor = verlet::WasmCouplingExecutor::new(&registry_root);
+    let scheduler = verlet::CouplingScheduler::new(&store, &executor);
     for index in 1..=3 {
         let appended = store
             .append_events(
-                &EventStreamId::for_thread(&coordinates),
-                vec![NewEventRecord::witnessed(
+                &verlet::EventStreamId::for_thread(&coordinates),
+                vec![verlet::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnCompleted,
-                    json!({"turn_id": format!("turn-{index}")}),
+                    verlet::EventKind::TurnCompleted,
+                    serde_json::json!({"turn_id": format!("turn-{index}")}),
                 )],
             )
             .await
             .unwrap();
         scheduler
             .run_batch(
-                &BoundCouplingSet::new("snapshot-counter", vec![coupling.clone()]),
+                &verlet::BoundCouplingSet::new("snapshot-counter", vec![coupling.clone()]),
                 appended,
             )
             .await
@@ -78,15 +69,15 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     }
     let live_derived = store
         .read_events(
-            &EventStreamId::new(format!("derived:counter:{}", coordinates.thread_id)),
+            &verlet::EventStreamId::new(format!("derived:counter:{}", coordinates.thread_id)),
             None,
         )
         .await
         .unwrap();
     assert_eq!(live_derived.len(), 1);
-    assert_eq!(live_derived[0].payload["count"], json!(3));
+    assert_eq!(live_derived[0].payload["count"], serde_json::json!(3));
     drop(store);
-    let before = fs::read(&recording_path).unwrap();
+    let before = std::fs::read(&recording_path).unwrap();
 
     let replay = run_verlet([
         "coupling",
@@ -102,21 +93,21 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
         recording_path.to_str().unwrap(),
         "--json",
     ]);
-    let after = fs::read(&recording_path).unwrap();
+    let after = std::fs::read(&recording_path).unwrap();
     assert_eq!(after, before, "replay must not mutate the source journal");
 
-    let replay: Value = serde_json::from_str(&replay).unwrap();
+    let replay: serde_json::Value = serde_json::from_str(&replay).unwrap();
     assert_eq!(replay["mode"], "replay");
     assert_eq!(replay["dryRun"], true);
     assert_eq!(replay["runs"].as_array().unwrap().len(), 3);
     assert_eq!(replay["proposalEvents"].as_array().unwrap().len(), 1);
     assert_eq!(
         replay["proposalEvents"][0]["stream"],
-        json!("derived:counter")
+        serde_json::json!("derived:counter")
     );
     assert_eq!(
         replay["proposalEvents"][0]["kind"],
-        json!("placement.decision")
+        serde_json::json!("placement.decision")
     );
     assert_eq!(
         replay["proposalEvents"][0]["payload"],
@@ -126,14 +117,14 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     let quota_coupling = counter_coupling(
         "org.example.counter.quota",
         &artifact_ref,
-        Some(AgentManifestCouplingQuota {
+        Some(verlet::AgentManifestCouplingQuota {
             per_turn: None,
             per_thread: Some(1),
         }),
     );
-    fs::write(
+    std::fs::write(
         &quota_coupling_path,
-        serde_json::to_vec_pretty(&BoundCouplingSet::new(
+        serde_json::to_vec_pretty(&verlet::BoundCouplingSet::new(
             "snapshot-quota",
             vec![quota_coupling],
         ))
@@ -156,7 +147,7 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
         recording_path.to_str().unwrap(),
         "--json",
     ]);
-    let quota_replay: Value = serde_json::from_str(&quota_replay).unwrap();
+    let quota_replay: serde_json::Value = serde_json::from_str(&quota_replay).unwrap();
     let blocked = quota_replay["runs"]
         .as_array()
         .unwrap()
@@ -165,33 +156,38 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
         .collect::<Vec<_>>();
     assert_eq!(blocked.len(), 2);
     assert!(blocked.iter().all(|run| {
-        run["status"] == json!("blocked") && run["reason"] == json!("quota_exhausted")
+        run["status"] == serde_json::json!("blocked")
+            && run["reason"] == serde_json::json!("quota_exhausted")
     }));
 }
 
 #[tokio::test]
 async fn coupling_replay_guides_user_when_daemon_holds_journal() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let example_module = repo.join("../../examples/wasm-counter-coupling");
     let root = temp_dir("coupling-replay-held-journal");
     let journal_path = root.join("session_history.sqlite3");
     let coupling_path = root.join("coupling.json");
 
-    let build = build_rust_wasm_module(RustWasmBuildOptions::new(&example_module)).unwrap();
+    let build =
+        verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(&example_module)).unwrap();
     let coupling = counter_coupling(
         "org.example.counter",
         "op://counter/fold_counter@sha256:0000000000000000000000000000000000000000000000000000000000000000",
         None,
     );
-    fs::write(
+    std::fs::write(
         &coupling_path,
-        serde_json::to_vec_pretty(&BoundCouplingSet::new("snapshot", vec![coupling])).unwrap(),
+        serde_json::to_vec_pretty(&verlet::BoundCouplingSet::new("snapshot", vec![coupling]))
+            .unwrap(),
     )
     .unwrap();
 
-    let held_store = SqliteSessionStore::open(&journal_path).await.unwrap();
-    let thread_id = ThreadCoordinates::new("tenant", "user", "held-journal").thread_id;
-    let output = Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let held_store = verlet::SqliteSessionStore::open(&journal_path)
+        .await
+        .unwrap();
+    let thread_id = verlet::ThreadCoordinates::new("tenant", "user", "held-journal").thread_id;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .args([
             "coupling",
             "run",
@@ -225,27 +221,27 @@ async fn coupling_replay_guides_user_when_daemon_holds_journal() {
 fn counter_coupling(
     id: &str,
     artifact_ref: &str,
-    quota: Option<AgentManifestCouplingQuota>,
-) -> BoundCoupling {
+    quota: Option<verlet::AgentManifestCouplingQuota>,
+) -> verlet::BoundCoupling {
     let hash = artifact_ref.rsplit_once("@sha256:").unwrap().1;
-    BoundCoupling {
+    verlet::BoundCoupling {
         id: id.to_string(),
-        role: CouplingRole::Projection,
-        trigger_kind: EventKind::TurnCompleted,
-        trigger_match: BTreeMap::new(),
+        role: verlet::CouplingRole::Projection,
+        trigger_kind: verlet::EventKind::TurnCompleted,
+        trigger_match: std::collections::BTreeMap::new(),
         trigger_quota: quota.unwrap_or_default(),
-        source_selectors: vec![BoundCouplingSelector {
+        source_selectors: vec![verlet::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![EventKind::TurnCompleted],
+            kinds: vec![verlet::EventKind::TurnCompleted],
             scope: None,
             since: None,
         }],
-        sink: BoundCouplingSink {
+        sink: verlet::BoundCouplingSink {
             stream: "derived:counter".to_string(),
-            kinds: vec![EventKind::PlacementDecision],
+            kinds: vec![verlet::EventKind::PlacementDecision],
         },
         function_ref: artifact_ref.to_string(),
-        function: BoundCouplingFunction {
+        function: verlet::BoundCouplingFunction {
             name: "counter".to_string(),
             artifact_hash: hash.to_string(),
             operation_name: Some("fold_counter".to_string()),
@@ -254,11 +250,11 @@ fn counter_coupling(
             "stream.read:thread".to_string(),
             "stream.write:derived:counter".to_string(),
         ],
-        budget: AgentManifestCouplingBudget {
+        budget: verlet::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
-        config: json!({
+        config: serde_json::json!({
             "every": 3,
             "sink_stream": "derived:counter",
             "sink_kind": "placement.decision",
@@ -268,7 +264,7 @@ fn counter_coupling(
 }
 
 fn run_verlet<const N: usize>(args: [&str; N]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .args(args)
         .output()
         .expect("failed to run verlet cli");
@@ -281,8 +277,8 @@ fn run_verlet<const N: usize>(args: [&str; N]) -> String {
     String::from_utf8(output.stdout).expect("verlet output should be utf8")
 }
 
-fn temp_dir(prefix: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::now_v7()));
-    fs::create_dir_all(&path).unwrap();
+fn temp_dir(prefix: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&path).unwrap();
     path
 }

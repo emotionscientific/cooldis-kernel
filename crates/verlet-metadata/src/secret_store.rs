@@ -1,15 +1,6 @@
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::Path;
-use thiserror::Error;
-use verlet_abi::WasmOperationManifest;
-use verlet_history::now_ms;
-use verlet_sqlite::{Connection, Db, DbConfig, params};
-
 pub type SecretStoreResult<T> = Result<T, SecretStoreError>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum SecretStoreError {
     #[error("secret name cannot be empty")]
     EmptyName,
@@ -28,7 +19,7 @@ pub enum SecretStoreError {
     Codec(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretSourceKind {
     Env,
@@ -57,7 +48,7 @@ impl SecretSourceKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SecretStatus {
     pub name: String,
     pub source_kind: SecretSourceKind,
@@ -67,7 +58,7 @@ pub struct SecretStatus {
     pub value: RedactedSecretValue,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RedactedSecretValue {
     pub redacted: bool,
 }
@@ -83,7 +74,7 @@ pub struct ResolvedSecret {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ManifestSecretResolution {
-    pub values: BTreeMap<String, String>,
+    pub values: std::collections::BTreeMap<String, String>,
     pub missing: std::collections::BTreeSet<String>,
 }
 
@@ -93,18 +84,18 @@ impl ManifestSecretResolution {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait SecretResolver: Send + Sync + 'static {
     async fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>>;
 }
 
 #[derive(Clone)]
 pub struct SqliteSecretStore {
-    inner: Db,
+    inner: verlet_sqlite::Db,
 }
 
 impl SqliteSecretStore {
-    pub async fn open(path: impl AsRef<Path>) -> SecretStoreResult<Self> {
+    pub async fn open(path: impl AsRef<std::path::Path>) -> SecretStoreResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent()
             && !parent.exists()
@@ -112,7 +103,7 @@ impl SqliteSecretStore {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
             restrict_dir_permissions(parent)?;
         }
-        let inner = Db::open(path, DbConfig::default())
+        let inner = verlet_sqlite::Db::open(path, verlet_sqlite::DbConfig::default())
             .await
             .map_err(storage_error)?;
         restrict_file_permissions(path)?;
@@ -120,13 +111,13 @@ impl SqliteSecretStore {
     }
 
     pub async fn in_memory() -> SecretStoreResult<Self> {
-        let inner = Db::in_memory(DbConfig::default())
+        let inner = verlet_sqlite::Db::in_memory(verlet_sqlite::DbConfig::default())
             .await
             .map_err(storage_error)?;
         Self::from_db(inner).await
     }
 
-    async fn from_db(inner: Db) -> SecretStoreResult<Self> {
+    async fn from_db(inner: verlet_sqlite::Db) -> SecretStoreResult<Self> {
         let store = Self { inner };
         let connection = store.inner.connect().await.map_err(storage_error)?;
         init_secret_store_schema(&connection).await?;
@@ -145,7 +136,7 @@ impl SqliteSecretStore {
         if value.is_empty() {
             return Err(SecretStoreError::EmptyValue(name));
         }
-        let now = now_ms();
+        let now = verlet_history::now_ms();
         let connection = self.inner.connect().await.map_err(storage_error)?;
         connection
             .execute(
@@ -159,7 +150,7 @@ impl SqliteSecretStore {
                         source_label = excluded.source_label,
                         updated_at_ms = excluded.updated_at_ms
                     "#,
-                params![
+                verlet_sqlite::params![
                     name.as_str(),
                     value,
                     source_kind.as_str(),
@@ -227,7 +218,7 @@ impl SqliteSecretStore {
         let deleted = connection
             .execute(
                 "DELETE FROM cooldis_secret_records WHERE name = ?1",
-                params![name],
+                verlet_sqlite::params![name],
             )
             .await
             .map_err(storage_error)?;
@@ -235,7 +226,7 @@ impl SqliteSecretStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl SecretResolver for SqliteSecretStore {
     async fn resolve_secret(&self, name: &str) -> SecretStoreResult<Option<ResolvedSecret>> {
         let name = validate_secret_name(name)?;
@@ -247,7 +238,7 @@ impl SecretResolver for SqliteSecretStore {
                 FROM cooldis_secret_records
                 WHERE name = ?1
                 "#,
-                params![name],
+                verlet_sqlite::params![name],
             )
             .await
             .map_err(storage_error)?;
@@ -269,7 +260,7 @@ impl SecretResolver for SqliteSecretStore {
 }
 
 pub fn required_secret_names(
-    manifest: &WasmOperationManifest,
+    manifest: &verlet_abi::WasmOperationManifest,
 ) -> SecretStoreResult<std::collections::BTreeSet<String>> {
     let mut names = std::collections::BTreeSet::new();
     for operation in &manifest.operations {
@@ -284,8 +275,8 @@ pub fn required_secret_names(
 
 pub async fn resolve_manifest_secrets(
     resolver: &dyn SecretResolver,
-    manifest: &WasmOperationManifest,
-) -> SecretStoreResult<BTreeMap<String, String>> {
+    manifest: &verlet_abi::WasmOperationManifest,
+) -> SecretStoreResult<std::collections::BTreeMap<String, String>> {
     Ok(resolve_manifest_secret_resolution(resolver, manifest)
         .await?
         .values)
@@ -293,9 +284,9 @@ pub async fn resolve_manifest_secrets(
 
 pub async fn resolve_manifest_secret_resolution(
     resolver: &dyn SecretResolver,
-    manifest: &WasmOperationManifest,
+    manifest: &verlet_abi::WasmOperationManifest,
 ) -> SecretStoreResult<ManifestSecretResolution> {
-    let mut secrets = BTreeMap::new();
+    let mut secrets = std::collections::BTreeMap::new();
     let mut missing = std::collections::BTreeSet::new();
     for name in required_secret_names(manifest)? {
         if let Some(secret) = resolver.resolve_secret(&name).await? {
@@ -327,7 +318,7 @@ pub fn validate_secret_name(name: &str) -> SecretStoreResult<String> {
     Ok(name.to_string())
 }
 
-async fn init_secret_store_schema(connection: &Connection) -> SecretStoreResult<()> {
+async fn init_secret_store_schema(connection: &verlet_sqlite::Connection) -> SecretStoreResult<()> {
     connection
         .execute_batch(
             r#"
@@ -346,7 +337,7 @@ async fn init_secret_store_schema(connection: &Connection) -> SecretStoreResult<
 }
 
 async fn sqlite_secret_status_by_name(
-    connection: &Connection,
+    connection: &verlet_sqlite::Connection,
     name: &str,
 ) -> SecretStoreResult<Option<SecretStatus>> {
     let mut rows = connection
@@ -356,7 +347,7 @@ async fn sqlite_secret_status_by_name(
             FROM cooldis_secret_records
             WHERE name = ?1
             "#,
-            params![name],
+            verlet_sqlite::params![name],
         )
         .await
         .map_err(storage_error)?;
@@ -384,20 +375,20 @@ fn storage_error(err: impl std::fmt::Display) -> SecretStoreError {
 }
 
 #[cfg(unix)]
-fn restrict_dir_permissions(path: &Path) -> SecretStoreResult<()> {
-    use std::os::unix::fs::PermissionsExt;
+fn restrict_dir_permissions(path: &std::path::Path) -> SecretStoreResult<()> {
+    use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(storage_error)
 }
 
 #[cfg(not(unix))]
-fn restrict_dir_permissions(_path: &Path) -> SecretStoreResult<()> {
+fn restrict_dir_permissions(_path: &std::path::Path) -> SecretStoreResult<()> {
     Ok(())
 }
 
 #[cfg(unix)]
-fn restrict_file_permissions(path: &Path) -> SecretStoreResult<()> {
+fn restrict_file_permissions(path: &std::path::Path) -> SecretStoreResult<()> {
     if path.exists() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(storage_error)?;
     }
@@ -405,7 +396,7 @@ fn restrict_file_permissions(path: &Path) -> SecretStoreResult<()> {
 }
 
 #[cfg(not(unix))]
-fn restrict_file_permissions(_path: &Path) -> SecretStoreResult<()> {
+fn restrict_file_permissions(_path: &std::path::Path) -> SecretStoreResult<()> {
     Ok(())
 }
 

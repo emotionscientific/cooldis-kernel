@@ -1,61 +1,48 @@
-use super::ThreadEvent;
-use super::runtime_utils::unix_timestamp_ms;
-use crate::CompactionTrigger;
-use crate::agent::hooks::{HookEventName, HookRunStatus};
-use crate::kernel::context_compiler::AgentContextCompilationDiagnostics;
-use crate::kernel::history::CanonicalStopReason;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use tokio::sync::broadcast;
-use verlet_runtime_contracts::{
-    RuntimeApprovalDecision, RuntimeEventId, RuntimeModelRequestErrorClass,
-    RuntimeModelRequestMode, RuntimeModelRequestPurpose, RuntimePermissionDecision,
-    RuntimeTerminalState, RuntimeToolLogLevel, RuntimeUsage, ThreadCheckpointId, ThreadCoordinates,
-    ThreadId, ThreadInteractionKind, ThreadLifecycleStatus, ThreadTopology,
-};
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeEvent {
-    pub id: RuntimeEventId,
-    pub coordinates: ThreadCoordinates,
+    pub id: verlet_runtime_contracts::RuntimeEventId,
+    pub coordinates: verlet_runtime_contracts::ThreadCoordinates,
     pub created_at_ms: u64,
     pub kind: RuntimeEventKind,
 }
 
 impl RuntimeEvent {
-    pub fn new(coordinates: ThreadCoordinates, kind: RuntimeEventKind) -> Self {
+    pub fn new(
+        coordinates: verlet_runtime_contracts::ThreadCoordinates,
+        kind: RuntimeEventKind,
+    ) -> Self {
         Self {
-            id: RuntimeEventId::new(),
+            id: verlet_runtime_contracts::RuntimeEventId::new(),
             coordinates,
-            created_at_ms: unix_timestamp_ms(),
+            created_at_ms: crate::kernel::runtime_host::runtime_utils::unix_timestamp_ms(),
             kind,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEventKind {
     ThreadStarted {
-        parent_thread_id: Option<ThreadId>,
+        parent_thread_id: Option<verlet_runtime_contracts::ThreadId>,
         #[serde(default)]
-        topology: ThreadTopology,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        metadata: BTreeMap<String, String>,
+        topology: verlet_runtime_contracts::ThreadTopology,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        metadata: std::collections::BTreeMap<String, String>,
     },
     ThreadInteraction {
-        interaction_id: RuntimeEventId,
-        kind: ThreadInteractionKind,
-        source_thread_id: ThreadId,
-        target_thread_id: ThreadId,
+        interaction_id: verlet_runtime_contracts::RuntimeEventId,
+        kind: verlet_runtime_contracts::ThreadInteractionKind,
+        source_thread_id: verlet_runtime_contracts::ThreadId,
+        target_thread_id: verlet_runtime_contracts::ThreadId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_turn_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_turn_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result_preview: Option<String>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        metadata: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        metadata: std::collections::BTreeMap<String, String>,
     },
     TextDelta {
         text: String,
@@ -78,23 +65,23 @@ pub enum RuntimeEventKind {
     ToolLog {
         call_id: String,
         tool_name: String,
-        level: RuntimeToolLogLevel,
+        level: verlet_runtime_contracts::RuntimeToolLogLevel,
         message: String,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        metadata: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        metadata: std::collections::BTreeMap<String, String>,
     },
     HookStarted {
         // lexicon-allow: hook - stable runtime event field for existing hook integration.
         hook_id: String,
-        event_name: HookEventName,
+        event_name: crate::agent::hooks::HookEventName,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         matcher: Option<String>,
     },
     HookCompleted {
         // lexicon-allow: hook - stable runtime event field for existing hook integration.
         hook_id: String,
-        event_name: HookEventName,
-        status: HookRunStatus,
+        event_name: crate::agent::hooks::HookEventName,
+        status: crate::agent::hooks::HookRunStatus,
         duration_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
@@ -102,23 +89,23 @@ pub enum RuntimeEventKind {
     ApprovalRequested {
         approval_id: String,
         action: String,
-        metadata: BTreeMap<String, String>,
+        metadata: std::collections::BTreeMap<String, String>,
     },
     ApprovalResolved {
         approval_id: String,
-        decision: RuntimeApprovalDecision,
+        decision: verlet_runtime_contracts::RuntimeApprovalDecision,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
     PermissionDecision {
         call_id: String,
         tool_name: String,
-        decision: RuntimePermissionDecision,
+        decision: verlet_runtime_contracts::RuntimePermissionDecision,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
     ContextCompiled {
-        diagnostics: AgentContextCompilationDiagnostics,
+        diagnostics: crate::kernel::context_compiler::AgentContextCompilationDiagnostics,
         provider_dropped_messages: usize,
         provider_truncated_text_bytes: usize,
         provider_retained_text_bytes: usize,
@@ -129,8 +116,8 @@ pub enum RuntimeEventKind {
         provider: String,
         api: String,
         model: String,
-        mode: RuntimeModelRequestMode,
-        purpose: RuntimeModelRequestPurpose,
+        mode: verlet_runtime_contracts::RuntimeModelRequestMode,
+        purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
         system_block_count: usize,
         message_count: usize,
         tool_count: usize,
@@ -143,12 +130,12 @@ pub enum RuntimeEventKind {
         provider: String,
         api: String,
         model: String,
-        mode: RuntimeModelRequestMode,
-        purpose: RuntimeModelRequestPurpose,
+        mode: verlet_runtime_contracts::RuntimeModelRequestMode,
+        purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
         attempt: u32,
         next_attempt: u32,
         delay_ms: u64,
-        error_class: RuntimeModelRequestErrorClass,
+        error_class: verlet_runtime_contracts::RuntimeModelRequestErrorClass,
         error: String,
     },
     ModelRequestFallbackSelected {
@@ -160,9 +147,9 @@ pub enum RuntimeEventKind {
         to_provider: String,
         to_api: String,
         to_model: String,
-        mode: RuntimeModelRequestMode,
-        purpose: RuntimeModelRequestPurpose,
-        error_class: RuntimeModelRequestErrorClass,
+        mode: verlet_runtime_contracts::RuntimeModelRequestMode,
+        purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
+        error_class: verlet_runtime_contracts::RuntimeModelRequestErrorClass,
         error: String,
     },
     ModelRequestCompleted {
@@ -171,11 +158,11 @@ pub enum RuntimeEventKind {
         provider: String,
         api: String,
         model: String,
-        mode: RuntimeModelRequestMode,
-        purpose: RuntimeModelRequestPurpose,
+        mode: verlet_runtime_contracts::RuntimeModelRequestMode,
+        purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
         duration_ms: u64,
-        usage: RuntimeUsage,
-        stop_reason: CanonicalStopReason,
+        usage: verlet_runtime_contracts::RuntimeUsage,
+        stop_reason: crate::kernel::history::CanonicalStopReason,
     },
     ModelRequestFailed {
         request_id: String,
@@ -183,14 +170,14 @@ pub enum RuntimeEventKind {
         provider: String,
         api: String,
         model: String,
-        mode: RuntimeModelRequestMode,
-        purpose: RuntimeModelRequestPurpose,
+        mode: verlet_runtime_contracts::RuntimeModelRequestMode,
+        purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
         duration_ms: u64,
-        error_class: RuntimeModelRequestErrorClass,
+        error_class: verlet_runtime_contracts::RuntimeModelRequestErrorClass,
         error: String,
     },
     Terminal {
-        state: RuntimeTerminalState,
+        state: verlet_runtime_contracts::RuntimeTerminalState,
     },
     Timeout {
         operation: String,
@@ -205,21 +192,21 @@ pub enum RuntimeEventKind {
         reason: String,
     },
     Usage {
-        usage: RuntimeUsage,
+        usage: verlet_runtime_contracts::RuntimeUsage,
     },
     SubthreadStarted {
-        child_thread_id: ThreadId,
+        child_thread_id: verlet_runtime_contracts::ThreadId,
     },
     SubthreadFinished {
-        child_thread_id: ThreadId,
-        status: ThreadLifecycleStatus,
+        child_thread_id: verlet_runtime_contracts::ThreadId,
+        status: verlet_runtime_contracts::ThreadLifecycleStatus,
     },
     Checkpoint {
-        checkpoint_id: ThreadCheckpointId,
+        checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
         label: Option<String>,
     },
     Compaction {
-        trigger: CompactionTrigger,
+        trigger: crate::CompactionTrigger,
         summary: String,
     },
     Cancelled {
@@ -232,12 +219,12 @@ pub enum RuntimeEventKind {
 }
 
 pub fn emit_runtime_event(
-    events: &broadcast::Sender<ThreadEvent>,
-    coordinates: &ThreadCoordinates,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::ThreadEvent>,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     kind: RuntimeEventKind,
 ) {
     let event = RuntimeEvent::new(coordinates.clone(), kind);
-    let _ = events.send(ThreadEvent::Runtime {
+    let _ = events.send(crate::kernel::runtime_host::ThreadEvent::Runtime {
         thread_id: coordinates.thread_id,
         event,
     });

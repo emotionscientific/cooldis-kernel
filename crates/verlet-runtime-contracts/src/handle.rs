@@ -11,11 +11,6 @@
 //! exactly-once delivery is the ingress claim/settle protocol's, not new
 //! machinery here.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-
-use crate::{RuntimeTerminalState, RuntimeUsage, ThreadCoordinates, ThreadId};
-
 /// Ingress content kind carrying a [`HandleDispatchEnvelope`]. Dispatch
 /// ingress is observed and settled before a process backend starts; unlike a
 /// terminal outcome it never wakes the consumer thread.
@@ -32,7 +27,7 @@ pub const HANDLE_OUTCOME_CONTENT_KIND: &str = "cooldis.handle.outcome/1";
 /// folds existing dispatch state and returns the original handle — never a
 /// second execution. For thread spawns this is carried on the wire in the
 /// existing `correlation_id` field.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct DispatchId(String);
 
@@ -52,7 +47,7 @@ impl std::fmt::Display for DispatchId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandleKind {
     Thread,
@@ -63,14 +58,14 @@ pub enum HandleKind {
 /// kind-tagged durable id. The id is the string form of the underlying
 /// thread or process id; model-facing surfaces address handles by
 /// `task_name` alias, never by this raw id.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HandleId {
     pub kind: HandleKind,
     pub id: String,
 }
 
 impl HandleId {
-    pub fn thread(thread_id: ThreadId) -> Self {
+    pub fn thread(thread_id: crate::ThreadId) -> Self {
         Self {
             kind: HandleKind::Thread,
             id: thread_id.to_string(),
@@ -91,11 +86,11 @@ impl HandleId {
 /// serialization point for idempotent dispatch. It intentionally contains no
 /// terminal fact: process termination is first made durable by the separate
 /// [`HandleTerminalEnvelope`] ingress witness.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HandleDispatchEnvelope {
     pub dispatch_id: DispatchId,
     pub handle: HandleId,
-    pub consumer: ThreadCoordinates,
+    pub consumer: crate::ThreadCoordinates,
     pub command_digest: String,
 }
 
@@ -103,7 +98,7 @@ pub struct HandleDispatchEnvelope {
 /// richer terminal detail (timeout, budget exhaustion, exit status) rides
 /// `outcome_reason` on the envelope, and an escalation is ordinary child
 /// output the parent reads — not an outcome.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandleTerminalOutcome {
     Completed,
@@ -113,21 +108,21 @@ pub enum HandleTerminalOutcome {
 
 /// The lawful projection of the runtime's richer terminal states into the
 /// closed vocabulary. Callers carry the lost detail in `outcome_reason`.
-impl From<RuntimeTerminalState> for HandleTerminalOutcome {
-    fn from(state: RuntimeTerminalState) -> Self {
+impl From<crate::RuntimeTerminalState> for HandleTerminalOutcome {
+    fn from(state: crate::RuntimeTerminalState) -> Self {
         match state {
-            RuntimeTerminalState::Completed => Self::Completed,
-            RuntimeTerminalState::Cancelled => Self::Cancelled,
-            RuntimeTerminalState::Stopped
-            | RuntimeTerminalState::Failed
-            | RuntimeTerminalState::TimedOut => Self::Failed,
+            crate::RuntimeTerminalState::Completed => Self::Completed,
+            crate::RuntimeTerminalState::Cancelled => Self::Cancelled,
+            crate::RuntimeTerminalState::Stopped
+            | crate::RuntimeTerminalState::Failed
+            | crate::RuntimeTerminalState::TimedOut => Self::Failed,
         }
     }
 }
 
 /// The terminal value of any handle: exactly one of these reaches the
 /// consumer per dispatch, for every handle kind and placement.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HandleTerminalEnvelope {
     /// Identity of the originating call — the provenance leg of the law.
     pub dispatch_id: DispatchId,
@@ -140,7 +135,7 @@ pub struct HandleTerminalEnvelope {
     /// Schema-typed result value, validated against `result_schema_id`
     /// when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<JsonValue>,
+    pub result: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_schema_id: Option<String>,
     /// Content-addressed references to artifacts the work produced.
@@ -148,7 +143,7 @@ pub struct HandleTerminalEnvelope {
     pub artifact_refs: Vec<String>,
     /// Present for thread handles; absent for processes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<RuntimeUsage>,
+    pub usage: Option<crate::RuntimeUsage>,
     /// Whether re-dispatch under a fresh dispatch identity is a sensible
     /// caller move.
     pub retryable: bool,
@@ -156,36 +151,35 @@ pub struct HandleTerminalEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn terminal_state_projection_is_total_and_three_valued() {
         assert_eq!(
-            HandleTerminalOutcome::from(RuntimeTerminalState::Completed),
-            HandleTerminalOutcome::Completed
+            crate::handle::HandleTerminalOutcome::from(crate::RuntimeTerminalState::Completed),
+            crate::handle::HandleTerminalOutcome::Completed
         );
         assert_eq!(
-            HandleTerminalOutcome::from(RuntimeTerminalState::Cancelled),
-            HandleTerminalOutcome::Cancelled
+            crate::handle::HandleTerminalOutcome::from(crate::RuntimeTerminalState::Cancelled),
+            crate::handle::HandleTerminalOutcome::Cancelled
         );
         for failed_like in [
-            RuntimeTerminalState::Stopped,
-            RuntimeTerminalState::Failed,
-            RuntimeTerminalState::TimedOut,
+            crate::RuntimeTerminalState::Stopped,
+            crate::RuntimeTerminalState::Failed,
+            crate::RuntimeTerminalState::TimedOut,
         ] {
             assert_eq!(
-                HandleTerminalOutcome::from(failed_like),
-                HandleTerminalOutcome::Failed
+                crate::handle::HandleTerminalOutcome::from(failed_like),
+                crate::handle::HandleTerminalOutcome::Failed
             );
         }
     }
 
     #[test]
     fn envelope_wire_shape_is_pinned() {
-        let envelope = HandleTerminalEnvelope {
-            dispatch_id: DispatchId::new("toolu_abc123"),
-            handle: HandleId::process("proc-7"),
-            outcome: HandleTerminalOutcome::Failed,
+        let envelope = crate::handle::HandleTerminalEnvelope {
+            dispatch_id: crate::handle::DispatchId::new("toolu_abc123"),
+            handle: crate::handle::HandleId::process("proc-7"),
+            outcome: crate::handle::HandleTerminalOutcome::Failed,
             outcome_reason: Some("exit status 2".to_string()),
             result: None,
             result_schema_id: None,
@@ -205,7 +199,7 @@ mod tests {
                 "retryable": true,
             })
         );
-        let decoded: HandleTerminalEnvelope = serde_json::from_value(json).unwrap();
+        let decoded: crate::handle::HandleTerminalEnvelope = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, envelope);
     }
 
@@ -225,17 +219,24 @@ mod tests {
             },
             "command_digest": "sha256:dispatch-command"
         });
-        let decoded: HandleDispatchEnvelope = serde_json::from_value(raw.clone()).unwrap();
+        let decoded: crate::handle::HandleDispatchEnvelope =
+            serde_json::from_value(raw.clone()).unwrap();
 
-        assert_eq!(decoded.dispatch_id, DispatchId::new("toolu_process_420"));
+        assert_eq!(
+            decoded.dispatch_id,
+            crate::handle::DispatchId::new("toolu_process_420")
+        );
         assert_eq!(
             decoded.handle,
-            HandleId::process("018f0000-0000-7000-8000-000000000420")
+            crate::handle::HandleId::process("018f0000-0000-7000-8000-000000000420")
         );
         assert_eq!(decoded.consumer.tenant_id, "tenant-a");
         assert_eq!(decoded.command_digest, "sha256:dispatch-command");
         assert_eq!(serde_json::to_value(decoded).unwrap(), raw);
-        assert_eq!(HANDLE_DISPATCH_CONTENT_KIND, "cooldis.handle.dispatch/1");
+        assert_eq!(
+            crate::handle::HANDLE_DISPATCH_CONTENT_KIND,
+            "cooldis.handle.dispatch/1"
+        );
     }
 
     #[test]
@@ -246,8 +247,11 @@ mod tests {
             "outcome": "completed",
             "retryable": false,
         });
-        let decoded: HandleTerminalEnvelope = serde_json::from_value(raw).unwrap();
-        assert_eq!(decoded.outcome, HandleTerminalOutcome::Completed);
+        let decoded: crate::handle::HandleTerminalEnvelope = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            decoded.outcome,
+            crate::handle::HandleTerminalOutcome::Completed
+        );
         assert!(decoded.result.is_none());
         assert!(decoded.artifact_refs.is_empty());
     }

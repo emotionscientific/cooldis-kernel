@@ -1,9 +1,9 @@
 //! The `agent` subcommand family.
 
-use super::*;
-use chrono::{SecondsFormat, TimeZone, Utc};
+use chrono::TimeZone as _;
+use std::io::Write as _;
 
-pub(super) async fn run_agent(mut args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_agent(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -22,11 +22,13 @@ pub(super) async fn run_agent(mut args: Vec<OsString>) -> VerletResult<()> {
         "diff" => agent_diff(args).await,
         "show" => agent_show(args).await,
         "run" => agent_run(args).await,
-        other => Err(usage_error(format!("unknown agent subcommand {other:?}"))),
+        other => Err(crate::cli::usage_error(format!(
+            "unknown agent subcommand {other:?}"
+        ))),
     }
 }
 
-pub(super) async fn agent_init(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn agent_init(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_agent_init_args(args)?;
     if options.help {
         print_agent_init_help();
@@ -34,7 +36,7 @@ pub(super) async fn agent_init(args: Vec<OsString>) -> VerletResult<()> {
     }
     let name = options
         .name
-        .ok_or_else(|| usage_error("agent init requires <name>"))?;
+        .ok_or_else(|| crate::cli::usage_error("agent init requires <name>"))?;
     let target = AgentInitTarget::from_options(&name, options.out_path);
     match target {
         AgentInitTarget::SingleFile(out_path) => {
@@ -49,7 +51,7 @@ pub(super) async fn agent_init(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn agent_plan(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn agent_plan(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_agent_manifest_args(args, "agent plan")?;
     if options.help {
         print_agent_plan_help();
@@ -57,8 +59,8 @@ pub(super) async fn agent_plan(args: Vec<OsString>) -> VerletResult<()> {
     }
     let manifest_path = options
         .manifest_path
-        .ok_or_else(|| usage_error("agent plan requires <manifest>"))?;
-    let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
+        .ok_or_else(|| crate::cli::usage_error("agent plan requires <manifest>"))?;
+    let registry = crate::LocalAgentRegistry::new(agent_registry_root(options.registry_root));
     let mut plan = registry.plan_manifest_path(manifest_path)?;
     let operations_registry_root = agent_operations_registry_root(options.operations_registry_root);
     if operations_registry_root.exists() {
@@ -76,9 +78,9 @@ pub(super) async fn agent_plan(args: Vec<OsString>) -> VerletResult<()> {
     println!("resources: {}", plan.resource_count);
     for resolved_ref in &plan.resolved_refs {
         match resolved_ref.status {
-            AgentManifestRefStatus::Resolved => {
+            crate::AgentManifestRefStatus::Resolved => {
                 let content_hash = resolved_ref.content_hash.as_deref().ok_or_else(|| {
-                    VerletError::RuntimeFactory(format!(
+                    crate::VerletError::RuntimeFactory(format!(
                         "resolved artifact ref {:?} is missing content_hash",
                         resolved_ref.declared
                     ))
@@ -98,7 +100,7 @@ pub(super) async fn agent_plan(args: Vec<OsString>) -> VerletResult<()> {
                     status
                 );
             }
-            AgentManifestRefStatus::UnresolvedOffline => {
+            crate::AgentManifestRefStatus::UnresolvedOffline => {
                 let status = plan
                     .verification_status_for_ref(&resolved_ref.declared)
                     .map(|status| format!(" [{}]", status.as_str()))
@@ -117,7 +119,7 @@ pub(super) async fn agent_plan(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn agent_publish(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn agent_publish(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_agent_manifest_args(args, "agent publish")?;
     if options.help {
         print_agent_publish_help();
@@ -125,8 +127,8 @@ pub(super) async fn agent_publish(args: Vec<OsString>) -> VerletResult<()> {
     }
     let manifest_path = options
         .manifest_path
-        .ok_or_else(|| usage_error("agent publish requires <manifest>"))?;
-    let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
+        .ok_or_else(|| crate::cli::usage_error("agent publish requires <manifest>"))?;
+    let registry = crate::LocalAgentRegistry::new(agent_registry_root(options.registry_root));
     let operations_registry_root = agent_operations_registry_root(options.operations_registry_root);
     if options.resolve_ops {
         let resolutions =
@@ -144,7 +146,7 @@ pub(super) async fn agent_publish(args: Vec<OsString>) -> VerletResult<()> {
     println!("manifest_hash: {}", record.manifest_hash);
     for resolved_ref in &record.resolved_refs {
         let content_hash = resolved_ref.content_hash.as_deref().ok_or_else(|| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "resolved artifact ref {:?} is missing content_hash",
                 resolved_ref.declared
             ))
@@ -191,25 +193,25 @@ pub(super) struct UnpinnedOperationRef {
 }
 
 pub(super) fn resolve_manifest_operation_refs(
-    manifest_path: &Path,
-    operation_registry_root: &Path,
-) -> VerletResult<Vec<OperationRefResolution>> {
-    let source = fs::read_to_string(manifest_path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    manifest_path: &std::path::Path,
+    operation_registry_root: &std::path::Path,
+) -> crate::VerletResult<Vec<OperationRefResolution>> {
+    let source = std::fs::read_to_string(manifest_path).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
             "failed to read agent manifest {}: {err}",
             manifest_path.display()
         ))
     })?;
     let operation_refs = manifest_operation_refs_from_source(&source)?;
-    let registry = LocalOperationRegistry::new(operation_registry_root);
+    let registry = crate::LocalOperationRegistry::new(operation_registry_root);
     let mut resolutions = Vec::new();
-    let mut replacements = BTreeMap::new();
+    let mut replacements = std::collections::BTreeMap::new();
     for operation_ref in operation_refs {
         let Some(parsed) = parse_resolvable_operation_ref(&operation_ref.reference)? else {
             continue;
         };
         let record = registry.load_record(&parsed.record_name).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "tool {:?} operation_ref {:?} was not found in the local operation registry: {err}; seed the operation registry or fix the op:// record name",
                 operation_ref.tool_id,
                 operation_ref.reference
@@ -233,7 +235,7 @@ pub(super) fn resolve_manifest_operation_refs(
         )?;
         match replacements.get(&operation_ref.reference) {
             Some(existing) if existing != &resolved => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "operation_ref {:?} resolved inconsistently to {:?} and {:?}",
                     operation_ref.reference, existing, resolved
                 )));
@@ -262,9 +264,10 @@ pub(super) fn resolve_manifest_operation_refs(
 
 pub(super) fn manifest_operation_refs_from_source(
     source: &str,
-) -> VerletResult<Vec<ManifestOperationRef>> {
-    let value: toml::Value = toml::from_str(source)
-        .map_err(|err| VerletError::RuntimeFactory(format!("invalid agent manifest: {err}")))?;
+) -> crate::VerletResult<Vec<ManifestOperationRef>> {
+    let value: toml::Value = toml::from_str(source).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!("invalid agent manifest: {err}"))
+    })?;
     let Some(tools) = value.get("tools").and_then(toml::Value::as_array) else {
         return Ok(Vec::new());
     };
@@ -303,7 +306,7 @@ pub(super) fn manifest_operation_refs_from_source(
 
 pub(super) fn parse_resolvable_operation_ref(
     reference: &str,
-) -> VerletResult<Option<UnpinnedOperationRef>> {
+) -> crate::VerletResult<Option<UnpinnedOperationRef>> {
     let Some(body) = reference.strip_prefix("op://") else {
         return Ok(None);
     };
@@ -312,7 +315,7 @@ pub(super) fn parse_resolvable_operation_ref(
     }
     let body = body.strip_suffix("@latest").unwrap_or(body);
     if body.contains('@') {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "operation_ref {reference:?} cannot be resolved by --resolve-ops; use op://<record>, op://<record>/<operation>, op://<record>@latest, or op://<record>/<operation>@latest"
         )));
     }
@@ -328,7 +331,7 @@ pub(super) fn parse_resolvable_operation_ref(
                 operation_name: Some((*operation_name).to_string()),
             }))
         }
-        _ => Err(VerletError::RuntimeFactory(format!(
+        _ => Err(crate::VerletError::RuntimeFactory(format!(
             "operation_ref {reference:?} must match op://<record>, op://<record>/<operation>, op://<record>@latest, or op://<record>/<operation>@latest"
         ))),
     }
@@ -336,10 +339,10 @@ pub(super) fn parse_resolvable_operation_ref(
 
 pub(super) fn rewrite_operation_ref_values(
     source: &str,
-    replacements: &BTreeMap<String, String>,
-    manifest_path: &Path,
-) -> VerletResult<String> {
-    let mut touched = BTreeSet::new();
+    replacements: &std::collections::BTreeMap<String, String>,
+    manifest_path: &std::path::Path,
+) -> crate::VerletResult<String> {
+    let mut touched = std::collections::BTreeSet::new();
     let mut rewritten = String::with_capacity(source.len());
     for line in source.split_inclusive('\n') {
         rewritten.push_str(&rewrite_operation_ref_line(
@@ -354,7 +357,7 @@ pub(super) fn rewrite_operation_ref_values(
         .cloned()
         .collect::<Vec<_>>();
     if !missing.is_empty() {
-        return Err(VerletError::RuntimeFactory(format!(
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "failed to rewrite operation_ref value(s) {} in {}; --resolve-ops supports single-line operation_ref string values",
             missing.join(", "),
             manifest_path.display()
@@ -365,8 +368,8 @@ pub(super) fn rewrite_operation_ref_values(
 
 pub(super) fn rewrite_operation_ref_line(
     line: &str,
-    replacements: &BTreeMap<String, String>,
-    touched: &mut BTreeSet<String>,
+    replacements: &std::collections::BTreeMap<String, String>,
+    touched: &mut std::collections::BTreeSet<String>,
 ) -> String {
     let mut index = 0;
     let bytes = line.as_bytes();
@@ -439,53 +442,57 @@ pub(super) fn is_escaped_basic_string_quote(bytes: &[u8], quote_index: usize) ->
     backslashes % 2 == 1
 }
 
-pub(super) fn write_text_atomically(path: &Path, label: String, body: &str) -> VerletResult<()> {
+pub(super) fn write_text_atomically(
+    path: &std::path::Path,
+    label: String,
+    body: &str,
+) -> crate::VerletResult<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
             "failed to create {label} directory {}: {err}",
             parent.display()
         ))
     })?;
-    let tmp_path = parent.join(format!(".verlet.tmp.{}", Uuid::now_v7()));
+    let tmp_path = parent.join(format!(".verlet.tmp.{}", uuid::Uuid::now_v7()));
     {
-        let mut file = fs::File::create(&tmp_path).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+        let mut file = std::fs::File::create(&tmp_path).map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to create temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
         file.write_all(body.as_bytes()).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to write temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
         file.sync_all().map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to sync temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
     }
-    fs::rename(&tmp_path, path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    std::fs::rename(&tmp_path, path).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
             "failed to atomically install {label} {}: {err}",
             path.display()
         ))
     })
 }
 
-pub(super) async fn agent_list(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn agent_list(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_agent_registry_args(args, "agent list")?;
     if options.help {
         print_agent_list_help();
         return Ok(());
     }
-    let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
+    let registry = crate::LocalAgentRegistry::new(agent_registry_root(options.registry_root));
     let records = registry.list_records()?;
     if records.is_empty() {
         println!("no published agents");
@@ -501,7 +508,7 @@ pub(super) async fn agent_list(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn agent_versions(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn agent_versions(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_agent_versions_args(args)?;
     if options.help {
         print_agent_versions_help();
@@ -509,14 +516,14 @@ pub(super) async fn agent_versions(args: Vec<OsString>) -> VerletResult<()> {
     }
     let name = options
         .name
-        .ok_or_else(|| usage_error("agent versions requires <name>"))?;
-    let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
+        .ok_or_else(|| crate::cli::usage_error("agent versions requires <name>"))?;
+    let registry = crate::LocalAgentRegistry::new(agent_registry_root(options.registry_root));
     let records = registry.list_version_records(&name)?;
     if options.json {
         let rows = records
             .iter()
             .map(|record| {
-                json!({
+                serde_json::json!({
                     "version": record.version,
                     "source_hash": record.source_hash,
                     "manifest_hash": record.manifest_hash,
@@ -525,8 +532,9 @@ pub(super) async fn agent_versions(args: Vec<OsString>) -> VerletResult<()> {
                 })
             })
             .collect::<Vec<_>>();
-        serde_json::to_writer_pretty(std::io::stdout(), &rows)
-            .map_err(|err| usage_error(format!("failed to encode agent versions JSON: {err}")))?;
+        serde_json::to_writer_pretty(std::io::stdout(), &rows).map_err(|err| {
+            crate::cli::usage_error(format!("failed to encode agent versions JSON: {err}"))
+        })?;
         println!();
         return Ok(());
     }
@@ -534,14 +542,14 @@ pub(super) async fn agent_versions(args: Vec<OsString>) -> VerletResult<()> {
     for record in records {
         let published_at = i64::try_from(record.published_at_ms)
             .ok()
-            .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
+            .and_then(|millis| chrono::Utc.timestamp_millis_opt(millis).single())
             .ok_or_else(|| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "agent record {}@{} has invalid published_at_ms {}",
                     name, record.version, record.published_at_ms
                 ))
             })?
-            .to_rfc3339_opts(SecondsFormat::Millis, true);
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let authored = if !record.authored_source_present {
             "  [no-authored-source]"
         } else {
@@ -555,7 +563,7 @@ pub(super) async fn agent_versions(args: Vec<OsString>) -> VerletResult<()> {
     Ok(())
 }
 
-pub(super) async fn agent_diff(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn agent_diff(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_agent_diff_args(args)?;
     if options.help {
         print_agent_diff_help();
@@ -563,22 +571,23 @@ pub(super) async fn agent_diff(args: Vec<OsString>) -> VerletResult<()> {
     }
     let name = options
         .name
-        .ok_or_else(|| usage_error("agent diff requires <name>"))?;
-    let from = options
-        .from
-        .ok_or_else(|| usage_error("agent diff requires --from <version>[:authored|:resolved]"))?;
-    let to = options
-        .to
-        .ok_or_else(|| usage_error("agent diff requires --to <version>[:authored|:resolved]"))?;
-    let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
+        .ok_or_else(|| crate::cli::usage_error("agent diff requires <name>"))?;
+    let from = options.from.ok_or_else(|| {
+        crate::cli::usage_error("agent diff requires --from <version>[:authored|:resolved]")
+    })?;
+    let to = options.to.ok_or_else(|| {
+        crate::cli::usage_error("agent diff requires --to <version>[:authored|:resolved]")
+    })?;
+    let registry = crate::LocalAgentRegistry::new(agent_registry_root(options.registry_root));
     let from_record = registry.load_version_record(&name, &from.version)?;
     let to_record = registry.load_version_record(&name, &to.version)?;
     let before = manifest_diff_snapshot(&from_record, from.form)?;
     let after = manifest_diff_snapshot(&to_record, to.form)?;
     let changes = crate::diff_canonical_json(&before, &after);
     if options.json {
-        serde_json::to_writer_pretty(std::io::stdout(), &changes)
-            .map_err(|err| usage_error(format!("failed to encode agent diff JSON: {err}")))?;
+        serde_json::to_writer_pretty(std::io::stdout(), &changes).map_err(|err| {
+            crate::cli::usage_error(format!("failed to encode agent diff JSON: {err}"))
+        })?;
         println!();
         return Ok(());
     }
@@ -613,14 +622,14 @@ pub(super) async fn agent_diff(args: Vec<OsString>) -> VerletResult<()> {
 }
 
 pub(super) fn manifest_diff_snapshot(
-    record: &PublishedAgentRecord,
+    record: &crate::PublishedAgentRecord,
     form: AgentManifestForm,
-) -> VerletResult<Value> {
+) -> crate::VerletResult<serde_json::Value> {
     match form {
         AgentManifestForm::Resolved => Ok(record.resolved_manifest.clone()),
         AgentManifestForm::Authored => {
             let source = record.authored_source.as_deref().ok_or_else(|| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "agent record {}@{}: legacy record has no authored_source; authored-form diff is unavailable",
                     record.name, record.version
                 ))
@@ -630,7 +639,7 @@ pub(super) fn manifest_diff_snapshot(
     }
 }
 
-pub(super) fn render_manifest_diff_value(value: &Value) -> String {
+pub(super) fn render_manifest_diff_value(value: &serde_json::Value) -> String {
     let rendered = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
     if rendered.chars().count() <= 120 {
         return rendered;
@@ -638,7 +647,7 @@ pub(super) fn render_manifest_diff_value(value: &Value) -> String {
     rendered.chars().take(117).collect::<String>() + "..."
 }
 
-pub(super) async fn agent_show(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn agent_show(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_agent_show_args(args)?;
     if options.help {
         print_agent_show_help();
@@ -646,13 +655,13 @@ pub(super) async fn agent_show(args: Vec<OsString>) -> VerletResult<()> {
     }
     let reference = options
         .reference
-        .ok_or_else(|| usage_error("agent show requires <agent-ref-or-name>"))?;
-    let registry = LocalAgentRegistry::new(agent_registry_root(options.registry_root));
+        .ok_or_else(|| crate::cli::usage_error("agent show requires <agent-ref-or-name>"))?;
+    let registry = crate::LocalAgentRegistry::new(agent_registry_root(options.registry_root));
     let record = registry.load_ref(&reference)?;
     print_agent_record_json(&record)
 }
 
-pub(super) async fn agent_run(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn agent_run(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     let options = parse_agent_run_args(args)?;
     if options.help {
         print_agent_run_help();
@@ -661,41 +670,43 @@ pub(super) async fn agent_run(args: Vec<OsString>) -> VerletResult<()> {
     let reference = options
         .reference
         .clone()
-        .ok_or_else(|| usage_error("agent run requires <agent-ref>"))?;
+        .ok_or_else(|| crate::cli::usage_error("agent run requires <agent-ref>"))?;
     let input = options
         .input
         .clone()
-        .ok_or_else(|| usage_error("agent run requires --input <text>"))?;
-    let root = PathBuf::from("/tmp").join(format!("cdis-agent-{}", Uuid::now_v7().simple()));
-    let cwd = std::env::current_dir()
-        .map_err(|err| usage_error(format!("failed to read current directory: {err}")))?;
-    let listen = AppServerListenAddr::WebSocket("127.0.0.1:0".parse().map_err(|err| {
-        usage_error(format!(
+        .ok_or_else(|| crate::cli::usage_error("agent run requires --input <text>"))?;
+    let root = std::path::PathBuf::from("/tmp")
+        .join(format!("cdis-agent-{}", uuid::Uuid::now_v7().simple()));
+    let cwd = std::env::current_dir().map_err(|err| {
+        crate::cli::usage_error(format!("failed to read current directory: {err}"))
+    })?;
+    let listen = crate::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().map_err(|err| {
+        crate::cli::usage_error(format!(
             "failed to build local app-server listen address: {err}"
         ))
     })?);
-    let mut config = VerletAppServerConfig::local(listen, cwd);
+    let mut config = crate::VerletAppServerConfig::local(listen, cwd);
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     let agent_registry_root = agent_registry_root(options.registry_root.clone());
     config.blob_registry_root =
-        default_blob_registry_root_for_agent_registry_root(&agent_registry_root);
+        crate::default_blob_registry_root_for_agent_registry_root(&agent_registry_root);
     config.agent_registry_root = agent_registry_root;
-    let app = VerletAppServer::new_local(config).await?;
+    let app = crate::VerletAppServer::new_local(config).await?;
     let thread_start = app
         .local_json_rpc_request(
             "thread/start",
-            json!({
+            serde_json::json!({
             "agentRef": reference,
             }),
         )
         .await?;
     let thread_id = thread_start["thread"]["id"]
         .as_str()
-        .ok_or_else(|| usage_error("thread/start response missing thread id"))?
+        .ok_or_else(|| crate::cli::usage_error("thread/start response missing thread id"))?
         .to_string();
-    let receipt_ids = manifest_receipt_event_ids(&app, &thread_id).await?;
-    let assistant_text = run_local_app_turn(&app, &thread_id, &input).await?;
+    let receipt_ids = crate::cli::console::manifest_receipt_event_ids(&app, &thread_id).await?;
+    let assistant_text = crate::cli::console::run_local_app_turn(&app, &thread_id, &input).await?;
     println!("{assistant_text}");
     println!("manifest.compile.completed: {}", receipt_ids.0);
     println!("manifest.bind.completed: {}", receipt_ids.1);
@@ -706,46 +717,46 @@ pub(super) async fn agent_run(args: Vec<OsString>) -> VerletResult<()> {
 #[derive(Debug)]
 pub(super) struct AgentInitArgs {
     name: Option<String>,
-    out_path: Option<PathBuf>,
+    out_path: Option<std::path::PathBuf>,
     force: bool,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) enum AgentInitTarget {
-    SingleFile(PathBuf),
-    ProjectDirectory(PathBuf),
+    SingleFile(std::path::PathBuf),
+    ProjectDirectory(std::path::PathBuf),
 }
 
 impl AgentInitTarget {
-    fn from_options(name: &str, out_path: Option<PathBuf>) -> Self {
+    fn from_options(name: &str, out_path: Option<std::path::PathBuf>) -> Self {
         match out_path {
             Some(path) if is_agent_manifest_file_path(&path) => Self::SingleFile(path),
             Some(path) => Self::ProjectDirectory(path),
-            None => Self::ProjectDirectory(PathBuf::from(name)),
+            None => Self::ProjectDirectory(std::path::PathBuf::from(name)),
         }
     }
 }
 
 #[derive(Debug)]
 pub(super) struct AgentManifestArgs {
-    manifest_path: Option<PathBuf>,
-    registry_root: Option<PathBuf>,
-    operations_registry_root: Option<PathBuf>,
+    manifest_path: Option<std::path::PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
+    operations_registry_root: Option<std::path::PathBuf>,
     resolve_ops: bool,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct AgentRegistryArgs {
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct AgentVersionsArgs {
     name: Option<String>,
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     json: bool,
     help: bool,
 }
@@ -776,7 +787,7 @@ pub(super) struct AgentDiffArgs {
     name: Option<String>,
     from: Option<AgentDiffEndpoint>,
     to: Option<AgentDiffEndpoint>,
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     json: bool,
     help: bool,
 }
@@ -784,7 +795,7 @@ pub(super) struct AgentDiffArgs {
 #[derive(Debug)]
 pub(super) struct AgentShowArgs {
     reference: Option<String>,
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
@@ -792,11 +803,13 @@ pub(super) struct AgentShowArgs {
 pub(super) struct AgentRunArgs {
     reference: Option<String>,
     input: Option<String>,
-    registry_root: Option<PathBuf>,
+    registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
-pub(super) fn parse_agent_init_args(args: Vec<OsString>) -> VerletResult<AgentInitArgs> {
+pub(super) fn parse_agent_init_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<AgentInitArgs> {
     let mut name = None;
     let mut out_path = None;
     let mut force = false;
@@ -805,16 +818,18 @@ pub(super) fn parse_agent_init_args(args: Vec<OsString>) -> VerletResult<AgentIn
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--out" => out_path = Some(required_path_value(&mut iter, "--out")?),
+            "--out" => out_path = Some(crate::cli::tool::required_path_value(&mut iter, "--out")?),
             "--force" => force = true,
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown agent init argument {other:?}"
                 )));
             }
             _ => {
                 if name.is_some() {
-                    return Err(usage_error("agent init accepts exactly one <name>"));
+                    return Err(crate::cli::usage_error(
+                        "agent init accepts exactly one <name>",
+                    ));
                 }
                 name = Some(arg.to_string_lossy().to_string());
             }
@@ -829,9 +844,9 @@ pub(super) fn parse_agent_init_args(args: Vec<OsString>) -> VerletResult<AgentIn
 }
 
 pub(super) fn parse_agent_manifest_args(
-    args: Vec<OsString>,
+    args: Vec<std::ffi::OsString>,
     command: &str,
-) -> VerletResult<AgentManifestArgs> {
+) -> crate::VerletResult<AgentManifestArgs> {
     let mut manifest_path = None;
     let mut registry_root = None;
     let mut operations_registry_root = None;
@@ -843,24 +858,29 @@ pub(super) fn parse_agent_manifest_args(
             "--help" | "-h" => help = true,
             "--resolve-ops" if command == "agent publish" => resolve_ops = true,
             "--registry-root" => {
-                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+                registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--registry-root",
+                )?)
             }
             "--operations-registry-root" => {
-                operations_registry_root = Some(required_path_value(
+                operations_registry_root = Some(crate::cli::tool::required_path_value(
                     &mut iter,
                     "--operations-registry-root",
                 )?)
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown {command} argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown {command} argument {other:?}"
+                )));
             }
             _ => {
                 if manifest_path.is_some() {
-                    return Err(usage_error(format!(
+                    return Err(crate::cli::usage_error(format!(
                         "{command} accepts exactly one <manifest>"
                     )));
                 }
-                manifest_path = Some(PathBuf::from(arg));
+                manifest_path = Some(std::path::PathBuf::from(arg));
             }
         }
     }
@@ -874,9 +894,9 @@ pub(super) fn parse_agent_manifest_args(
 }
 
 pub(super) fn parse_agent_registry_args(
-    args: Vec<OsString>,
+    args: Vec<std::ffi::OsString>,
     command: &str,
-) -> VerletResult<AgentRegistryArgs> {
+) -> crate::VerletResult<AgentRegistryArgs> {
     let mut registry_root = None;
     let mut help = false;
     let mut iter = args.into_iter();
@@ -884,10 +904,15 @@ pub(super) fn parse_agent_registry_args(
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--registry-root" => {
-                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+                registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--registry-root",
+                )?)
             }
             other => {
-                return Err(usage_error(format!("unknown {command} argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown {command} argument {other:?}"
+                )));
             }
         }
     }
@@ -897,7 +922,9 @@ pub(super) fn parse_agent_registry_args(
     })
 }
 
-pub(super) fn parse_agent_versions_args(args: Vec<OsString>) -> VerletResult<AgentVersionsArgs> {
+pub(super) fn parse_agent_versions_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<AgentVersionsArgs> {
     let mut name = None;
     let mut registry_root = None;
     let mut json = false;
@@ -908,19 +935,21 @@ pub(super) fn parse_agent_versions_args(args: Vec<OsString>) -> VerletResult<Age
             "--help" | "-h" => help = true,
             "--json" => json = true,
             "--registry-root" => {
-                registry_root = Some(PathBuf::from(required_agent_history_value(
+                registry_root = Some(std::path::PathBuf::from(required_agent_history_value(
                     &mut iter,
                     "--registry-root",
                 )?))
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown agent versions argument {other:?}"
                 )));
             }
             _ => {
                 if name.is_some() {
-                    return Err(usage_error("agent versions accepts exactly one <name>"));
+                    return Err(crate::cli::usage_error(
+                        "agent versions accepts exactly one <name>",
+                    ));
                 }
                 name = Some(arg.to_string_lossy().to_string());
             }
@@ -934,7 +963,9 @@ pub(super) fn parse_agent_versions_args(args: Vec<OsString>) -> VerletResult<Age
     })
 }
 
-pub(super) fn parse_agent_diff_args(args: Vec<OsString>) -> VerletResult<AgentDiffArgs> {
+pub(super) fn parse_agent_diff_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<AgentDiffArgs> {
     let mut name = None;
     let mut from = None;
     let mut to = None;
@@ -957,19 +988,21 @@ pub(super) fn parse_agent_diff_args(args: Vec<OsString>) -> VerletResult<AgentDi
                 )?)
             }
             "--registry-root" => {
-                registry_root = Some(PathBuf::from(required_agent_history_value(
+                registry_root = Some(std::path::PathBuf::from(required_agent_history_value(
                     &mut iter,
                     "--registry-root",
                 )?))
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown agent diff argument {other:?}"
                 )));
             }
             _ => {
                 if name.is_some() {
-                    return Err(usage_error("agent diff accepts exactly one <name>"));
+                    return Err(crate::cli::usage_error(
+                        "agent diff accepts exactly one <name>",
+                    ));
                 }
                 name = Some(arg.to_string_lossy().to_string());
             }
@@ -985,7 +1018,7 @@ pub(super) fn parse_agent_diff_args(args: Vec<OsString>) -> VerletResult<AgentDi
     })
 }
 
-pub(super) fn parse_agent_diff_endpoint(value: &str) -> VerletResult<AgentDiffEndpoint> {
+pub(super) fn parse_agent_diff_endpoint(value: &str) -> crate::VerletResult<AgentDiffEndpoint> {
     let (version, form) = match value.rsplit_once(':') {
         Some((version, "authored")) => (version, AgentManifestForm::Authored),
         Some((version, "resolved")) => (version, AgentManifestForm::Resolved),
@@ -999,19 +1032,21 @@ pub(super) fn parse_agent_diff_endpoint(value: &str) -> VerletResult<AgentDiffEn
 }
 
 fn required_agent_history_value(
-    iter: &mut impl Iterator<Item = OsString>,
+    iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
-) -> VerletResult<OsString> {
+) -> crate::VerletResult<std::ffi::OsString> {
     let value = iter
         .next()
-        .ok_or_else(|| usage_error(format!("{flag} requires a value")))?;
+        .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))?;
     if value.to_string_lossy().starts_with('-') {
-        return Err(usage_error(format!("{flag} requires a value")));
+        return Err(crate::cli::usage_error(format!("{flag} requires a value")));
     }
     Ok(value)
 }
 
-pub(super) fn parse_agent_show_args(args: Vec<OsString>) -> VerletResult<AgentShowArgs> {
+pub(super) fn parse_agent_show_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<AgentShowArgs> {
     let mut reference = None;
     let mut registry_root = None;
     let mut help = false;
@@ -1020,16 +1055,19 @@ pub(super) fn parse_agent_show_args(args: Vec<OsString>) -> VerletResult<AgentSh
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--registry-root" => {
-                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+                registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--registry-root",
+                )?)
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "unknown agent show argument {other:?}"
                 )));
             }
             _ => {
                 if reference.is_some() {
-                    return Err(usage_error(
+                    return Err(crate::cli::usage_error(
                         "agent show accepts exactly one <agent-ref-or-name>",
                     ));
                 }
@@ -1044,7 +1082,9 @@ pub(super) fn parse_agent_show_args(args: Vec<OsString>) -> VerletResult<AgentSh
     })
 }
 
-pub(super) fn parse_agent_run_args(args: Vec<OsString>) -> VerletResult<AgentRunArgs> {
+pub(super) fn parse_agent_run_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<AgentRunArgs> {
     let mut reference = None;
     let mut input = None;
     let mut registry_root = None;
@@ -1053,16 +1093,27 @@ pub(super) fn parse_agent_run_args(args: Vec<OsString>) -> VerletResult<AgentRun
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--input" => input = Some(required_string_value(&mut iter, "--input")?),
+            "--input" => {
+                input = Some(crate::cli::tool::required_string_value(
+                    &mut iter, "--input",
+                )?)
+            }
             "--registry-root" => {
-                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+                registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--registry-root",
+                )?)
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown agent run argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown agent run argument {other:?}"
+                )));
             }
             _ => {
                 if reference.is_some() {
-                    return Err(usage_error("agent run accepts exactly one <agent-ref>"));
+                    return Err(crate::cli::usage_error(
+                        "agent run accepts exactly one <agent-ref>",
+                    ));
                 }
                 reference = Some(arg.to_string_lossy().to_string());
             }
@@ -1076,11 +1127,11 @@ pub(super) fn parse_agent_run_args(args: Vec<OsString>) -> VerletResult<AgentRun
     })
 }
 
-pub(super) fn agent_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
+pub(super) fn agent_registry_root(registry_root: Option<std::path::PathBuf>) -> std::path::PathBuf {
     registry_root.unwrap_or_else(|| {
-        let legacy = PathBuf::from(concat!(".", "cool", "dis/agents"));
-        if Path::new(".verlet").exists() || !legacy.exists() {
-            PathBuf::from(".verlet/agents")
+        let legacy = std::path::PathBuf::from(concat!(".", "cool", "dis/agents"));
+        if std::path::Path::new(".verlet").exists() || !legacy.exists() {
+            std::path::PathBuf::from(".verlet/agents")
         } else {
             eprintln!(
                 "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",
@@ -1091,21 +1142,23 @@ pub(super) fn agent_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
     })
 }
 
-pub(super) fn agent_operations_registry_root(registry_root: Option<PathBuf>) -> PathBuf {
-    registry_root.unwrap_or_else(default_operations_registry_root)
+pub(super) fn agent_operations_registry_root(
+    registry_root: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    registry_root.unwrap_or_else(crate::default_operations_registry_root)
 }
 
-pub(super) fn is_agent_manifest_file_path(path: &Path) -> bool {
+pub(super) fn is_agent_manifest_file_path(path: &std::path::Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("toml")
 }
 
 pub(super) fn write_agent_manifest_file(
     name: &str,
-    out_path: &Path,
+    out_path: &std::path::Path,
     force: bool,
-) -> VerletResult<()> {
+) -> crate::VerletResult<()> {
     if out_path.exists() && !force {
-        return Err(usage_error(format!(
+        return Err(crate::cli::usage_error(format!(
             "agent manifest {} already exists; pass --force to replace it",
             out_path.display()
         )));
@@ -1114,12 +1167,16 @@ pub(super) fn write_agent_manifest_file(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        fs::create_dir_all(parent).map_err(io_error)?;
+        std::fs::create_dir_all(parent).map_err(crate::cli::io_error)?;
     }
-    fs::write(out_path, render_agent_manifest_template(name)?).map_err(io_error)
+    std::fs::write(out_path, render_agent_manifest_template(name)?).map_err(crate::cli::io_error)
 }
 
-pub(super) fn write_agent_project(name: &str, root: &Path, force: bool) -> VerletResult<()> {
+pub(super) fn write_agent_project(
+    name: &str,
+    root: &std::path::Path,
+    force: bool,
+) -> crate::VerletResult<()> {
     let manifest_path = root.join("verlet.agent.toml");
     let system_prompt_path = root.join("prompts/system.md");
     let operation_refs_path = root.join("components/operations.toml");
@@ -1135,40 +1192,41 @@ pub(super) fn write_agent_project(name: &str, root: &Path, force: bool) -> Verle
     if !force {
         for path in files {
             if path.exists() {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "agent project file {} already exists; pass --force to replace it",
                     path.display()
                 )));
             }
         }
     }
-    fs::create_dir_all(root.join("prompts")).map_err(io_error)?;
-    fs::create_dir_all(root.join("components")).map_err(io_error)?;
-    fs::create_dir_all(root.join("operations")).map_err(io_error)?;
-    fs::write(&manifest_path, render_agent_manifest_template(name)?).map_err(io_error)?;
-    fs::write(
+    std::fs::create_dir_all(root.join("prompts")).map_err(crate::cli::io_error)?;
+    std::fs::create_dir_all(root.join("components")).map_err(crate::cli::io_error)?;
+    std::fs::create_dir_all(root.join("operations")).map_err(crate::cli::io_error)?;
+    std::fs::write(&manifest_path, render_agent_manifest_template(name)?)
+        .map_err(crate::cli::io_error)?;
+    std::fs::write(
         &system_prompt_path,
         render_agent_system_prompt_template(name)?,
     )
-    .map_err(io_error)?;
-    fs::write(
+    .map_err(crate::cli::io_error)?;
+    std::fs::write(
         &operation_refs_path,
         render_agent_operation_refs_template(name)?,
     )
-    .map_err(io_error)?;
-    fs::write(
+    .map_err(crate::cli::io_error)?;
+    std::fs::write(
         &coupling_templates_path,
         render_agent_coupling_templates_template(name)?,
     )
-    .map_err(io_error)?;
-    fs::write(
+    .map_err(crate::cli::io_error)?;
+    std::fs::write(
         &operation_slot_path,
         render_agent_operation_slot_template(name)?,
     )
-    .map_err(io_error)
+    .map_err(crate::cli::io_error)
 }
 
-pub(super) fn render_agent_manifest_template(name: &str) -> VerletResult<String> {
+pub(super) fn render_agent_manifest_template(name: &str) -> crate::VerletResult<String> {
     crate::validate_record_name(name)?;
     Ok(format!(
         "# Verlet V1 folder-first agent manifest.\n\
@@ -1194,7 +1252,7 @@ streaming = false\n\
     ))
 }
 
-pub(super) fn render_agent_system_prompt_template(name: &str) -> VerletResult<String> {
+pub(super) fn render_agent_system_prompt_template(name: &str) -> crate::VerletResult<String> {
     crate::validate_record_name(name)?;
     Ok(format!(
         "You are the {name} agent.\n\
@@ -1204,7 +1262,7 @@ receipt or event evidence needed to resume or debug the run.\n"
     ))
 }
 
-pub(super) fn render_agent_operation_refs_template(name: &str) -> VerletResult<String> {
+pub(super) fn render_agent_operation_refs_template(name: &str) -> crate::VerletResult<String> {
     crate::validate_record_name(name)?;
     Ok(format!(
         "# Component refs for {name}.\n\
@@ -1218,7 +1276,7 @@ operation_ref = \"op://example-tool@sha256:0000000000000000000000000000000000000
     ))
 }
 
-pub(super) fn render_agent_coupling_templates_template(name: &str) -> VerletResult<String> {
+pub(super) fn render_agent_coupling_templates_template(name: &str) -> crate::VerletResult<String> {
     crate::validate_record_name(name)?;
     let mut out = format!(
         "# Coupling template catalog for {name}.\n\
@@ -1265,7 +1323,7 @@ pub(super) fn coupling_template_role_toml_label(role: crate::CouplingRole) -> &'
     }
 }
 
-pub(super) fn render_agent_operation_slot_template(name: &str) -> VerletResult<String> {
+pub(super) fn render_agent_operation_slot_template(name: &str) -> crate::VerletResult<String> {
     crate::validate_record_name(name)?;
     Ok(format!(
         "# Local operations for {name}\n\
@@ -1280,40 +1338,43 @@ pub(super) fn toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-pub(super) fn print_agent_record_json(record: &PublishedAgentRecord) -> VerletResult<()> {
+pub(super) fn print_agent_record_json(
+    record: &crate::PublishedAgentRecord,
+) -> crate::VerletResult<()> {
     let json = serde_json::to_string_pretty(record)
-        .map_err(|err| usage_error(format!("failed to encode agent record: {err}")))?;
+        .map_err(|err| crate::cli::usage_error(format!("failed to encode agent record: {err}")))?;
     println!("{json}");
     Ok(())
 }
 
-pub(super) fn agent_context_source_lines(manifest: &Value) -> Vec<String> {
+pub(super) fn agent_context_source_lines(manifest: &serde_json::Value) -> Vec<String> {
     let resources = manifest
         .get("resources")
-        .and_then(Value::as_array)
+        .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|resource| {
-            let name = resource.get("name").and_then(Value::as_str)?;
+            let name = resource.get("name").and_then(serde_json::Value::as_str)?;
             let ref_uri = resource
                 .get("ref")
                 .or_else(|| resource.get("reference"))
-                .and_then(Value::as_str)?;
+                .and_then(serde_json::Value::as_str)?;
             Some((name, ref_uri))
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<std::collections::BTreeMap<_, _>>();
     manifest
         .get("context")
         .and_then(|context| context.get("sources"))
-        .and_then(Value::as_array)
+        .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter(|source| {
-            source.get("assembler").and_then(Value::as_str) == Some("kernel://assembler/static")
+            source.get("assembler").and_then(serde_json::Value::as_str)
+                == Some("kernel://assembler/static")
         })
         .filter_map(|source| {
-            let id = source.get("id").and_then(Value::as_str)?;
-            let input = source.get("input").and_then(Value::as_str)?;
+            let id = source.get("id").and_then(serde_json::Value::as_str)?;
+            let input = source.get("input").and_then(serde_json::Value::as_str)?;
             let ref_uri = resources.get(input).copied().unwrap_or(input);
             let content_hash = content_hash_label_from_ref(ref_uri)?;
             Some(format!(
@@ -1453,34 +1514,40 @@ output, then prints the manifest compile and bind receipt event ids.\n"
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn agent_diff_endpoint_preserves_colons_inside_versions() {
-        let endpoint = parse_agent_diff_endpoint("release:2026:07").unwrap();
+        let endpoint = crate::cli::agent::parse_agent_diff_endpoint("release:2026:07").unwrap();
         assert_eq!(endpoint.version, "release:2026:07");
-        assert_eq!(endpoint.form, AgentManifestForm::Resolved);
+        assert_eq!(
+            endpoint.form,
+            crate::cli::agent::AgentManifestForm::Resolved
+        );
 
-        let endpoint = parse_agent_diff_endpoint("release:2026:07:authored").unwrap();
+        let endpoint =
+            crate::cli::agent::parse_agent_diff_endpoint("release:2026:07:authored").unwrap();
         assert_eq!(endpoint.version, "release:2026:07");
-        assert_eq!(endpoint.form, AgentManifestForm::Authored);
+        assert_eq!(
+            endpoint.form,
+            crate::cli::agent::AgentManifestForm::Authored
+        );
     }
 
     #[test]
     fn agent_history_parsers_reject_missing_flag_values_and_duplicate_names() {
-        let error = parse_agent_diff_args(
+        let error = crate::cli::agent::parse_agent_diff_args(
             ["auditor", "--from", "--to", "2.0.0"]
                 .into_iter()
-                .map(OsString::from)
+                .map(std::ffi::OsString::from)
                 .collect(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("--from requires a value"));
 
-        let error = parse_agent_versions_args(
+        let error = crate::cli::agent::parse_agent_versions_args(
             ["auditor", "--registry-root", "--json"]
                 .into_iter()
-                .map(OsString::from)
+                .map(std::ffi::OsString::from)
                 .collect(),
         )
         .unwrap_err();
@@ -1490,10 +1557,10 @@ mod tests {
                 .contains("--registry-root requires a value")
         );
 
-        let error = parse_agent_diff_args(
+        let error = crate::cli::agent::parse_agent_diff_args(
             ["auditor", "second", "--from", "1", "--to", "2"]
                 .into_iter()
-                .map(OsString::from)
+                .map(std::ffi::OsString::from)
                 .collect(),
         )
         .unwrap_err();
@@ -1506,8 +1573,8 @@ mod tests {
 
     #[test]
     fn manifest_diff_values_are_compact_json_truncated_to_120_characters() {
-        let value = Value::String("x".repeat(200));
-        let rendered = render_manifest_diff_value(&value);
+        let value = serde_json::Value::String("x".repeat(200));
+        let rendered = crate::cli::agent::render_manifest_diff_value(&value);
 
         assert_eq!(rendered.chars().count(), 120);
         assert!(rendered.ends_with("..."));
@@ -1516,11 +1583,15 @@ mod tests {
 
     #[test]
     fn manifest_diff_value_truncation_counts_multibyte_characters_at_the_boundary() {
-        let exactly_120 = render_manifest_diff_value(&Value::String("é".repeat(118)));
+        let exactly_120 = crate::cli::agent::render_manifest_diff_value(
+            &serde_json::Value::String("é".repeat(118)),
+        );
         assert_eq!(exactly_120.chars().count(), 120);
         assert!(!exactly_120.ends_with("..."));
 
-        let over_boundary = render_manifest_diff_value(&Value::String("é".repeat(119)));
+        let over_boundary = crate::cli::agent::render_manifest_diff_value(
+            &serde_json::Value::String("é".repeat(119)),
+        );
         assert_eq!(over_boundary.chars().count(), 120);
         assert!(over_boundary.ends_with("..."));
     }

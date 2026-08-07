@@ -1,11 +1,9 @@
 //! The `console` subcommand family and its private app-server support.
 
-use super::*;
-
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn run_console(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_console(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args
         .first()
         .is_some_and(|arg| arg == "--help" || arg == "-h")
@@ -19,29 +17,31 @@ pub(super) async fn run_console(args: Vec<OsString>) -> VerletResult<()> {
         return Ok(());
     }
 
-    let listener = TcpListener::bind(options.listen).await.map_err(|err| {
-        usage_error(format!(
-            "failed to bind Verlet console listener {}: {err}",
-            options.listen
-        ))
+    let listener = tokio::net::TcpListener::bind(options.listen)
+        .await
+        .map_err(|err| {
+            crate::cli::usage_error(format!(
+                "failed to bind Verlet console listener {}: {err}",
+                options.listen
+            ))
+        })?;
+    let bound_addr = listener.local_addr().map_err(|err| {
+        crate::cli::usage_error(format!("failed to inspect Verlet console listener: {err}"))
     })?;
-    let bound_addr = listener
-        .local_addr()
-        .map_err(|err| usage_error(format!("failed to inspect Verlet console listener: {err}")))?;
-    let listen = AppServerListenAddr::WebSocket(bound_addr);
+    let listen = crate::AppServerListenAddr::WebSocket(bound_addr);
     let assets = resolve_console_asset_root()?;
     let resolved = resolve_console_app_server_config(&options, listen.clone())?;
     let project_root = resolved.project_root.clone();
     let config_path = resolved.config_path.clone();
     let mut config = resolved.config;
     let state_home = config.state_home.clone();
-    config.console_assets = Some(ConsoleAssetConfig {
+    config.console_assets = Some(crate::ConsoleAssetConfig {
         root: assets,
         session_token: String::new(),
     });
     prepare_console_project_storage(&config)?;
 
-    let server = VerletAppServer::new_local(config).await?;
+    let server = crate::VerletAppServer::new_local(config).await?;
     let ui_url = format!("http://{bound_addr}/");
     let rpc_url = format!("ws://{bound_addr}/rpc");
     println!("verlet console UI  {ui_url}");
@@ -64,32 +64,33 @@ pub(super) async fn run_console(args: Vec<OsString>) -> VerletResult<()> {
 #[cfg(test)]
 pub(super) fn console_app_server_config(
     options: &ConsoleArgs,
-    listen: AppServerListenAddr,
-) -> VerletResult<VerletAppServerConfig> {
+    listen: crate::AppServerListenAddr,
+) -> crate::VerletResult<crate::VerletAppServerConfig> {
     resolve_console_app_server_config(options, listen).map(|resolved| resolved.config)
 }
 
 pub(super) struct ResolvedConsoleAppServerConfig {
-    config: VerletAppServerConfig,
-    project_root: PathBuf,
-    config_path: Option<PathBuf>,
+    config: crate::VerletAppServerConfig,
+    project_root: std::path::PathBuf,
+    config_path: Option<std::path::PathBuf>,
 }
 
 pub(super) struct ConsoleEnvironment {
-    selected_cwd: PathBuf,
-    project_root: PathBuf,
-    project_storage_root: PathBuf,
-    user_home: PathBuf,
-    config_paths: Vec<PathBuf>,
+    selected_cwd: std::path::PathBuf,
+    project_root: std::path::PathBuf,
+    project_storage_root: std::path::PathBuf,
+    user_home: std::path::PathBuf,
+    config_paths: Vec<std::path::PathBuf>,
 }
 
 pub(super) fn resolve_console_app_server_config(
     options: &ConsoleArgs,
-    listen: AppServerListenAddr,
-) -> VerletResult<ResolvedConsoleAppServerConfig> {
+    listen: crate::AppServerListenAddr,
+) -> crate::VerletResult<ResolvedConsoleAppServerConfig> {
     let env = resolve_console_environment(options)?;
-    let loaded = load_verlet_daemon_config_layers(&env.config_paths, env.project_root.clone())?;
-    let mut config = VerletAppServerConfig::local(listen.clone(), env.selected_cwd.clone());
+    let loaded =
+        crate::load_verlet_daemon_config_layers(&env.config_paths, env.project_root.clone())?;
+    let mut config = crate::VerletAppServerConfig::local(listen.clone(), env.selected_cwd.clone());
     config.runtime_home = env.project_storage_root.join("runtime");
     config.state_home = env.project_storage_root.join("state");
     config.user_state_home = env.user_home.join("state");
@@ -112,10 +113,12 @@ pub(super) fn resolve_console_app_server_config(
         config.cwd = cwd;
     }
     if let Some(operations) = loaded.config.registries.operations.clone() {
-        config.capsule_bindings.registry_root = Some(daemon_app_server_registry_root(operations)?);
+        config.capsule_bindings.registry_root = Some(
+            crate::cli::daemon::daemon_app_server_registry_root(operations)?,
+        );
     }
     if let Some(agents) = loaded.config.registries.agents.clone() {
-        config.agent_registry_root = daemon_app_server_registry_root(agents)?;
+        config.agent_registry_root = crate::cli::daemon::daemon_app_server_registry_root(agents)?;
     }
     config.capsule_bindings.global_operation_names =
         loaded.config.operations.global_operation_names.clone();
@@ -123,7 +126,7 @@ pub(super) fn resolve_console_app_server_config(
         loaded.config.operations.load_all_active_when_unbound;
     apply_chat_provider_config(
         &mut config,
-        load_daemon_provider_config(&loaded.config.provider)?,
+        crate::cli::daemon::load_daemon_provider_config(&loaded.config.provider)?,
     );
     config.listen = listen;
 
@@ -136,9 +139,9 @@ pub(super) fn resolve_console_app_server_config(
 
 pub(super) fn resolve_console_environment(
     options: &ConsoleArgs,
-) -> VerletResult<ConsoleEnvironment> {
+) -> crate::VerletResult<ConsoleEnvironment> {
     let selected_cwd = absolute_path(&options.cwd)?;
-    let project = discover_verlet_project(&selected_cwd)?;
+    let project = crate::discover_verlet_project(&selected_cwd)?;
     let user_home = default_user_verlet_home()?;
     let project_storage_root = console_project_storage_root(&project.root, &user_home);
     let mut config_paths = Vec::new();
@@ -162,7 +165,10 @@ pub(super) fn resolve_console_environment(
     })
 }
 
-pub(super) fn console_project_storage_root(project_root: &Path, user_home: &Path) -> PathBuf {
+pub(super) fn console_project_storage_root(
+    project_root: &std::path::Path,
+    user_home: &std::path::Path,
+) -> std::path::PathBuf {
     let canonical = project_root.join(".verlet");
     let legacy = project_root.join(concat!(".", "cool", "dis"));
     let storage_root = if canonical.exists() || !legacy.exists() {
@@ -180,7 +186,9 @@ pub(super) fn console_project_storage_root(project_root: &Path, user_home: &Path
     storage_root
 }
 
-pub(super) fn prepare_console_project_storage(config: &VerletAppServerConfig) -> VerletResult<()> {
+pub(super) fn prepare_console_project_storage(
+    config: &crate::VerletAppServerConfig,
+) -> crate::VerletResult<()> {
     let mut roots = vec![
         config.runtime_home.as_path(),
         config.state_home.as_path(),
@@ -191,8 +199,8 @@ pub(super) fn prepare_console_project_storage(config: &VerletAppServerConfig) ->
         roots.push(registry_root);
     }
     for root in roots {
-        fs::create_dir_all(root).map_err(|err| {
-            io_error(format!(
+        std::fs::create_dir_all(root).map_err(|err| {
+            crate::cli::io_error(format!(
                 "failed to prepare Verlet console directory {}: {err}",
                 root.display()
             ))
@@ -201,13 +209,15 @@ pub(super) fn prepare_console_project_storage(config: &VerletAppServerConfig) ->
     Ok(())
 }
 
-pub(super) fn default_user_verlet_home() -> VerletResult<PathBuf> {
-    if let Some(home) = crate::env_compat::var_os("VERLET_HOME").map(PathBuf::from) {
+pub(super) fn default_user_verlet_home() -> crate::VerletResult<std::path::PathBuf> {
+    if let Some(home) = crate::env_compat::var_os("VERLET_HOME").map(std::path::PathBuf::from) {
         return Ok(home);
     }
     let home = crate::env_compat::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| usage_error("HOME is not set and VERLET_HOME was not provided"))?;
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            crate::cli::usage_error("HOME is not set and VERLET_HOME was not provided")
+        })?;
     let canonical = home.join(".verlet");
     let legacy = home.join(concat!(".", "cool", "dis"));
     if canonical.exists() || !legacy.exists() {
@@ -221,25 +231,29 @@ pub(super) fn default_user_verlet_home() -> VerletResult<PathBuf> {
     }
 }
 
-pub(super) fn absolute_path(path: &Path) -> VerletResult<PathBuf> {
+pub(super) fn absolute_path(path: &std::path::Path) -> crate::VerletResult<std::path::PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_path_buf());
     }
     Ok(std::env::current_dir()
-        .map_err(|err| usage_error(format!("failed to read current working directory: {err}")))?
+        .map_err(|err| {
+            crate::cli::usage_error(format!("failed to read current working directory: {err}"))
+        })?
         .join(path))
 }
 
-pub(super) fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+pub(super) fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
     if !paths.iter().any(|existing| existing == &path) {
         paths.push(path);
     }
 }
 
-pub(super) fn resolve_console_asset_root() -> VerletResult<PathBuf> {
-    if let Some(path) = crate::env_compat::var_os("VERLET_CONSOLE_ASSET_DIR").map(PathBuf::from) {
+pub(super) fn resolve_console_asset_root() -> crate::VerletResult<std::path::PathBuf> {
+    if let Some(path) =
+        crate::env_compat::var_os("VERLET_CONSOLE_ASSET_DIR").map(std::path::PathBuf::from)
+    {
         return console_asset_root_if_valid(path).ok_or_else(|| {
-            usage_error(
+            crate::cli::usage_error(
                 "VERLET_CONSOLE_ASSET_DIR must point at a built console directory containing index.html",
             )
         });
@@ -250,49 +264,50 @@ pub(super) fn resolve_console_asset_root() -> VerletResult<PathBuf> {
         candidates.push(exe_asset_candidate(&exe));
         candidates.push(
             exe.parent()
-                .unwrap_or(Path::new("."))
+                .unwrap_or(std::path::Path::new("."))
                 .join("../share/verlet/console"),
         );
         if let Ok(link) = std::fs::read_link(&exe) {
             let target = if link.is_absolute() {
                 link
             } else {
-                exe.parent().unwrap_or(Path::new(".")).join(link)
+                exe.parent().unwrap_or(std::path::Path::new(".")).join(link)
             };
             candidates.push(exe_asset_candidate(&target));
         }
     }
-    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/console/dist"));
+    candidates
+        .push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/console/dist"));
 
     candidates
         .into_iter()
         .find_map(console_asset_root_if_valid)
         .ok_or_else(|| {
-            usage_error(
+            crate::cli::usage_error(
                 "Verlet console assets were not found; run `scripts/build-console-assets.sh` or set VERLET_CONSOLE_ASSET_DIR",
             )
         })
 }
 
-pub(super) fn exe_asset_candidate(exe: &Path) -> PathBuf {
+pub(super) fn exe_asset_candidate(exe: &std::path::Path) -> std::path::PathBuf {
     exe.parent()
-        .unwrap_or(Path::new("."))
+        .unwrap_or(std::path::Path::new("."))
         .join("share/verlet/console")
 }
 
-pub(super) fn console_asset_root_if_valid(path: PathBuf) -> Option<PathBuf> {
+pub(super) fn console_asset_root_if_valid(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
     path.join("index.html").is_file().then_some(path)
 }
 
-pub(super) fn open_browser_url(url: &str) -> VerletResult<()> {
+pub(super) fn open_browser_url(url: &str) -> crate::VerletResult<()> {
     browser_open_command(url)?
         .spawn()
         .map(|_| ())
-        .map_err(|err| usage_error(format!("failed to open browser: {err}")))
+        .map_err(|err| crate::cli::usage_error(format!("failed to open browser: {err}")))
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn browser_open_command(url: &str) -> VerletResult<std::process::Command> {
+pub(super) fn browser_open_command(url: &str) -> crate::VerletResult<std::process::Command> {
     let mut command = std::process::Command::new("open");
     command.arg(url);
     Ok(command)
@@ -322,20 +337,20 @@ pub(super) fn browser_open_command(_url: &str) -> VerletResult<std::process::Com
 #[derive(Debug)]
 pub(super) struct ConsoleArgs {
     listen: std::net::SocketAddr,
-    cwd: PathBuf,
+    cwd: std::path::PathBuf,
     cwd_explicit: bool,
-    config_path: Option<PathBuf>,
+    config_path: Option<std::path::PathBuf>,
     open: bool,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct ChatArgs {
-    pub(super) cwd: PathBuf,
-    config_path: Option<PathBuf>,
-    env_file: Option<PathBuf>,
-    runtime_home: Option<PathBuf>,
-    state_home: Option<PathBuf>,
+    pub(super) cwd: std::path::PathBuf,
+    config_path: Option<std::path::PathBuf>,
+    env_file: Option<std::path::PathBuf>,
+    runtime_home: Option<std::path::PathBuf>,
+    state_home: Option<std::path::PathBuf>,
     provider: Option<String>,
     base_url: Option<String>,
     api_key: Option<String>,
@@ -348,7 +363,7 @@ pub(super) struct ChatArgs {
     pub(super) help: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 pub(super) struct ChatConfigFile {
     chat: Option<ChatConfigSection>,
     provider: Option<String>,
@@ -362,12 +377,12 @@ pub(super) struct ChatConfigFile {
     model: Option<String>,
     max_tokens: Option<u32>,
     stream: Option<bool>,
-    env_file: Option<PathBuf>,
+    env_file: Option<std::path::PathBuf>,
     #[serde(default, alias = "capsuleBindings")]
-    capsule_bindings: Option<CapsuleBindingsConfig>,
+    capsule_bindings: Option<crate::CapsuleBindingsConfig>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 pub(super) struct ChatConfigSection {
     provider: Option<String>,
     base_url: Option<String>,
@@ -380,9 +395,9 @@ pub(super) struct ChatConfigSection {
     model: Option<String>,
     max_tokens: Option<u32>,
     stream: Option<bool>,
-    env_file: Option<PathBuf>,
+    env_file: Option<std::path::PathBuf>,
     #[serde(default, alias = "capsuleBindings")]
-    capsule_bindings: Option<CapsuleBindingsConfig>,
+    capsule_bindings: Option<crate::CapsuleBindingsConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -430,7 +445,7 @@ pub(super) enum ChatProviderConfig {
 }
 
 pub(super) fn apply_chat_provider_config(
-    config: &mut VerletAppServerConfig,
+    config: &mut crate::VerletAppServerConfig,
     provider: ChatProviderConfig,
 ) {
     match provider {
@@ -443,8 +458,8 @@ pub(super) fn apply_chat_provider_config(
             stream,
         } => {
             config.model = model.clone();
-            config.model_provider = APP_SERVER_BIFROST_PROVIDER.to_string();
-            config.provider = AppServerProviderConfig::BifrostOpenAIResponses {
+            config.model_provider = crate::APP_SERVER_BIFROST_PROVIDER.to_string();
+            config.provider = crate::AppServerProviderConfig::BifrostOpenAIResponses {
                 base_url,
                 api_key,
                 model,
@@ -463,7 +478,7 @@ pub(super) fn apply_chat_provider_config(
         } => {
             config.model = model.clone();
             config.model_provider = provider.clone();
-            config.provider = AppServerProviderConfig::OpenAIChatCompletions {
+            config.provider = crate::AppServerProviderConfig::OpenAIChatCompletions {
                 provider,
                 base_url,
                 api_key,
@@ -481,8 +496,8 @@ pub(super) fn apply_chat_provider_config(
             stream,
         } => {
             config.model = model.clone();
-            config.model_provider = APP_SERVER_ANTHROPIC_PROVIDER.to_string();
-            config.provider = AppServerProviderConfig::AnthropicMessages {
+            config.model_provider = crate::APP_SERVER_ANTHROPIC_PROVIDER.to_string();
+            config.provider = crate::AppServerProviderConfig::AnthropicMessages {
                 base_url,
                 api_key,
                 model,
@@ -501,8 +516,8 @@ pub(super) fn apply_chat_provider_config(
             stream,
         } => {
             config.model = model.clone();
-            config.model_provider = APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER.to_string();
-            config.provider = AppServerProviderConfig::AnthropicBedrock {
+            config.model_provider = crate::APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER.to_string();
+            config.provider = crate::AppServerProviderConfig::AnthropicBedrock {
                 region,
                 base_url,
                 access_key_id,
@@ -523,7 +538,7 @@ pub(super) fn apply_chat_provider_config(
                 config.model = model.clone();
             }
             config.model_provider = provider_id.clone();
-            config.provider = AppServerProviderConfig::CatalogOpenAIChatCompletions {
+            config.provider = crate::AppServerProviderConfig::CatalogOpenAIChatCompletions {
                 provider_id,
                 model,
                 max_tokens,
@@ -533,12 +548,15 @@ pub(super) fn apply_chat_provider_config(
     }
 }
 
-pub(super) fn parse_console_args(args: Vec<OsString>) -> VerletResult<ConsoleArgs> {
+pub(super) fn parse_console_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::VerletResult<ConsoleArgs> {
     let mut listen = "127.0.0.1:0"
         .parse::<std::net::SocketAddr>()
         .expect("default console listen address is valid");
-    let mut cwd = std::env::current_dir()
-        .map_err(|err| usage_error(format!("failed to read current working directory: {err}")))?;
+    let mut cwd = std::env::current_dir().map_err(|err| {
+        crate::cli::usage_error(format!("failed to read current working directory: {err}"))
+    })?;
     let mut cwd_explicit = false;
     let mut config_path = None;
     let mut open = true;
@@ -549,21 +567,31 @@ pub(super) fn parse_console_args(args: Vec<OsString>) -> VerletResult<ConsoleArg
             "--help" | "-h" => help = true,
             "--no-open" => open = false,
             "--cwd" => {
-                cwd = PathBuf::from(required_string_value(&mut iter, "--cwd")?);
+                cwd = std::path::PathBuf::from(crate::cli::tool::required_string_value(
+                    &mut iter, "--cwd",
+                )?);
                 cwd_explicit = true;
             }
-            "--config" => config_path = Some(required_path_value(&mut iter, "--config")?),
+            "--config" => {
+                config_path = Some(crate::cli::tool::required_path_value(
+                    &mut iter, "--config",
+                )?)
+            }
             "--port" => {
-                let port = required_string_value(&mut iter, "--port")?
+                let port = crate::cli::tool::required_string_value(&mut iter, "--port")?
                     .parse::<u16>()
-                    .map_err(|_| usage_error("--port must be an integer from 0 to 65535"))?;
+                    .map_err(|_| {
+                        crate::cli::usage_error("--port must be an integer from 0 to 65535")
+                    })?;
                 listen = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown console argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown console argument {other:?}"
+                )));
             }
             other => {
-                return Err(usage_error(format!(
+                return Err(crate::cli::usage_error(format!(
                     "verlet console does not accept positional argument {other:?}"
                 )));
             }
@@ -579,9 +607,10 @@ pub(super) fn parse_console_args(args: Vec<OsString>) -> VerletResult<ConsoleArg
     })
 }
 
-pub(super) fn parse_chat_args(args: Vec<OsString>) -> VerletResult<ChatArgs> {
-    let mut cwd = std::env::current_dir()
-        .map_err(|err| usage_error(format!("failed to read current working directory: {err}")))?;
+pub(super) fn parse_chat_args(args: Vec<std::ffi::OsString>) -> crate::VerletResult<ChatArgs> {
+    let mut cwd = std::env::current_dir().map_err(|err| {
+        crate::cli::usage_error(format!("failed to read current working directory: {err}"))
+    })?;
     let mut config_path = None;
     let mut env_file = None;
     let mut runtime_home = None;
@@ -600,41 +629,78 @@ pub(super) fn parse_chat_args(args: Vec<OsString>) -> VerletResult<ChatArgs> {
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--config" => config_path = Some(required_path_value(&mut iter, "--config")?),
-            "--env-file" => env_file = Some(required_path_value(&mut iter, "--env-file")?),
-            "--cwd" => cwd = PathBuf::from(required_string_value(&mut iter, "--cwd")?),
-            "--runtime-home" => {
-                runtime_home = Some(PathBuf::from(required_string_value(
+            "--config" => {
+                config_path = Some(crate::cli::tool::required_path_value(
+                    &mut iter, "--config",
+                )?)
+            }
+            "--env-file" => {
+                env_file = Some(crate::cli::tool::required_path_value(
                     &mut iter,
-                    "--runtime-home",
-                )?));
+                    "--env-file",
+                )?)
+            }
+            "--cwd" => {
+                cwd = std::path::PathBuf::from(crate::cli::tool::required_string_value(
+                    &mut iter, "--cwd",
+                )?)
+            }
+            "--runtime-home" => {
+                runtime_home = Some(std::path::PathBuf::from(
+                    crate::cli::tool::required_string_value(&mut iter, "--runtime-home")?,
+                ));
             }
             "--state-home" => {
-                state_home = Some(PathBuf::from(required_string_value(
+                state_home = Some(std::path::PathBuf::from(
+                    crate::cli::tool::required_string_value(&mut iter, "--state-home")?,
+                ));
+            }
+            "--provider" => {
+                provider = Some(crate::cli::tool::required_string_value(
                     &mut iter,
-                    "--state-home",
-                )?));
+                    "--provider",
+                )?)
             }
-            "--provider" => provider = Some(required_string_value(&mut iter, "--provider")?),
-            "--base-url" => base_url = Some(required_string_value(&mut iter, "--base-url")?),
-            "--api-key" => api_key = Some(required_string_value(&mut iter, "--api-key")?),
+            "--base-url" => {
+                base_url = Some(crate::cli::tool::required_string_value(
+                    &mut iter,
+                    "--base-url",
+                )?)
+            }
+            "--api-key" => {
+                api_key = Some(crate::cli::tool::required_string_value(
+                    &mut iter,
+                    "--api-key",
+                )?)
+            }
             "--api-key-env" => {
-                api_key_env = Some(required_string_value(&mut iter, "--api-key-env")?)
+                api_key_env = Some(crate::cli::tool::required_string_value(
+                    &mut iter,
+                    "--api-key-env",
+                )?)
             }
-            "--model" => model = Some(required_string_value(&mut iter, "--model")?),
+            "--model" => {
+                model = Some(crate::cli::tool::required_string_value(
+                    &mut iter, "--model",
+                )?)
+            }
             "--max-tokens" => {
-                let value = required_string_value(&mut iter, "--max-tokens")?;
-                max_tokens = Some(
-                    value
-                        .parse()
-                        .map_err(|_| usage_error("--max-tokens must be a positive integer"))?,
-                );
+                let value = crate::cli::tool::required_string_value(&mut iter, "--max-tokens")?;
+                max_tokens = Some(value.parse().map_err(|_| {
+                    crate::cli::usage_error("--max-tokens must be a positive integer")
+                })?);
             }
             "--stream" => stream = Some(true),
             "--no-stream" => stream = Some(false),
-            "--attach" => attach = Some(required_string_value(&mut iter, "--attach")?),
+            "--attach" => {
+                attach = Some(crate::cli::tool::required_string_value(
+                    &mut iter, "--attach",
+                )?)
+            }
             other if other.starts_with('-') => {
-                return Err(usage_error(format!("unknown chat argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown chat argument {other:?}"
+                )));
             }
             _ => positionals.push(arg.to_string_lossy().to_string()),
         }
@@ -663,7 +729,9 @@ pub(super) fn parse_chat_args(args: Vec<OsString>) -> VerletResult<ChatArgs> {
     })
 }
 
-pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatProviderConfig> {
+pub(super) fn load_chat_provider_config(
+    args: &ChatArgs,
+) -> crate::VerletResult<ChatProviderConfig> {
     let (mut config, config_base) = load_chat_config_file(args.config_path.as_deref())?;
     if let Some(provider) = args.provider.clone() {
         config.provider = Some(provider);
@@ -707,19 +775,22 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .env_file
                 .clone()
                 .map(|path| {
-                    resolve_config_path(config_base.as_deref().unwrap_or(Path::new(".")), path)
+                    crate::cli::tool::resolve_config_path(
+                        config_base.as_deref().unwrap_or(std::path::Path::new(".")),
+                        path,
+                    )
                 })
                 .or_else(|| {
                     crate::env_compat::var("VERLET_CHAT_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
                     crate::env_compat::var("VERLET_BIFROST_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
-                .unwrap_or_else(|| PathBuf::from(".env"));
+                .unwrap_or_else(|| std::path::PathBuf::from(".env"));
             let file_env = read_env_file_if_exists(&env_file)?;
             let base_url = config
                 .base_url
@@ -728,7 +799,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .or_else(|| env_or_file("LLM_PROXY_PUBLIC_URL", &file_env))
                 .or_else(|| env_or_file("LLM_PROXY_URL", &file_env))
                 .ok_or_else(|| {
-                    usage_error(
+                    crate::cli::usage_error(
                         "Bifrost chat provider requires chat.base_url, VERLET_BIFROST_URL, LLM_PROXY_PUBLIC_URL, or LLM_PROXY_URL",
                     )
                 })?
@@ -747,7 +818,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .or_else(|| env_or_file("BIFROST_SYSTEM_VIRTUAL_KEY", &file_env))
                 .or_else(|| env_or_file("BIFROST_SYSTEM_KEY", &file_env))
                 .ok_or_else(|| {
-                    usage_error(
+                    crate::cli::usage_error(
                         "Bifrost chat provider requires chat.api_key, chat.api_key_env, VERLET_BIFROST_KEY, or BIFROST_SYSTEM_VIRTUAL_KEY",
                     )
                 })?;
@@ -755,7 +826,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .model
                 .clone()
                 .or_else(|| env_or_file("VERLET_BIFROST_OPENAI_MODEL", &file_env))
-                .unwrap_or_else(|| APP_SERVER_BIFROST_MODEL.to_string());
+                .unwrap_or_else(|| crate::APP_SERVER_BIFROST_MODEL.to_string());
             Ok(ChatProviderConfig::BifrostOpenAI {
                 base_url,
                 api_key,
@@ -769,19 +840,22 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .env_file
                 .clone()
                 .map(|path| {
-                    resolve_config_path(config_base.as_deref().unwrap_or(Path::new(".")), path)
+                    crate::cli::tool::resolve_config_path(
+                        config_base.as_deref().unwrap_or(std::path::Path::new(".")),
+                        path,
+                    )
                 })
                 .or_else(|| {
                     crate::env_compat::var("VERLET_CHAT_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
                     crate::env_compat::var("VERLET_ANTHROPIC_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
-                .unwrap_or_else(|| PathBuf::from(".env"));
+                .unwrap_or_else(|| std::path::PathBuf::from(".env"));
             let file_env = read_env_file_if_exists(&env_file)?;
             let base_url = config
                 .base_url
@@ -802,7 +876,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 })
                 .or_else(|| env_or_file("ANTHROPIC_API_KEY", &file_env))
                 .ok_or_else(|| {
-                    usage_error(
+                    crate::cli::usage_error(
                         "Anthropic chat provider requires chat.api_key, chat.api_key_env, or ANTHROPIC_API_KEY",
                     )
                 })?;
@@ -811,7 +885,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .clone()
                 .or_else(|| env_or_file("VERLET_ANTHROPIC_MODEL", &file_env))
                 .or_else(|| env_or_file("ANTHROPIC_MODEL", &file_env))
-                .unwrap_or_else(|| APP_SERVER_ANTHROPIC_MODEL.to_string());
+                .unwrap_or_else(|| crate::APP_SERVER_ANTHROPIC_MODEL.to_string());
             Ok(ChatProviderConfig::AnthropicMessages {
                 base_url,
                 api_key,
@@ -825,24 +899,27 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .env_file
                 .clone()
                 .map(|path| {
-                    resolve_config_path(config_base.as_deref().unwrap_or(Path::new(".")), path)
+                    crate::cli::tool::resolve_config_path(
+                        config_base.as_deref().unwrap_or(std::path::Path::new(".")),
+                        path,
+                    )
                 })
                 .or_else(|| {
                     crate::env_compat::var("VERLET_CHAT_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
                     crate::env_compat::var("VERLET_BEDROCK_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
                     crate::env_compat::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
-                .unwrap_or_else(|| PathBuf::from(".env"));
+                .unwrap_or_else(|| std::path::PathBuf::from(".env"));
             let file_env = read_env_file_if_exists(&env_file)?;
             let region = config
                 .region
@@ -862,7 +939,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .clone()
                 .or_else(|| env_or_file("AWS_ACCESS_KEY_ID", &file_env))
                 .ok_or_else(|| {
-                    usage_error(
+                    crate::cli::usage_error(
                         "Anthropic Bedrock provider requires AWS_ACCESS_KEY_ID or chat.aws_access_key_id",
                     )
                 })?;
@@ -871,7 +948,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .clone()
                 .or_else(|| env_or_file("AWS_SECRET_ACCESS_KEY", &file_env))
                 .ok_or_else(|| {
-                    usage_error(
+                    crate::cli::usage_error(
                         "Anthropic Bedrock provider requires AWS_SECRET_ACCESS_KEY or chat.aws_secret_access_key",
                     )
                 })?;
@@ -885,7 +962,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .or_else(|| env_or_file("VERLET_ANTHROPIC_BEDROCK_MODEL", &file_env))
                 .or_else(|| env_or_file("AWS_BEDROCK_MODEL", &file_env))
                 .or_else(|| env_or_file("ANTHROPIC_DEFAULT_SONNET_MODEL", &file_env))
-                .unwrap_or_else(|| APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string());
+                .unwrap_or_else(|| crate::APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string());
             let stream = config.stream.unwrap_or(true);
             Ok(ChatProviderConfig::AnthropicBedrock {
                 region,
@@ -906,23 +983,26 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
         | "openai_compatible_openai"
         | "openai_compatible_chat"
         | "openai_compatible_serverless" => {
-            let openai_compatible = provider_is_openai_compatible(provider);
+            let openai_compatible = crate::cli::daemon::provider_is_openai_compatible(provider);
             let env_file = config
                 .env_file
                 .clone()
                 .map(|path| {
-                    resolve_config_path(config_base.as_deref().unwrap_or(Path::new(".")), path)
+                    crate::cli::tool::resolve_config_path(
+                        config_base.as_deref().unwrap_or(std::path::Path::new(".")),
+                        path,
+                    )
                 })
                 .or_else(|| {
                     crate::env_compat::var("VERLET_CHAT_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
                     if openai_compatible {
                         crate::env_compat::var("VERLET_OPENAI_COMPATIBLE_ENV_FILE")
                             .ok()
-                            .map(PathBuf::from)
+                            .map(std::path::PathBuf::from)
                     } else {
                         None
                     }
@@ -930,9 +1010,9 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                 .or_else(|| {
                     crate::env_compat::var("VERLET_BIFROST_ENV_FILE")
                         .ok()
-                        .map(PathBuf::from)
+                        .map(std::path::PathBuf::from)
                 })
-                .unwrap_or_else(|| PathBuf::from(".env"));
+                .unwrap_or_else(|| std::path::PathBuf::from(".env"));
             let file_env = read_env_file_if_exists(&env_file)?;
             if openai_compatible
                 && config.base_url.is_none()
@@ -947,7 +1027,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                     .or_else(|| env_or_file("VERLET_OPENAI_COMPATIBLE_MODEL", &file_env))
                     .or_else(|| env_or_file("OPENAI_COMPATIBLE_MODEL", &file_env));
                 return Ok(ChatProviderConfig::CatalogOpenAIChatCompletions {
-                    provider_id: APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string(),
+                    provider_id: crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string(),
                     model,
                     max_tokens: config.max_tokens.unwrap_or(4096),
                     stream: config.stream.unwrap_or(true),
@@ -968,7 +1048,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                     .or_else(|| env_or_file("LLM_PROXY_PUBLIC_URL", &file_env))
                     .or_else(|| env_or_file("LLM_PROXY_URL", &file_env))
                     .ok_or_else(|| {
-                        usage_error(
+                        crate::cli::usage_error(
                             "OpenAI Chat Completions provider requires chat.base_url, VERLET_BIFROST_URL, LLM_PROXY_PUBLIC_URL, or LLM_PROXY_URL",
                         )
                     })?
@@ -988,7 +1068,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                     .or_else(|| env_or_file("VERLET_OPENAI_COMPATIBLE_API_KEY", &file_env))
                     .or_else(|| env_or_file("OPENAI_COMPATIBLE_API_KEY", &file_env))
                     .ok_or_else(|| {
-                        usage_error(
+                        crate::cli::usage_error(
                             "OpenAI Compatible chat provider requires chat.api_key, chat.api_key_env, VERLET_OPENAI_COMPATIBLE_API_KEY, or OPENAI_COMPATIBLE_API_KEY",
                         )
                     })?
@@ -1006,7 +1086,7 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                     .or_else(|| env_or_file("BIFROST_SYSTEM_VIRTUAL_KEY", &file_env))
                     .or_else(|| env_or_file("BIFROST_SYSTEM_KEY", &file_env))
                     .ok_or_else(|| {
-                        usage_error(
+                        crate::cli::usage_error(
                             "OpenAI Chat Completions provider requires chat.api_key, chat.api_key_env, VERLET_BIFROST_KEY, or BIFROST_SYSTEM_VIRTUAL_KEY",
                         )
                     })?
@@ -1017,26 +1097,26 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
                     .clone()
                     .or_else(|| env_or_file("VERLET_OPENAI_COMPATIBLE_MODEL", &file_env))
                     .or_else(|| env_or_file("OPENAI_COMPATIBLE_MODEL", &file_env))
-                    .unwrap_or_else(|| APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string())
+                    .unwrap_or_else(|| crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string())
             } else {
                 config
                     .model
                     .clone()
                     .or_else(|| env_or_file("VERLET_BIFROST_OPENAI_CHAT_MODEL", &file_env))
                     .or_else(|| env_or_file("VERLET_BIFROST_OPENAI_MODEL", &file_env))
-                    .unwrap_or_else(|| APP_SERVER_BIFROST_MODEL.to_string())
+                    .unwrap_or_else(|| crate::APP_SERVER_BIFROST_MODEL.to_string())
             };
             Ok(ChatProviderConfig::OpenAIChatCompletions {
-                provider: chat_completions_provider_name(provider),
+                provider: crate::cli::daemon::chat_completions_provider_name(provider),
                 base_url,
                 api_key,
                 model,
                 max_tokens: config.max_tokens.unwrap_or(4096),
                 stream: config.stream.unwrap_or(true),
-                headers: provider_default_headers(provider),
+                headers: crate::cli::daemon::provider_default_headers(provider),
             })
         }
-        other => Err(usage_error(format!(
+        other => Err(crate::cli::usage_error(format!(
             "unknown chat provider {other:?}; expected local, bifrost_openai, openai_chat_completions, anthropic, anthropic_bedrock, or openai_compatible"
         ))),
     }
@@ -1044,12 +1124,12 @@ pub(super) fn load_chat_provider_config(args: &ChatArgs) -> VerletResult<ChatPro
 
 pub(super) fn load_chat_capsule_bindings_config(
     args: &ChatArgs,
-) -> VerletResult<CapsuleBindingsConfig> {
+) -> crate::VerletResult<crate::CapsuleBindingsConfig> {
     let (config, config_base) = load_chat_config_file(args.config_path.as_deref())?;
     let mut capsule_bindings = config.capsule_bindings.unwrap_or_default();
     if let Some(registry_root) = capsule_bindings.registry_root.take() {
         capsule_bindings.registry_root = Some(match config_base.as_deref() {
-            Some(base) => resolve_config_path(base, registry_root),
+            Some(base) => crate::cli::tool::resolve_config_path(base, registry_root),
             None => registry_root,
         });
     }
@@ -1057,17 +1137,17 @@ pub(super) fn load_chat_capsule_bindings_config(
 }
 
 pub(super) fn load_chat_config_file(
-    path: Option<&Path>,
-) -> VerletResult<(ChatConfigSection, Option<PathBuf>)> {
+    path: Option<&std::path::Path>,
+) -> crate::VerletResult<(ChatConfigSection, Option<std::path::PathBuf>)> {
     let discovered;
     let path = if let Some(path) = path {
         path
     } else {
-        let canonical = PathBuf::from("verlet.json");
+        let canonical = std::path::PathBuf::from("verlet.json");
         if canonical.exists() {
             discovered = canonical;
         } else {
-            let legacy = PathBuf::from(concat!("cool", "dis.json"));
+            let legacy = std::path::PathBuf::from(concat!("cool", "dis.json"));
             if !legacy.exists() {
                 return Ok((ChatConfigSection::default(), None));
             }
@@ -1079,14 +1159,14 @@ pub(super) fn load_chat_config_file(
         }
         discovered.as_path()
     };
-    let bytes = fs::read(path).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    let bytes = std::fs::read(path).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
             "failed to read chat config {}: {err}",
             path.display()
         ))
     })?;
     let file: ChatConfigFile = serde_json::from_slice(&bytes).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "failed to decode chat config {} as JSON: {err}",
             path.display()
         ))
@@ -1110,17 +1190,22 @@ pub(super) fn load_chat_config_file(
     Ok((config, path.parent().map(|base| base.to_path_buf())))
 }
 
-pub(super) fn read_env_file_if_exists(path: &Path) -> VerletResult<BTreeMap<String, String>> {
+pub(super) fn read_env_file_if_exists(
+    path: &std::path::Path,
+) -> crate::VerletResult<std::collections::BTreeMap<String, String>> {
     if !path.exists() {
-        return Ok(BTreeMap::new());
+        return Ok(std::collections::BTreeMap::new());
     }
-    let text = fs::read_to_string(path).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to read env file {}: {err}", path.display()))
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
+            "failed to read env file {}: {err}",
+            path.display()
+        ))
     })?;
     Ok(parse_env_lines(&text))
 }
 
-pub(super) fn parse_env_lines(text: &str) -> BTreeMap<String, String> {
+pub(super) fn parse_env_lines(text: &str) -> std::collections::BTreeMap<String, String> {
     text.lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -1145,7 +1230,10 @@ pub(super) fn unquote_env_value(value: &str) -> String {
     value.to_string()
 }
 
-pub(super) fn env_or_file(name: &str, file_env: &BTreeMap<String, String>) -> Option<String> {
+pub(super) fn env_or_file(
+    name: &str,
+    file_env: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
     crate::env_compat::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -1153,19 +1241,20 @@ pub(super) fn env_or_file(name: &str, file_env: &BTreeMap<String, String>) -> Op
 }
 
 pub(super) struct PrivateAppServer {
-    listen: AppServerListenAddr,
-    root: PathBuf,
-    task: JoinHandle<VerletResult<()>>,
+    listen: crate::AppServerListenAddr,
+    root: std::path::PathBuf,
+    task: tokio::task::JoinHandle<crate::VerletResult<()>>,
 }
 
 impl PrivateAppServer {
-    pub(super) async fn start(options: &ChatArgs) -> VerletResult<Self> {
-        let root = PathBuf::from("/tmp").join(format!("cdis-chat-{}", Uuid::now_v7().simple()));
-        let listen = AppServerListenAddr::Unix(root.join("app-server.sock"));
+    pub(super) async fn start(options: &ChatArgs) -> crate::VerletResult<Self> {
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("cdis-chat-{}", uuid::Uuid::now_v7().simple()));
+        let listen = crate::AppServerListenAddr::Unix(root.join("app-server.sock"));
         let provider = load_chat_provider_config(options)?;
         // lexicon-allow: capsule - existing app-server operation binding API name
         let capsule_bindings = load_chat_capsule_bindings_config(options)?;
-        let mut config = VerletAppServerConfig::local(listen.clone(), options.cwd.clone());
+        let mut config = crate::VerletAppServerConfig::local(listen.clone(), options.cwd.clone());
         config.runtime_home = options
             .runtime_home
             .clone()
@@ -1178,14 +1267,14 @@ impl PrivateAppServer {
         config.capsule_bindings = capsule_bindings;
         apply_chat_provider_config(&mut config, provider);
 
-        let server = VerletAppServer::new_local(config).await?;
+        let server = crate::VerletAppServer::new_local(config).await?;
         let serve_listen = listen.clone();
         let task = tokio::spawn(async move { server.serve(serve_listen).await });
         wait_for_private_socket(socket_path(&listen)).await?;
         Ok(Self { listen, root, task })
     }
 
-    pub(super) fn socket_path(&self) -> &Path {
+    pub(super) fn socket_path(&self) -> &std::path::Path {
         socket_path(&self.listen)
     }
 
@@ -1199,77 +1288,82 @@ impl Drop for PrivateAppServer {
     }
 }
 
-pub(super) fn socket_path(listen: &AppServerListenAddr) -> &Path {
+pub(super) fn socket_path(listen: &crate::AppServerListenAddr) -> &std::path::Path {
     match listen {
-        AppServerListenAddr::Unix(path) => path.as_path(),
-        AppServerListenAddr::WebSocket(_) => {
+        crate::AppServerListenAddr::Unix(path) => path.as_path(),
+        crate::AppServerListenAddr::WebSocket(_) => {
             unreachable!("private chat app-server always listens on a Unix socket")
         }
     }
 }
 
-pub(super) async fn wait_for_private_socket(path: &Path) -> VerletResult<()> {
+pub(super) async fn wait_for_private_socket(path: &std::path::Path) -> crate::VerletResult<()> {
     for _ in 0..100 {
         if path.exists() {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    Err(usage_error(format!(
+    Err(crate::cli::usage_error(format!(
         "timed out waiting for private app-server socket {}",
         path.display()
     )))
 }
 
 pub(super) async fn manifest_receipt_event_ids(
-    app: &VerletAppServer,
+    app: &crate::VerletAppServer,
     thread_id: &str,
-) -> VerletResult<(String, String)> {
+) -> crate::VerletResult<(String, String)> {
     let response = app
         .local_json_rpc_request(
             "thread/events/list",
-            json!({
+            serde_json::json!({
                 "threadId": thread_id,
                 "kinds": [
-                    EventKind::ManifestCompileCompleted.as_str(),
-                    EventKind::ManifestBindCompleted.as_str(),
+                    crate::EventKind::ManifestCompileCompleted.as_str(),
+                    crate::EventKind::ManifestBindCompleted.as_str(),
                 ],
             }),
         )
         .await
-        .map_err(|err| usage_error(format!("failed to read thread events: {err}")))?;
+        .map_err(|err| crate::cli::usage_error(format!("failed to read thread events: {err}")))?;
     let events = response["data"]
         .as_array()
-        .ok_or_else(|| usage_error("thread/events/list response missing data array"))?;
+        .ok_or_else(|| crate::cli::usage_error("thread/events/list response missing data array"))?;
     let compile = events
         .iter()
-        .find(|event| event["kind"] == EventKind::ManifestCompileCompleted.as_str())
-        .ok_or_else(|| usage_error("manifest.compile.completed receipt event was not found"))?;
+        .find(|event| event["kind"] == crate::EventKind::ManifestCompileCompleted.as_str())
+        .ok_or_else(|| {
+            crate::cli::usage_error("manifest.compile.completed receipt event was not found")
+        })?;
     let bind = events
         .iter()
-        .find(|event| event["kind"] == EventKind::ManifestBindCompleted.as_str())
-        .ok_or_else(|| usage_error("manifest.bind.completed receipt event was not found"))?;
-    let compile_id = compile["eventId"]
-        .as_str()
-        .ok_or_else(|| usage_error("manifest.compile.completed event missing eventId"))?;
+        .find(|event| event["kind"] == crate::EventKind::ManifestBindCompleted.as_str())
+        .ok_or_else(|| {
+            crate::cli::usage_error("manifest.bind.completed receipt event was not found")
+        })?;
+    let compile_id = compile["eventId"].as_str().ok_or_else(|| {
+        crate::cli::usage_error("manifest.compile.completed event missing eventId")
+    })?;
     let bind_id = bind["eventId"]
         .as_str()
-        .ok_or_else(|| usage_error("manifest.bind.completed event missing eventId"))?;
+        .ok_or_else(|| crate::cli::usage_error("manifest.bind.completed event missing eventId"))?;
     Ok((compile_id.to_string(), bind_id.to_string()))
 }
 
 pub(super) async fn run_local_app_turn(
-    app: &VerletAppServer,
+    app: &crate::VerletAppServer,
     thread_id: &str,
     input: &str,
-) -> VerletResult<String> {
-    let parsed = ThreadId::parse_str(thread_id)
-        .map_err(|err| usage_error(format!("invalid thread id {thread_id:?}: {err}")))?;
+) -> crate::VerletResult<String> {
+    let parsed = crate::ThreadId::parse_str(thread_id).map_err(|err| {
+        crate::cli::usage_error(format!("invalid thread id {thread_id:?}: {err}"))
+    })?;
     let handle = app.supervisor().get_thread(app.tenant_id(), parsed).await?;
     let mut events = handle.subscribe_events();
     app.local_json_rpc_request(
         "turn/start",
-        json!({
+        serde_json::json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": input, "text_elements": [] }],
         }),
@@ -1277,10 +1371,12 @@ pub(super) async fn run_local_app_turn(
     .await?;
     let mut output = String::new();
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(120), events.recv())
             .await
-            .map_err(|_| usage_error(format!("timed out waiting for turn on {thread_id}")))?
-            .map_err(|err| usage_error(format!("thread event stream closed: {err}")))?;
+            .map_err(|_| {
+                crate::cli::usage_error(format!("timed out waiting for turn on {thread_id}"))
+            })?
+            .map_err(|err| crate::cli::usage_error(format!("thread event stream closed: {err}")))?;
         match event {
             crate::ThreadEvent::Output { text, .. } => {
                 output.push_str(&text);
@@ -1290,23 +1386,25 @@ pub(super) async fn run_local_app_turn(
                     state: crate::RuntimeTerminalState::Completed,
                 } => return Ok(output),
                 crate::RuntimeEventKind::Terminal { state } => {
-                    return Err(usage_error(format!(
+                    return Err(crate::cli::usage_error(format!(
                         "turn ended before completion: {state:?}"
                     )));
                 }
                 crate::RuntimeEventKind::Failed { message, .. } => {
-                    return Err(usage_error(format!("turn failed: {message}")));
+                    return Err(crate::cli::usage_error(format!("turn failed: {message}")));
                 }
                 _ => {}
             },
             crate::ThreadEvent::Cancelled { reason, .. } => {
-                return Err(usage_error(format!("turn cancelled: {reason}")));
+                return Err(crate::cli::usage_error(format!("turn cancelled: {reason}")));
             }
             crate::ThreadEvent::Stopped { .. } => {
-                return Err(usage_error("thread stopped before turn completion"));
+                return Err(crate::cli::usage_error(
+                    "thread stopped before turn completion",
+                ));
             }
             crate::ThreadEvent::Failed { message, .. } => {
-                return Err(usage_error(format!("turn failed: {message}")));
+                return Err(crate::cli::usage_error(format!("turn failed: {message}")));
             }
             _ => {}
         }
@@ -1314,7 +1412,7 @@ pub(super) async fn run_local_app_turn(
 }
 
 pub(super) fn notification_matches_thread_turn(
-    notification: &JsonRpcNotification,
+    notification: &crate::JsonRpcNotification,
     thread_id: &str,
     turn_id: &str,
 ) -> bool {
@@ -1322,32 +1420,32 @@ pub(super) fn notification_matches_thread_turn(
         .params
         .as_ref()
         .and_then(|params| params.get("threadId"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         == Some(thread_id)
         && notification
             .params
             .as_ref()
             .and_then(|params| params.get("turnId"))
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
             == Some(turn_id)
 }
 
-pub(super) fn notification_turn_id(notification: &JsonRpcNotification) -> Option<&str> {
+pub(super) fn notification_turn_id(notification: &crate::JsonRpcNotification) -> Option<&str> {
     notification
         .params
         .as_ref()
         .and_then(|params| params.get("turn"))
         .and_then(|turn| turn.get("id"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
 }
 
-pub(super) fn notification_error_message(notification: &JsonRpcNotification) -> String {
+pub(super) fn notification_error_message(notification: &crate::JsonRpcNotification) -> String {
     notification
         .params
         .as_ref()
         .and_then(|params| params.get("error"))
         .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown error")
         .to_string()
 }

@@ -1,11 +1,7 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, BTreeSet};
-
 pub const COUPLING_INVOCATION_ABI: &str = "cooldis.coupling.invocation/0.1";
 pub const COUPLING_DISCHARGE_ABI: &str = "cooldis.coupling.discharge/0.1";
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct WasmOperationManifest {
     pub abi: String,
     pub operations: Vec<WasmOperationDefinition>,
@@ -19,7 +15,7 @@ impl WasmOperationManifest {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct WasmOperationDefinition {
     pub id: u32,
     pub name: String,
@@ -35,7 +31,7 @@ pub struct WasmOperationDefinition {
     pub required_capabilities: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WasmOperationValueKind {
     #[default]
@@ -44,7 +40,7 @@ pub enum WasmOperationValueKind {
     Json,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WasmOperationEventKind {
     #[default]
@@ -52,7 +48,7 @@ pub enum WasmOperationEventKind {
     Jsonl,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WasmOperationMode {
     #[default]
@@ -61,7 +57,7 @@ pub enum WasmOperationMode {
     Streaming,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Principal {
     pub kind: PrincipalKind,
     pub id: String,
@@ -88,7 +84,7 @@ impl Principal {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrincipalKind {
     User,
@@ -99,7 +95,7 @@ pub enum PrincipalKind {
     Provisioner,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ExecutionPrincipal {
     Anonymous,
@@ -129,7 +125,7 @@ impl ExecutionPrincipal {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct AbiCapabilityGrant {
     pub capability: String,
 }
@@ -158,7 +154,7 @@ impl From<String> for AbiCapabilityGrant {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AttachmentIdentity {
     Secret { name: String },
@@ -166,13 +162,13 @@ pub enum AttachmentIdentity {
     ScopedResource { name: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttachmentBinding {
     pub handle: String,
     pub capability: AbiCapabilityGrant,
     pub identity: AttachmentIdentity,
     #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 impl AttachmentBinding {
@@ -185,7 +181,7 @@ impl AttachmentBinding {
             handle: handle.into(),
             capability: capability.into(),
             identity,
-            metadata: BTreeMap::new(),
+            metadata: std::collections::BTreeMap::new(),
         }
     }
 
@@ -195,7 +191,7 @@ impl AttachmentBinding {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InvocationContext {
     pub caller: Option<Principal>,
     pub execution: ExecutionPrincipal,
@@ -204,17 +200,17 @@ pub struct InvocationContext {
     #[serde(default)]
     pub attachment_bindings: Vec<AttachmentBinding>,
     #[serde(default)]
-    pub audit_metadata: BTreeMap<String, String>,
+    pub audit_metadata: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingInvocation {
     pub abi: String,
     pub trigger_event: CouplingInvocationEvent,
     #[serde(default)]
     pub selected_events: Vec<CouplingInvocationEvent>,
     #[serde(default)]
-    pub config: JsonValue,
+    pub config: serde_json::Value,
     pub invocation_meta: CouplingInvocationMeta,
 }
 
@@ -222,7 +218,7 @@ impl CouplingInvocation {
     pub fn new(
         trigger_event: CouplingInvocationEvent,
         selected_events: Vec<CouplingInvocationEvent>,
-        config: JsonValue,
+        config: serde_json::Value,
         invocation_meta: CouplingInvocationMeta,
     ) -> Self {
         Self {
@@ -235,7 +231,7 @@ impl CouplingInvocation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingInvocationEvent {
     pub id: String,
     pub stream_id: String,
@@ -243,17 +239,17 @@ pub struct CouplingInvocationEvent {
     pub kind: String,
     pub origin: String,
     #[serde(default)]
-    pub payload: JsonValue,
+    pub payload: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingInvocationMeta {
     pub coupling_id: String,
     pub thread_id: String,
     pub depth: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingDischarge {
     pub abi: String,
     #[serde(default)]
@@ -269,14 +265,14 @@ impl CouplingDischarge {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingDischargeEvent {
     pub stream: String,
     pub kind: String,
     #[serde(default)]
-    pub payload: JsonValue,
+    pub payload: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<JsonValue>,
+    pub provenance: Option<serde_json::Value>,
 }
 
 impl InvocationContext {
@@ -311,7 +307,7 @@ impl InvocationContext {
         self
     }
 
-    pub fn grant_set(&self) -> BTreeSet<String> {
+    pub fn grant_set(&self) -> std::collections::BTreeSet<String> {
         self.grants
             .iter()
             .map(|grant| grant.capability.clone())
@@ -319,7 +315,7 @@ impl InvocationContext {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AbiOperationContract {
     pub registered_name: String,
     pub operation_name: String,
@@ -402,7 +398,7 @@ impl AbiOperationContract {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AbiSourcePort {
     pub name: String,
     pub value: AbiPortValue,
@@ -410,7 +406,7 @@ pub struct AbiSourcePort {
     pub required: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AbiSinkPort {
     pub name: String,
     pub value: AbiPortValue,
@@ -424,7 +420,7 @@ impl AbiSinkPort {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AbiEffectPort {
     pub name: String,
     pub kind: AbiEffectKind,
@@ -432,14 +428,14 @@ pub struct AbiEffectPort {
     pub required: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AbiEventPort {
     pub name: String,
     pub value: AbiEventValue,
     pub binding: AbiEventBinding,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AbiPortValue {
     Bytes,
@@ -460,7 +456,7 @@ impl From<WasmOperationValueKind> for AbiPortValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AbiSourceBinding {
     InvocationInput,
@@ -468,20 +464,20 @@ pub enum AbiSourceBinding {
     HostAllocatedArtifact,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AbiSinkBinding {
     InvocationOutput,
     DurableArtifact { path: Option<String> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AbiEffectKind {
     VfsWrite { mode: AbiVfsWriteMode },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AbiVfsWriteMode {
     WriteNew,
@@ -490,7 +486,7 @@ pub enum AbiVfsWriteMode {
     Scratch,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AbiEffectBinding {
     CallerBoundPath { path: Option<String> },
@@ -520,34 +516,34 @@ impl AbiEffectBinding {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AbiEventValue {
     Jsonl,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AbiEventBinding {
     InvocationEvents,
     DurableLog { path: Option<String> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AbiEffectReceipt {
     pub effect_port: String,
     pub kind: AbiEffectReceiptKind,
     pub invocation_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AbiEffectClaim {
     pub effect_port: String,
     pub kind: AbiEffectKind,
     pub binding: AbiEffectBinding,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AbiEffectReceiptKind {
     VfsWrite {

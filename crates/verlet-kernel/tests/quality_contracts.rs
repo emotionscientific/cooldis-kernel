@@ -1,17 +1,13 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(Path::parent)
+        .and_then(std::path::Path::parent)
         .expect("kernel crate should live two levels below repo root")
         .to_path_buf()
 }
 
-fn read(path: impl AsRef<Path>) -> String {
-    fs::read_to_string(path.as_ref())
+fn read(path: impl AsRef<std::path::Path>) -> String {
+    std::fs::read_to_string(path.as_ref())
         .unwrap_or_else(|err| panic!("read {}: {err}", path.as_ref().display()))
 }
 
@@ -110,7 +106,8 @@ fn public_domain_namespaces_and_flat_exports_stay_usable() {
         "/tmp/state",
     );
 
-    let registry = Arc::new(verlet::operations::operation_registry::OperationRegistry::new());
+    let registry =
+        std::sync::Arc::new(verlet::operations::operation_registry::OperationRegistry::new());
     let _router = verlet::agent::agent_tool_router::AgentToolRouter::new(registry);
 
     let daemon_config = verlet::daemon::daemon_config::VerletDaemonConfig::default();
@@ -132,7 +129,7 @@ fn hosted_docs_markdown_links_resolve_inside_docs_tree() {
     let mut checked = 0usize;
     let mut missing = Vec::new();
 
-    for entry in fs::read_dir(&docs).expect("read docs directory") {
+    for entry in std::fs::read_dir(&docs).expect("read docs directory") {
         let path = entry.expect("read docs entry").path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
             continue;

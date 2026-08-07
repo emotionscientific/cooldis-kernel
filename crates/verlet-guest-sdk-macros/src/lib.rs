@@ -11,9 +11,7 @@
 //! attribute is a compile error at the use site so an unfinished macro can
 //! never silently produce a guest with no exports.
 
-use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{Error, FnArg, ItemFn, PatType, ReturnType, Type, parse_macro_input, spanned::Spanned};
+use syn::spanned::Spanned as _;
 
 /// Marks a function as a Verlet operation guest entry point.
 ///
@@ -33,8 +31,11 @@ use syn::{Error, FnArg, ItemFn, PatType, ReturnType, Type, parse_macro_input, sp
 /// The expansion generates the ABI exports, the operation-manifest entry
 /// wiring, and the envelope encode/decode.
 #[proc_macro_attribute]
-pub fn operation(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
+pub fn operation(
+    attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let input = syn::parse_macro_input!(item as syn::ItemFn);
     match expand_operation(attr, input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
@@ -56,27 +57,33 @@ pub fn operation(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// events of `cooldis.coupling.discharge/0.1`. Couplings are pure compute:
 /// the expansion imports no effectful host powers.
 #[proc_macro_attribute]
-pub fn coupling(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
+pub fn coupling(
+    attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let input = syn::parse_macro_input!(item as syn::ItemFn);
     match expand_coupling(attr, input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand_operation(attr: TokenStream, item: ItemFn) -> Result<proc_macro2::TokenStream, Error> {
+fn expand_operation(
+    attr: proc_macro::TokenStream,
+    item: syn::ItemFn,
+) -> Result<proc_macro2::TokenStream, syn::Error> {
     reject_attr("operation", attr)?;
     validate_common("operation", &item)?;
     let name = item.sig.ident.to_string();
     let ident = &item.sig.ident;
-    let invoke_ident = format_ident!("__verlet_guest_sdk_invoke_{ident}");
+    let invoke_ident = quote::format_ident!("__verlet_guest_sdk_invoke_{ident}");
     let operation_id = 1u32;
     let inputs = item.sig.inputs.iter().collect::<Vec<_>>();
     let (invoke_fn, call_expr, manifest_events) = match inputs.as_slice() {
-        [FnArg::Typed(input)] => {
+        [syn::FnArg::Typed(input)] => {
             let input_ty = &input.ty;
             (
-                quote! {
+                quote::quote! {
                     fn #invoke_ident(
                         source: ::verlet_guest_sdk::Source,
                         output: ::verlet_guest_sdk::Sink,
@@ -86,19 +93,19 @@ fn expand_operation(attr: TokenStream, item: ItemFn) -> Result<proc_macro2::Toke
                         ::verlet_guest_sdk::__private::write_json_output(output, &output_value)
                     }
                 },
-                quote! {
+                quote::quote! {
                     #invoke_ident(
                         ::verlet_guest_sdk::Source(source),
                         ::verlet_guest_sdk::Sink(output),
                     )
                 },
-                quote! {},
+                quote::quote! {},
             )
         }
-        [first, FnArg::Typed(input)] if is_mut_ref_argument(first) => {
+        [first, syn::FnArg::Typed(input)] if is_mut_ref_argument(first) => {
             let input_ty = &input.ty;
             (
-                quote! {
+                quote::quote! {
                     fn #invoke_ident(
                         invocation: ::verlet_guest_sdk::Invocation,
                         source: ::verlet_guest_sdk::Source,
@@ -111,7 +118,7 @@ fn expand_operation(attr: TokenStream, item: ItemFn) -> Result<proc_macro2::Toke
                         ::verlet_guest_sdk::__private::write_json_output(output, &output_value)
                     }
                 },
-                quote! {
+                quote::quote! {
                     #invoke_ident(
                         ::verlet_guest_sdk::Invocation(invocation),
                         ::verlet_guest_sdk::Source(source),
@@ -119,24 +126,24 @@ fn expand_operation(attr: TokenStream, item: ItemFn) -> Result<proc_macro2::Toke
                         ::verlet_guest_sdk::EventSink(events),
                     )
                 },
-                quote! {.jsonl_events()},
+                quote::quote! {.jsonl_events()},
             )
         }
         [first, _] => {
-            return Err(Error::new(
+            return Err(syn::Error::new(
                 first.span(),
                 "#[operation] only supports fn(input) or fn(&mut OperationContext, input)",
             ));
         }
         _ => {
-            return Err(Error::new(
+            return Err(syn::Error::new(
                 item.sig.inputs.span(),
                 "#[operation] only supports fn(input) or fn(&mut OperationContext, input)",
             ));
         }
     };
 
-    Ok(quote! {
+    Ok(quote::quote! {
         #item
 
         #invoke_fn
@@ -173,27 +180,30 @@ fn expand_operation(attr: TokenStream, item: ItemFn) -> Result<proc_macro2::Toke
     })
 }
 
-fn expand_coupling(attr: TokenStream, item: ItemFn) -> Result<proc_macro2::TokenStream, Error> {
+fn expand_coupling(
+    attr: proc_macro::TokenStream,
+    item: syn::ItemFn,
+) -> Result<proc_macro2::TokenStream, syn::Error> {
     reject_attr("coupling", attr)?;
     validate_common("coupling", &item)?;
     if item.sig.inputs.len() != 1 {
-        return Err(Error::new(
+        return Err(syn::Error::new(
             item.sig.inputs.span(),
             "#[coupling] only supports fn(CouplingContext)",
         ));
     }
-    let Some(FnArg::Typed(PatType { ty, .. })) = item.sig.inputs.first() else {
-        return Err(Error::new(
+    let Some(syn::FnArg::Typed(syn::PatType { ty, .. })) = item.sig.inputs.first() else {
+        return Err(syn::Error::new(
             item.sig.inputs.span(),
             "#[coupling] only supports fn(CouplingContext)",
         ));
     };
     let name = item.sig.ident.to_string();
     let ident = &item.sig.ident;
-    let invoke_ident = format_ident!("__verlet_guest_sdk_invoke_{ident}");
+    let invoke_ident = quote::format_ident!("__verlet_guest_sdk_invoke_{ident}");
     let operation_id = 1u32;
 
-    Ok(quote! {
+    Ok(quote::quote! {
         #item
 
         fn #invoke_ident(
@@ -241,38 +251,38 @@ fn expand_coupling(attr: TokenStream, item: ItemFn) -> Result<proc_macro2::Token
     })
 }
 
-fn reject_attr(name: &str, attr: TokenStream) -> Result<(), Error> {
+fn reject_attr(name: &str, attr: proc_macro::TokenStream) -> Result<(), syn::Error> {
     if attr.is_empty() {
         Ok(())
     } else {
-        Err(Error::new(
+        Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             format!("#[{name}] does not accept arguments in the frozen v1 contract"),
         ))
     }
 }
 
-fn validate_common(name: &str, item: &ItemFn) -> Result<(), Error> {
+fn validate_common(name: &str, item: &syn::ItemFn) -> Result<(), syn::Error> {
     if item.sig.constness.is_some() {
-        return Err(Error::new(
+        return Err(syn::Error::new(
             item.sig.constness.span(),
             format!("#[{name}] does not support const functions"),
         ));
     }
     if item.sig.asyncness.is_some() {
-        return Err(Error::new(
+        return Err(syn::Error::new(
             item.sig.asyncness.span(),
             format!("#[{name}] does not support async functions"),
         ));
     }
     if item.sig.unsafety.is_some() {
-        return Err(Error::new(
+        return Err(syn::Error::new(
             item.sig.unsafety.span(),
             format!("#[{name}] does not support unsafe functions"),
         ));
     }
-    if !matches!(item.sig.output, ReturnType::Type(_, _)) {
-        return Err(Error::new(
+    if !matches!(item.sig.output, syn::ReturnType::Type(_, _)) {
+        return Err(syn::Error::new(
             item.sig.output.span(),
             format!("#[{name}] functions must return Result<_, GuestError>"),
         ));
@@ -280,12 +290,12 @@ fn validate_common(name: &str, item: &ItemFn) -> Result<(), Error> {
     Ok(())
 }
 
-fn is_mut_ref_argument(arg: &FnArg) -> bool {
-    let FnArg::Typed(input) = arg else {
+fn is_mut_ref_argument(arg: &syn::FnArg) -> bool {
+    let syn::FnArg::Typed(input) = arg else {
         return false;
     };
     matches!(
         input.ty.as_ref(),
-        Type::Reference(reference) if reference.mutability.is_some()
+        syn::Type::Reference(reference) if reference.mutability.is_some()
     )
 }

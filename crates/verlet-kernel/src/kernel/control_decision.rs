@@ -1,34 +1,25 @@
-use crate::{
-    AgentManifestBindReceipt, AgentManifestCouplingBinding, CouplingRole, EventKind, EventOrigin,
-    EventRecord, EventRecordId, EventStore, EventStreamId, ThreadCoordinates, VerletError,
-    VerletResult,
-};
-use chrono::{SecondsFormat, TimeZone, Utc};
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-use std::collections::BTreeSet;
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+use chrono::TimeZone as _;
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallSubject {
     pub turn_id: String,
     pub call_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallRequestedPayload {
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
     pub tool_name: String,
-    pub arguments: JsonValue,
+    pub arguments: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args_fingerprint: Option<String>,
     /// Kernel-derived resource holds for this invocation. Empty when decoding
     /// events written before hold scheduling existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub holds: Vec<JsonValue>,
+    pub holds: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallDecisionPayload {
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
@@ -37,15 +28,15 @@ pub struct ToolCallDecisionPayload {
     pub admissible: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum ToolCallDecisionOutcomePayload {
     Allow,
-    Rewrite { arguments: JsonValue },
+    Rewrite { arguments: serde_json::Value },
     Deny { reason: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallSuspendedPayload {
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
@@ -55,7 +46,7 @@ pub struct ToolCallSuspendedPayload {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallCompletedPayload {
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
@@ -89,7 +80,7 @@ pub(crate) fn tool_invocation_fingerprint_matches(
 }
 
 /// Witnessed cancellation outcome for a tool call reached by an interrupt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallCancellation {
     /// The invocation observed the cancellation token and settled within the
@@ -101,12 +92,12 @@ pub enum ToolCallCancellation {
     CancelledExceededGrace,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalSubject {
     pub approval_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalResolvedPayload {
     pub subject: ApprovalSubject,
     pub snapshot_id: String,
@@ -115,7 +106,7 @@ pub struct ApprovalResolvedPayload {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MandateSubject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
@@ -123,7 +114,7 @@ pub struct MandateSubject {
     pub loop_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MandateSchedulePayload {
     Cron { expr: String, tz: String },
@@ -131,7 +122,7 @@ pub enum MandateSchedulePayload {
     At { when: String },
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MandateCatchUpPolicy {
     CoalesceMissed,
@@ -139,7 +130,7 @@ pub enum MandateCatchUpPolicy {
     SkipMissed,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MandateStartedPayload {
     pub subject: MandateSubject,
     pub mandate_id: String,
@@ -160,7 +151,7 @@ pub struct MandateStartedPayload {
     pub input_template: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MandateRevokedPayload {
     pub subject: MandateSubject,
     pub mandate_id: String,
@@ -171,20 +162,20 @@ pub struct MandateRevokedPayload {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnContinuationSubject {
     pub loop_id: String,
     pub parent_turn_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnContinueRequestedPayload {
     pub subject: TurnContinuationSubject,
     pub snapshot_id: String,
     pub next_turn_input: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnContinuationAcceptedPayload {
     pub subject: TurnContinuationSubject,
     pub snapshot_id: String,
@@ -194,7 +185,7 @@ pub struct TurnContinuationAcceptedPayload {
     pub admissible: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnContinuationRejectedPayload {
     pub subject: TurnContinuationSubject,
     pub snapshot_id: String,
@@ -203,19 +194,19 @@ pub struct TurnContinuationRejectedPayload {
     pub admissible: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlacementSubject {
     pub invocation_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlacementDecisionPayload {
     pub subject: PlacementSubject,
     pub snapshot_id: String,
     pub placement: PlacementTarget,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlacementTarget {
     Local,
@@ -225,10 +216,10 @@ pub enum PlacementTarget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolDecisionRequest {
-    pub coordinates: ThreadCoordinates,
+    pub coordinates: crate::ThreadCoordinates,
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
-    pub request_event_id: EventRecordId,
+    pub request_event_id: crate::EventRecordId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,10 +230,10 @@ pub struct ToolControllerBinding {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingToolCallSuspension {
-    pub suspended_event_id: EventRecordId,
+    pub suspended_event_id: crate::EventRecordId,
     pub subject: ToolCallSubject,
     pub snapshot_id: String,
-    pub request_event_id: Option<EventRecordId>,
+    pub request_event_id: Option<crate::EventRecordId>,
     pub approval_id: Option<String>,
     pub reason: Option<String>,
 }
@@ -251,19 +242,19 @@ pub struct PendingToolCallSuspension {
 pub enum ToolCallDecision {
     NoDecision,
     Allow {
-        consumed_fact_id: EventRecordId,
+        consumed_fact_id: crate::EventRecordId,
     },
     Rewrite {
-        consumed_fact_id: EventRecordId,
-        arguments: JsonValue,
+        consumed_fact_id: crate::EventRecordId,
+        arguments: serde_json::Value,
     },
     Deny {
-        consumed_fact_id: Option<EventRecordId>,
+        consumed_fact_id: Option<crate::EventRecordId>,
         reason: String,
         fail_closed: bool,
     },
     Wait {
-        consumed_fact_id: EventRecordId,
+        consumed_fact_id: crate::EventRecordId,
         approval_id: Option<String>,
         reason: Option<String>,
     },
@@ -271,10 +262,10 @@ pub enum ToolCallDecision {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnContinuationDecisionRequest {
-    pub coordinates: ThreadCoordinates,
+    pub coordinates: crate::ThreadCoordinates,
     pub subject: TurnContinuationSubject,
     pub snapshot_id: String,
-    pub request_event_id: EventRecordId,
+    pub request_event_id: crate::EventRecordId,
     pub now_ms: i64,
     pub completed_continuations: u32,
 }
@@ -283,12 +274,12 @@ pub struct TurnContinuationDecisionRequest {
 pub enum TurnContinuationDecision {
     NoRequest,
     Accept {
-        consumed_request_id: EventRecordId,
+        consumed_request_id: crate::EventRecordId,
         mandate_id: String,
         next_turn_input: String,
     },
     Reject {
-        consumed_request_id: Option<EventRecordId>,
+        consumed_request_id: Option<crate::EventRecordId>,
         reason: String,
         fail_closed: bool,
     },
@@ -296,12 +287,12 @@ pub enum TurnContinuationDecision {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlacementDecisionRequest {
-    pub coordinates: ThreadCoordinates,
+    pub coordinates: crate::ThreadCoordinates,
     pub subject: PlacementSubject,
     pub snapshot_id: String,
-    pub request_event_id: EventRecordId,
+    pub request_event_id: crate::EventRecordId,
     pub default_target: PlacementTarget,
-    pub allowed_targets: BTreeSet<PlacementTarget>,
+    pub allowed_targets: std::collections::BTreeSet<PlacementTarget>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -310,18 +301,18 @@ pub enum PlacementDecision {
         target: PlacementTarget,
     },
     Selected {
-        consumed_fact_id: EventRecordId,
+        consumed_fact_id: crate::EventRecordId,
         target: PlacementTarget,
     },
     Deny {
-        consumed_fact_id: Option<EventRecordId>,
+        consumed_fact_id: Option<crate::EventRecordId>,
         reason: String,
         fail_closed: bool,
     },
 }
 
 impl ToolCallDecision {
-    pub fn consumed_fact_id(&self) -> Option<EventRecordId> {
+    pub fn consumed_fact_id(&self) -> Option<crate::EventRecordId> {
         match self {
             Self::NoDecision => None,
             Self::Allow { consumed_fact_id }
@@ -338,19 +329,19 @@ impl ToolCallDecision {
     }
 }
 
-pub async fn decide_tool_call<S: EventStore + ?Sized>(
+pub async fn decide_tool_call<S: crate::EventStore + ?Sized>(
     store: &S,
     request: ToolDecisionRequest,
-) -> VerletResult<ToolCallDecision> {
+) -> crate::VerletResult<ToolCallDecision> {
     let control_events = store
         .read_events(&control_stream_id(&request.coordinates), None)
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
     let mut terminal_candidates = Vec::new();
     let mut wait_candidates = Vec::new();
     for event in control_events {
         match event.kind {
-            EventKind::ToolCallDecision => {
+            crate::EventKind::ToolCallDecision => {
                 let payload = match serde_json::from_value::<ToolCallDecisionPayload>(
                     event.payload.clone(),
                 ) {
@@ -373,7 +364,7 @@ pub async fn decide_tool_call<S: EventStore + ?Sized>(
                 }
                 terminal_candidates.push(tool_decision_from_payload(event.id, payload));
             }
-            EventKind::ToolCallSuspended => {
+            crate::EventKind::ToolCallSuspended => {
                 let payload =
                     match serde_json::from_value::<ToolCallSuspendedPayload>(event.payload.clone())
                     {
@@ -425,11 +416,11 @@ pub async fn decide_tool_call<S: EventStore + ?Sized>(
     }
 }
 
-pub async fn active_tool_controller_for_request<S: EventStore + ?Sized>(
+pub async fn active_tool_controller_for_request<S: crate::EventStore + ?Sized>(
     store: &S,
-    coordinates: &ThreadCoordinates,
+    coordinates: &crate::ThreadCoordinates,
     tool_name: &str,
-) -> VerletResult<Option<ToolControllerBinding>> {
+) -> crate::VerletResult<Option<ToolControllerBinding>> {
     let Some((_, receipt)) = active_manifest_bind_receipt(store, coordinates).await? else {
         return Ok(None);
     };
@@ -445,59 +436,63 @@ pub async fn active_tool_controller_for_request<S: EventStore + ?Sized>(
     Ok(None)
 }
 
-pub async fn active_manifest_bind_receipt<S: EventStore + ?Sized>(
+pub async fn active_manifest_bind_receipt<S: crate::EventStore + ?Sized>(
     store: &S,
-    coordinates: &ThreadCoordinates,
-) -> VerletResult<Option<(EventRecordId, AgentManifestBindReceipt)>> {
+    coordinates: &crate::ThreadCoordinates,
+) -> crate::VerletResult<Option<(crate::EventRecordId, crate::AgentManifestBindReceipt)>> {
     let thread_events = store
-        .read_events(&EventStreamId::for_thread(coordinates), None)
+        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
     let Some(event) = thread_events
         .into_iter()
-        .filter(|event| event.kind == EventKind::ManifestBindCompleted)
+        .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted)
         .max_by_key(|event| event.sequence.get())
     else {
         return Ok(None);
     };
-    let receipt =
-        serde_json::from_value::<AgentManifestBindReceipt>(event.payload).map_err(|err| {
-            VerletError::History(format!("manifest.bind.completed payload is invalid: {err}"))
+    let receipt = serde_json::from_value::<crate::AgentManifestBindReceipt>(event.payload)
+        .map_err(|err| {
+            crate::VerletError::History(format!(
+                "manifest.bind.completed payload is invalid: {err}"
+            ))
         })?;
     Ok(Some((event.id, receipt)))
 }
 
-pub async fn list_pending_tool_call_suspensions<S: EventStore + ?Sized>(
+pub async fn list_pending_tool_call_suspensions<S: crate::EventStore + ?Sized>(
     store: &S,
-    coordinates: &ThreadCoordinates,
-) -> VerletResult<Vec<PendingToolCallSuspension>> {
+    coordinates: &crate::ThreadCoordinates,
+) -> crate::VerletResult<Vec<PendingToolCallSuspension>> {
     let control_events = store
         .read_events(&control_stream_id(coordinates), None)
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
     let thread_events = store
-        .read_events(&EventStreamId::for_thread(coordinates), None)
+        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
-    let mut terminal_subjects = BTreeSet::<(ToolCallSubject, String)>::new();
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+    let mut terminal_subjects = std::collections::BTreeSet::<(ToolCallSubject, String)>::new();
     for event in control_events
         .iter()
-        .filter(|event| event.kind == EventKind::ToolCallDecision)
+        .filter(|event| event.kind == crate::EventKind::ToolCallDecision)
     {
         let payload = serde_json::from_value::<ToolCallDecisionPayload>(event.payload.clone())
             .map_err(|err| {
-                VerletError::History(format!("tool.call.decision payload is invalid: {err}"))
+                crate::VerletError::History(format!("tool.call.decision payload is invalid: {err}"))
             })?;
         terminal_subjects.insert((payload.subject, payload.snapshot_id));
     }
     let mut completions = Vec::new();
     for event in thread_events
         .iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
     {
         let payload = serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone())
             .map_err(|err| {
-                VerletError::History(format!("tool.call.completed payload is invalid: {err}"))
+                crate::VerletError::History(format!(
+                    "tool.call.completed payload is invalid: {err}"
+                ))
             })?;
         completions.push(payload);
     }
@@ -505,23 +500,26 @@ pub async fn list_pending_tool_call_suspensions<S: EventStore + ?Sized>(
     let mut pending = Vec::new();
     for event in control_events
         .into_iter()
-        .filter(|event| event.kind == EventKind::ToolCallSuspended)
+        .filter(|event| event.kind == crate::EventKind::ToolCallSuspended)
     {
         let payload = serde_json::from_value::<ToolCallSuspendedPayload>(event.payload.clone())
             .map_err(|err| {
-                VerletError::History(format!("tool.call.suspended payload is invalid: {err}"))
+                crate::VerletError::History(format!(
+                    "tool.call.suspended payload is invalid: {err}"
+                ))
             })?;
         let request_event_id = event.provenance.source_event_ids.first().copied();
         let request = request_event_id
             .and_then(|request_event_id| {
                 thread_events.iter().find(|event| {
-                    event.id == request_event_id && event.kind == EventKind::ToolCallRequested
+                    event.id == request_event_id
+                        && event.kind == crate::EventKind::ToolCallRequested
                 })
             })
             .map(|request_event| {
                 serde_json::from_value::<ToolCallRequestedPayload>(request_event.payload.clone())
                     .map_err(|err| {
-                        VerletError::History(format!(
+                        crate::VerletError::History(format!(
                             "tool.call.requested payload is invalid: {err}"
                         ))
                     })
@@ -561,17 +559,17 @@ pub async fn list_pending_tool_call_suspensions<S: EventStore + ?Sized>(
     Ok(pending)
 }
 
-pub async fn decide_turn_continuation<S: EventStore + ?Sized>(
+pub async fn decide_turn_continuation<S: crate::EventStore + ?Sized>(
     store: &S,
     request: TurnContinuationDecisionRequest,
-) -> VerletResult<TurnContinuationDecision> {
+) -> crate::VerletResult<TurnContinuationDecision> {
     let control_events = store
         .read_events(&control_stream_id(&request.coordinates), None)
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
     let mut candidates = Vec::new();
     for event in &control_events {
-        if event.kind != EventKind::TurnContinueRequested {
+        if event.kind != crate::EventKind::TurnContinueRequested {
             continue;
         }
         let payload =
@@ -633,10 +631,10 @@ pub async fn decide_turn_continuation<S: EventStore + ?Sized>(
     if let Some(expires_at_ms) = mandate.expires_at_ms
         && request.now_ms > expires_at_ms
     {
-        let expires_at = Utc
+        let expires_at = chrono::Utc
             .timestamp_millis_opt(expires_at_ms)
             .single()
-            .map(|instant| instant.to_rfc3339_opts(SecondsFormat::Millis, true));
+            .map(|instant| instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         return Ok(TurnContinuationDecision::Reject {
             consumed_request_id: Some(consumed_request_id),
             reason: match expires_at {
@@ -656,17 +654,17 @@ pub async fn decide_turn_continuation<S: EventStore + ?Sized>(
     })
 }
 
-pub async fn decide_placement<S: EventStore + ?Sized>(
+pub async fn decide_placement<S: crate::EventStore + ?Sized>(
     store: &S,
     request: PlacementDecisionRequest,
-) -> VerletResult<PlacementDecision> {
+) -> crate::VerletResult<PlacementDecision> {
     let control_events = store
         .read_events(&control_stream_id(&request.coordinates), None)
         .await
-        .map_err(|err| VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::VerletError::History(err.to_string()))?;
     let mut candidates = Vec::new();
     for event in control_events {
-        if event.kind != EventKind::PlacementDecision {
+        if event.kind != crate::EventKind::PlacementDecision {
             continue;
         }
         let payload =
@@ -721,12 +719,12 @@ pub async fn decide_placement<S: EventStore + ?Sized>(
     })
 }
 
-pub fn control_stream_id(coordinates: &ThreadCoordinates) -> EventStreamId {
-    EventStreamId::new(format!("control:{}", coordinates.thread_id))
+pub fn control_stream_id(coordinates: &crate::ThreadCoordinates) -> crate::EventStreamId {
+    crate::EventStreamId::new(format!("control:{}", coordinates.thread_id))
 }
 
 fn tool_decision_from_payload(
-    consumed_fact_id: EventRecordId,
+    consumed_fact_id: crate::EventRecordId,
     payload: ToolCallDecisionPayload,
 ) -> ToolCallDecision {
     match payload.outcome {
@@ -743,35 +741,41 @@ fn tool_decision_from_payload(
     }
 }
 
-fn fresh_control_fact(event: &EventRecord, request: &ToolDecisionRequest) -> bool {
+fn fresh_control_fact(event: &crate::EventRecord, request: &ToolDecisionRequest) -> bool {
     fresh_control_event(event, request.request_event_id)
 }
 
-fn provenance_reaches_request(event: &EventRecord, request: &ToolDecisionRequest) -> bool {
+fn provenance_reaches_request(event: &crate::EventRecord, request: &ToolDecisionRequest) -> bool {
     provenance_reaches_event(event, request.request_event_id)
 }
 
-fn fresh_control_event(event: &EventRecord, request_event_id: EventRecordId) -> bool {
+fn fresh_control_event(event: &crate::EventRecord, request_event_id: crate::EventRecordId) -> bool {
     match event.origin {
-        EventOrigin::Witnessed => true,
-        EventOrigin::Discharged => provenance_reaches_event(event, request_event_id),
+        crate::EventOrigin::Witnessed => true,
+        crate::EventOrigin::Discharged => provenance_reaches_event(event, request_event_id),
     }
 }
 
-fn provenance_reaches_event(event: &EventRecord, request_event_id: EventRecordId) -> bool {
+fn provenance_reaches_event(
+    event: &crate::EventRecord,
+    request_event_id: crate::EventRecordId,
+) -> bool {
     event
         .provenance
         .source_event_ids
         .contains(&request_event_id)
 }
 
-fn coupling_matches_tool_request(coupling: &AgentManifestCouplingBinding, tool_name: &str) -> bool {
-    coupling.role == CouplingRole::Controller
-        && coupling.trigger_kind == EventKind::ToolCallRequested.as_str()
+fn coupling_matches_tool_request(
+    coupling: &crate::AgentManifestCouplingBinding,
+    tool_name: &str,
+) -> bool {
+    coupling.role == crate::CouplingRole::Controller
+        && coupling.trigger_kind == crate::EventKind::ToolCallRequested.as_str()
         && coupling.sink_stream == "control"
         && coupling.sink_kinds.iter().any(|kind| {
-            kind == EventKind::ToolCallDecision.as_str()
-                || kind == EventKind::ToolCallSuspended.as_str()
+            kind == crate::EventKind::ToolCallDecision.as_str()
+                || kind == crate::EventKind::ToolCallSuspended.as_str()
         })
         && coupling.trigger_match.iter().all(|(key, expected)| {
             matches!(key.as_str(), "tool" | "tool_name" | "name")
@@ -780,18 +784,20 @@ fn coupling_matches_tool_request(coupling: &AgentManifestCouplingBinding, tool_n
 }
 
 fn latest_matching_mandate(
-    events: &[EventRecord],
+    events: &[crate::EventRecord],
     request: &TurnContinuationDecisionRequest,
-) -> VerletResult<Option<MandateStartedPayload>> {
+) -> crate::VerletResult<Option<MandateStartedPayload>> {
     let mut matching = Vec::new();
     for event in events {
-        if event.kind != EventKind::MandateStarted || event.origin != EventOrigin::Witnessed {
+        if event.kind != crate::EventKind::MandateStarted
+            || event.origin != crate::EventOrigin::Witnessed
+        {
             continue;
         }
         let payload = match serde_json::from_value::<MandateStartedPayload>(event.payload.clone()) {
             Ok(payload) => payload,
             Err(err) => {
-                return Err(VerletError::History(format!(
+                return Err(crate::VerletError::History(format!(
                     "mandate.started payload is invalid: {err}"
                 )));
             }
@@ -820,18 +826,20 @@ fn latest_matching_mandate(
 }
 
 fn mandate_rejection_reason(
-    events: &[EventRecord],
+    events: &[crate::EventRecord],
     request: &TurnContinuationDecisionRequest,
     mandate: &MandateStartedPayload,
-) -> VerletResult<Option<String>> {
+) -> crate::VerletResult<Option<String>> {
     for event in events {
-        if event.kind != EventKind::MandateRevoked || event.origin != EventOrigin::Witnessed {
+        if event.kind != crate::EventKind::MandateRevoked
+            || event.origin != crate::EventOrigin::Witnessed
+        {
             continue;
         }
         let payload = match serde_json::from_value::<MandateRevokedPayload>(event.payload.clone()) {
             Ok(payload) => payload,
             Err(err) => {
-                return Err(VerletError::History(format!(
+                return Err(crate::VerletError::History(format!(
                     "mandate.revoked payload is invalid: {err}"
                 )));
             }
@@ -851,33 +859,28 @@ fn mandate_rejection_reason(
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        AgentManifestBindReceipt, AgentManifestCouplingBinding, AgentManifestCouplingBudget,
-        AgentManifestRuntimeDefaults, CouplingRole, EventKind, EventProvenance, EventStore,
-        EventStreamId, InMemorySessionStore, NewEventRecord, ThreadCoordinates,
-    };
-    use serde_json::json;
-    use std::collections::{BTreeMap, BTreeSet};
+    use crate::kernel::history::EventStore as _;
 
     #[test]
     fn decision_payload_admissible_is_additive_optional() {
-        let tool_without: ToolCallDecisionPayload = serde_json::from_value(json!({
-            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
-            "snapshot_id": "snapshot-a",
-            "outcome": {"decision": "allow"}
-        }))
-        .unwrap();
+        let tool_without: crate::kernel::control_decision::ToolCallDecisionPayload =
+            serde_json::from_value(serde_json::json!({
+                "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+                "snapshot_id": "snapshot-a",
+                "outcome": {"decision": "allow"}
+            }))
+            .unwrap();
         assert_eq!(tool_without.admissible, None);
         assert!(serde_json::to_value(&tool_without).unwrap()["admissible"].is_null());
 
-        let tool_with: ToolCallDecisionPayload = serde_json::from_value(json!({
-            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
-            "snapshot_id": "snapshot-a",
-            "outcome": {"decision": "deny", "reason": "blocked"},
-            "admissible": ["allow", "rewrite", "deny"]
-        }))
-        .unwrap();
+        let tool_with: crate::kernel::control_decision::ToolCallDecisionPayload =
+            serde_json::from_value(serde_json::json!({
+                "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+                "snapshot_id": "snapshot-a",
+                "outcome": {"decision": "deny", "reason": "blocked"},
+                "admissible": ["allow", "rewrite", "deny"]
+            }))
+            .unwrap();
         assert_eq!(
             tool_with.admissible,
             Some(vec![
@@ -888,81 +891,91 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&tool_with).unwrap()["admissible"],
-            json!(["allow", "rewrite", "deny"])
+            serde_json::json!(["allow", "rewrite", "deny"])
         );
 
-        let accepted: TurnContinuationAcceptedPayload = serde_json::from_value(json!({
-            "subject": {"loop_id": "loop-1", "parent_turn_id": "turn-1"},
-            "snapshot_id": "snapshot-a",
-            "mandate_id": "mandate-1",
-            "next_turn_id": "turn-2",
-            "admissible": ["accepted", "rejected"]
-        }))
-        .unwrap();
+        let accepted: crate::kernel::control_decision::TurnContinuationAcceptedPayload =
+            serde_json::from_value(serde_json::json!({
+                "subject": {"loop_id": "loop-1", "parent_turn_id": "turn-1"},
+                "snapshot_id": "snapshot-a",
+                "mandate_id": "mandate-1",
+                "next_turn_id": "turn-2",
+                "admissible": ["accepted", "rejected"]
+            }))
+            .unwrap();
         assert_eq!(
             accepted.admissible,
             Some(vec!["accepted".to_string(), "rejected".to_string()])
         );
 
-        let rejected: TurnContinuationRejectedPayload = serde_json::from_value(json!({
-            "subject": {"loop_id": "loop-1", "parent_turn_id": "turn-1"},
-            "snapshot_id": "snapshot-a",
-            "reason": "budget exhausted"
-        }))
-        .unwrap();
+        let rejected: crate::kernel::control_decision::TurnContinuationRejectedPayload =
+            serde_json::from_value(serde_json::json!({
+                "subject": {"loop_id": "loop-1", "parent_turn_id": "turn-1"},
+                "snapshot_id": "snapshot-a",
+                "reason": "budget exhausted"
+            }))
+            .unwrap();
         assert_eq!(rejected.admissible, None);
     }
 
     #[test]
     fn tool_request_holds_and_completion_finish_order_are_decode_compatible() {
-        let legacy_request: ToolCallRequestedPayload = serde_json::from_value(json!({
-            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
-            "snapshot_id": "snapshot-a",
-            "tool_name": "thread_submit",
-            "arguments": {"task_name": "worker-a"}
-        }))
-        .unwrap();
+        let legacy_request: crate::kernel::control_decision::ToolCallRequestedPayload =
+            serde_json::from_value(serde_json::json!({
+                "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+                "snapshot_id": "snapshot-a",
+                "tool_name": "thread_submit",
+                "arguments": {"task_name": "worker-a"}
+            }))
+            .unwrap();
         assert!(legacy_request.holds.is_empty());
         assert_eq!(legacy_request.args_fingerprint, None);
-        assert!(tool_invocation_fingerprint_matches(
-            "snapshot-a",
-            None,
-            "snapshot-a",
-            Some("sha256:new"),
-        ));
-        assert!(!tool_invocation_fingerprint_matches(
-            "snapshot-a",
-            Some("sha256:old"),
-            "snapshot-a",
-            Some("sha256:new"),
-        ));
-        assert!(!tool_invocation_fingerprint_matches(
-            "snapshot-a",
-            None,
-            "snapshot-b",
-            None,
-        ));
+        assert!(
+            crate::kernel::control_decision::tool_invocation_fingerprint_matches(
+                "snapshot-a",
+                None,
+                "snapshot-a",
+                Some("sha256:new"),
+            )
+        );
+        assert!(
+            !crate::kernel::control_decision::tool_invocation_fingerprint_matches(
+                "snapshot-a",
+                Some("sha256:old"),
+                "snapshot-a",
+                Some("sha256:new"),
+            )
+        );
+        assert!(
+            !crate::kernel::control_decision::tool_invocation_fingerprint_matches(
+                "snapshot-a",
+                None,
+                "snapshot-b",
+                None,
+            )
+        );
 
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         struct LegacyToolCallRequestedPayload {
-            subject: ToolCallSubject,
+            subject: crate::kernel::control_decision::ToolCallSubject,
             snapshot_id: String,
             tool_name: String,
-            arguments: JsonValue,
+            arguments: serde_json::Value,
         }
 
-        let new_request = serde_json::to_value(ToolCallRequestedPayload {
-            subject: legacy_request.subject.clone(),
-            snapshot_id: legacy_request.snapshot_id.clone(),
-            tool_name: legacy_request.tool_name.clone(),
-            arguments: legacy_request.arguments.clone(),
-            args_fingerprint: Some(format!("sha256:{}", "a".repeat(64))),
-            holds: vec![json!({
-                "key": {"kind": "kernel_thread", "task_name": "worker-a"},
-                "access": "exclusive"
-            })],
-        })
-        .unwrap();
+        let new_request =
+            serde_json::to_value(crate::kernel::control_decision::ToolCallRequestedPayload {
+                subject: legacy_request.subject.clone(),
+                snapshot_id: legacy_request.snapshot_id.clone(),
+                tool_name: legacy_request.tool_name.clone(),
+                arguments: legacy_request.arguments.clone(),
+                args_fingerprint: Some(format!("sha256:{}", "a".repeat(64))),
+                holds: vec![serde_json::json!({
+                    "key": {"kind": "kernel_thread", "task_name": "worker-a"},
+                    "access": "exclusive"
+                })],
+            })
+            .unwrap();
         let decoded_by_old_reader: LegacyToolCallRequestedPayload =
             serde_json::from_value(new_request).unwrap();
         assert_eq!(decoded_by_old_reader.subject, legacy_request.subject);
@@ -970,32 +983,39 @@ mod tests {
         assert_eq!(decoded_by_old_reader.tool_name, "thread_submit");
         assert_eq!(
             decoded_by_old_reader.arguments,
-            json!({"task_name": "worker-a"})
+            serde_json::json!({"task_name": "worker-a"})
         );
 
-        let legacy_completion: ToolCallCompletedPayload = serde_json::from_value(json!({
-            "subject": {"turn_id": "turn-1", "call_id": "call-1"},
-            "snapshot_id": "snapshot-a",
-            "tool_name": "thread_submit",
-            "success": true,
-            "duration_ms": 4
-        }))
-        .unwrap();
+        let legacy_completion: crate::kernel::control_decision::ToolCallCompletedPayload =
+            serde_json::from_value(serde_json::json!({
+                "subject": {"turn_id": "turn-1", "call_id": "call-1"},
+                "snapshot_id": "snapshot-a",
+                "tool_name": "thread_submit",
+                "success": true,
+                "duration_ms": 4
+            }))
+            .unwrap();
         assert_eq!(legacy_completion.finish_order, None);
         assert_eq!(legacy_completion.cancellation, None);
         assert_eq!(legacy_completion.args_fingerprint, None);
 
-        let cancelled = serde_json::to_value(ToolCallCompletedPayload {
-            args_fingerprint: Some(format!("sha256:{}", "a".repeat(64))),
-            cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
-            ..legacy_completion.clone()
-        })
-        .unwrap();
-        assert_eq!(cancelled["cancellation"], json!("cancelled_exceeded_grace"));
+        let cancelled =
+            serde_json::to_value(crate::kernel::control_decision::ToolCallCompletedPayload {
+                args_fingerprint: Some(format!("sha256:{}", "a".repeat(64))),
+                cancellation: Some(
+                    crate::kernel::control_decision::ToolCallCancellation::CancelledExceededGrace,
+                ),
+                ..legacy_completion.clone()
+            })
+            .unwrap();
+        assert_eq!(
+            cancelled["cancellation"],
+            serde_json::json!("cancelled_exceeded_grace")
+        );
 
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         struct LegacyToolCallCompletedPayload {
-            subject: ToolCallSubject,
+            subject: crate::kernel::control_decision::ToolCallSubject,
             success: bool,
         }
         let decoded_by_old_reader: LegacyToolCallCompletedPayload =
@@ -1014,44 +1034,49 @@ mod tests {
     async fn tool_decision_accepts_fresh_allow_fact() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_decision(ToolCallDecisionPayload {
+            .append_decision(crate::kernel::control_decision::ToolCallDecisionPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
-                outcome: ToolCallDecisionOutcomePayload::Allow,
+                outcome: crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Allow,
                 admissible: None,
             })
             .await;
 
-        let decision = decide_tool_call(&fixture.store, fixture.request())
-            .await
-            .unwrap();
+        let decision =
+            crate::kernel::control_decision::decide_tool_call(&fixture.store, fixture.request())
+                .await
+                .unwrap();
 
-        assert!(matches!(decision, ToolCallDecision::Allow { .. }));
+        assert!(matches!(
+            decision,
+            crate::kernel::control_decision::ToolCallDecision::Allow { .. }
+        ));
     }
 
     #[tokio::test]
     async fn tool_decision_rewrites_with_valid_arguments() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_decision(ToolCallDecisionPayload {
+            .append_decision(crate::kernel::control_decision::ToolCallDecisionPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
-                outcome: ToolCallDecisionOutcomePayload::Rewrite {
-                    arguments: json!({"cmd": "ls"}),
+                outcome: crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Rewrite {
+                    arguments: serde_json::json!({"cmd": "ls"}),
                 },
                 admissible: None,
             })
             .await;
 
-        let decision = decide_tool_call(&fixture.store, fixture.request())
-            .await
-            .unwrap();
+        let decision =
+            crate::kernel::control_decision::decide_tool_call(&fixture.store, fixture.request())
+                .await
+                .unwrap();
 
         assert_eq!(
             decision,
-            ToolCallDecision::Rewrite {
+            crate::kernel::control_decision::ToolCallDecision::Rewrite {
                 consumed_fact_id: decision.consumed_fact_id().unwrap(),
-                arguments: json!({"cmd": "ls"}),
+                arguments: serde_json::json!({"cmd": "ls"}),
             }
         );
     }
@@ -1060,23 +1085,24 @@ mod tests {
     async fn tool_decision_denies_with_reason() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_decision(ToolCallDecisionPayload {
+            .append_decision(crate::kernel::control_decision::ToolCallDecisionPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
-                outcome: ToolCallDecisionOutcomePayload::Deny {
+                outcome: crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Deny {
                     reason: "dangerous command".to_string(),
                 },
                 admissible: None,
             })
             .await;
 
-        let decision = decide_tool_call(&fixture.store, fixture.request())
-            .await
-            .unwrap();
+        let decision =
+            crate::kernel::control_decision::decide_tool_call(&fixture.store, fixture.request())
+                .await
+                .unwrap();
 
         assert!(matches!(
             decision,
-            ToolCallDecision::Deny {
+            crate::kernel::control_decision::ToolCallDecision::Deny {
                 reason,
                 fail_closed: false,
                 ..
@@ -1088,7 +1114,7 @@ mod tests {
     async fn tool_suspension_waits_without_terminal_tool_result() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_suspended(ToolCallSuspendedPayload {
+            .append_suspended(crate::kernel::control_decision::ToolCallSuspendedPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 approval_id: Some("approval-1".to_string()),
@@ -1096,13 +1122,14 @@ mod tests {
             })
             .await;
 
-        let decision = decide_tool_call(&fixture.store, fixture.request())
-            .await
-            .unwrap();
+        let decision =
+            crate::kernel::control_decision::decide_tool_call(&fixture.store, fixture.request())
+                .await
+                .unwrap();
 
         assert!(matches!(
             decision,
-            ToolCallDecision::Wait {
+            crate::kernel::control_decision::ToolCallDecision::Wait {
                 approval_id: Some(id),
                 ..
             } if id == "approval-1"
@@ -1113,35 +1140,43 @@ mod tests {
     async fn stale_snapshot_facts_are_ignored_as_no_decision() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_decision(ToolCallDecisionPayload {
+            .append_decision(crate::kernel::control_decision::ToolCallDecisionPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: "old-snapshot".to_string(),
-                outcome: ToolCallDecisionOutcomePayload::Allow,
+                outcome: crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Allow,
                 admissible: None,
             })
             .await;
 
-        let decision = decide_tool_call(&fixture.store, fixture.request())
-            .await
-            .unwrap();
+        let decision =
+            crate::kernel::control_decision::decide_tool_call(&fixture.store, fixture.request())
+                .await
+                .unwrap();
 
-        assert_eq!(decision, ToolCallDecision::NoDecision);
+        assert_eq!(
+            decision,
+            crate::kernel::control_decision::ToolCallDecision::NoDecision
+        );
     }
 
     #[tokio::test]
     async fn malformed_matching_fact_fails_closed() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_raw(EventKind::ToolCallDecision, json!({"bad": true}))
+            .append_raw(
+                crate::EventKind::ToolCallDecision,
+                serde_json::json!({"bad": true}),
+            )
             .await;
 
-        let decision = decide_tool_call(&fixture.store, fixture.request())
-            .await
-            .unwrap();
+        let decision =
+            crate::kernel::control_decision::decide_tool_call(&fixture.store, fixture.request())
+                .await
+                .unwrap();
 
         assert!(matches!(
             decision,
-            ToolCallDecision::Deny {
+            crate::kernel::control_decision::ToolCallDecision::Deny {
                 fail_closed: true,
                 reason,
                 ..
@@ -1153,31 +1188,32 @@ mod tests {
     async fn conflicting_terminal_facts_fail_closed() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_decision(ToolCallDecisionPayload {
+            .append_decision(crate::kernel::control_decision::ToolCallDecisionPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
-                outcome: ToolCallDecisionOutcomePayload::Allow,
+                outcome: crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Allow,
                 admissible: None,
             })
             .await;
         fixture
-            .append_decision(ToolCallDecisionPayload {
+            .append_decision(crate::kernel::control_decision::ToolCallDecisionPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
-                outcome: ToolCallDecisionOutcomePayload::Deny {
+                outcome: crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Deny {
                     reason: "blocked".to_string(),
                 },
                 admissible: None,
             })
             .await;
 
-        let decision = decide_tool_call(&fixture.store, fixture.request())
-            .await
-            .unwrap();
+        let decision =
+            crate::kernel::control_decision::decide_tool_call(&fixture.store, fixture.request())
+                .await
+                .unwrap();
 
         assert!(matches!(
             decision,
-            ToolCallDecision::Deny {
+            crate::kernel::control_decision::ToolCallDecision::Deny {
                 fail_closed: true,
                 reason,
                 ..
@@ -1191,19 +1227,25 @@ mod tests {
         fixture
             .append_manifest_bind(vec![tool_controller_binding(
                 "bash_gate",
-                BTreeMap::from([("tool".to_string(), json!("bash"))]),
+                std::collections::BTreeMap::from([("tool".to_string(), serde_json::json!("bash"))]),
             )])
             .await;
 
-        let binding =
-            active_tool_controller_for_request(&fixture.store, &fixture.coordinates, "bash")
-                .await
-                .unwrap()
-                .expect("controller should match bash");
-        let missing =
-            active_tool_controller_for_request(&fixture.store, &fixture.coordinates, "python")
-                .await
-                .unwrap();
+        let binding = crate::kernel::control_decision::active_tool_controller_for_request(
+            &fixture.store,
+            &fixture.coordinates,
+            "bash",
+        )
+        .await
+        .unwrap()
+        .expect("controller should match bash");
+        let missing = crate::kernel::control_decision::active_tool_controller_for_request(
+            &fixture.store,
+            &fixture.coordinates,
+            "python",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(binding.coupling_id, "bash_gate");
         assert_eq!(binding.snapshot_id, "snapshot-a");
@@ -1215,13 +1257,16 @@ mod tests {
         let fixture = ToolDecisionFixture::new().await;
         fixture.append_turn_continue("try again").await;
 
-        let decision = decide_turn_continuation(&fixture.store, fixture.continuation_request())
-            .await
-            .unwrap();
+        let decision = crate::kernel::control_decision::decide_turn_continuation(
+            &fixture.store,
+            fixture.continuation_request(),
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(
             decision,
-            TurnContinuationDecision::Reject {
+            crate::kernel::control_decision::TurnContinuationDecision::Reject {
                 reason,
                 fail_closed: false,
                 ..
@@ -1234,8 +1279,8 @@ mod tests {
         let fixture = ToolDecisionFixture::new().await;
         fixture.append_turn_continue("try again").await;
         fixture
-            .append_mandate_started(MandateStartedPayload {
-                subject: MandateSubject {
+            .append_mandate_started(crate::kernel::control_decision::MandateStartedPayload {
+                subject: crate::kernel::control_decision::MandateSubject {
                     thread_id: None,
                     loop_id: Some("loop-1".to_string()),
                 },
@@ -1251,13 +1296,16 @@ mod tests {
             })
             .await;
 
-        let decision = decide_turn_continuation(&fixture.store, fixture.continuation_request())
-            .await
-            .unwrap();
+        let decision = crate::kernel::control_decision::decide_turn_continuation(
+            &fixture.store,
+            fixture.continuation_request(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             decision,
-            TurnContinuationDecision::Accept {
+            crate::kernel::control_decision::TurnContinuationDecision::Accept {
                 consumed_request_id: decision_consumed_request(&decision).unwrap(),
                 mandate_id: "mandate-1".to_string(),
                 next_turn_input: "try again".to_string(),
@@ -1270,8 +1318,8 @@ mod tests {
         let fixture = ToolDecisionFixture::new().await;
         fixture.append_turn_continue("try again").await;
         fixture
-            .append_mandate_started(MandateStartedPayload {
-                subject: MandateSubject {
+            .append_mandate_started(crate::kernel::control_decision::MandateStartedPayload {
+                subject: crate::kernel::control_decision::MandateSubject {
                     thread_id: None,
                     loop_id: Some("loop-1".to_string()),
                 },
@@ -1287,13 +1335,16 @@ mod tests {
             })
             .await;
 
-        let decision = decide_turn_continuation(&fixture.store, fixture.continuation_request())
-            .await
-            .unwrap();
+        let decision = crate::kernel::control_decision::decide_turn_continuation(
+            &fixture.store,
+            fixture.continuation_request(),
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(
             decision,
-            TurnContinuationDecision::Reject {
+            crate::kernel::control_decision::TurnContinuationDecision::Reject {
                 consumed_request_id: Some(_),
                 reason,
                 fail_closed: false,
@@ -1306,8 +1357,8 @@ mod tests {
         let fixture = ToolDecisionFixture::new().await;
         fixture.append_turn_continue("try again").await;
         fixture
-            .append_mandate_started(MandateStartedPayload {
-                subject: MandateSubject {
+            .append_mandate_started(crate::kernel::control_decision::MandateStartedPayload {
+                subject: crate::kernel::control_decision::MandateSubject {
                     thread_id: None,
                     loop_id: Some("loop-1".to_string()),
                 },
@@ -1323,8 +1374,8 @@ mod tests {
             })
             .await;
         fixture
-            .append_mandate_revoked(MandateRevokedPayload {
-                subject: MandateSubject {
+            .append_mandate_revoked(crate::kernel::control_decision::MandateRevokedPayload {
+                subject: crate::kernel::control_decision::MandateSubject {
                     thread_id: None,
                     loop_id: Some("loop-1".to_string()),
                 },
@@ -1335,13 +1386,16 @@ mod tests {
             })
             .await;
 
-        let decision = decide_turn_continuation(&fixture.store, fixture.continuation_request())
-            .await
-            .unwrap();
+        let decision = crate::kernel::control_decision::decide_turn_continuation(
+            &fixture.store,
+            fixture.continuation_request(),
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(
             decision,
-            TurnContinuationDecision::Reject { reason, .. }
+            crate::kernel::control_decision::TurnContinuationDecision::Reject { reason, .. }
                 if reason == "operator stopped loop"
         ));
     }
@@ -1349,37 +1403,43 @@ mod tests {
     #[tokio::test]
     async fn placement_defaults_without_controller_and_rejects_invalid_target() {
         let fixture = ToolDecisionFixture::new().await;
-        let defaulted = decide_placement(&fixture.store, fixture.placement_request())
-            .await
-            .unwrap();
+        let defaulted = crate::kernel::control_decision::decide_placement(
+            &fixture.store,
+            fixture.placement_request(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             defaulted,
-            PlacementDecision::Default {
-                target: PlacementTarget::Local
+            crate::kernel::control_decision::PlacementDecision::Default {
+                target: crate::kernel::control_decision::PlacementTarget::Local
             }
         );
 
         fixture
             .append_raw(
-                EventKind::PlacementDecision,
-                serde_json::to_value(PlacementDecisionPayload {
-                    subject: PlacementSubject {
+                crate::EventKind::PlacementDecision,
+                serde_json::to_value(crate::kernel::control_decision::PlacementDecisionPayload {
+                    subject: crate::kernel::control_decision::PlacementSubject {
                         invocation_id: "invoke-1".to_string(),
                     },
                     snapshot_id: fixture.snapshot_id.clone(),
-                    placement: PlacementTarget::Remote,
+                    placement: crate::kernel::control_decision::PlacementTarget::Remote,
                 })
                 .unwrap(),
             )
             .await;
 
-        let decision = decide_placement(&fixture.store, fixture.placement_request())
-            .await
-            .unwrap();
+        let decision = crate::kernel::control_decision::decide_placement(
+            &fixture.store,
+            fixture.placement_request(),
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(
             decision,
-            PlacementDecision::Deny {
+            crate::kernel::control_decision::PlacementDecision::Deny {
                 fail_closed: true,
                 reason,
                 ..
@@ -1391,7 +1451,7 @@ mod tests {
     async fn pending_tool_suspension_is_rebuilt_from_control_stream() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_suspended(ToolCallSuspendedPayload {
+            .append_suspended(crate::kernel::control_decision::ToolCallSuspendedPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 approval_id: Some("approval-1".to_string()),
@@ -1399,9 +1459,12 @@ mod tests {
             })
             .await;
 
-        let pending = list_pending_tool_call_suspensions(&fixture.store, &fixture.coordinates)
-            .await
-            .unwrap();
+        let pending = crate::kernel::control_decision::list_pending_tool_call_suspensions(
+            &fixture.store,
+            &fixture.coordinates,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].subject, fixture.subject);
@@ -1413,7 +1476,7 @@ mod tests {
     async fn terminal_tool_decision_closes_pending_suspension() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
-            .append_suspended(ToolCallSuspendedPayload {
+            .append_suspended(crate::kernel::control_decision::ToolCallSuspendedPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
                 approval_id: Some("approval-1".to_string()),
@@ -1421,17 +1484,20 @@ mod tests {
             })
             .await;
         fixture
-            .append_decision(ToolCallDecisionPayload {
+            .append_decision(crate::kernel::control_decision::ToolCallDecisionPayload {
                 subject: fixture.subject.clone(),
                 snapshot_id: fixture.snapshot_id.clone(),
-                outcome: ToolCallDecisionOutcomePayload::Allow,
+                outcome: crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Allow,
                 admissible: None,
             })
             .await;
 
-        let pending = list_pending_tool_call_suspensions(&fixture.store, &fixture.coordinates)
-            .await
-            .unwrap();
+        let pending = crate::kernel::control_decision::list_pending_tool_call_suspensions(
+            &fixture.store,
+            &fixture.coordinates,
+        )
+        .await
+        .unwrap();
 
         assert!(pending.is_empty());
     }
@@ -1441,8 +1507,8 @@ mod tests {
         let fixture = ToolDecisionFixture::new().await;
         fixture
             .append_control_witnessed(
-                EventKind::ToolCallSuspended,
-                serde_json::to_value(ToolCallSuspendedPayload {
+                crate::EventKind::ToolCallSuspended,
+                serde_json::to_value(crate::kernel::control_decision::ToolCallSuspendedPayload {
                     subject: fixture.subject.clone(),
                     snapshot_id: fixture.snapshot_id.clone(),
                     approval_id: Some("approval-legacy".to_string()),
@@ -1454,65 +1520,72 @@ mod tests {
         fixture
             .store
             .append_events(
-                &EventStreamId::for_thread(&fixture.coordinates),
-                vec![NewEventRecord::witnessed(
+                &crate::EventStreamId::for_thread(&fixture.coordinates),
+                vec![crate::NewEventRecord::witnessed(
                     fixture.coordinates.clone(),
-                    EventKind::ToolCallCompleted,
-                    serde_json::to_value(ToolCallCompletedPayload {
-                        subject: fixture.subject.clone(),
-                        snapshot_id: fixture.snapshot_id.clone(),
-                        tool_name: "bash".to_string(),
-                        success: true,
-                        args_fingerprint: None,
-                        duration_ms: Some(1),
-                        finish_order: None,
-                        cancellation: None,
-                    })
+                    crate::EventKind::ToolCallCompleted,
+                    serde_json::to_value(
+                        crate::kernel::control_decision::ToolCallCompletedPayload {
+                            subject: fixture.subject.clone(),
+                            snapshot_id: fixture.snapshot_id.clone(),
+                            tool_name: "bash".to_string(),
+                            success: true,
+                            args_fingerprint: None,
+                            duration_ms: Some(1),
+                            finish_order: None,
+                            cancellation: None,
+                        },
+                    )
                     .unwrap(),
                 )],
             )
             .await
             .unwrap();
 
-        let pending = list_pending_tool_call_suspensions(&fixture.store, &fixture.coordinates)
-            .await
-            .unwrap();
+        let pending = crate::kernel::control_decision::list_pending_tool_call_suspensions(
+            &fixture.store,
+            &fixture.coordinates,
+        )
+        .await
+        .unwrap();
 
         assert!(pending.is_empty());
     }
 
     struct ToolDecisionFixture {
-        store: InMemorySessionStore,
-        coordinates: ThreadCoordinates,
-        subject: ToolCallSubject,
+        store: crate::InMemorySessionStore,
+        coordinates: crate::ThreadCoordinates,
+        subject: crate::kernel::control_decision::ToolCallSubject,
         snapshot_id: String,
         request_event: crate::EventRecord,
     }
 
     impl ToolDecisionFixture {
         async fn new() -> Self {
-            let store = InMemorySessionStore::default();
-            let coordinates = ThreadCoordinates::new("tenant", "user", "session");
-            let subject = ToolCallSubject {
+            let store = crate::InMemorySessionStore::default();
+            let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+            let subject = crate::kernel::control_decision::ToolCallSubject {
                 turn_id: "turn-1".to_string(),
                 call_id: "call-1".to_string(),
             };
             let snapshot_id = "snapshot-a".to_string();
-            let thread_stream = EventStreamId::for_thread(&coordinates);
+            let thread_stream = crate::EventStreamId::for_thread(&coordinates);
             let request_event = store
                 .append_events(
                     &thread_stream,
-                    vec![NewEventRecord::witnessed(
+                    vec![crate::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::ToolCallRequested,
-                        serde_json::to_value(ToolCallRequestedPayload {
-                            subject: subject.clone(),
-                            snapshot_id: snapshot_id.clone(),
-                            tool_name: "bash".to_string(),
-                            arguments: json!({"cmd": "rm -rf /"}),
-                            args_fingerprint: None,
-                            holds: Vec::new(),
-                        })
+                        crate::EventKind::ToolCallRequested,
+                        serde_json::to_value(
+                            crate::kernel::control_decision::ToolCallRequestedPayload {
+                                subject: subject.clone(),
+                                snapshot_id: snapshot_id.clone(),
+                                tool_name: "bash".to_string(),
+                                arguments: serde_json::json!({"cmd": "rm -rf /"}),
+                                args_fingerprint: None,
+                                holds: Vec::new(),
+                            },
+                        )
                         .unwrap(),
                     )],
                 )
@@ -1529,8 +1602,8 @@ mod tests {
             }
         }
 
-        fn request(&self) -> ToolDecisionRequest {
-            ToolDecisionRequest {
+        fn request(&self) -> crate::kernel::control_decision::ToolDecisionRequest {
+            crate::kernel::control_decision::ToolDecisionRequest {
                 coordinates: self.coordinates.clone(),
                 subject: self.subject.clone(),
                 snapshot_id: self.snapshot_id.clone(),
@@ -1538,10 +1611,12 @@ mod tests {
             }
         }
 
-        fn continuation_request(&self) -> TurnContinuationDecisionRequest {
-            TurnContinuationDecisionRequest {
+        fn continuation_request(
+            &self,
+        ) -> crate::kernel::control_decision::TurnContinuationDecisionRequest {
+            crate::kernel::control_decision::TurnContinuationDecisionRequest {
                 coordinates: self.coordinates.clone(),
-                subject: TurnContinuationSubject {
+                subject: crate::kernel::control_decision::TurnContinuationSubject {
                     loop_id: "loop-1".to_string(),
                     parent_turn_id: "turn-1".to_string(),
                 },
@@ -1552,30 +1627,39 @@ mod tests {
             }
         }
 
-        fn placement_request(&self) -> PlacementDecisionRequest {
-            PlacementDecisionRequest {
+        fn placement_request(&self) -> crate::kernel::control_decision::PlacementDecisionRequest {
+            crate::kernel::control_decision::PlacementDecisionRequest {
                 coordinates: self.coordinates.clone(),
-                subject: PlacementSubject {
+                subject: crate::kernel::control_decision::PlacementSubject {
                     invocation_id: "invoke-1".to_string(),
                 },
                 snapshot_id: self.snapshot_id.clone(),
                 request_event_id: self.request_event.id,
-                default_target: PlacementTarget::Local,
-                allowed_targets: BTreeSet::from([PlacementTarget::Local, PlacementTarget::Sandbox]),
+                default_target: crate::kernel::control_decision::PlacementTarget::Local,
+                allowed_targets: std::collections::BTreeSet::from([
+                    crate::kernel::control_decision::PlacementTarget::Local,
+                    crate::kernel::control_decision::PlacementTarget::Sandbox,
+                ]),
             }
         }
 
-        async fn append_decision(&self, payload: ToolCallDecisionPayload) {
+        async fn append_decision(
+            &self,
+            payload: crate::kernel::control_decision::ToolCallDecisionPayload,
+        ) {
             self.append_raw(
-                EventKind::ToolCallDecision,
+                crate::EventKind::ToolCallDecision,
                 serde_json::to_value(payload).unwrap(),
             )
             .await;
         }
 
-        async fn append_suspended(&self, payload: ToolCallSuspendedPayload) {
+        async fn append_suspended(
+            &self,
+            payload: crate::kernel::control_decision::ToolCallSuspendedPayload,
+        ) {
             self.append_raw(
-                EventKind::ToolCallSuspended,
+                crate::EventKind::ToolCallSuspended,
                 serde_json::to_value(payload).unwrap(),
             )
             .await;
@@ -1583,38 +1667,46 @@ mod tests {
 
         async fn append_turn_continue(&self, next_turn_input: &str) {
             self.append_raw(
-                EventKind::TurnContinueRequested,
-                serde_json::to_value(TurnContinueRequestedPayload {
-                    subject: TurnContinuationSubject {
-                        loop_id: "loop-1".to_string(),
-                        parent_turn_id: "turn-1".to_string(),
+                crate::EventKind::TurnContinueRequested,
+                serde_json::to_value(
+                    crate::kernel::control_decision::TurnContinueRequestedPayload {
+                        subject: crate::kernel::control_decision::TurnContinuationSubject {
+                            loop_id: "loop-1".to_string(),
+                            parent_turn_id: "turn-1".to_string(),
+                        },
+                        snapshot_id: self.snapshot_id.clone(),
+                        next_turn_input: next_turn_input.to_string(),
                     },
-                    snapshot_id: self.snapshot_id.clone(),
-                    next_turn_input: next_turn_input.to_string(),
-                })
+                )
                 .unwrap(),
             )
             .await;
         }
 
-        async fn append_mandate_started(&self, payload: MandateStartedPayload) {
+        async fn append_mandate_started(
+            &self,
+            payload: crate::kernel::control_decision::MandateStartedPayload,
+        ) {
             self.append_control_witnessed(
-                EventKind::MandateStarted,
+                crate::EventKind::MandateStarted,
                 serde_json::to_value(payload).unwrap(),
             )
             .await;
         }
 
-        async fn append_mandate_revoked(&self, payload: MandateRevokedPayload) {
+        async fn append_mandate_revoked(
+            &self,
+            payload: crate::kernel::control_decision::MandateRevokedPayload,
+        ) {
             self.append_control_witnessed(
-                EventKind::MandateRevoked,
+                crate::EventKind::MandateRevoked,
                 serde_json::to_value(payload).unwrap(),
             )
             .await;
         }
 
-        async fn append_manifest_bind(&self, couplings: Vec<AgentManifestCouplingBinding>) {
-            let receipt = AgentManifestBindReceipt {
+        async fn append_manifest_bind(&self, couplings: Vec<crate::AgentManifestCouplingBinding>) {
+            let receipt = crate::AgentManifestBindReceipt {
                 ref_uri: "agent://test/bash".to_string(),
                 manifest_hash: self.snapshot_id.clone(),
                 model_profile_id: "default".to_string(),
@@ -1630,7 +1722,7 @@ mod tests {
                 couplings,
                 granted: Vec::new(),
                 grant_bindings: Vec::new(),
-                effective_runtime: AgentManifestRuntimeDefaults::default(),
+                effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
                 placement: None,
                 placement_origin: None,
@@ -1639,17 +1731,19 @@ mod tests {
             };
             self.store
                 .append_events(
-                    &EventStreamId::for_thread(&self.coordinates),
-                    vec![NewEventRecord::discharged(
+                    &crate::EventStreamId::for_thread(&self.coordinates),
+                    vec![crate::NewEventRecord::discharged(
                         self.coordinates.clone(),
-                        EventKind::ManifestBindCompleted,
+                        crate::EventKind::ManifestBindCompleted,
                         serde_json::to_value(receipt).unwrap(),
-                        EventProvenance {
-                            source_streams: vec![EventStreamId::for_thread(&self.coordinates)],
+                        crate::EventProvenance {
+                            source_streams: vec![crate::EventStreamId::for_thread(
+                                &self.coordinates,
+                            )],
                             source_event_ids: vec![self.request_event.id],
                             discharged_by: Some("binder:manifest".to_string()),
                             function: Some("bind/v1".to_string()),
-                            ..EventProvenance::default()
+                            ..crate::EventProvenance::default()
                         },
                     )],
                 )
@@ -1657,20 +1751,22 @@ mod tests {
                 .unwrap();
         }
 
-        async fn append_raw(&self, kind: EventKind, payload: serde_json::Value) {
+        async fn append_raw(&self, kind: crate::EventKind, payload: serde_json::Value) {
             self.store
                 .append_events(
-                    &control_stream_id(&self.coordinates),
-                    vec![NewEventRecord::discharged(
+                    &crate::kernel::control_decision::control_stream_id(&self.coordinates),
+                    vec![crate::NewEventRecord::discharged(
                         self.coordinates.clone(),
                         kind,
                         payload,
-                        EventProvenance {
-                            source_streams: vec![EventStreamId::for_thread(&self.coordinates)],
+                        crate::EventProvenance {
+                            source_streams: vec![crate::EventStreamId::for_thread(
+                                &self.coordinates,
+                            )],
                             source_event_ids: vec![self.request_event.id],
                             discharged_by: Some("coupling:test".to_string()),
                             function: Some("op://test/run@sha256:test".to_string()),
-                            ..EventProvenance::default()
+                            ..crate::EventProvenance::default()
                         },
                     )],
                 )
@@ -1678,11 +1774,15 @@ mod tests {
                 .unwrap();
         }
 
-        async fn append_control_witnessed(&self, kind: EventKind, payload: serde_json::Value) {
+        async fn append_control_witnessed(
+            &self,
+            kind: crate::EventKind,
+            payload: serde_json::Value,
+        ) {
             self.store
                 .append_events(
-                    &control_stream_id(&self.coordinates),
-                    vec![NewEventRecord::witnessed(
+                    &crate::kernel::control_decision::control_stream_id(&self.coordinates),
+                    vec![crate::NewEventRecord::witnessed(
                         self.coordinates.clone(),
                         kind,
                         payload,
@@ -1695,38 +1795,40 @@ mod tests {
 
     fn tool_controller_binding(
         id: &str,
-        trigger_match: BTreeMap<String, serde_json::Value>,
-    ) -> AgentManifestCouplingBinding {
-        AgentManifestCouplingBinding {
+        trigger_match: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> crate::AgentManifestCouplingBinding {
+        crate::AgentManifestCouplingBinding {
             id: id.to_string(),
-            role: CouplingRole::Controller,
-            trigger_kind: EventKind::ToolCallRequested.to_string(),
+            role: crate::CouplingRole::Controller,
+            trigger_kind: crate::EventKind::ToolCallRequested.to_string(),
             trigger_match,
             source_streams: vec!["thread".to_string()],
-            source_kinds: vec![EventKind::ToolCallRequested.to_string()],
+            source_kinds: vec![crate::EventKind::ToolCallRequested.to_string()],
             sink_stream: "control".to_string(),
-            sink_kinds: vec![EventKind::ToolCallDecision.to_string()],
+            sink_kinds: vec![crate::EventKind::ToolCallDecision.to_string()],
             function_ref: "op://policy/bash-gate@sha256:abc".to_string(),
             artifact_hash: "abc".to_string(),
             operation_name: Some("bash_gate".to_string()),
             grants: Vec::new(),
             grant_expiries: Vec::new(),
-            budget: AgentManifestCouplingBudget::default(),
+            budget: crate::AgentManifestCouplingBudget::default(),
             config_hash: "config".to_string(),
         }
     }
 
-    fn decision_consumed_request(decision: &TurnContinuationDecision) -> Option<EventRecordId> {
+    fn decision_consumed_request(
+        decision: &crate::kernel::control_decision::TurnContinuationDecision,
+    ) -> Option<crate::EventRecordId> {
         match decision {
-            TurnContinuationDecision::Accept {
+            crate::kernel::control_decision::TurnContinuationDecision::Accept {
                 consumed_request_id,
                 ..
             } => Some(*consumed_request_id),
-            TurnContinuationDecision::Reject {
+            crate::kernel::control_decision::TurnContinuationDecision::Reject {
                 consumed_request_id,
                 ..
             } => *consumed_request_id,
-            TurnContinuationDecision::NoRequest => None,
+            crate::kernel::control_decision::TurnContinuationDecision::NoRequest => None,
         }
     }
 }

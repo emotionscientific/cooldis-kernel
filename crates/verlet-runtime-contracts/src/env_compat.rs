@@ -1,30 +1,26 @@
-use std::collections::HashSet;
-use std::env::VarError;
-use std::ffi::OsString;
-use std::sync::{Mutex, OnceLock};
+static WARNED_LEGACY_ENV: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
 
-static WARNED_LEGACY_ENV: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
-pub fn var(canonical: &str) -> Result<String, VarError> {
+pub fn var(canonical: &str) -> Result<String, std::env::VarError> {
     match var_os(canonical) {
-        Some(value) => value.into_string().map_err(VarError::NotUnicode),
-        None => Err(VarError::NotPresent),
+        Some(value) => value.into_string().map_err(std::env::VarError::NotUnicode),
+        None => Err(std::env::VarError::NotPresent),
     }
 }
 
-pub fn var_os(canonical: &str) -> Option<OsString> {
+pub fn var_os(canonical: &str) -> Option<std::ffi::OsString> {
     var_os_with(canonical, |name| std::env::var_os(name))
 }
 
 pub fn var_os_with(
     canonical: &str,
-    get_env: impl FnMut(&str) -> Option<OsString>,
-) -> Option<OsString> {
+    get_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
     resolve_os_with(
         canonical,
         get_env,
         |message| eprintln!("{message}"),
-        WARNED_LEGACY_ENV.get_or_init(|| Mutex::new(HashSet::new())),
+        WARNED_LEGACY_ENV.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new())),
     )
 }
 
@@ -32,8 +28,10 @@ pub fn string_with(
     canonical: &str,
     mut get_env: impl FnMut(&str) -> Option<String>,
 ) -> Option<String> {
-    var_os_with(canonical, |name| get_env(name).map(OsString::from))
-        .and_then(|value| value.into_string().ok())
+    var_os_with(canonical, |name| {
+        get_env(name).map(std::ffi::OsString::from)
+    })
+    .and_then(|value| value.into_string().ok())
 }
 
 fn legacy_name(canonical: &str) -> Option<String> {
@@ -44,10 +42,10 @@ fn legacy_name(canonical: &str) -> Option<String> {
 
 fn resolve_os_with(
     canonical: &str,
-    mut get_env: impl FnMut(&str) -> Option<OsString>,
+    mut get_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
     mut warn: impl FnMut(&str),
-    warned: &Mutex<HashSet<String>>,
-) -> Option<OsString> {
+    warned: &std::sync::Mutex<std::collections::HashSet<String>>,
+) -> Option<std::ffi::OsString> {
     if let Some(value) = get_env(canonical) {
         return Some(value);
     }
@@ -67,11 +65,9 @@ fn resolve_os_with(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::ffi::OsStr;
 
     fn old_name(canonical: &str) -> String {
-        legacy_name(canonical).unwrap()
+        crate::env_compat::legacy_name(canonical).unwrap()
     }
 
     #[test]
@@ -79,20 +75,20 @@ mod tests {
         let canonical = "VERLET_TEST_ENV_NEW_WINS";
         let legacy = old_name(canonical);
         let mut warnings = Vec::new();
-        let warned = Mutex::new(HashSet::new());
+        let warned = std::sync::Mutex::new(std::collections::HashSet::new());
 
-        let value = resolve_os_with(
+        let value = crate::env_compat::resolve_os_with(
             canonical,
             |name| match name {
-                name if name == canonical => Some(OsString::from("new")),
-                name if name == legacy => Some(OsString::from("old")),
+                name if name == canonical => Some(std::ffi::OsString::from("new")),
+                name if name == legacy => Some(std::ffi::OsString::from("old")),
                 _ => None,
             },
             |message| warnings.push(message.to_string()),
             &warned,
         );
 
-        assert_eq!(value.as_deref(), Some(OsStr::new("new")));
+        assert_eq!(value.as_deref(), Some(std::ffi::OsStr::new("new")));
         assert!(warnings.is_empty());
     }
 
@@ -101,23 +97,23 @@ mod tests {
         let canonical = "VERLET_TEST_ENV_FALLBACK";
         let legacy = old_name(canonical);
         let mut warnings = Vec::new();
-        let warned = Mutex::new(HashSet::new());
+        let warned = std::sync::Mutex::new(std::collections::HashSet::new());
 
-        let first = resolve_os_with(
+        let first = crate::env_compat::resolve_os_with(
             canonical,
-            |name| (name == legacy).then(|| OsString::from("old")),
+            |name| (name == legacy).then(|| std::ffi::OsString::from("old")),
             |message| warnings.push(message.to_string()),
             &warned,
         );
-        let second = resolve_os_with(
+        let second = crate::env_compat::resolve_os_with(
             canonical,
-            |name| (name == legacy).then(|| OsString::from("old")),
+            |name| (name == legacy).then(|| std::ffi::OsString::from("old")),
             |message| warnings.push(message.to_string()),
             &warned,
         );
 
-        assert_eq!(first.as_deref(), Some(OsStr::new("old")));
-        assert_eq!(second.as_deref(), Some(OsStr::new("old")));
+        assert_eq!(first.as_deref(), Some(std::ffi::OsStr::new("old")));
+        assert_eq!(second.as_deref(), Some(std::ffi::OsStr::new("old")));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains(&legacy));
         assert!(warnings[0].contains(canonical));

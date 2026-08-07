@@ -1,20 +1,24 @@
-use super::*;
-use std::os::unix::process::ExitStatusExt;
-use std::process::Command;
+use std::os::unix::process::ExitStatusExt as _;
 
 #[test]
 fn sigabrt_tripwire_is_installed_for_lib_tests() {
     unsafe {
-        let mut current: libc::sigaction = mem::zeroed();
-        assert_eq!(libc::sigaction(libc::SIGABRT, ptr::null(), &mut current), 0);
-        assert_eq!(current.sa_sigaction, handle_sigabrt as *const () as usize);
+        let mut current: libc::sigaction = std::mem::zeroed();
+        assert_eq!(
+            libc::sigaction(libc::SIGABRT, std::ptr::null(), &mut current),
+            0
+        );
+        assert_eq!(
+            current.sa_sigaction,
+            crate::test_abort_tripwire::handle_sigabrt as *const () as usize
+        );
         assert_ne!(current.sa_flags & libc::SA_NODEFER, 0);
     }
 }
 
 #[test]
 fn sigabrt_tripwire_re_signals_default_abort_in_child() {
-    let output = Command::new(std::env::current_exe().unwrap())
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg("test_abort_tripwire::tests::sigabrt_tripwire_child_aborts")
         .arg("--ignored")

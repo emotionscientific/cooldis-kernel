@@ -1,54 +1,29 @@
-use super::*;
-use crate::EventKind;
-use crate::test_support::{FaultingProviderClient, FaultingRuntimeStore};
-use crate::{
-    AgentKernelToolCall, AgentKernelToolProvider, AgentManifestBindReceipt,
-    AgentManifestCouplingBinding, AgentManifestCouplingBudget, AgentManifestDirectToolBinding,
-    AgentManifestOperationBinding, AgentManifestRuntimeDefaults, AgentToolRouter,
-    CanonicalStopReason, CanonicalUsage, CommandHookHandler, CouplingRole, EventProvenance,
-    EventRecord, EventSequence, EventStore, EventStreamId, HistoryResult, HookEventName,
-    HookHandler, HookHandlerOutput, HookHandlerSpec, HookRequest, HookRunStatus,
-    InMemorySessionStore, KernelOperationRegistration, KernelThreadSpawnAgentBinding,
-    KernelThreadSpawnAgentResolver, NewEventRecord, NewObservationRecord, ObservationRecord,
-    ObservationStore, OperationRegistration, OperationRegistry, OperationToolAlias,
-    ProviderCapabilityRecord, ProviderContextPolicy, RuntimeEvent, RuntimeExecutionPolicy,
-    RuntimeHost, RuntimeStore, SessionContext, SessionEntry, SessionEntryId, SessionEntryKind,
-    SessionStore, SqliteSessionStore, THREAD_SPAWN_OPERATION, ThreadBaseRef, ThreadCoordinates,
-    ThreadJoinedPayload, ThreadSpawnedPayload, ThreadTerminalState, ThreadTopology,
-    ToolCallDecisionOutcomePayload, ToolCallDecisionPayload, ToolCallSubject,
-    ToolCallSuspendedPayload, ToolInvocationCancellation, TurnContextSnapshot, WasmRuntimeArtifact,
-    verlet_threads_kernel_package,
-};
-use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
+use crate::EventStore as _;
+use crate::ObservationStore as _;
+use crate::SessionStore as _;
 
 #[derive(Default)]
 struct RecordingClient {
-    requests: Mutex<Vec<ProviderRequest>>,
-    responses: Mutex<Vec<crate::ProviderResponse>>,
-    capabilities: Option<ProviderCapabilityRecord>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    responses: std::sync::Mutex<Vec<crate::ProviderResponse>>,
+    capabilities: Option<crate::ProviderCapabilityRecord>,
 }
 
 impl RecordingClient {
     fn with_responses(responses: Vec<crate::ProviderResponse>) -> Self {
         Self {
-            requests: Mutex::new(Vec::new()),
-            responses: Mutex::new(responses.into_iter().rev().collect()),
+            requests: std::sync::Mutex::new(Vec::new()),
+            responses: std::sync::Mutex::new(responses.into_iter().rev().collect()),
             capabilities: None,
         }
     }
 
-    fn with_capabilities(mut self, capabilities: ProviderCapabilityRecord) -> Self {
+    fn with_capabilities(mut self, capabilities: crate::ProviderCapabilityRecord) -> Self {
         self.capabilities = Some(capabilities);
         self
     }
 
-    fn requests(&self) -> Vec<ProviderRequest> {
+    fn requests(&self) -> Vec<crate::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
@@ -60,55 +35,56 @@ enum ScriptedResponse {
 }
 
 struct ScriptedClient {
-    requests: Mutex<Vec<ProviderRequest>>,
-    responses: Mutex<VecDeque<ScriptedResponse>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    responses: std::sync::Mutex<std::collections::VecDeque<ScriptedResponse>>,
 }
 
 struct StreamingClient {
-    requests: Mutex<Vec<ProviderRequest>>,
-    events: Mutex<VecDeque<Vec<ProviderStreamEvent>>>,
+    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    events: std::sync::Mutex<std::collections::VecDeque<Vec<crate::ProviderStreamEvent>>>,
 }
 
 struct TurnContextRecordingKernelToolProvider {
-    snapshots: Mutex<Vec<Option<TurnContextSnapshot>>>,
+    snapshots: std::sync::Mutex<Vec<Option<crate::TurnContextSnapshot>>>,
 }
 
 struct WitnessCheckingEchoProvider {
-    store: Arc<InMemorySessionStore>,
+    store: std::sync::Arc<crate::InMemorySessionStore>,
     expected_command_sha256: String,
-    seen_arguments: Mutex<Vec<Value>>,
+    seen_arguments: std::sync::Mutex<Vec<serde_json::Value>>,
 }
 
 struct FinishSecondFirstToolProvider {
-    second_finished: Notify,
+    second_finished: tokio::sync::Notify,
 }
 
 struct SerialBlockingToolProvider {
     tool_name: &'static str,
-    started: mpsc::UnboundedSender<String>,
-    release_first: Notify,
+    started: tokio::sync::mpsc::UnboundedSender<String>,
+    release_first: tokio::sync::Notify,
 }
 
 struct CancellationAcknowledgingThreadToolProvider {
-    started: mpsc::UnboundedSender<String>,
-    acknowledged: mpsc::UnboundedSender<String>,
+    started: tokio::sync::mpsc::UnboundedSender<String>,
+    acknowledged: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 struct NonObservingThreadToolProvider {
-    started: mpsc::UnboundedSender<String>,
-    released: AtomicBool,
-    release: Notify,
-    never_launched: AtomicBool,
+    started: tokio::sync::mpsc::UnboundedSender<String>,
+    released: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+    never_launched: std::sync::atomic::AtomicBool,
 }
 
 struct PanickingAfterGraceToolProvider {
-    started: mpsc::UnboundedSender<()>,
-    release: Notify,
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: tokio::sync::Notify,
 }
 
 impl NonObservingThreadToolProvider {
     fn release(&self) {
-        self.released.store(true, Ordering::SeqCst);
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.release.notify_waiters();
     }
 }
@@ -119,13 +95,13 @@ struct IsolatedFailureToolProvider;
 
 #[derive(Default)]
 struct RecoveryCountingToolProvider {
-    invocations: AtomicU64,
+    invocations: std::sync::atomic::AtomicU64,
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for RecoveryCountingToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for RecoveryCountingToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "recovery_tool",
             "Recovery contract test tool.",
             serde_json::json!({"type":"object"}),
@@ -134,10 +110,11 @@ impl AgentKernelToolProvider for RecoveryCountingToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
-        self.invocations.fetch_add(1, Ordering::SeqCst);
-        Ok(Some(CanonicalMessage::tool_result(
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
+        self.invocations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             format!("executed:{}", call.arguments["input"].as_str().unwrap()),
@@ -149,21 +126,25 @@ impl AgentKernelToolProvider for RecoveryCountingToolProvider {
 #[test]
 fn recovery_action_truth_table_honors_effect_class_and_fingerprint() {
     for effect_class in [
-        EffectClass::Pure,
-        EffectClass::Idempotent,
-        EffectClass::AtMostOnce,
+        crate::EffectClass::Pure,
+        crate::EffectClass::Idempotent,
+        crate::EffectClass::AtMostOnce,
     ] {
         for outcome_exists in [false, true] {
             for fingerprint_matches in [false, true] {
                 let expected = if outcome_exists && fingerprint_matches {
-                    ToolRecoveryAction::Reuse
-                } else if effect_class == EffectClass::AtMostOnce {
-                    ToolRecoveryAction::ConservativeFailure
+                    crate::adapters::agent_loop::ToolRecoveryAction::Reuse
+                } else if effect_class == crate::EffectClass::AtMostOnce {
+                    crate::adapters::agent_loop::ToolRecoveryAction::ConservativeFailure
                 } else {
-                    ToolRecoveryAction::Reexecute
+                    crate::adapters::agent_loop::ToolRecoveryAction::Reexecute
                 };
                 assert_eq!(
-                    tool_recovery_action(effect_class, outcome_exists, fingerprint_matches),
+                    crate::adapters::agent_loop::tool_recovery_action(
+                        effect_class,
+                        outcome_exists,
+                        fingerprint_matches
+                    ),
                     expected,
                     "{effect_class:?} outcome_exists={outcome_exists} fingerprint_matches={fingerprint_matches}"
                 );
@@ -172,8 +153,8 @@ fn recovery_action_truth_table_honors_effect_class_and_fingerprint() {
     }
 }
 
-fn recovery_bind_receipt(effect_class: EffectClass) -> AgentManifestBindReceipt {
-    AgentManifestBindReceipt {
+fn recovery_bind_receipt(effect_class: crate::EffectClass) -> crate::AgentManifestBindReceipt {
+    crate::AgentManifestBindReceipt {
         ref_uri: "agent://test/recovery".to_string(),
         manifest_hash: "snapshot-recovery".to_string(),
         model_profile_origin: None,
@@ -183,14 +164,14 @@ fn recovery_bind_receipt(effect_class: EffectClass) -> AgentManifestBindReceipt 
         provider_id: "test".to_string(),
         model_id: "model".to_string(),
         tool_ids: vec!["recovery".to_string()],
-        operation_bindings: vec![AgentManifestOperationBinding {
+        operation_bindings: vec![crate::AgentManifestOperationBinding {
             name: "recovery".to_string(),
             artifact_hash: "test".to_string(),
             effect_class,
             grants: Vec::new(),
             grant_expiries: Vec::new(),
             operations: vec!["recovery_tool".to_string()],
-            direct_tools: vec![AgentManifestDirectToolBinding {
+            direct_tools: vec![crate::AgentManifestDirectToolBinding {
                 tool_name: "recovery_tool".to_string(),
                 operation: "recovery_tool".to_string(),
                 effect_class,
@@ -204,7 +185,7 @@ fn recovery_bind_receipt(effect_class: EffectClass) -> AgentManifestBindReceipt 
         couplings: Vec::new(),
         granted: Vec::new(),
         grant_bindings: Vec::new(),
-        effective_runtime: AgentManifestRuntimeDefaults::default(),
+        effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: None,
         workspace: None,
@@ -212,16 +193,16 @@ fn recovery_bind_receipt(effect_class: EffectClass) -> AgentManifestBindReceipt 
 }
 
 async fn append_recovery_bind_receipt(
-    store: &dyn RuntimeStore,
-    coordinates: &ThreadCoordinates,
-    effect_class: EffectClass,
+    store: &dyn crate::RuntimeStore,
+    coordinates: &crate::ThreadCoordinates,
+    effect_class: crate::EffectClass,
 ) {
     store
         .append_events(
-            &EventStreamId::for_thread(coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::ManifestBindCompleted,
+                crate::EventKind::ManifestBindCompleted,
                 serde_json::to_value(recovery_bind_receipt(effect_class)).unwrap(),
             )],
         )
@@ -231,17 +212,17 @@ async fn append_recovery_bind_receipt(
 
 #[test]
 fn bash_effect_class_requires_one_exactly_attributable_operation() {
-    let mut receipt = recovery_bind_receipt(EffectClass::Idempotent);
+    let mut receipt = recovery_bind_receipt(crate::EffectClass::Idempotent);
     receipt.operation_bindings[0].operations = vec!["safe".to_string()];
     receipt.operation_bindings[0].direct_tools.clear();
 
     assert_eq!(
-        effect_class_from_bind_receipt(
+        crate::adapters::agent_loop::effect_class_from_bind_receipt(
             &receipt,
             crate::BASH_TOOL,
             &serde_json::json!({"command": "safe argument"}),
         ),
-        EffectClass::Idempotent
+        crate::EffectClass::Idempotent
     );
     for command in [
         "FOO=1 safe",
@@ -257,31 +238,32 @@ fn bash_effect_class_requires_one_exactly_attributable_operation() {
         "\"safe\" argument",
     ] {
         assert_eq!(
-            effect_class_from_bind_receipt(
+            crate::adapters::agent_loop::effect_class_from_bind_receipt(
                 &receipt,
                 crate::BASH_TOOL,
                 &serde_json::json!({"command": command}),
             ),
-            EffectClass::AtMostOnce,
+            crate::EffectClass::AtMostOnce,
             "compound or shell-evaluated command {command:?} must fail closed"
         );
     }
 }
 
 async fn append_recovery_request(
-    store: &dyn RuntimeStore,
-    coordinates: &ThreadCoordinates,
-    arguments: Value,
-) -> EventRecord {
-    let fingerprint = args_fingerprint("recovery_tool", &arguments).unwrap();
+    store: &dyn crate::RuntimeStore,
+    coordinates: &crate::ThreadCoordinates,
+    arguments: serde_json::Value,
+) -> crate::EventRecord {
+    let fingerprint =
+        crate::agent::tool_universe::args_fingerprint("recovery_tool", &arguments).unwrap();
     store
         .append_events(
-            &EventStreamId::for_thread(coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::ToolCallRequested,
-                serde_json::to_value(ToolCallRequestedPayload {
-                    subject: ToolCallSubject {
+                crate::EventKind::ToolCallRequested,
+                serde_json::to_value(crate::ToolCallRequestedPayload {
+                    subject: crate::ToolCallSubject {
                         turn_id: "turn-recovery".to_string(),
                         call_id: "call-recovery".to_string(),
                     },
@@ -301,25 +283,26 @@ async fn append_recovery_request(
 }
 
 async fn recovery_after_store_reopen(
-    effect_class: EffectClass,
-    prior_arguments: Value,
+    effect_class: crate::EffectClass,
+    prior_arguments: serde_json::Value,
     recorded_result: Option<&str>,
-    current_arguments: Value,
-) -> (u64, CanonicalMessage) {
+    current_arguments: serde_json::Value,
+) -> (u64, crate::CanonicalMessage) {
     let path = temp_db_path("verlet-tool-recovery");
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "recovery");
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "recovery");
     {
-        let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
+        let store = std::sync::Arc::new(crate::SqliteSessionStore::open(&path).await.unwrap());
         append_recovery_bind_receipt(store.as_ref(), &coordinates, effect_class).await;
         let request = append_recovery_request(store.as_ref(), &coordinates, prior_arguments).await;
         if let Some(recorded_result) = recorded_result {
-            let services = RuntimeServices::new(store, RuntimeExecutionPolicy::default());
+            let services =
+                crate::RuntimeServices::new(store, crate::RuntimeExecutionPolicy::default());
             services
                 .append_agent_loop_session_entry(
                     &coordinates,
                     None,
-                    SessionEntryKind::Message {
-                        message: CanonicalMessage::tool_result(
+                    crate::SessionEntryKind::Message {
+                        message: crate::CanonicalMessage::tool_result(
                             "call-recovery",
                             "recovery_tool",
                             recorded_result,
@@ -331,8 +314,8 @@ async fn recovery_after_store_reopen(
                 .await
                 .unwrap();
             let request_payload =
-                serde_json::from_value::<ToolCallRequestedPayload>(request.payload).unwrap();
-            append_tool_completion_event(
+                serde_json::from_value::<crate::ToolCallRequestedPayload>(request.payload).unwrap();
+            crate::adapters::agent_loop::append_tool_completion_event(
                 &services,
                 &coordinates,
                 "turn-recovery".to_string(),
@@ -350,8 +333,8 @@ async fn recovery_after_store_reopen(
         }
     }
 
-    let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
-    let services = RuntimeServices::new(store, RuntimeExecutionPolicy::default());
+    let store = std::sync::Arc::new(crate::SqliteSessionStore::open(&path).await.unwrap());
+    let services = crate::RuntimeServices::new(store, crate::RuntimeExecutionPolicy::default());
     let current_request = append_recovery_request(
         services.runtime_store().as_ref(),
         &coordinates,
@@ -359,9 +342,9 @@ async fn recovery_after_store_reopen(
     )
     .await;
     let current_payload =
-        serde_json::from_value::<ToolCallRequestedPayload>(current_request.payload).unwrap();
-    let mut calls = vec![WitnessedToolCall {
-        tool_call: ProviderToolCall {
+        serde_json::from_value::<crate::ToolCallRequestedPayload>(current_request.payload).unwrap();
+    let mut calls = vec![crate::adapters::agent_loop::WitnessedToolCall {
+        tool_call: crate::adapters::agent_loop::ProviderToolCall {
             id: "call-recovery".to_string(),
             name: "recovery_tool".to_string(),
             arguments: current_arguments,
@@ -370,44 +353,51 @@ async fn recovery_after_store_reopen(
         args_fingerprint: current_payload.args_fingerprint.clone(),
         request_event_id: current_request.id,
         holds: Vec::new(),
-        recovery_action: ToolRecoveryAction::Reexecute,
+        recovery_action: crate::adapters::agent_loop::ToolRecoveryAction::Reexecute,
         recovery_source_event_id: None,
         recovery_fingerprint_mismatch: false,
     }];
-    apply_tool_recovery_actions(&services, &coordinates, "turn-recovery", &mut calls)
-        .await
-        .unwrap();
+    crate::adapters::agent_loop::apply_tool_recovery_actions(
+        &services,
+        &coordinates,
+        "turn-recovery",
+        &mut calls,
+    )
+    .await
+    .unwrap();
 
-    let provider = Arc::new(RecoveryCountingToolProvider::default());
-    let kernel_provider: Arc<dyn AgentKernelToolProvider> = provider.clone();
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let provider = std::sync::Arc::new(RecoveryCountingToolProvider::default());
+    let kernel_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> = provider.clone();
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(kernel_provider),
     );
-    let interceptor = ToolExecutionInterceptor::new(router);
-    let turn_context = TurnContext::new(
-        ThreadContext::root(coordinates),
+    let interceptor = crate::ToolExecutionInterceptor::new(router);
+    let turn_context = crate::TurnContext::new(
+        crate::ThreadContext::root(coordinates),
         "turn-recovery",
-        &TurnInput::text(""),
-        CancellationToken::new(),
+        &crate::TurnInput::text(""),
+        tokio_util::sync::CancellationToken::new(),
     );
-    let (events, _) = broadcast::channel(8);
-    let prepared = prepare_tool_call(
+    let (events, _) = tokio::sync::broadcast::channel(8);
+    let prepared = crate::adapters::agent_loop::prepare_tool_call(
         &interceptor,
         &services,
         &turn_context,
         &events,
         calls.pop().unwrap(),
-        Arc::new(AtomicU64::new(0)),
-        ToolInvocationCancellation::never(),
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        crate::ToolInvocationCancellation::never(),
     )
     .await
     .unwrap();
-    let PreparedToolCallOutcome::Completed { ref outcome, .. } = prepared else {
+    let crate::adapters::agent_loop::PreparedToolCallOutcome::Completed { ref outcome, .. } =
+        prepared
+    else {
         panic!("recovery should produce a completed outcome");
     };
     let result = outcome.result.clone();
-    append_detached_tool_call_outcome(
+    crate::adapters::agent_loop::append_detached_tool_call_outcome(
         &services,
         &turn_context,
         turn_context.coordinates().thread_id,
@@ -417,7 +407,7 @@ async fn recovery_after_store_reopen(
     .await
     .unwrap();
     assert!(
-        matching_tool_call_completed_exists(
+        crate::adapters::agent_loop::matching_tool_call_completed_exists(
             &services,
             turn_context.coordinates(),
             "turn-recovery",
@@ -430,7 +420,7 @@ async fn recovery_after_store_reopen(
         "recovery completion must echo the current fingerprint"
     );
     assert!(
-        existing_tool_result_message(
+        crate::adapters::agent_loop::existing_tool_result_message(
             &services,
             turn_context.coordinates(),
             current_request.id,
@@ -443,7 +433,9 @@ async fn recovery_after_store_reopen(
         .is_some(),
         "recovery outcome must be witnessed from the current request"
     );
-    let invocations = provider.invocations.load(Ordering::SeqCst);
+    let invocations = provider
+        .invocations
+        .load(std::sync::atomic::Ordering::SeqCst);
     drop(services);
     let _ = std::fs::remove_file(path);
     (invocations, result)
@@ -452,20 +444,23 @@ async fn recovery_after_store_reopen(
 #[tokio::test]
 async fn crash_cut_idempotent_dangling_request_reexecutes_after_store_reopen() {
     let (invocations, result) = recovery_after_store_reopen(
-        EffectClass::Idempotent,
+        crate::EffectClass::Idempotent,
         serde_json::json!({"input":"same"}),
         None,
         serde_json::json!({"input":"same"}),
     )
     .await;
     assert_eq!(invocations, 1);
-    assert_eq!(text_from_message(&result), "executed:same");
+    assert_eq!(
+        crate::adapters::agent_loop::text_from_message(&result),
+        "executed:same"
+    );
 }
 
 #[tokio::test]
 async fn crash_cut_at_most_once_dangling_request_records_conservative_failure() {
     let (invocations, result) = recovery_after_store_reopen(
-        EffectClass::AtMostOnce,
+        crate::EffectClass::AtMostOnce,
         serde_json::json!({"input":"same"}),
         None,
         serde_json::json!({"input":"same"}),
@@ -474,9 +469,9 @@ async fn crash_cut_at_most_once_dangling_request_records_conservative_failure() 
     assert_eq!(invocations, 0);
     assert!(matches!(
         result,
-        CanonicalMessage::ToolResult { is_error: true, .. }
+        crate::CanonicalMessage::ToolResult { is_error: true, .. }
     ));
-    let text = text_from_message(&result);
+    let text = crate::adapters::agent_loop::text_from_message(&result);
     assert!(text.contains("interrupted"), "{text}");
     assert!(text.contains("effect class at-most-once"), "{text}");
 }
@@ -484,34 +479,40 @@ async fn crash_cut_at_most_once_dangling_request_records_conservative_failure() 
 #[tokio::test]
 async fn completed_matching_fingerprint_reuses_and_mismatch_never_reuses() {
     let (matching_invocations, matching_result) = recovery_after_store_reopen(
-        EffectClass::Idempotent,
+        crate::EffectClass::Idempotent,
         serde_json::json!({"input":"same"}),
         Some("recorded:same"),
         serde_json::json!({"input":"same"}),
     )
     .await;
     assert_eq!(matching_invocations, 0);
-    assert_eq!(text_from_message(&matching_result), "recorded:same");
+    assert_eq!(
+        crate::adapters::agent_loop::text_from_message(&matching_result),
+        "recorded:same"
+    );
 
     let (mismatch_invocations, mismatch_result) = recovery_after_store_reopen(
-        EffectClass::Idempotent,
+        crate::EffectClass::Idempotent,
         serde_json::json!({"input":"old"}),
         Some("recorded:old"),
         serde_json::json!({"input":"new"}),
     )
     .await;
     assert_eq!(mismatch_invocations, 1);
-    assert_eq!(text_from_message(&mismatch_result), "executed:new");
+    assert_eq!(
+        crate::adapters::agent_loop::text_from_message(&mismatch_result),
+        "executed:new"
+    );
 
     let (at_most_once_invocations, at_most_once_result) = recovery_after_store_reopen(
-        EffectClass::AtMostOnce,
+        crate::EffectClass::AtMostOnce,
         serde_json::json!({"input":"old"}),
         Some("recorded:old"),
         serde_json::json!({"input":"new"}),
     )
     .await;
     assert_eq!(at_most_once_invocations, 0);
-    let text = text_from_message(&at_most_once_result);
+    let text = crate::adapters::agent_loop::text_from_message(&at_most_once_result);
     assert!(text.contains("fingerprint mismatch"), "{text}");
     assert!(text.contains("effect class at-most-once"), "{text}");
 }
@@ -521,25 +522,26 @@ async fn completion_without_canonical_result_degrades_by_effect_class() {
     for (label, effect_class, expected) in [
         (
             "idempotent",
-            EffectClass::Idempotent,
-            ToolRecoveryAction::Reexecute,
+            crate::EffectClass::Idempotent,
+            crate::adapters::agent_loop::ToolRecoveryAction::Reexecute,
         ),
         (
             "at-most-once",
-            EffectClass::AtMostOnce,
-            ToolRecoveryAction::ConservativeFailure,
+            crate::EffectClass::AtMostOnce,
+            crate::adapters::agent_loop::ToolRecoveryAction::ConservativeFailure,
         ),
     ] {
-        let store = Arc::new(InMemorySessionStore::new());
-        let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+        let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+        let services =
+            crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
         let coordinates =
-            ThreadCoordinates::new("tenant_a", "user_1", format!("completion-only-{label}"));
+            crate::ThreadCoordinates::new("tenant_a", "user_1", format!("completion-only-{label}"));
         append_recovery_bind_receipt(store.as_ref(), &coordinates, effect_class).await;
         let arguments = serde_json::json!({"input":"same"});
         let prior = append_recovery_request(store.as_ref(), &coordinates, arguments.clone()).await;
         let prior_payload =
-            serde_json::from_value::<ToolCallRequestedPayload>(prior.payload).unwrap();
-        append_tool_completion_event(
+            serde_json::from_value::<crate::ToolCallRequestedPayload>(prior.payload).unwrap();
+        crate::adapters::agent_loop::append_tool_completion_event(
             &services,
             &coordinates,
             "turn-recovery".to_string(),
@@ -557,9 +559,9 @@ async fn completion_without_canonical_result_degrades_by_effect_class() {
         let current =
             append_recovery_request(store.as_ref(), &coordinates, arguments.clone()).await;
         let current_payload =
-            serde_json::from_value::<ToolCallRequestedPayload>(current.payload).unwrap();
-        let mut calls = vec![WitnessedToolCall {
-            tool_call: ProviderToolCall {
+            serde_json::from_value::<crate::ToolCallRequestedPayload>(current.payload).unwrap();
+        let mut calls = vec![crate::adapters::agent_loop::WitnessedToolCall {
+            tool_call: crate::adapters::agent_loop::ProviderToolCall {
                 id: "call-recovery".to_string(),
                 name: "recovery_tool".to_string(),
                 arguments,
@@ -568,14 +570,19 @@ async fn completion_without_canonical_result_degrades_by_effect_class() {
             args_fingerprint: current_payload.args_fingerprint,
             request_event_id: current.id,
             holds: Vec::new(),
-            recovery_action: ToolRecoveryAction::Reexecute,
+            recovery_action: crate::adapters::agent_loop::ToolRecoveryAction::Reexecute,
             recovery_source_event_id: None,
             recovery_fingerprint_mismatch: false,
         }];
 
-        apply_tool_recovery_actions(&services, &coordinates, "turn-recovery", &mut calls)
-            .await
-            .unwrap();
+        crate::adapters::agent_loop::apply_tool_recovery_actions(
+            &services,
+            &coordinates,
+            "turn-recovery",
+            &mut calls,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(calls[0].recovery_action, expected, "{label}");
         assert_eq!(calls[0].recovery_source_event_id, None, "{label}");
@@ -584,16 +591,18 @@ async fn completion_without_canonical_result_degrades_by_effect_class() {
 
 #[tokio::test]
 async fn legacy_request_and_completion_reuse_by_request_event_and_call_id() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "legacy-tool-recovery");
-    append_recovery_bind_receipt(store.as_ref(), &coordinates, EffectClass::Idempotent).await;
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let services =
+        crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "legacy-tool-recovery");
+    append_recovery_bind_receipt(store.as_ref(), &coordinates, crate::EffectClass::Idempotent)
+        .await;
     let prior = store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(&coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::ToolCallRequested,
+                crate::EventKind::ToolCallRequested,
                 serde_json::json!({
                     "subject": {"turn_id":"turn-recovery", "call_id":"call-recovery"},
                     "snapshot_id": "snapshot-recovery",
@@ -610,8 +619,8 @@ async fn legacy_request_and_completion_reuse_by_request_event_and_call_id() {
         .append_agent_loop_session_entry(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::tool_result(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::tool_result(
                     "call-recovery",
                     "recovery_tool",
                     "legacy result",
@@ -624,10 +633,10 @@ async fn legacy_request_and_completion_reuse_by_request_event_and_call_id() {
         .unwrap();
     store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(&coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::ToolCallCompleted,
+                crate::EventKind::ToolCallCompleted,
                 serde_json::json!({
                     "subject": {"turn_id":"turn-recovery", "call_id":"call-recovery"},
                     "snapshot_id": "snapshot-recovery",
@@ -645,9 +654,9 @@ async fn legacy_request_and_completion_reuse_by_request_event_and_call_id() {
     )
     .await;
     let current_payload =
-        serde_json::from_value::<ToolCallRequestedPayload>(current.payload).unwrap();
-    let mut calls = vec![WitnessedToolCall {
-        tool_call: ProviderToolCall {
+        serde_json::from_value::<crate::ToolCallRequestedPayload>(current.payload).unwrap();
+    let mut calls = vec![crate::adapters::agent_loop::WitnessedToolCall {
+        tool_call: crate::adapters::agent_loop::ProviderToolCall {
             id: "call-recovery".to_string(),
             name: "recovery_tool".to_string(),
             arguments: serde_json::json!({"input":"same"}),
@@ -656,47 +665,58 @@ async fn legacy_request_and_completion_reuse_by_request_event_and_call_id() {
         args_fingerprint: current_payload.args_fingerprint,
         request_event_id: current.id,
         holds: Vec::new(),
-        recovery_action: ToolRecoveryAction::Reexecute,
+        recovery_action: crate::adapters::agent_loop::ToolRecoveryAction::Reexecute,
         recovery_source_event_id: None,
         recovery_fingerprint_mismatch: false,
     }];
 
-    apply_tool_recovery_actions(&services, &coordinates, "turn-recovery", &mut calls)
-        .await
-        .unwrap();
+    crate::adapters::agent_loop::apply_tool_recovery_actions(
+        &services,
+        &coordinates,
+        "turn-recovery",
+        &mut calls,
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(calls[0].recovery_action, ToolRecoveryAction::Reuse);
+    assert_eq!(
+        calls[0].recovery_action,
+        crate::adapters::agent_loop::ToolRecoveryAction::Reuse
+    );
     assert_eq!(calls[0].recovery_source_event_id, Some(prior.id));
     assert!(!calls[0].recovery_fingerprint_mismatch);
 }
 
 #[tokio::test]
 async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "rewritten-bash-recovery");
-    let mut receipt = recovery_bind_receipt(EffectClass::Idempotent);
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let services =
+        crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
+    let coordinates =
+        crate::ThreadCoordinates::new("tenant_a", "user_1", "rewritten-bash-recovery");
+    let mut receipt = recovery_bind_receipt(crate::EffectClass::Idempotent);
     receipt.operation_bindings[0].operations = vec!["safe".to_string()];
     receipt.operation_bindings[0].direct_tools.clear();
     store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(&coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::ManifestBindCompleted,
+                crate::EventKind::ManifestBindCompleted,
                 serde_json::to_value(receipt).unwrap(),
             )],
         )
         .await
         .unwrap();
     let arguments = serde_json::json!({"command":"safe input"});
-    let request = |arguments: Value| {
-        let fingerprint = args_fingerprint(crate::BASH_TOOL, &arguments).unwrap();
-        NewEventRecord::witnessed(
+    let request = |arguments: serde_json::Value| {
+        let fingerprint =
+            crate::agent::tool_universe::args_fingerprint(crate::BASH_TOOL, &arguments).unwrap();
+        crate::NewEventRecord::witnessed(
             coordinates.clone(),
-            EventKind::ToolCallRequested,
-            serde_json::to_value(ToolCallRequestedPayload {
-                subject: ToolCallSubject {
+            crate::EventKind::ToolCallRequested,
+            serde_json::to_value(crate::ToolCallRequestedPayload {
+                subject: crate::ToolCallSubject {
                     turn_id: "turn-recovery".to_string(),
                     call_id: "call-recovery".to_string(),
                 },
@@ -711,7 +731,7 @@ async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class
     };
     let prior = store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
+            &crate::EventStreamId::for_thread(&coordinates),
             vec![request(arguments.clone())],
         )
         .await
@@ -721,27 +741,27 @@ async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class
     store
         .append_events(
             &crate::control_stream_id(&coordinates),
-            vec![NewEventRecord::discharged(
+            vec![crate::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::ToolCallDecision,
-                serde_json::to_value(ToolCallDecisionPayload {
-                    subject: ToolCallSubject {
+                crate::EventKind::ToolCallDecision,
+                serde_json::to_value(crate::ToolCallDecisionPayload {
+                    subject: crate::ToolCallSubject {
                         turn_id: "turn-recovery".to_string(),
                         call_id: "call-recovery".to_string(),
                     },
                     snapshot_id: "snapshot-recovery".to_string(),
-                    outcome: ToolCallDecisionOutcomePayload::Rewrite {
+                    outcome: crate::ToolCallDecisionOutcomePayload::Rewrite {
                         arguments: serde_json::json!({"command":"destructive input"}),
                     },
                     admissible: None,
                 })
                 .unwrap(),
-                EventProvenance {
-                    source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                crate::EventProvenance {
+                    source_streams: vec![crate::EventStreamId::for_thread(&coordinates)],
                     source_event_ids: vec![prior.id],
                     discharged_by: Some("test:rewrite".to_string()),
                     function: Some("rewrite/v1".to_string()),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
@@ -749,7 +769,7 @@ async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class
         .unwrap();
     let current = store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
+            &crate::EventStreamId::for_thread(&coordinates),
             vec![request(arguments.clone())],
         )
         .await
@@ -757,9 +777,9 @@ async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class
         .pop()
         .unwrap();
     let current_payload =
-        serde_json::from_value::<ToolCallRequestedPayload>(current.payload).unwrap();
-    let mut calls = vec![WitnessedToolCall {
-        tool_call: ProviderToolCall {
+        serde_json::from_value::<crate::ToolCallRequestedPayload>(current.payload).unwrap();
+    let mut calls = vec![crate::adapters::agent_loop::WitnessedToolCall {
+        tool_call: crate::adapters::agent_loop::ProviderToolCall {
             id: "call-recovery".to_string(),
             name: crate::BASH_TOOL.to_string(),
             arguments,
@@ -768,68 +788,79 @@ async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class
         args_fingerprint: current_payload.args_fingerprint,
         request_event_id: current.id,
         holds: Vec::new(),
-        recovery_action: ToolRecoveryAction::Reexecute,
+        recovery_action: crate::adapters::agent_loop::ToolRecoveryAction::Reexecute,
         recovery_source_event_id: None,
         recovery_fingerprint_mismatch: false,
     }];
 
-    apply_tool_recovery_actions(&services, &coordinates, "turn-recovery", &mut calls)
-        .await
-        .unwrap();
+    crate::adapters::agent_loop::apply_tool_recovery_actions(
+        &services,
+        &coordinates,
+        "turn-recovery",
+        &mut calls,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         calls[0].recovery_action,
-        ToolRecoveryAction::ConservativeFailure
+        crate::adapters::agent_loop::ToolRecoveryAction::ConservativeFailure
     );
 }
 
 #[tokio::test]
 async fn turn_rerun_replays_witnessed_assistant_batch_without_redecode_mismatch() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "witnessed-turn-rerun");
-    append_recovery_bind_receipt(store.as_ref(), &coordinates, EffectClass::Idempotent).await;
-    let input = TurnInput::text("recover the witnessed batch");
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let services =
+        crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "witnessed-turn-rerun");
+    append_recovery_bind_receipt(store.as_ref(), &coordinates, crate::EffectClass::Idempotent)
+        .await;
+    let input = crate::TurnInput::text("recover the witnessed batch");
     let user_entry = services
         .append_user_turn_input(&coordinates, "turn-recovery", &input)
         .await
         .unwrap();
-    let submitted =
-        append_turn_submitted_event(&services, &coordinates, "turn-recovery", &user_entry)
-            .await
-            .unwrap();
+    let submitted = crate::adapters::agent_loop::append_turn_submitted_event(
+        &services,
+        &coordinates,
+        "turn-recovery",
+        &user_entry,
+    )
+    .await
+    .unwrap();
     let arguments = serde_json::json!({"input":"same"});
-    let assistant = CanonicalMessage::assistant(
+    let assistant = crate::CanonicalMessage::assistant(
         "openai",
-        ProviderApi::OpenAIResponses,
+        crate::ProviderApi::OpenAIResponses,
         "gpt-test",
-        vec![CanonicalContent::tool_call(
+        vec![crate::CanonicalContent::tool_call(
             "call-recovery",
             "recovery_tool",
             arguments.clone(),
         )],
-        CanonicalStopReason::ToolUse,
+        crate::CanonicalStopReason::ToolUse,
     );
     let assistant_entry = services
         .append_agent_loop_session_entry(
             &coordinates,
             None,
-            SessionEntryKind::Message { message: assistant },
+            crate::SessionEntryKind::Message { message: assistant },
             vec![submitted.id],
         )
         .await
         .unwrap();
-    let turn_context = TurnContext::new(
-        ThreadContext::root(coordinates.clone()),
+    let turn_context = crate::TurnContext::new(
+        crate::ThreadContext::root(coordinates.clone()),
         "turn-recovery",
         &input,
-        CancellationToken::new(),
+        tokio_util::sync::CancellationToken::new(),
     );
-    append_tool_call_requested_events(
+    crate::adapters::agent_loop::append_tool_call_requested_events(
         &services,
         &turn_context,
         &[(
-            ProviderToolCall {
+            crate::adapters::agent_loop::ProviderToolCall {
                 id: "call-recovery".to_string(),
                 name: "recovery_tool".to_string(),
                 arguments: arguments.clone(),
@@ -842,19 +873,23 @@ async fn turn_rerun_replays_witnessed_assistant_batch_without_redecode_mismatch(
     .unwrap();
     drop(services);
 
-    let provider = Arc::new(RecoveryCountingToolProvider::default());
-    let kernel_provider: Arc<dyn AgentKernelToolProvider> = provider.clone();
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let provider = std::sync::Arc::new(RecoveryCountingToolProvider::default());
+    let kernel_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> = provider.clone();
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(kernel_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
         "recovered final reply",
     )]));
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 client.clone(),
             )
             .with_tool_router(router),
@@ -864,8 +899,8 @@ async fn turn_rerun_replays_witnessed_assistant_batch_without_redecode_mismatch(
     let thread = host
         .load_thread_with_topology_and_metadata(
             coordinates.clone(),
-            ThreadTopology::root(),
-            BTreeMap::new(),
+            crate::ThreadTopology::root(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -880,22 +915,29 @@ async fn turn_rerun_replays_witnessed_assistant_batch_without_redecode_mismatch(
     .unwrap();
     assert_output(&mut events, "recovered final reply").await;
 
-    assert_eq!(provider.invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        provider
+            .invocations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     assert_eq!(
         client.requests().len(),
         1,
         "the model is called only after replay"
     );
     let requests = store
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
         .await
         .unwrap()
         .into_iter()
         .filter(|event| {
-            event.kind == EventKind::ToolCallRequested
+            event.kind == crate::EventKind::ToolCallRequested
                 && event.payload["subject"]["call_id"] == "call-recovery"
         })
-        .map(|event| serde_json::from_value::<ToolCallRequestedPayload>(event.payload).unwrap())
+        .map(|event| {
+            serde_json::from_value::<crate::ToolCallRequestedPayload>(event.payload).unwrap()
+        })
         .collect::<Vec<_>>();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].arguments, requests[1].arguments);
@@ -910,7 +952,7 @@ async fn turn_rerun_replays_witnessed_assistant_batch_without_redecode_mismatch(
             .any(|message| {
                 matches!(
                     message,
-                    CanonicalMessage::ToolResult {
+                    crate::CanonicalMessage::ToolResult {
                         tool_call_id,
                         is_error: false,
                         ..
@@ -923,70 +965,72 @@ async fn turn_rerun_replays_witnessed_assistant_batch_without_redecode_mismatch(
 
 #[derive(Default)]
 struct AppendPause {
-    entered: AtomicBool,
-    entered_notify: Notify,
-    released: AtomicBool,
-    release_notify: Notify,
+    entered: std::sync::atomic::AtomicBool,
+    entered_notify: tokio::sync::Notify,
+    released: std::sync::atomic::AtomicBool,
+    release_notify: tokio::sync::Notify,
 }
 
 impl AppendPause {
     async fn arrive_and_wait(&self) {
-        self.entered.store(true, Ordering::SeqCst);
+        self.entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.entered_notify.notify_waiters();
-        while !self.released.load(Ordering::SeqCst) {
+        while !self.released.load(std::sync::atomic::Ordering::SeqCst) {
             self.release_notify.notified().await;
         }
     }
 
     async fn wait_until_entered(&self) {
-        while !self.entered.load(Ordering::SeqCst) {
+        while !self.entered.load(std::sync::atomic::Ordering::SeqCst) {
             self.entered_notify.notified().await;
         }
     }
 
     fn release(&self) {
-        self.released.store(true, Ordering::SeqCst);
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.release_notify.notify_waiters();
     }
 }
 
 #[derive(Clone)]
 struct PausingRuntimeStore {
-    inner: InMemorySessionStore,
-    pause_kind: EventKind,
-    pause_once: Arc<AtomicBool>,
-    pause: Arc<AppendPause>,
+    inner: crate::InMemorySessionStore,
+    pause_kind: crate::EventKind,
+    pause_once: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pause: std::sync::Arc<AppendPause>,
 }
 
 impl PausingRuntimeStore {
-    fn after_first_append_of(pause_kind: EventKind) -> Self {
+    fn after_first_append_of(pause_kind: crate::EventKind) -> Self {
         Self {
-            inner: InMemorySessionStore::new(),
+            inner: crate::InMemorySessionStore::new(),
             pause_kind,
-            pause_once: Arc::new(AtomicBool::new(true)),
-            pause: Arc::new(AppendPause::default()),
+            pause_once: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            pause: std::sync::Arc::new(AppendPause::default()),
         }
     }
 }
 
-#[async_trait]
-impl SessionStore for PausingRuntimeStore {
+#[async_trait::async_trait]
+impl crate::SessionStore for PausingRuntimeStore {
     async fn append(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &crate::ThreadCoordinates,
+        parent_entry_id: Option<crate::SessionEntryId>,
+        kind: crate::SessionEntryKind,
+    ) -> crate::HistoryResult<crate::SessionEntry> {
         self.inner.append(coordinates, parent_entry_id, kind).await
     }
 
     async fn append_with_provenance(
         &self,
-        coordinates: &ThreadCoordinates,
-        parent_entry_id: Option<SessionEntryId>,
-        kind: SessionEntryKind,
-        provenance: EventProvenance,
-    ) -> HistoryResult<SessionEntry> {
+        coordinates: &crate::ThreadCoordinates,
+        parent_entry_id: Option<crate::SessionEntryId>,
+        kind: crate::SessionEntryKind,
+        provenance: crate::EventProvenance,
+    ) -> crate::HistoryResult<crate::SessionEntry> {
         self.inner
             .append_with_provenance(coordinates, parent_entry_id, kind, provenance)
             .await
@@ -994,10 +1038,10 @@ impl SessionStore for PausingRuntimeStore {
 
     async fn append_turn_input(
         &self,
-        coordinates: &ThreadCoordinates,
+        coordinates: &crate::ThreadCoordinates,
         turn_id: &str,
-        kind: SessionEntryKind,
-    ) -> HistoryResult<SessionEntry> {
+        kind: crate::SessionEntryKind,
+    ) -> crate::HistoryResult<crate::SessionEntry> {
         self.inner
             .append_turn_input(coordinates, turn_id, kind)
             .await
@@ -1005,32 +1049,32 @@ impl SessionStore for PausingRuntimeStore {
 
     async fn active_leaf(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<Option<SessionEntryId>> {
+        coordinates: &crate::ThreadCoordinates,
+    ) -> crate::HistoryResult<Option<crate::SessionEntryId>> {
         self.inner.active_leaf(coordinates).await
     }
 
     async fn select_branch(
         &self,
-        coordinates: &ThreadCoordinates,
-        leaf_entry_id: Option<SessionEntryId>,
-    ) -> HistoryResult<()> {
+        coordinates: &crate::ThreadCoordinates,
+        leaf_entry_id: Option<crate::SessionEntryId>,
+    ) -> crate::HistoryResult<()> {
         self.inner.select_branch(coordinates, leaf_entry_id).await
     }
 
     async fn build_context(
         &self,
-        coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<SessionContext> {
+        coordinates: &crate::ThreadCoordinates,
+    ) -> crate::HistoryResult<crate::SessionContext> {
         self.inner.build_context(coordinates).await
     }
 
     async fn clone_branch(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        source_leaf: Option<SessionEntryId>,
-        target_coordinates: &ThreadCoordinates,
-    ) -> HistoryResult<Option<SessionEntryId>> {
+        source_coordinates: &crate::ThreadCoordinates,
+        source_leaf: Option<crate::SessionEntryId>,
+        target_coordinates: &crate::ThreadCoordinates,
+    ) -> crate::HistoryResult<Option<crate::SessionEntryId>> {
         self.inner
             .clone_branch(source_coordinates, source_leaf, target_coordinates)
             .await
@@ -1038,25 +1082,27 @@ impl SessionStore for PausingRuntimeStore {
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &ThreadCoordinates,
-        target_coordinates: &ThreadCoordinates,
-        base: ThreadBaseRef,
-    ) -> HistoryResult<()> {
+        source_coordinates: &crate::ThreadCoordinates,
+        target_coordinates: &crate::ThreadCoordinates,
+        base: crate::ThreadBaseRef,
+    ) -> crate::HistoryResult<()> {
         self.inner
             .fork_by_reference(source_coordinates, target_coordinates, base)
             .await
     }
 }
 
-#[async_trait]
-impl EventStore for PausingRuntimeStore {
+#[async_trait::async_trait]
+impl crate::EventStore for PausingRuntimeStore {
     async fn append_events(
         &self,
-        stream_id: &EventStreamId,
-        records: Vec<NewEventRecord>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &crate::EventStreamId,
+        records: Vec<crate::NewEventRecord>,
+    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
         let should_pause = records.iter().any(|record| record.kind == self.pause_kind)
-            && self.pause_once.swap(false, Ordering::SeqCst);
+            && self
+                .pause_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
         let appended = self.inner.append_events(stream_id, records).await?;
         if should_pause {
             self.pause.arrive_and_wait().await;
@@ -1066,12 +1112,14 @@ impl EventStore for PausingRuntimeStore {
 
     async fn append_events_fenced(
         &self,
-        stream_id: &EventStreamId,
-        expected_next_sequence: EventSequence,
-        records: Vec<NewEventRecord>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &crate::EventStreamId,
+        expected_next_sequence: crate::EventSequence,
+        records: Vec<crate::NewEventRecord>,
+    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
         let should_pause = records.iter().any(|record| record.kind == self.pause_kind)
-            && self.pause_once.swap(false, Ordering::SeqCst);
+            && self
+                .pause_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
         let appended = self
             .inner
             .append_events_fenced(stream_id, expected_next_sequence, records)
@@ -1084,28 +1132,28 @@ impl EventStore for PausingRuntimeStore {
 
     async fn read_events(
         &self,
-        stream_id: &EventStreamId,
-        from_sequence: Option<EventSequence>,
-    ) -> HistoryResult<Vec<EventRecord>> {
+        stream_id: &crate::EventStreamId,
+        from_sequence: Option<crate::EventSequence>,
+    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
         self.inner.read_events(stream_id, from_sequence).await
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 // lexicon-allow: observation_store - deterministic test store implements the existing history trait.
-impl ObservationStore for PausingRuntimeStore {
+impl crate::ObservationStore for PausingRuntimeStore {
     async fn append_observation(
         &self,
-        record: NewObservationRecord,
-    ) -> HistoryResult<ObservationRecord> {
+        record: crate::NewObservationRecord,
+    ) -> crate::HistoryResult<crate::ObservationRecord> {
         self.inner.append_observation(record).await
     }
 
     async fn list_observations(
         &self,
-        scope: &ThreadCoordinates,
+        scope: &crate::ThreadCoordinates,
         kind: Option<&str>,
-    ) -> HistoryResult<Vec<ObservationRecord>> {
+    ) -> crate::HistoryResult<Vec<crate::ObservationRecord>> {
         self.inner.list_observations(scope, kind).await
     }
 }
@@ -1115,20 +1163,20 @@ struct StaticThreadSpawnAgentResolver;
 const CHILD_AGENT_REF: &str = "agent://worker@latest";
 const CHILD_MANIFEST_HASH: &str = "sha256:child-manifest";
 
-#[async_trait]
-impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
-    fn default_agent_ref(&self, _caller: &ThreadContext) -> Option<String> {
+#[async_trait::async_trait]
+impl crate::KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
+    fn default_agent_ref(&self, _caller: &crate::ThreadContext) -> Option<String> {
         Some(CHILD_AGENT_REF.to_string())
     }
 
     async fn resolve_agent_ref(
         &self,
-        _caller: &ThreadContext,
+        _caller: &crate::ThreadContext,
         agent_ref: &str,
-    ) -> VerletResult<KernelThreadSpawnAgentBinding> {
+    ) -> crate::VerletResult<crate::KernelThreadSpawnAgentBinding> {
         assert_eq!(agent_ref, CHILD_AGENT_REF);
-        Ok(KernelThreadSpawnAgentBinding {
-            metadata: BTreeMap::from([(
+        Ok(crate::KernelThreadSpawnAgentBinding {
+            metadata: std::collections::BTreeMap::from([(
                 "cooldis.agent.manifest_hash".to_string(),
                 CHILD_MANIFEST_HASH.to_string(),
             )]),
@@ -1137,7 +1185,7 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
                 "manifest_hash": CHILD_MANIFEST_HASH,
                 "source_hash": "sha256:child-source"
             }),
-            bind_receipt: serde_json::to_value(AgentManifestBindReceipt {
+            bind_receipt: serde_json::to_value(crate::AgentManifestBindReceipt {
                 ref_uri: CHILD_AGENT_REF.to_string(),
                 manifest_hash: CHILD_MANIFEST_HASH.to_string(),
                 model_profile_id: "default".to_string(),
@@ -1153,7 +1201,7 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
                 static_context_segments: Vec::new(),
                 granted: vec!["threads.read".to_string()],
                 grant_bindings: Vec::new(),
-                effective_runtime: AgentManifestRuntimeDefaults::default(),
+                effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
                 placement: None,
                 placement_origin: None,
@@ -1166,30 +1214,30 @@ impl KernelThreadSpawnAgentResolver for StaticThreadSpawnAgentResolver {
 }
 
 struct StaticHookHandler {
-    spec: HookHandlerSpec,
-    output: HookHandlerOutput,
-    requests: Mutex<Vec<HookRequest>>,
+    spec: crate::HookHandlerSpec,
+    output: crate::HookHandlerOutput,
+    requests: std::sync::Mutex<Vec<crate::HookRequest>>,
 }
 
 impl StaticHookHandler {
     fn new(
         id: impl Into<String>,
-        event_name: HookEventName,
+        event_name: crate::HookEventName,
         matcher: Option<&str>,
-        output: HookHandlerOutput,
+        output: crate::HookHandlerOutput,
     ) -> Self {
         Self {
-            spec: HookHandlerSpec {
+            spec: crate::HookHandlerSpec {
                 id: id.into(),
                 event_name,
                 matcher: matcher.map(str::to_string),
             },
             output,
-            requests: Mutex::new(Vec::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
         }
     }
 
-    fn requests(&self) -> Vec<HookRequest> {
+    fn requests(&self) -> Vec<crate::HookRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
@@ -1197,37 +1245,40 @@ impl StaticHookHandler {
 impl TurnContextRecordingKernelToolProvider {
     fn new() -> Self {
         Self {
-            snapshots: Mutex::new(Vec::new()),
+            snapshots: std::sync::Mutex::new(Vec::new()),
         }
     }
 
-    fn snapshots(&self) -> Vec<Option<TurnContextSnapshot>> {
+    fn snapshots(&self) -> Vec<Option<crate::TurnContextSnapshot>> {
         self.snapshots.lock().unwrap().clone()
     }
 }
 
 impl WitnessCheckingEchoProvider {
-    fn seen_arguments(&self) -> Vec<Value> {
+    fn seen_arguments(&self) -> Vec<serde_json::Value> {
         self.seen_arguments.lock().unwrap().clone()
     }
 }
 
-#[async_trait]
-impl HookHandler for StaticHookHandler {
-    fn spec(&self) -> HookHandlerSpec {
+#[async_trait::async_trait]
+impl crate::HookHandler for StaticHookHandler {
+    fn spec(&self) -> crate::HookHandlerSpec {
         self.spec.clone()
     }
 
-    async fn run(&self, request: HookRequest) -> VerletResult<HookHandlerOutput> {
+    async fn run(
+        &self,
+        request: crate::HookRequest,
+    ) -> crate::VerletResult<crate::HookHandlerOutput> {
         self.requests.lock().unwrap().push(request);
         Ok(self.output.clone())
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for WitnessCheckingEchoProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for WitnessCheckingEchoProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "echo_search",
             "Echo input after checking hook witnesses.",
             serde_json::json!({"type":"object"}),
@@ -1236,8 +1287,8 @@ impl AgentKernelToolProvider for WitnessCheckingEchoProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         let coordinates = call
             .turn_context
             .as_ref()
@@ -1267,7 +1318,7 @@ impl AgentKernelToolProvider for WitnessCheckingEchoProvider {
         assert_eq!(
             payload["tool_input"]["before_sha256"].as_str(),
             Some(
-                sha256_hex(
+                crate::agent::contracts::sha256_hex(
                     &serde_json::to_vec(
                         &serde_json::json!({"input":"original","secret":"before-secret"})
                     )
@@ -1279,7 +1330,7 @@ impl AgentKernelToolProvider for WitnessCheckingEchoProvider {
         assert_eq!(
             payload["tool_input"]["after_sha256"].as_str(),
             Some(
-                sha256_hex(
+                crate::agent::contracts::sha256_hex(
                     &serde_json::to_vec(
                         &serde_json::json!({"input":"rewritten","secret":"after-secret"})
                     )
@@ -1294,7 +1345,7 @@ impl AgentKernelToolProvider for WitnessCheckingEchoProvider {
         );
 
         self.seen_arguments.lock().unwrap().push(call.arguments);
-        Ok(Some(CanonicalMessage::tool_result(
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             "tool original before-secret-output",
@@ -1306,34 +1357,34 @@ impl AgentKernelToolProvider for WitnessCheckingEchoProvider {
 impl ScriptedClient {
     fn new(responses: Vec<ScriptedResponse>) -> Self {
         Self {
-            requests: Mutex::new(Vec::new()),
-            responses: Mutex::new(responses.into()),
+            requests: std::sync::Mutex::new(Vec::new()),
+            responses: std::sync::Mutex::new(responses.into()),
         }
     }
 
-    fn requests(&self) -> Vec<ProviderRequest> {
+    fn requests(&self) -> Vec<crate::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
 impl StreamingClient {
-    fn new(events: Vec<Vec<ProviderStreamEvent>>) -> Self {
+    fn new(events: Vec<Vec<crate::ProviderStreamEvent>>) -> Self {
         Self {
-            requests: Mutex::new(Vec::new()),
-            events: Mutex::new(events.into()),
+            requests: std::sync::Mutex::new(Vec::new()),
+            events: std::sync::Mutex::new(events.into()),
         }
     }
 
-    fn requests(&self) -> Vec<ProviderRequest> {
+    fn requests(&self) -> Vec<crate::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
-#[async_trait]
-impl ProviderClient for ScriptedClient {
+#[async_trait::async_trait]
+impl crate::ProviderClient for ScriptedClient {
     async fn complete(
         &self,
-        request: &ProviderRequest,
+        request: &crate::ProviderRequest,
     ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let response =
@@ -1348,15 +1399,15 @@ impl ProviderClient for ScriptedClient {
     }
 }
 
-#[async_trait]
-impl ProviderClient for RecordingClient {
+#[async_trait::async_trait]
+impl crate::ProviderClient for RecordingClient {
     fn capabilities(&self) -> Option<crate::ProviderCapabilityRecord> {
         self.capabilities.clone()
     }
 
     async fn complete(
         &self,
-        request: &ProviderRequest,
+        request: &crate::ProviderRequest,
     ) -> crate::ProviderResult<crate::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         self.responses
@@ -1367,11 +1418,11 @@ impl ProviderClient for RecordingClient {
     }
 }
 
-#[async_trait]
-impl ProviderClient for StreamingClient {
+#[async_trait::async_trait]
+impl crate::ProviderClient for StreamingClient {
     async fn complete(
         &self,
-        _request: &ProviderRequest,
+        _request: &crate::ProviderRequest,
     ) -> crate::ProviderResult<crate::ProviderResponse> {
         Err(crate::ProviderError::Decode(
             "streaming test client requires stream()".to_string(),
@@ -1380,8 +1431,8 @@ impl ProviderClient for StreamingClient {
 
     async fn stream(
         &self,
-        request: &ProviderRequest,
-    ) -> crate::ProviderResult<Vec<ProviderStreamEvent>> {
+        request: &crate::ProviderRequest,
+    ) -> crate::ProviderResult<Vec<crate::ProviderStreamEvent>> {
         self.requests.lock().unwrap().push(request.clone());
         self.events
             .lock()
@@ -1391,10 +1442,10 @@ impl ProviderClient for StreamingClient {
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for TurnContextRecordingKernelToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for TurnContextRecordingKernelToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "record_turn_context",
             "Record the current Verlet turn context.",
             serde_json::json!({
@@ -1406,13 +1457,13 @@ impl AgentKernelToolProvider for TurnContextRecordingKernelToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         self.snapshots
             .lock()
             .unwrap()
             .push(call.turn_context.clone());
-        Ok(Some(CanonicalMessage::tool_result(
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             "turn context recorded",
@@ -1421,10 +1472,10 @@ impl AgentKernelToolProvider for TurnContextRecordingKernelToolProvider {
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for FinishSecondFirstToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for FinishSecondFirstToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "thread_submit",
             "Deterministic hold-scheduler test tool.",
             serde_json::json!({"type": "object"}),
@@ -1433,14 +1484,14 @@ impl AgentKernelToolProvider for FinishSecondFirstToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         match call.arguments["slot"].as_str() {
             Some("first") => self.second_finished.notified().await,
             Some("second") => self.second_finished.notify_one(),
             other => panic!("unexpected finish-order slot: {other:?}"),
         }
-        Ok(Some(CanonicalMessage::tool_result(
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             call.arguments["slot"].as_str().unwrap(),
@@ -1449,10 +1500,10 @@ impl AgentKernelToolProvider for FinishSecondFirstToolProvider {
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for SerialBlockingToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for SerialBlockingToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             self.tool_name,
             "Deterministic serialization test tool.",
             serde_json::json!({"type": "object"}),
@@ -1461,14 +1512,14 @@ impl AgentKernelToolProvider for SerialBlockingToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         let slot = call.arguments["slot"].as_str().unwrap().to_string();
         self.started.send(slot.clone()).unwrap();
         if slot == "first" {
             self.release_first.notified().await;
         }
-        Ok(Some(CanonicalMessage::tool_result(
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             slot,
@@ -1477,10 +1528,10 @@ impl AgentKernelToolProvider for SerialBlockingToolProvider {
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for CancellationAcknowledgingThreadToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for CancellationAcknowledgingThreadToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "thread_submit",
             "Cancellation-aware interruption test tool.",
             serde_json::json!({"type": "object"}),
@@ -1489,21 +1540,21 @@ impl AgentKernelToolProvider for CancellationAcknowledgingThreadToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        _call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        _call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         panic!("the interruption test must use the cancellable provider surface")
     }
 
     async fn invoke_tool_call_cancellable(
         &self,
-        call: AgentKernelToolCall,
-        cancellation: ToolInvocationCancellation,
-    ) -> VerletResult<crate::AgentKernelToolOutcome> {
+        call: crate::AgentKernelToolCall,
+        cancellation: crate::ToolInvocationCancellation,
+    ) -> crate::VerletResult<crate::AgentKernelToolOutcome> {
         self.started.send(call.call_id.clone()).unwrap();
         cancellation.token().cancelled().await;
         self.acknowledged.send(call.call_id.clone()).unwrap();
         Ok(crate::AgentKernelToolOutcome::Completed(Some(
-            CanonicalMessage::tool_result(
+            crate::CanonicalMessage::tool_result(
                 call.call_id,
                 call.tool_name,
                 "interrupt acknowledged",
@@ -1513,13 +1564,13 @@ impl AgentKernelToolProvider for CancellationAcknowledgingThreadToolProvider {
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for NonObservingThreadToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for NonObservingThreadToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
         ["thread_status", "thread_wait"]
             .into_iter()
             .map(|name| {
-                ToolDefinition::new(
+                crate::ToolDefinition::new(
                     name,
                     "Default-implementation interruption test tool.",
                     serde_json::json!({"type": "object"}),
@@ -1530,16 +1581,17 @@ impl AgentKernelToolProvider for NonObservingThreadToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         if call.tool_name == "thread_wait" {
-            self.never_launched.store(false, Ordering::SeqCst);
+            self.never_launched
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
         self.started.send(call.call_id.clone()).unwrap();
-        while !self.released.load(Ordering::SeqCst) {
+        while !self.released.load(std::sync::atomic::Ordering::SeqCst) {
             self.release.notified().await;
         }
-        Ok(Some(CanonicalMessage::tool_result(
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             "finished without observing cancellation",
@@ -1548,10 +1600,10 @@ impl AgentKernelToolProvider for NonObservingThreadToolProvider {
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for PanickingAfterGraceToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for PanickingAfterGraceToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "thread_status",
             "Panics after the cancellation monitor abandons it.",
             serde_json::json!({"type": "object"}),
@@ -1560,21 +1612,21 @@ impl AgentKernelToolProvider for PanickingAfterGraceToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        _call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        _call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         self.started.send(()).unwrap();
         self.release.notified().await;
         panic!("panic after grace")
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for ImmediateThreadToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for ImmediateThreadToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
         ["thread_submit", "thread_status"]
             .into_iter()
             .map(|name| {
-                ToolDefinition::new(
+                crate::ToolDefinition::new(
                     name,
                     "Immediate suspension-batch test tool.",
                     serde_json::json!({"type": "object"}),
@@ -1585,9 +1637,9 @@ impl AgentKernelToolProvider for ImmediateThreadToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
-        Ok(Some(CanonicalMessage::tool_result(
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name.clone(),
             format!("{} completed", call.tool_name),
@@ -1596,10 +1648,10 @@ impl AgentKernelToolProvider for ImmediateThreadToolProvider {
     }
 }
 
-#[async_trait]
-impl AgentKernelToolProvider for IsolatedFailureToolProvider {
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+#[async_trait::async_trait]
+impl crate::AgentKernelToolProvider for IsolatedFailureToolProvider {
+    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+        vec![crate::ToolDefinition::new(
             "thread_submit",
             "Per-call failure isolation test tool.",
             serde_json::json!({"type": "object"}),
@@ -1608,14 +1660,14 @@ impl AgentKernelToolProvider for IsolatedFailureToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: AgentKernelToolCall,
-    ) -> VerletResult<Option<CanonicalMessage>> {
+        call: crate::AgentKernelToolCall,
+    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
         if call.arguments["fail"].as_bool() == Some(true) {
-            return Err(VerletError::RuntimeExecution(
+            return Err(crate::VerletError::RuntimeExecution(
                 "expected call failure".to_string(),
             ));
         }
-        Ok(Some(CanonicalMessage::tool_result(
+        Ok(Some(crate::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             "sibling completed",
@@ -1626,14 +1678,14 @@ impl AgentKernelToolProvider for IsolatedFailureToolProvider {
 
 fn response_text(text: &str) -> crate::ProviderResponse {
     crate::ProviderResponse {
-        content: vec![CanonicalContent::text(text)],
-        usage: CanonicalUsage {
+        content: vec![crate::CanonicalContent::text(text)],
+        usage: crate::CanonicalUsage {
             input_tokens: 1,
             output_tokens: 2,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
         },
-        stop_reason: CanonicalStopReason::EndTurn,
+        stop_reason: crate::CanonicalStopReason::EndTurn,
     }
 }
 
@@ -1641,30 +1693,32 @@ fn response_tool_call() -> crate::ProviderResponse {
     response_tool_call_named("bash", serde_json::json!({"command":"pwd"}))
 }
 
-fn response_tool_call_named(name: &str, arguments: Value) -> crate::ProviderResponse {
+fn response_tool_call_named(name: &str, arguments: serde_json::Value) -> crate::ProviderResponse {
     response_tool_call_named_with_id("call_1|fc_1", name, arguments)
 }
 
 fn response_tool_call_named_with_id(
     call_id: &str,
     name: &str,
-    arguments: Value,
+    arguments: serde_json::Value,
 ) -> crate::ProviderResponse {
     crate::ProviderResponse {
-        content: vec![CanonicalContent::tool_call(call_id, name, arguments)],
-        usage: CanonicalUsage::default(),
-        stop_reason: CanonicalStopReason::ToolUse,
+        content: vec![crate::CanonicalContent::tool_call(call_id, name, arguments)],
+        usage: crate::CanonicalUsage::default(),
+        stop_reason: crate::CanonicalStopReason::ToolUse,
     }
 }
 
-fn response_tool_calls(calls: Vec<(&str, &str, Value)>) -> crate::ProviderResponse {
+fn response_tool_calls(calls: Vec<(&str, &str, serde_json::Value)>) -> crate::ProviderResponse {
     crate::ProviderResponse {
         content: calls
             .into_iter()
-            .map(|(call_id, name, arguments)| CanonicalContent::tool_call(call_id, name, arguments))
+            .map(|(call_id, name, arguments)| {
+                crate::CanonicalContent::tool_call(call_id, name, arguments)
+            })
             .collect(),
-        usage: CanonicalUsage::default(),
-        stop_reason: CanonicalStopReason::ToolUse,
+        usage: crate::CanonicalUsage::default(),
+        stop_reason: crate::CanonicalStopReason::ToolUse,
     }
 }
 
@@ -1682,39 +1736,67 @@ fn tool_round_responses(rounds: usize) -> Vec<crate::ProviderResponse> {
     responses
 }
 
-fn runtime_factory(client: Arc<dyn ProviderClient>) -> Arc<AgentLoopFactory> {
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+fn runtime_factory(
+    client: std::sync::Arc<dyn crate::ProviderClient>,
+) -> std::sync::Arc<crate::adapters::agent_loop::AgentLoopFactory> {
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    Arc::new(AgentLoopFactory::new(config, client))
+    std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+        config, client,
+    ))
 }
 
 fn runtime_factory_with_registry(
-    client: Arc<dyn ProviderClient>,
-    registry: Arc<OperationRegistry>,
-) -> Arc<AgentLoopFactory> {
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    client: std::sync::Arc<dyn crate::ProviderClient>,
+    registry: std::sync::Arc<crate::OperationRegistry>,
+) -> std::sync::Arc<crate::adapters::agent_loop::AgentLoopFactory> {
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    Arc::new(AgentLoopFactory::new(config, client).with_operation_registry(registry))
+    std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, client)
+            .with_operation_registry(registry),
+    )
 }
 
-fn streaming_runtime_factory(client: Arc<dyn ProviderClient>) -> Arc<AgentLoopFactory> {
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+fn streaming_runtime_factory(
+    client: std::sync::Arc<dyn crate::ProviderClient>,
+) -> std::sync::Arc<crate::adapters::agent_loop::AgentLoopFactory> {
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
     config.stream = true;
-    Arc::new(AgentLoopFactory::new(config, client))
+    std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+        config, client,
+    ))
 }
 
-fn factory(client: Arc<RecordingClient>) -> Arc<AgentLoopFactory> {
+fn factory(
+    client: std::sync::Arc<RecordingClient>,
+) -> std::sync::Arc<crate::adapters::agent_loop::AgentLoopFactory> {
     runtime_factory(client)
 }
 
 struct RootProviderChildEchoFactory {
-    root: Arc<AgentLoopFactory>,
+    root: std::sync::Arc<crate::adapters::agent_loop::AgentLoopFactory>,
 }
 
-#[async_trait]
-impl AgentRuntimeFactory for RootProviderChildEchoFactory {
-    async fn build(&self, context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+#[async_trait::async_trait]
+impl crate::AgentRuntimeFactory for RootProviderChildEchoFactory {
+    async fn build(
+        &self,
+        context: &crate::ThreadContext,
+    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
         if context.parent_thread_id.is_some() {
             return Ok(Box::new(ChildEchoRuntime));
         }
@@ -1724,61 +1806,61 @@ impl AgentRuntimeFactory for RootProviderChildEchoFactory {
 
 struct ChildEchoRuntime;
 
-#[async_trait]
-impl AgentRuntime for ChildEchoRuntime {
+#[async_trait::async_trait]
+impl crate::AgentRuntime for ChildEchoRuntime {
     async fn run(
         self: Box<Self>,
-        context: ThreadContext,
-        services: RuntimeServices,
-        mut commands: mpsc::Receiver<ThreadCommand>,
-        events: broadcast::Sender<ThreadEvent>,
-        status: watch::Sender<ThreadStatus>,
-        cancellation: CancellationToken,
+        context: crate::ThreadContext,
+        services: crate::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+        status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         let thread_id = context.coordinates.thread_id;
         let thread_context = context.clone();
         let coordinates = context.coordinates.clone();
-        emit_runtime_event(
+        crate::emit_runtime_event(
             &events,
             &coordinates,
-            RuntimeEventKind::ThreadStarted {
+            crate::RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
                 metadata: context.metadata.clone(),
             },
         );
-        let _ = events.send(ThreadEvent::Started { context });
-        let _ = status.send(ThreadStatus::Idle);
+        let _ = events.send(crate::ThreadEvent::Started { context });
+        let _ = status.send(crate::ThreadStatus::Idle);
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    let _ = status.send(ThreadStatus::Stopped);
-                    let _ = events.send(ThreadEvent::Stopped { thread_id });
+                    let _ = status.send(crate::ThreadStatus::Stopped);
+                    let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
                     break;
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(ThreadCommand::Submit { turn_id, input, .. }) => {
-                            let _ = status.send(ThreadStatus::Running);
+                        Some(crate::ThreadCommand::Submit { turn_id, input, .. }) => {
+                            let _ = status.send(crate::ThreadStatus::Running);
                             let _ = services.append_user_turn_input(&coordinates, &turn_id, &input).await;
-                            let _ = events.send(ThreadEvent::Output {
+                            let _ = events.send(crate::ThreadEvent::Output {
                                 thread_id,
                                 text: format!("child:{}", input.text_projection()),
                             });
                             if let Ok(completed) = services
                                 .append_thread_event(
                                     &coordinates,
-                                    NewEventRecord::discharged(
+                                    crate::NewEventRecord::discharged(
                                         coordinates.clone(),
-                                        EventKind::TurnCompleted,
+                                        crate::EventKind::TurnCompleted,
                                         serde_json::json!({
                                             "turn_id": turn_id,
                                         }),
-                                        EventProvenance {
-                                            source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                                        crate::EventProvenance {
+                                            source_streams: vec![crate::EventStreamId::for_thread(&coordinates)],
                                             discharged_by: Some("runtime:child-echo".to_string()),
                                             function: Some("turn_complete/v1".to_string()),
-                                            ..EventProvenance::default()
+                                            ..crate::EventProvenance::default()
                                         },
                                     ),
                                 )
@@ -1787,28 +1869,28 @@ impl AgentRuntime for ChildEchoRuntime {
                                 let _ = services
                                     .append_thread_joined_event_if_spawned(
                                         &thread_context,
-                                        ThreadTerminalState::Completed,
+                                        crate::ThreadTerminalState::Completed,
                                         None,
                                         Some(completed.id),
                                     )
                                     .await;
                             }
-                            let _ = status.send(ThreadStatus::Idle);
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::Cancel { reason }) => {
-                            let _ = events.send(ThreadEvent::Cancelled { thread_id, reason });
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::ThreadCommand::Cancel { reason }) => {
+                            let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::CancelTurn { .. }) => {}
-                        Some(ThreadCommand::Compact { .. }) => {
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::ThreadCommand::CancelTurn { .. }) => {}
+                        Some(crate::ThreadCommand::Compact { .. }) => {
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::ResumeToolCall { .. }) => {
-                            let _ = status.send(ThreadStatus::Idle);
+                        Some(crate::ThreadCommand::ResumeToolCall { .. }) => {
+                            let _ = status.send(crate::ThreadStatus::Idle);
                         }
-                        Some(ThreadCommand::Shutdown) | None => {
-                            let _ = status.send(ThreadStatus::Stopped);
-                            let _ = events.send(ThreadEvent::Stopped { thread_id });
+                        Some(crate::ThreadCommand::Shutdown) | None => {
+                            let _ = status.send(crate::ThreadStatus::Stopped);
+                            let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
                             break;
                         }
                     }
@@ -1818,16 +1900,16 @@ impl AgentRuntime for ChildEchoRuntime {
     }
 }
 
-fn text_messages(messages: &[CanonicalMessage]) -> Vec<String> {
+fn text_messages(messages: &[crate::CanonicalMessage]) -> Vec<String> {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => content
+            crate::CanonicalMessage::User { content, .. }
+            | crate::CanonicalMessage::Assistant { content, .. }
+            | crate::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .find_map(|content| match content {
-                    CanonicalContent::Text { text, .. } => Some(text.clone()),
+                    crate::CanonicalContent::Text { text, .. } => Some(text.clone()),
                     _ => None,
                 })
                 .unwrap_or_default(),
@@ -1835,11 +1917,11 @@ fn text_messages(messages: &[CanonicalMessage]) -> Vec<String> {
         .collect()
 }
 
-fn text_from_content(content: &[CanonicalContent]) -> String {
+fn text_from_content(content: &[crate::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1848,18 +1930,18 @@ fn text_from_content(content: &[CanonicalContent]) -> String {
 
 #[tokio::test]
 async fn runtime_builds_each_turn_from_canonical_session_history() {
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_text("first reply"),
         response_text("second reply"),
     ]));
-    let host = RuntimeHost::with_session_store(
-        factory(Arc::clone(&client)),
-        Arc::new(InMemorySessionStore::new()),
+    let host = crate::RuntimeHost::with_session_store(
+        factory(std::sync::Arc::clone(&client)),
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -1891,26 +1973,27 @@ async fn runtime_builds_each_turn_from_canonical_session_history() {
 
 #[tokio::test]
 async fn runtime_applies_provider_context_policy_before_request() {
-    let mut capabilities = ProviderCapabilityRecord::for_api(ProviderApi::OpenAIResponses);
-    capabilities.context_policy = ProviderContextPolicy {
+    let mut capabilities =
+        crate::ProviderCapabilityRecord::for_api(crate::ProviderApi::OpenAIResponses);
+    capabilities.context_policy = crate::ProviderContextPolicy {
         max_messages: Some(2),
         max_text_bytes: Some(5),
     };
-    let client = Arc::new(
+    let client = std::sync::Arc::new(
         RecordingClient::with_responses(vec![
             response_text("first reply"),
             response_text("second reply"),
         ])
         .with_capabilities(capabilities),
     );
-    let host = RuntimeHost::with_session_store(
-        factory(Arc::clone(&client)),
-        Arc::new(InMemorySessionStore::new()),
+    let host = crate::RuntimeHost::with_session_store(
+        factory(std::sync::Arc::clone(&client)),
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -1932,25 +2015,31 @@ async fn runtime_applies_provider_context_policy_before_request() {
 
 #[tokio::test]
 async fn runtime_uses_agent_context_compiler_before_provider_policy() {
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_text("first reply"),
         response_text("second reply"),
     ]));
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let factory = Arc::new(
-        AgentLoopFactory::new(config, client.clone()).with_context_compile_policy(
-            AgentContextCompilePolicy {
+    let factory = std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, client.clone())
+            .with_context_compile_policy(crate::AgentContextCompilePolicy {
                 max_messages: Some(1),
                 max_text_bytes: None,
-            },
-        ),
+            }),
     );
-    let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
+    let host = crate::RuntimeHost::with_session_store(
+        factory,
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
+    );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -1972,31 +2061,39 @@ async fn runtime_uses_agent_context_compiler_before_provider_policy() {
 
 #[tokio::test]
 async fn runtime_includes_memory_read_plan_context_before_provider_request() {
-    let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
         "memory-aware reply",
     )]));
-    let config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    let factory = Arc::new(AgentLoopFactory::new(config, client.clone()));
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(factory, store.clone());
+    let config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    let factory = std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+        config,
+        client.clone(),
+    ));
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(factory, store.clone());
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let coordinates = &thread.context().coordinates;
-    let thread_stream = EventStreamId::for_thread(coordinates);
-    let memory_stream = EventStreamId::new(format!("derived:memory:{}", coordinates.thread_id));
+    let thread_stream = crate::EventStreamId::for_thread(coordinates);
+    let memory_stream =
+        crate::EventStreamId::new(format!("derived:memory:{}", coordinates.thread_id));
     let memory = store
         .append_events(
             &memory_stream,
-            vec![NewEventRecord::discharged(
+            vec![crate::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::ContextSummaryCompleted,
+                crate::EventKind::ContextSummaryCompleted,
                 serde_json::json!({
-                    "schema": EventKind::ContextSummaryCompleted.payload_schema_id(),
+                    "schema": crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
                     "role": "summary_checkpoint",
                     "text": "User prefers SQLite first, then S2 as stream backend.",
                     "covered_ranges": [{
@@ -2010,26 +2107,26 @@ async fn runtime_includes_memory_read_plan_context_before_provider_request() {
                     "template_id": "std::memory.extract",
                     "memory_kind": "observation"
                 }),
-                EventProvenance {
+                crate::EventProvenance {
                     source_streams: vec![thread_stream],
                     discharged_by: Some("coupling:std::memory.extract".to_string()),
                     function: Some("op://std-memory-extract/run@sha256:test".to_string()),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
         .await
         .unwrap();
     let derived_context_stream =
-        EventStreamId::new(format!("derived:context:{}", coordinates.thread_id));
+        crate::EventStreamId::new(format!("derived:context:{}", coordinates.thread_id));
     store
         .append_events(
             &derived_context_stream,
-            vec![NewEventRecord::discharged(
+            vec![crate::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::ContextReadPlanSet,
+                crate::EventKind::ContextReadPlanSet,
                 serde_json::json!({
-                    "schema": EventKind::ContextReadPlanSet.payload_schema_id(),
+                    "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
                     "scope": "thread",
                     "name": "memory.default",
                     "pipeline_id": "context.memory",
@@ -2048,12 +2145,12 @@ async fn runtime_includes_memory_read_plan_context_before_provider_request() {
                         }]
                     }
                 }),
-                EventProvenance {
+                crate::EventProvenance {
                     source_streams: vec![memory_stream],
                     source_event_ids: vec![memory[0].id],
                     discharged_by: Some("coupling:std::memory.recall".to_string()),
                     function: Some("op://std-memory-recall/run@sha256:test".to_string()),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
@@ -2082,32 +2179,39 @@ async fn runtime_includes_memory_read_plan_context_before_provider_request() {
 
 #[tokio::test]
 async fn runtime_includes_instruction_read_plan_context_before_provider_request() {
-    let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
         "instruction-aware reply",
     )]));
-    let config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    let factory = Arc::new(AgentLoopFactory::new(config, client.clone()));
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(factory, store.clone());
+    let config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    let factory = std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+        config,
+        client.clone(),
+    ));
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(factory, store.clone());
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let coordinates = &thread.context().coordinates;
-    let thread_stream = EventStreamId::for_thread(coordinates);
+    let thread_stream = crate::EventStreamId::for_thread(coordinates);
     let derived_context_stream =
-        EventStreamId::new(format!("derived:context:{}", coordinates.thread_id));
+        crate::EventStreamId::new(format!("derived:context:{}", coordinates.thread_id));
     let instruction = store
         .append_events(
             &derived_context_stream,
-            vec![NewEventRecord::discharged(
+            vec![crate::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::ContextSummaryCompleted,
+                crate::EventKind::ContextSummaryCompleted,
                 serde_json::json!({
-                    "schema": EventKind::ContextSummaryCompleted.payload_schema_id(),
+                    "schema": crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
                     "role": "summary_checkpoint",
                     "text": "Prefer SQLite event sourcing for V1 unless the live lane asks for S2.",
                     "covered_ranges": [{
@@ -2121,13 +2225,13 @@ async fn runtime_includes_instruction_read_plan_context_before_provider_request(
                     "template_id": "std::prompt.dynamic_instructions",
                     "instruction_name": "instructions.default"
                 }),
-                EventProvenance {
+                crate::EventProvenance {
                     source_streams: vec![thread_stream],
                     discharged_by: Some("coupling:std::prompt.dynamic_instructions".to_string()),
                     function: Some(
                         "op://std-prompt-dynamic-instructions/run@sha256:test".to_string(),
                     ),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
@@ -2136,11 +2240,11 @@ async fn runtime_includes_instruction_read_plan_context_before_provider_request(
     store
         .append_events(
             &derived_context_stream,
-            vec![NewEventRecord::discharged(
+            vec![crate::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::ContextReadPlanSet,
+                crate::EventKind::ContextReadPlanSet,
                 serde_json::json!({
-                    "schema": EventKind::ContextReadPlanSet.payload_schema_id(),
+                    "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
                     "scope": "thread",
                     "name": "instructions.default",
                     "pipeline_id": "context.instructions",
@@ -2159,14 +2263,14 @@ async fn runtime_includes_instruction_read_plan_context_before_provider_request(
                         }]
                     }
                 }),
-                EventProvenance {
+                crate::EventProvenance {
                     source_streams: vec![derived_context_stream.clone()],
                     source_event_ids: vec![instruction[0].id],
                     discharged_by: Some("coupling:std::prompt.dynamic_instructions".to_string()),
                     function: Some(
                         "op://std-prompt-dynamic-instructions/run@sha256:test".to_string(),
                     ),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
@@ -2195,26 +2299,27 @@ async fn runtime_includes_instruction_read_plan_context_before_provider_request(
 
 #[tokio::test]
 async fn runtime_emits_model_lifecycle_and_context_diagnostics() {
-    let mut capabilities = ProviderCapabilityRecord::for_api(ProviderApi::OpenAIResponses);
-    capabilities.context_policy = ProviderContextPolicy {
+    let mut capabilities =
+        crate::ProviderCapabilityRecord::for_api(crate::ProviderApi::OpenAIResponses);
+    capabilities.context_policy = crate::ProviderContextPolicy {
         max_messages: Some(1),
         max_text_bytes: Some(4),
     };
-    let client = Arc::new(
+    let client = std::sync::Arc::new(
         RecordingClient::with_responses(vec![
             response_text("first reply"),
             response_text("second reply"),
         ])
         .with_capabilities(capabilities),
     );
-    let host = RuntimeHost::with_session_store(
-        factory(Arc::clone(&client)),
-        Arc::new(InMemorySessionStore::new()),
+    let host = crate::RuntimeHost::with_session_store(
+        factory(std::sync::Arc::clone(&client)),
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2232,7 +2337,7 @@ async fn runtime_emits_model_lifecycle_and_context_diagnostics() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ContextCompiled {
+            crate::RuntimeEventKind::ContextCompiled {
                 diagnostics,
                 provider_dropped_messages: 2,
                 provider_truncated_text_bytes: 1,
@@ -2245,13 +2350,13 @@ async fn runtime_emits_model_lifecycle_and_context_diagnostics() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestStarted {
+            crate::RuntimeEventKind::ModelRequestStarted {
                 turn_id,
                 provider,
                 api,
                 model,
-                mode: RuntimeModelRequestMode::Complete,
-                purpose: RuntimeModelRequestPurpose::Turn,
+                mode: crate::RuntimeModelRequestMode::Complete,
+                purpose: crate::RuntimeModelRequestPurpose::Turn,
                 message_count: 1,
                 max_tokens: 128,
                 ..
@@ -2264,10 +2369,10 @@ async fn runtime_emits_model_lifecycle_and_context_diagnostics() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestCompleted {
+            crate::RuntimeEventKind::ModelRequestCompleted {
                 turn_id,
                 usage,
-                stop_reason: CanonicalStopReason::EndTurn,
+                stop_reason: crate::CanonicalStopReason::EndTurn,
                 ..
             } if turn_id == "turn-2"
                 && usage.input_tokens == 1
@@ -2278,15 +2383,15 @@ async fn runtime_emits_model_lifecycle_and_context_diagnostics() {
 
 #[tokio::test]
 async fn runtime_emits_model_request_failed_on_provider_error() {
-    let client = Arc::new(RecordingClient::with_responses(Vec::new()));
-    let host = RuntimeHost::with_session_store(
-        factory(Arc::clone(&client)),
-        Arc::new(InMemorySessionStore::new()),
+    let client = std::sync::Arc::new(RecordingClient::with_responses(Vec::new()));
+    let host = crate::RuntimeHost::with_session_store(
+        factory(std::sync::Arc::clone(&client)),
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2301,9 +2406,9 @@ async fn runtime_emits_model_request_failed_on_provider_error() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestStarted {
+            crate::RuntimeEventKind::ModelRequestStarted {
                 turn_id,
-                purpose: RuntimeModelRequestPurpose::Turn,
+                purpose: crate::RuntimeModelRequestPurpose::Turn,
                 ..
             } if turn_id == "turn-1"
         )
@@ -2311,7 +2416,7 @@ async fn runtime_emits_model_request_failed_on_provider_error() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestFailed {
+            crate::RuntimeEventKind::ModelRequestFailed {
                 turn_id,
                 error,
                 ..
@@ -2322,25 +2427,34 @@ async fn runtime_emits_model_request_failed_on_provider_error() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn model_request_retries_retryable_provider_error() {
-    let inner = Arc::new(RecordingClient::with_responses(vec![response_text(
+    let inner = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
         "retry reply",
     )]));
-    let client = Arc::new(
-        FaultingProviderClient::new(inner.clone())
+    let client = std::sync::Arc::new(
+        crate::test_support::FaultingProviderClient::new(inner.clone())
             .fail_nth_http("complete", 1, "temporary outage")
-            .delay_nth("complete", 2, Duration::from_millis(25)),
+            .delay_nth("complete", 2, tokio::time::Duration::from_millis(25)),
     );
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let factory = Arc::new(
-        AgentLoopFactory::new(config, client.clone())
-            .with_model_request_retry_policy(ModelRequestRetryPolicy::fixed(2, 50)),
+    let factory = std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, client.clone())
+            .with_model_request_retry_policy(
+                crate::adapters::agent_loop::ModelRequestRetryPolicy::fixed(2, 50),
+            ),
     );
-    let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
+    let host = crate::RuntimeHost::with_session_store(
+        factory,
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
+    );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2356,8 +2470,8 @@ async fn model_request_retries_retryable_provider_error() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestFailed {
-                error_class: RuntimeModelRequestErrorClass::Retryable,
+            crate::RuntimeEventKind::ModelRequestFailed {
+                error_class: crate::RuntimeModelRequestErrorClass::Retryable,
                 error,
                 ..
             } if error.contains("temporary outage")
@@ -2366,11 +2480,11 @@ async fn model_request_retries_retryable_provider_error() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestRetryScheduled {
+            crate::RuntimeEventKind::ModelRequestRetryScheduled {
                 attempt: 1,
                 next_attempt: 2,
                 delay_ms: 50,
-                error_class: RuntimeModelRequestErrorClass::Retryable,
+                error_class: crate::RuntimeModelRequestErrorClass::Retryable,
                 ..
             }
         )
@@ -2379,21 +2493,30 @@ async fn model_request_retries_retryable_provider_error() {
 
 #[tokio::test]
 async fn model_request_does_not_retry_fatal_provider_error() {
-    let client = Arc::new(ScriptedClient::new(vec![
+    let client = std::sync::Arc::new(ScriptedClient::new(vec![
         ScriptedResponse::Error(crate::ProviderError::Decode("bad json".to_string())),
         ScriptedResponse::Response(response_text("unused reply")),
     ]));
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    config.max_tokens = 128;
-    let factory = Arc::new(
-        AgentLoopFactory::new(config, client.clone())
-            .with_model_request_retry_policy(ModelRequestRetryPolicy::fixed(2, 0)),
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
     );
-    let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
+    config.max_tokens = 128;
+    let factory = std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, client.clone())
+            .with_model_request_retry_policy(
+                crate::adapters::agent_loop::ModelRequestRetryPolicy::fixed(2, 0),
+            ),
+    );
+    let host = crate::RuntimeHost::with_session_store(
+        factory,
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
+    );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2408,45 +2531,56 @@ async fn model_request_does_not_retry_fatal_provider_error() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestFailed {
-                error_class: RuntimeModelRequestErrorClass::Fatal,
+            crate::RuntimeEventKind::ModelRequestFailed {
+                error_class: crate::RuntimeModelRequestErrorClass::Fatal,
                 error,
                 ..
             } if error.contains("bad json")
         )
     }));
-    assert!(
-        !runtime_events
-            .iter()
-            .any(|event| { matches!(event, RuntimeEventKind::ModelRequestRetryScheduled { .. }) })
-    );
+    assert!(!runtime_events.iter().any(|event| {
+        matches!(
+            event,
+            crate::RuntimeEventKind::ModelRequestRetryScheduled { .. }
+        )
+    }));
 }
 
 #[tokio::test]
 async fn model_request_falls_back_after_retry_exhaustion() {
-    let primary_client = Arc::new(ScriptedClient::new(vec![ScriptedResponse::Error(
+    let primary_client = std::sync::Arc::new(ScriptedClient::new(vec![ScriptedResponse::Error(
         crate::ProviderError::HttpStatus {
             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             body: "provider down".to_string(),
         },
     )]));
-    let fallback_client = Arc::new(RecordingClient::with_responses(vec![response_text(
-        "fallback reply",
-    )]));
-    let mut primary_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let fallback_client =
+        std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
+            "fallback reply",
+        )]));
+    let mut primary_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     primary_config.max_tokens = 128;
-    let fallback_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "fallback", "gpt-fallback");
-    let factory = Arc::new(
-        AgentLoopFactory::new(primary_config, primary_client.clone())
+    let fallback_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "fallback",
+        "gpt-fallback",
+    );
+    let factory = std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(primary_config, primary_client.clone())
             .with_model_request_fallback(fallback_config, fallback_client.clone()),
     );
-    let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
+    let host = crate::RuntimeHost::with_session_store(
+        factory,
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
+    );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2462,12 +2596,12 @@ async fn model_request_falls_back_after_retry_exhaustion() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestFallbackSelected {
+            crate::RuntimeEventKind::ModelRequestFallbackSelected {
                 from_provider,
                 from_model,
                 to_provider,
                 to_model,
-                error_class: RuntimeModelRequestErrorClass::Retryable,
+                error_class: crate::RuntimeModelRequestErrorClass::Retryable,
                 ..
             } if from_provider == "openai"
                 && from_model == "gpt-test"
@@ -2477,9 +2611,9 @@ async fn model_request_falls_back_after_retry_exhaustion() {
     }));
     assert!(matches!(
         assistant,
-        CanonicalMessage::Assistant {
+        crate::CanonicalMessage::Assistant {
             provider,
-            api: ProviderApi::OpenAIResponses,
+            api: crate::ProviderApi::OpenAIResponses,
             model,
             content,
             ..
@@ -2491,17 +2625,17 @@ async fn model_request_falls_back_after_retry_exhaustion() {
 
 #[tokio::test]
 async fn stream_assembly_requires_terminal_done() {
-    let client = Arc::new(StreamingClient::new(vec![vec![
-        ProviderStreamEvent::TextDelta {
+    let client = std::sync::Arc::new(StreamingClient::new(vec![vec![
+        crate::ProviderStreamEvent::TextDelta {
             text: "partial".to_string(),
         },
     ]]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let host = RuntimeHost::new(streaming_runtime_factory(provider_client));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let host = crate::RuntimeHost::new(streaming_runtime_factory(provider_client));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2517,8 +2651,8 @@ async fn stream_assembly_requires_terminal_done() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ModelRequestFailed {
-                error_class: RuntimeModelRequestErrorClass::StreamAssembly,
+            crate::RuntimeEventKind::ModelRequestFailed {
+                error_class: crate::RuntimeModelRequestErrorClass::StreamAssembly,
                 error,
                 ..
             } if error.contains("provider stream ended before done event")
@@ -2528,17 +2662,18 @@ async fn stream_assembly_requires_terminal_done() {
 
 #[tokio::test]
 async fn stream_and_complete_preserve_equivalent_final_history() {
-    let complete_client = Arc::new(RecordingClient::with_responses(vec![response_text(
-        "same reply",
-    )]));
-    let complete_host = RuntimeHost::with_session_store(
-        factory(Arc::clone(&complete_client)),
-        Arc::new(InMemorySessionStore::new()),
+    let complete_client =
+        std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
+            "same reply",
+        )]));
+    let complete_host = crate::RuntimeHost::with_session_store(
+        factory(std::sync::Arc::clone(&complete_client)),
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
     );
     let complete_thread = complete_host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_complete"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_complete"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2553,32 +2688,32 @@ async fn stream_and_complete_preserve_equivalent_final_history() {
         .unwrap();
     assert_output(&mut complete_events, "same reply").await;
 
-    let streaming_usage = CanonicalUsage {
+    let streaming_usage = crate::CanonicalUsage {
         input_tokens: 1,
         output_tokens: 2,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
     };
-    let stream_client = Arc::new(StreamingClient::new(vec![vec![
-        ProviderStreamEvent::TextDelta {
+    let stream_client = std::sync::Arc::new(StreamingClient::new(vec![vec![
+        crate::ProviderStreamEvent::TextDelta {
             text: "same reply".to_string(),
         },
-        ProviderStreamEvent::Usage {
+        crate::ProviderStreamEvent::Usage {
             usage: streaming_usage,
         },
-        ProviderStreamEvent::Done {
-            stop_reason: CanonicalStopReason::EndTurn,
+        crate::ProviderStreamEvent::Done {
+            stop_reason: crate::CanonicalStopReason::EndTurn,
         },
     ]]));
-    let provider_client: Arc<dyn ProviderClient> = stream_client;
-    let stream_host = RuntimeHost::with_session_store(
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = stream_client;
+    let stream_host = crate::RuntimeHost::with_session_store(
         streaming_runtime_factory(provider_client),
-        Arc::new(InMemorySessionStore::new()),
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
     );
     let stream_thread = stream_host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_stream"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_stream"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2602,13 +2737,13 @@ async fn stream_and_complete_preserve_equivalent_final_history() {
     );
     match (&complete_messages[1], &stream_messages[1]) {
         (
-            CanonicalMessage::Assistant {
+            crate::CanonicalMessage::Assistant {
                 content: complete_content,
                 usage: complete_usage,
                 stop_reason: complete_stop_reason,
                 ..
             },
-            CanonicalMessage::Assistant {
+            crate::CanonicalMessage::Assistant {
                 content: stream_content,
                 usage: stream_usage,
                 stop_reason: stream_stop_reason,
@@ -2625,39 +2760,44 @@ async fn stream_and_complete_preserve_equivalent_final_history() {
 
 #[tokio::test]
 async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() {
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_text("first reply"),
         response_text("summary from model"),
     ]));
-    let pre_hook = Arc::new(StaticHookHandler::new(
+    let pre_hook = std::sync::Arc::new(StaticHookHandler::new(
         "pre-compact",
-        HookEventName::PreCompact,
+        crate::HookEventName::PreCompact,
         Some("manual"),
-        HookHandlerOutput::default(),
+        crate::HookHandlerOutput::default(),
     ));
-    let post_hook = Arc::new(StaticHookHandler::new(
+    let post_hook = std::sync::Arc::new(StaticHookHandler::new(
         "post-compact",
-        HookEventName::PostCompact,
+        crate::HookEventName::PostCompact,
         Some("manual"),
-        HookHandlerOutput::default(),
+        crate::HookHandlerOutput::default(),
     ));
-    let pre_handler: Arc<dyn HookHandler> = pre_hook.clone();
-    let post_handler: Arc<dyn HookHandler> = post_hook.clone();
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    config.max_tokens = 128;
-    let factory = Arc::new(
-        AgentLoopFactory::new(config, client.clone()).with_hook_pipeline(Arc::new(
-            HookPipeline::new()
-                .with_handler(pre_handler)
-                .with_handler(post_handler),
-        )),
+    let pre_handler: std::sync::Arc<dyn crate::HookHandler> = pre_hook.clone();
+    let post_handler: std::sync::Arc<dyn crate::HookHandler> = post_hook.clone();
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
     );
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(factory, store.clone());
+    config.max_tokens = 128;
+    let factory = std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, client.clone())
+            .with_hook_pipeline(std::sync::Arc::new(
+                crate::HookPipeline::new()
+                    .with_handler(pre_handler)
+                    .with_handler(post_handler),
+            )),
+    );
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(factory, store.clone());
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2670,7 +2810,12 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
     host.compact_thread(thread.context().coordinates.thread_id, "compact-1", None)
         .await
         .unwrap();
-    assert_compaction(&mut events, CompactionTrigger::Manual, "summary from model").await;
+    assert_compaction(
+        &mut events,
+        crate::CompactionTrigger::Manual,
+        "summary from model",
+    )
+    .await;
 
     let requests = client.requests();
     assert_eq!(
@@ -2679,12 +2824,12 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
     );
     assert!(matches!(
         pre_hook.requests().as_slice(),
-        [HookRequest::PreCompact(request)] if request.trigger == CompactionTrigger::Manual
+        [crate::HookRequest::PreCompact(request)] if request.trigger == crate::CompactionTrigger::Manual
     ));
     assert!(matches!(
         post_hook.requests().as_slice(),
-        [HookRequest::PostCompact(request)]
-            if request.trigger == CompactionTrigger::Manual
+        [crate::HookRequest::PostCompact(request)]
+            if request.trigger == crate::CompactionTrigger::Manual
                 && request.summary == "summary from model"
     ));
     assert_eq!(
@@ -2692,11 +2837,11 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
         vec!["Compacted conversation summary:\nsummary from model"]
     );
 
-    let stream_id = EventStreamId::for_thread(&thread.context().coordinates);
+    let stream_id = crate::EventStreamId::for_thread(&thread.context().coordinates);
     let persisted_events = store.read_events(&stream_id, None).await.unwrap();
     let summary_event = persisted_events
         .iter()
-        .find(|event| event.kind == EventKind::ContextSummaryCompleted)
+        .find(|event| event.kind == crate::EventKind::ContextSummaryCompleted)
         .expect("compaction should persist a context.summary.completed event");
     assert_eq!(summary_event.origin, crate::EventOrigin::Discharged);
     assert_eq!(
@@ -2704,7 +2849,10 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
         "cooldis.event.context.summary.completed/1"
     );
     assert_eq!(summary_event.payload["text"], "summary from model");
-    let expected_summary_hash = format!("sha256:{}", sha256_hex("summary from model".as_bytes()));
+    let expected_summary_hash = format!(
+        "sha256:{}",
+        crate::agent::contracts::sha256_hex("summary from model".as_bytes())
+    );
     assert_eq!(
         summary_event.payload["content"]["sha256"].as_str(),
         Some(expected_summary_hash.as_str())
@@ -2712,7 +2860,7 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
 
     let read_plan_event = persisted_events
         .iter()
-        .find(|event| event.kind == EventKind::ContextReadPlanSet)
+        .find(|event| event.kind == crate::EventKind::ContextReadPlanSet)
         .expect("compaction should persist a context.read_plan.set event");
     assert_eq!(read_plan_event.origin, crate::EventOrigin::Discharged);
     assert_eq!(
@@ -2732,17 +2880,17 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
 
 #[tokio::test]
 async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() {
-    let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
         "summary after late result",
     )]));
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "compact-late-result");
-    let store = Arc::new(InMemorySessionStore::new());
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "compact-late-result");
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
     let first_user = store
         .append_turn_input(
             &coordinates,
             "turn-old",
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("first turn"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("first turn"),
             },
         )
         .await
@@ -2751,17 +2899,17 @@ async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() 
         .append(
             &coordinates,
             Some(first_user.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::assistant(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::assistant(
                     "openai",
-                    ProviderApi::OpenAIResponses,
+                    crate::ProviderApi::OpenAIResponses,
                     "gpt-test",
-                    vec![CanonicalContent::tool_call(
+                    vec![crate::CanonicalContent::tool_call(
                         "call-late",
                         "lookup",
                         serde_json::json!({"q": "slow"}),
                     )],
-                    CanonicalStopReason::ToolUse,
+                    crate::CanonicalStopReason::ToolUse,
                 ),
             },
         )
@@ -2771,8 +2919,8 @@ async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() 
         .append_turn_input(
             &coordinates,
             "turn-new",
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("replacement turn"),
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("replacement turn"),
             },
         )
         .await
@@ -2781,8 +2929,8 @@ async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() 
         .append(
             &coordinates,
             Some(replacement_user.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::tool_result(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::tool_result(
                     "call-late",
                     "lookup",
                     "settled after cancellation",
@@ -2793,15 +2941,19 @@ async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() 
         .await
         .unwrap();
     assert_eq!(assistant.parent_entry_id, Some(first_user.entry_id));
-    let host = RuntimeHost::with_session_store(
-        Arc::new(AgentLoopFactory::new(
-            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+            crate::adapters::agent_loop::AgentLoopConfig::new(
+                crate::ProviderApi::OpenAIResponses,
+                "openai",
+                "gpt-test",
+            ),
             client.clone(),
         )),
         store,
     );
     let thread = host
-        .start_thread(coordinates, ThreadTopology::root())
+        .start_thread(coordinates, crate::ThreadTopology::root())
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
@@ -2811,7 +2963,7 @@ async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() 
         .unwrap();
     assert_compaction(
         &mut events,
-        CompactionTrigger::Manual,
+        crate::CompactionTrigger::Manual,
         "summary after late result",
     )
     .await;
@@ -2820,32 +2972,39 @@ async fn compaction_reattaches_a_late_tool_result_before_the_replacement_user() 
     assert!(matches!(
         request.messages.as_slice(),
         [
-            CanonicalMessage::User { .. },
-            CanonicalMessage::Assistant { .. },
-            CanonicalMessage::ToolResult { tool_call_id, .. },
-            CanonicalMessage::User { .. },
+            crate::CanonicalMessage::User { .. },
+            crate::CanonicalMessage::Assistant { .. },
+            crate::CanonicalMessage::ToolResult { tool_call_id, .. },
+            crate::CanonicalMessage::User { .. },
         ] if tool_call_id == "call-late"
     ));
 }
 
 #[tokio::test]
 async fn auto_compaction_triggers_before_next_submit_when_budget_is_exceeded() {
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_text("first reply"),
         response_text("auto summary"),
         response_text("second reply"),
     ]));
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
-    config.max_tokens = 128;
-    let factory = Arc::new(
-        AgentLoopFactory::new(config, client.clone())
-            .with_compaction_policy(CompactionPolicy::auto_at_text_bytes(5)),
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
     );
-    let host = RuntimeHost::with_session_store(factory, Arc::new(InMemorySessionStore::new()));
+    config.max_tokens = 128;
+    let factory = std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, client.clone())
+            .with_compaction_policy(crate::CompactionPolicy::auto_at_text_bytes(5)),
+    );
+    let host = crate::RuntimeHost::with_session_store(
+        factory,
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
+    );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2862,7 +3021,7 @@ async fn auto_compaction_triggers_before_next_submit_when_budget_is_exceeded() {
     host.submit(thread.context().coordinates.thread_id, "turn-2", "next")
         .await
         .unwrap();
-    assert_compaction(&mut events, CompactionTrigger::Auto, "auto summary").await;
+    assert_compaction(&mut events, crate::CompactionTrigger::Auto, "auto summary").await;
     assert_output(&mut events, "second reply").await;
 
     let requests = client.requests();
@@ -2878,19 +3037,19 @@ async fn auto_compaction_triggers_before_next_submit_when_budget_is_exceeded() {
 
 #[tokio::test]
 async fn resume_and_fork_after_compaction_preserve_active_branch() {
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_text("root reply"),
         response_text("resumed reply"),
         response_text("fork reply"),
     ]));
-    let host = RuntimeHost::with_session_store(
-        factory(Arc::clone(&client)),
-        Arc::new(InMemorySessionStore::new()),
+    let host = crate::RuntimeHost::with_session_store(
+        factory(std::sync::Arc::clone(&client)),
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -2907,13 +3066,18 @@ async fn resume_and_fork_after_compaction_preserve_active_branch() {
     )
     .await
     .unwrap();
-    assert_compaction(&mut events, CompactionTrigger::Manual, "root summary").await;
+    assert_compaction(
+        &mut events,
+        crate::CompactionTrigger::Manual,
+        "root summary",
+    )
+    .await;
     let checkpoint = host
         .create_checkpoint(
             thread.context().coordinates.thread_id,
             None,
             Some("after-compact".to_string()),
-            BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -2981,22 +3145,22 @@ async fn resume_and_fork_after_compaction_preserve_active_branch() {
 
 #[tokio::test]
 async fn runtime_isolates_canonical_histories_by_thread() {
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_text("reply a"),
         response_text("reply b"),
     ]));
-    let host = RuntimeHost::new(factory(Arc::clone(&client)));
+    let host = crate::RuntimeHost::new(factory(std::sync::Arc::clone(&client)));
     let a = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
     let b = host
         .start_thread(
-            ThreadCoordinates::new("tenant_b", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_b", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3027,12 +3191,12 @@ async fn runtime_isolates_canonical_histories_by_thread() {
 
 #[tokio::test]
 async fn runtime_stores_tool_calls_as_canonical_assistant_content() {
-    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_call()]));
-    let host = RuntimeHost::new(factory(client));
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_tool_call()]));
+    let host = crate::RuntimeHost::new(factory(client));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3044,7 +3208,7 @@ async fn runtime_stores_tool_calls_as_canonical_assistant_content() {
     let assistant = assert_assistant_mirror(&mut events).await;
 
     match assistant {
-        CanonicalMessage::Assistant {
+        crate::CanonicalMessage::Assistant {
             provider,
             api,
             model,
@@ -3053,12 +3217,12 @@ async fn runtime_stores_tool_calls_as_canonical_assistant_content() {
             ..
         } => {
             assert_eq!(provider, "openai");
-            assert_eq!(api, ProviderApi::OpenAIResponses);
+            assert_eq!(api, crate::ProviderApi::OpenAIResponses);
             assert_eq!(model, "gpt-test");
-            assert_eq!(stop_reason, CanonicalStopReason::ToolUse);
+            assert_eq!(stop_reason, crate::CanonicalStopReason::ToolUse);
             assert!(matches!(
                 content.first(),
-                Some(CanonicalContent::ToolCall { id, name, .. })
+                Some(crate::CanonicalContent::ToolCall { id, name, .. })
                     if id == "call_1|fc_1" && name == "bash"
             ));
         }
@@ -3072,16 +3236,16 @@ async fn runtime_stores_tool_calls_as_canonical_assistant_content() {
 #[tokio::test]
 async fn runtime_executes_registry_tool_call_and_continues_with_tool_result() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "verlet"})),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let host = RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let host = crate::RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3094,7 +3258,7 @@ async fn runtime_executes_registry_tool_call_and_continues_with_tool_result() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallResult {
+            crate::RuntimeEventKind::ToolCallResult {
                 call_id,
                 output,
                 success: true,
@@ -3105,10 +3269,10 @@ async fn runtime_executes_registry_tool_call_and_continues_with_tool_result() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::PermissionDecision {
+            crate::RuntimeEventKind::PermissionDecision {
                 call_id,
                 tool_name,
-                decision: RuntimePermissionDecision::Allow,
+                decision: crate::RuntimePermissionDecision::Allow,
                 reason: None,
             } if call_id == "call_1|fc_1" && tool_name == "echo_search"
         )
@@ -3116,10 +3280,10 @@ async fn runtime_executes_registry_tool_call_and_continues_with_tool_result() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolLog {
+            crate::RuntimeEventKind::ToolLog {
                 call_id,
                 tool_name,
-                level: RuntimeToolLogLevel::Info,
+                level: crate::RuntimeToolLogLevel::Info,
                 metadata,
                 ..
             } if call_id == "call_1|fc_1"
@@ -3139,7 +3303,7 @@ async fn runtime_executes_registry_tool_call_and_continues_with_tool_result() {
     );
     assert!(matches!(
         &requests[1].messages[2],
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             tool_call_id,
             tool_name,
             content,
@@ -3161,13 +3325,13 @@ async fn runtime_executes_registry_tool_call_and_continues_with_tool_result() {
 #[tokio::test]
 async fn default_tool_round_budget_still_fails_after_eight_completed_batches() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(tool_round_responses(9)));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let host = RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
+    let client = std::sync::Arc::new(RecordingClient::with_responses(tool_round_responses(9)));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let host = crate::RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "round-default"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "round-default"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3183,15 +3347,16 @@ async fn default_tool_round_budget_still_fails_after_eight_completed_batches() {
 #[tokio::test]
 async fn manifest_round_budget_of_sixty_four_allows_nine_tool_batches() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(tool_round_responses(9)));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let host = RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
+    let client = std::sync::Arc::new(RecordingClient::with_responses(tool_round_responses(9)));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let host = crate::RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
     let thread = host
         .start_thread_with_topology_and_metadata(
-            ThreadCoordinates::new("tenant_a", "user_1", "round-64"),
-            ThreadTopology::root(),
-            BTreeMap::from([(
-                THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "round-64"),
+            crate::ThreadTopology::root(),
+            std::collections::BTreeMap::from([(
+                crate::adapters::agent_loop::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA
+                    .to_string(),
                 "64".to_string(),
             )]),
         )
@@ -3209,15 +3374,16 @@ async fn manifest_round_budget_of_sixty_four_allows_nine_tool_batches() {
 #[tokio::test]
 async fn explicit_unlimited_manifest_round_budget_allows_more_than_the_default() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(tool_round_responses(12)));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let host = RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
+    let client = std::sync::Arc::new(RecordingClient::with_responses(tool_round_responses(12)));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let host = crate::RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
     let thread = host
         .start_thread_with_topology_and_metadata(
-            ThreadCoordinates::new("tenant_a", "user_1", "round-unlimited"),
-            ThreadTopology::root(),
-            BTreeMap::from([(
-                THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "round-unlimited"),
+            crate::ThreadTopology::root(),
+            std::collections::BTreeMap::from([(
+                crate::adapters::agent_loop::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA
+                    .to_string(),
                 "unlimited".to_string(),
             )]),
         )
@@ -3234,15 +3400,16 @@ async fn explicit_unlimited_manifest_round_budget_allows_more_than_the_default()
 
 #[tokio::test]
 async fn persisted_round_accounting_rejects_a_request_without_an_assistant_source() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "round-provenance");
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let services =
+        crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "round-provenance");
     let malformed_request = || {
-        NewEventRecord::discharged(
+        crate::NewEventRecord::discharged(
             coordinates.clone(),
-            EventKind::ToolCallRequested,
-            serde_json::to_value(ToolCallRequestedPayload {
-                subject: ToolCallSubject {
+            crate::EventKind::ToolCallRequested,
+            serde_json::to_value(crate::ToolCallRequestedPayload {
+                subject: crate::ToolCallSubject {
                     turn_id: "turn-1".to_string(),
                     call_id: "call-1".to_string(),
                 },
@@ -3253,27 +3420,27 @@ async fn persisted_round_accounting_rejects_a_request_without_an_assistant_sourc
                 holds: Vec::new(),
             })
             .unwrap(),
-            EventProvenance {
-                source_streams: vec![EventStreamId::for_thread(&coordinates)],
+            crate::EventProvenance {
+                source_streams: vec![crate::EventStreamId::for_thread(&coordinates)],
                 discharged_by: Some("test:malformed-round".to_string()),
                 function: Some("tool_request/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         )
     };
     store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
+            &crate::EventStreamId::for_thread(&coordinates),
             vec![malformed_request()],
         )
         .await
         .unwrap();
     let turn_submitted = store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(&coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::TurnSubmitted,
+                crate::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id": "turn-1"}),
             )],
         )
@@ -3283,40 +3450,50 @@ async fn persisted_round_accounting_rejects_a_request_without_an_assistant_sourc
         .unwrap();
 
     assert_eq!(
-        persisted_tool_rounds_for_turn(&services, &coordinates, "turn-1", turn_submitted.sequence,)
-            .await
-            .unwrap(),
+        crate::adapters::agent_loop::persisted_tool_rounds_for_turn(
+            &services,
+            &coordinates,
+            "turn-1",
+            turn_submitted.sequence,
+        )
+        .await
+        .unwrap(),
         0,
         "malformed events before the active turn bound must not affect accounting"
     );
     store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
+            &crate::EventStreamId::for_thread(&coordinates),
             vec![malformed_request()],
         )
         .await
         .unwrap();
 
-    let err =
-        persisted_tool_rounds_for_turn(&services, &coordinates, "turn-1", turn_submitted.sequence)
-            .await
-            .unwrap_err();
+    let err = crate::adapters::agent_loop::persisted_tool_rounds_for_turn(
+        &services,
+        &coordinates,
+        "turn-1",
+        turn_submitted.sequence,
+    )
+    .await
+    .unwrap_err();
     assert!(err.to_string().contains("has no assistant source event"));
 }
 
 #[tokio::test]
 async fn persisted_round_accounting_rejects_a_cross_turn_assistant_source() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "round-cross-turn");
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let services =
+        crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "round-cross-turn");
     let old_assistant = store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(&coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::SessionEntryAppended,
+                crate::EventKind::SessionEntryAppended,
                 serde_json::json!({
-                    "entry_id": SessionEntryId::new().to_string(),
+                    "entry_id": crate::SessionEntryId::new().to_string(),
                     "entry_kind": "message",
                 }),
             )],
@@ -3327,10 +3504,10 @@ async fn persisted_round_accounting_rejects_a_cross_turn_assistant_source() {
         .unwrap();
     let turn_submitted = store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(&coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::TurnSubmitted,
+                crate::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id": "turn-1"}),
             )],
         )
@@ -3340,12 +3517,12 @@ async fn persisted_round_accounting_rejects_a_cross_turn_assistant_source() {
         .unwrap();
     store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
-            vec![NewEventRecord::discharged(
+            &crate::EventStreamId::for_thread(&coordinates),
+            vec![crate::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::ToolCallRequested,
-                serde_json::to_value(ToolCallRequestedPayload {
-                    subject: ToolCallSubject {
+                crate::EventKind::ToolCallRequested,
+                serde_json::to_value(crate::ToolCallRequestedPayload {
+                    subject: crate::ToolCallSubject {
                         turn_id: "turn-1".to_string(),
                         call_id: "call-1".to_string(),
                     },
@@ -3356,35 +3533,39 @@ async fn persisted_round_accounting_rejects_a_cross_turn_assistant_source() {
                     holds: Vec::new(),
                 })
                 .unwrap(),
-                EventProvenance {
-                    source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                crate::EventProvenance {
+                    source_streams: vec![crate::EventStreamId::for_thread(&coordinates)],
                     source_event_ids: vec![old_assistant.id],
                     discharged_by: Some("test:cross-turn-round".to_string()),
                     function: Some("tool_request/v1".to_string()),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
         .await
         .unwrap();
 
-    let err =
-        persisted_tool_rounds_for_turn(&services, &coordinates, "turn-1", turn_submitted.sequence)
-            .await
-            .unwrap_err();
+    let err = crate::adapters::agent_loop::persisted_tool_rounds_for_turn(
+        &services,
+        &coordinates,
+        "turn-1",
+        turn_submitted.sequence,
+    )
+    .await
+    .unwrap_err();
     assert!(err.to_string().contains("outside the active turn"));
 }
 
 #[tokio::test]
 async fn independent_thread_holds_overlap_results_append_in_call_order_and_finish_is_witnessed() {
-    let tool_provider = Arc::new(FinishSecondFirstToolProvider {
-        second_finished: Notify::new(),
+    let tool_provider = std::sync::Arc::new(FinishSecondFirstToolProvider {
+        second_finished: tokio::sync::Notify::new(),
     });
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_calls(vec![
             (
                 "call-first",
@@ -3399,18 +3580,25 @@ async fn independent_thread_holds_overlap_results_append_in_call_order_and_finis
         ]),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(AgentLoopFactory::new(config, provider_client).with_tool_router(router)),
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+                .with_tool_router(router),
+        ),
         store.clone(),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "hold-overlap"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "hold-overlap"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3426,7 +3614,7 @@ async fn independent_thread_holds_overlap_results_append_in_call_order_and_finis
         .messages
         .iter()
         .filter_map(|message| match message {
-            CanonicalMessage::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            crate::CanonicalMessage::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -3434,14 +3622,14 @@ async fn independent_thread_holds_overlap_results_append_in_call_order_and_finis
 
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap();
     let requests = records
         .iter()
-        .filter(|event| event.kind == EventKind::ToolCallRequested)
+        .filter(|event| event.kind == crate::EventKind::ToolCallRequested)
         .collect::<Vec<_>>();
     assert_eq!(requests.len(), 2);
     assert_eq!(
@@ -3456,7 +3644,7 @@ async fn independent_thread_holds_overlap_results_append_in_call_order_and_finis
     );
     let completed = records
         .iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
         .collect::<Vec<_>>();
     assert_eq!(completed.len(), 2);
     assert_eq!(completed[0].payload["subject"]["call_id"], "call-first");
@@ -3467,12 +3655,13 @@ async fn independent_thread_holds_overlap_results_append_in_call_order_and_finis
 
 #[tokio::test]
 async fn duplicate_model_tool_call_ids_fail_before_the_batch_is_witnessed() {
-    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> =
+        std::sync::Arc::new(ImmediateThreadToolProvider);
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
         vec![
             (
                 "duplicate-call",
@@ -3486,11 +3675,15 @@ async fn duplicate_model_tool_call_ids_fail_before_the_batch_is_witnessed() {
             ),
         ],
     )]));
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 client,
             )
             .with_tool_router(router),
@@ -3499,8 +3692,8 @@ async fn duplicate_model_tool_call_ids_fail_before_the_batch_is_witnessed() {
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "duplicate-tool-call-id"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "duplicate-tool-call-id"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3518,7 +3711,7 @@ async fn duplicate_model_tool_call_ids_fail_before_the_batch_is_witnessed() {
 
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -3526,19 +3719,20 @@ async fn duplicate_model_tool_call_ids_fail_before_the_batch_is_witnessed() {
     assert!(
         records
             .iter()
-            .all(|event| event.kind != EventKind::ToolCallRequested),
+            .all(|event| event.kind != crate::EventKind::ToolCallRequested),
         "an ambiguous batch must fail before request ids become durable"
     );
 }
 
 #[tokio::test]
 async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
-    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> =
+        std::sync::Arc::new(ImmediateThreadToolProvider);
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
         vec![
             (
                 "call-first",
@@ -3552,14 +3746,18 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
             ),
         ],
     )]));
-    let store = Arc::new(PausingRuntimeStore::after_first_append_of(
-        EventKind::ToolCallCompleted,
+    let store = std::sync::Arc::new(PausingRuntimeStore::after_first_append_of(
+        crate::EventKind::ToolCallCompleted,
     ));
-    let pause = Arc::clone(&store.pause);
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let pause = std::sync::Arc::clone(&store.pause);
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 client,
             )
             .with_tool_router(router),
@@ -3568,8 +3766,8 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-tool-commit"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-tool-commit"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3582,9 +3780,12 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
     )
     .await
     .unwrap();
-    timeout(Duration::from_secs(30), pause.wait_until_entered())
-        .await
-        .expect("first completion append did not reach the pause");
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        pause.wait_until_entered(),
+    )
+    .await
+    .expect("first completion append did not reach the pause");
 
     host.cancel(
         thread.context().coordinates.thread_id,
@@ -3594,9 +3795,9 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
     .unwrap();
     assert!(
         // tight-timeout: cancellation must remain absent until the buffered commit is released
-        timeout(Duration::from_millis(100), async {
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), async {
             loop {
-                if let ThreadEvent::Cancelled { .. } = events.recv().await.unwrap() {
+                if let crate::ThreadEvent::Cancelled { .. } = events.recv().await.unwrap() {
                     return;
                 }
             }
@@ -3610,14 +3811,14 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
     assert_cancelled(&mut events, "cancel during commit").await;
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap();
     let completed = records
         .iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
         .map(|event| event.payload["subject"]["call_id"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(completed, vec!["call-first", "call-second"]);
@@ -3626,22 +3827,22 @@ async fn cancellation_waits_for_buffered_call_order_commit_to_finish() {
 #[tokio::test]
 async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "verlet"})),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client;
-    let store = Arc::new(PausingRuntimeStore::after_first_append_of(
-        EventKind::TurnWaiting,
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let store = std::sync::Arc::new(PausingRuntimeStore::after_first_append_of(
+        crate::EventKind::TurnWaiting,
     ));
-    let pause = Arc::clone(&store.pause);
-    let host = RuntimeHost::with_session_store(
+    let pause = std::sync::Arc::clone(&store.pause);
+    let host = crate::RuntimeHost::with_session_store(
         runtime_factory_with_registry(provider_client, registry),
         store.clone(),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-tool-wait"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-tool-wait"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3661,9 +3862,12 @@ async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() 
     host.submit(thread.context().coordinates.thread_id, "turn-1", "wait")
         .await
         .unwrap();
-    timeout(Duration::from_secs(30), pause.wait_until_entered())
-        .await
-        .expect("turn.waiting append did not reach the pause");
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        pause.wait_until_entered(),
+    )
+    .await
+    .expect("turn.waiting append did not reach the pause");
     host.cancel(
         thread.context().coordinates.thread_id,
         "cancel during suspended commit",
@@ -3672,9 +3876,9 @@ async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() 
     .unwrap();
     assert!(
         // tight-timeout: cancellation must remain absent until the suspended commit is released
-        timeout(Duration::from_millis(100), async {
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), async {
             loop {
-                if let ThreadEvent::Cancelled { .. } = events.recv().await.unwrap() {
+                if let crate::ThreadEvent::Cancelled { .. } = events.recv().await.unwrap() {
                     return;
                 }
             }
@@ -3688,7 +3892,7 @@ async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() 
     assert_cancelled(&mut events, "cancel during suspended commit").await;
     let control_records = store
         .read_events(
-            &EventStreamId::new(format!(
+            &crate::EventStreamId::new(format!(
                 "control:{}",
                 thread.context().coordinates.thread_id
             )),
@@ -3699,13 +3903,13 @@ async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() 
     assert_eq!(
         control_records
             .iter()
-            .filter(|event| event.kind == EventKind::TurnWaiting)
+            .filter(|event| event.kind == crate::EventKind::TurnWaiting)
             .count(),
         1
     );
     let thread_records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -3713,18 +3917,19 @@ async fn cancellation_racing_suspended_turn_commit_observes_the_full_boundary() 
     assert!(
         thread_records
             .iter()
-            .all(|event| event.kind != EventKind::ToolCallCompleted)
+            .all(|event| event.kind != crate::EventKind::ToolCallCompleted)
     );
 }
 
 #[tokio::test]
 async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnesses() {
-    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> =
+        std::sync::Arc::new(ImmediateThreadToolProvider);
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
         vec![
             (
                 "call-first",
@@ -3738,14 +3943,18 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
             ),
         ],
     )]));
-    let store = Arc::new(PausingRuntimeStore::after_first_append_of(
-        EventKind::ToolCallRequested,
+    let store = std::sync::Arc::new(PausingRuntimeStore::after_first_append_of(
+        crate::EventKind::ToolCallRequested,
     ));
-    let pause = Arc::clone(&store.pause);
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let pause = std::sync::Arc::clone(&store.pause);
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 client,
             )
             .with_tool_router(router),
@@ -3754,8 +3963,8 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-request-append"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "cancel-during-request-append"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3768,9 +3977,12 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
     )
     .await
     .unwrap();
-    timeout(Duration::from_secs(30), pause.wait_until_entered())
-        .await
-        .expect("request batch append did not reach the pause");
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        pause.wait_until_entered(),
+    )
+    .await
+    .expect("request batch append did not reach the pause");
     host.cancel(
         thread.context().coordinates.thread_id,
         "cancel request append",
@@ -3782,7 +3994,7 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
 
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -3790,37 +4002,38 @@ async fn cancellation_during_atomic_request_append_leaves_all_or_no_batch_witnes
     assert_eq!(
         records
             .iter()
-            .filter(|event| event.kind == EventKind::ToolCallRequested)
+            .filter(|event| event.kind == crate::EventKind::ToolCallRequested)
             .count(),
         2
     );
     let completed = records
         .iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
         .map(|event| {
-            serde_json::from_value::<ToolCallCompletedPayload>(event.payload.clone()).unwrap()
+            serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload.clone())
+                .unwrap()
         })
         .collect::<Vec<_>>();
     assert_eq!(completed.len(), 2);
     assert!(completed.iter().all(|payload| {
         !payload.success
-            && payload.cancellation == Some(ToolCallCancellation::CancelledAcknowledged)
+            && payload.cancellation == Some(crate::ToolCallCancellation::CancelledAcknowledged)
     }));
 }
 
 #[tokio::test]
 async fn conflicting_thread_holds_serialize_in_model_call_order() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let tool_provider = Arc::new(SerialBlockingToolProvider {
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool_provider = std::sync::Arc::new(SerialBlockingToolProvider {
         tool_name: "thread_submit",
         started: started_tx,
-        release_first: Notify::new(),
+        release_first: tokio::sync::Notify::new(),
     });
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider.clone()),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_calls(vec![
             (
                 "call-first",
@@ -3835,16 +4048,21 @@ async fn conflicting_thread_holds_serialize_in_model_call_order() {
         ]),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let host = RuntimeHost::new(Arc::new(
-        AgentLoopFactory::new(config, provider_client).with_tool_router(router),
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+            .with_tool_router(router),
     ));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "hold-serialize"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "hold-serialize"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3858,7 +4076,7 @@ async fn conflicting_thread_holds_serialize_in_model_call_order() {
     .await
     .unwrap();
     assert_eq!(
-        timeout(Duration::from_secs(30), started_rx.recv())
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), started_rx.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -3867,7 +4085,7 @@ async fn conflicting_thread_holds_serialize_in_model_call_order() {
     assert!(started_rx.try_recv().is_err());
     tool_provider.release_first.notify_one();
     assert_eq!(
-        timeout(Duration::from_secs(30), started_rx.recv())
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), started_rx.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -3878,17 +4096,17 @@ async fn conflicting_thread_holds_serialize_in_model_call_order() {
 
 #[tokio::test]
 async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let tool_provider = Arc::new(SerialBlockingToolProvider {
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool_provider = std::sync::Arc::new(SerialBlockingToolProvider {
         tool_name: "bash",
         started: started_tx,
-        release_first: Notify::new(),
+        release_first: tokio::sync::Notify::new(),
     });
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider.clone()),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_calls(vec![
             (
                 "call-first",
@@ -3903,16 +4121,21 @@ async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
         ]),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let host = RuntimeHost::new(Arc::new(
-        AgentLoopFactory::new(config, provider_client).with_tool_router(router),
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+            .with_tool_router(router),
     ));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "bash-hold-serialize"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "bash-hold-serialize"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -3926,7 +4149,7 @@ async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
     .await
     .unwrap();
     assert_eq!(
-        timeout(Duration::from_secs(30), started_rx.recv())
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), started_rx.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -3935,7 +4158,7 @@ async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
     assert!(started_rx.try_recv().is_err());
     tool_provider.release_first.notify_one();
     assert_eq!(
-        timeout(Duration::from_secs(30), started_rx.recv())
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), started_rx.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -3946,12 +4169,13 @@ async fn bash_family_holds_prevent_interleaving_before_the_harness_mutex() {
 
 #[tokio::test]
 async fn suspended_batch_finishes_and_appends_other_members_before_turn_waits() {
-    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> =
+        std::sync::Arc::new(ImmediateThreadToolProvider);
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_tool_calls(
         vec![
             (
                 "call-wait",
@@ -3965,18 +4189,25 @@ async fn suspended_batch_finishes_and_appends_other_members_before_turn_waits() 
             ),
         ],
     )]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(AgentLoopFactory::new(config, provider_client).with_tool_router(router)),
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+                .with_tool_router(router),
+        ),
         store.clone(),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "hold-suspension"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "hold-suspension"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4003,7 +4234,7 @@ async fn suspended_batch_finishes_and_appends_other_members_before_turn_waits() 
     wait_for_thread_event(
         &store,
         &thread.context().coordinates,
-        EventKind::TurnWaiting,
+        crate::EventKind::TurnWaiting,
     )
     .await;
     wait_for_status(&mut status, crate::ThreadStatus::Idle).await;
@@ -4013,7 +4244,7 @@ async fn suspended_batch_finishes_and_appends_other_members_before_turn_waits() 
     assert!(session.messages.iter().any(|message| {
         matches!(
             message,
-            CanonicalMessage::ToolResult {
+            crate::CanonicalMessage::ToolResult {
                 tool_call_id,
                 is_error: false,
                 ..
@@ -4023,19 +4254,20 @@ async fn suspended_batch_finishes_and_appends_other_members_before_turn_waits() 
     assert!(session.messages.iter().all(|message| {
         !matches!(
             message,
-            CanonicalMessage::ToolResult { tool_call_id, .. } if tool_call_id == "call-wait"
+            crate::CanonicalMessage::ToolResult { tool_call_id, .. } if tool_call_id == "call-wait"
         )
     }));
 }
 
 #[tokio::test]
 async fn provider_waits_for_every_suspended_batch_member_before_continuing() {
-    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(ImmediateThreadToolProvider);
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> =
+        std::sync::Arc::new(ImmediateThreadToolProvider);
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_calls(vec![
             (
                 "call-first",
@@ -4050,12 +4282,16 @@ async fn provider_waits_for_every_suspended_batch_member_before_continuing() {
         ]),
         response_text("all suspended calls resumed"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 provider_client,
             )
             .with_tool_router(router),
@@ -4064,8 +4300,8 @@ async fn provider_waits_for_every_suspended_batch_member_before_continuing() {
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "all-tools-suspended"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "all-tools-suspended"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4098,7 +4334,7 @@ async fn provider_waits_for_every_suspended_batch_member_before_continuing() {
     wait_for_thread_event(
         &store,
         &thread.context().coordinates,
-        EventKind::TurnWaiting,
+        crate::EventKind::TurnWaiting,
     )
     .await;
     wait_for_status(&mut status, crate::ThreadStatus::Idle).await;
@@ -4109,7 +4345,7 @@ async fn provider_waits_for_every_suspended_batch_member_before_continuing() {
             "snapshot-controller",
             "turn-1",
             call_id,
-            ToolCallDecisionOutcomePayload::Allow,
+            crate::ToolCallDecisionOutcomePayload::Allow,
         )
         .await;
     }
@@ -4148,12 +4384,13 @@ async fn provider_waits_for_every_suspended_batch_member_before_continuing() {
 
 #[tokio::test]
 async fn failed_tool_call_does_not_cancel_independent_sibling() {
-    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(IsolatedFailureToolProvider);
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> =
+        std::sync::Arc::new(IsolatedFailureToolProvider);
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_calls(vec![
             (
                 "call-fail",
@@ -4168,16 +4405,21 @@ async fn failed_tool_call_does_not_cancel_independent_sibling() {
         ]),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let host = RuntimeHost::new(Arc::new(
-        AgentLoopFactory::new(config, provider_client).with_tool_router(router),
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+            .with_tool_router(router),
     ));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "hold-failure-isolation"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "hold-failure-isolation"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4199,7 +4441,7 @@ async fn failed_tool_call_does_not_cancel_independent_sibling() {
         .messages
         .into_iter()
         .filter_map(|message| match message {
-            CanonicalMessage::ToolResult {
+            crate::CanonicalMessage::ToolResult {
                 tool_call_id,
                 is_error,
                 ..
@@ -4218,12 +4460,13 @@ async fn failed_tool_call_does_not_cancel_independent_sibling() {
 
 #[tokio::test]
 async fn failed_conflicting_tool_releases_its_hold_for_the_next_call() {
-    let tool_provider: Arc<dyn AgentKernelToolProvider> = Arc::new(IsolatedFailureToolProvider);
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> =
+        std::sync::Arc::new(IsolatedFailureToolProvider);
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_calls(vec![
             (
                 "call-fail",
@@ -4238,11 +4481,15 @@ async fn failed_conflicting_tool_releases_its_hold_for_the_next_call() {
         ]),
         response_text("final reply"),
     ]));
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 client,
             )
             .with_tool_router(router),
@@ -4251,8 +4498,8 @@ async fn failed_conflicting_tool_releases_its_hold_for_the_next_call() {
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "hold-error-release"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "hold-error-release"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4272,7 +4519,7 @@ async fn failed_conflicting_tool_releases_its_hold_for_the_next_call() {
         .messages
         .iter()
         .filter_map(|message| match message {
-            CanonicalMessage::ToolResult {
+            crate::CanonicalMessage::ToolResult {
                 tool_call_id,
                 is_error,
                 ..
@@ -4285,24 +4532,24 @@ async fn failed_conflicting_tool_releases_its_hold_for_the_next_call() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_calls() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let (acknowledged_tx, mut acknowledged_rx) = mpsc::unbounded_channel();
-    let acknowledging_provider = Arc::new(CancellationAcknowledgingThreadToolProvider {
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (acknowledged_tx, mut acknowledged_rx) = tokio::sync::mpsc::unbounded_channel();
+    let acknowledging_provider = std::sync::Arc::new(CancellationAcknowledgingThreadToolProvider {
         started: started_tx.clone(),
         acknowledged: acknowledged_tx,
     });
-    let non_observing_provider = Arc::new(NonObservingThreadToolProvider {
+    let non_observing_provider = std::sync::Arc::new(NonObservingThreadToolProvider {
         started: started_tx,
-        released: AtomicBool::new(false),
-        release: Notify::new(),
-        never_launched: AtomicBool::new(true),
+        released: std::sync::atomic::AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
+        never_launched: std::sync::atomic::AtomicBool::new(true),
     });
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(acknowledging_provider)
             .with_kernel_tool_provider(non_observing_provider.clone()),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_calls(vec![
             (
                 "call-acknowledged",
@@ -4322,19 +4569,26 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
         ]),
         response_text("replacement reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client;
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client;
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(AgentLoopFactory::new(config, provider_client).with_tool_router(router)),
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+                .with_tool_router(router),
+        ),
         store.clone(),
     );
     let thread = host
         .start_thread_with_topology_and_metadata(
-            ThreadCoordinates::new("tenant_a", "user_1", "interrupt-tool-batch"),
-            ThreadTopology::root(),
-            BTreeMap::new(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "interrupt-tool-batch"),
+            crate::ThreadTopology::root(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -4354,13 +4608,17 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
     ];
     started.sort();
     assert_eq!(started, vec!["call-acknowledged", "call-exceeded"]);
-    assert!(non_observing_provider.never_launched.load(Ordering::SeqCst));
+    assert!(
+        non_observing_provider
+            .never_launched
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
 
     host.submit_with_mode(
         thread.context().coordinates.thread_id,
         "turn-replacement",
         "replacement",
-        TurnSubmissionMode::Interrupt,
+        crate::TurnSubmissionMode::Interrupt,
     )
     .await
     .unwrap();
@@ -4370,14 +4628,14 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
     );
     tokio::task::yield_now().await;
 
-    tokio::time::advance(Duration::from_millis(99)).await;
+    tokio::time::advance(tokio::time::Duration::from_millis(99)).await;
     tokio::task::yield_now().await;
     assert!(
         !drain_has_cancelled(&mut events),
         "the turn terminal must remain blocked until the configured grace"
     );
 
-    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::time::advance(tokio::time::Duration::from_millis(1)).await;
     let mut saw_cancelled = false;
     for _ in 0..100 {
         tokio::task::yield_now().await;
@@ -4390,14 +4648,14 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
 
     let before_detached_settlement = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap();
     let requests = before_detached_settlement
         .iter()
-        .filter(|event| event.kind == EventKind::ToolCallRequested)
+        .filter(|event| event.kind == crate::EventKind::ToolCallRequested)
         .collect::<Vec<_>>();
     assert_eq!(requests.len(), 3);
     assert!(
@@ -4407,7 +4665,7 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
     );
     let completed_before_release = before_detached_settlement
         .iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
         .map(|event| {
             (
                 event.payload["subject"]["call_id"]
@@ -4439,7 +4697,7 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
     wait_for_tool_completion_count(&store, &thread.context().coordinates, 3).await;
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -4447,7 +4705,7 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
     let exceeded = records
         .iter()
         .find(|event| {
-            event.kind == EventKind::ToolCallCompleted
+            event.kind == crate::EventKind::ToolCallCompleted
                 && event.payload["subject"]["call_id"] == "call-exceeded"
         })
         .expect("detached invocation did not settle its own completion");
@@ -4456,28 +4714,36 @@ async fn interrupt_mid_batch_witnesses_acknowledged_exceeded_and_never_launched_
         serde_json::json!("cancelled_exceeded_grace")
     );
     assert_eq!(exceeded.payload["success"], true);
-    assert!(non_observing_provider.never_launched.load(Ordering::SeqCst));
+    assert!(
+        non_observing_provider
+            .never_launched
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn invocation_panic_after_grace_still_self_settles_exactly_once() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let tool_provider = Arc::new(PanickingAfterGraceToolProvider {
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool_provider = std::sync::Arc::new(PanickingAfterGraceToolProvider {
         started: started_tx,
-        release: Notify::new(),
+        release: tokio::sync::Notify::new(),
     });
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider.clone()),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("thread_status", serde_json::json!({"task_name": "worker"})),
     ]));
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 client,
             )
             .with_tool_router(router),
@@ -4486,8 +4752,8 @@ async fn invocation_panic_after_grace_still_self_settles_exactly_once() {
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "panic-after-grace"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "panic-after-grace"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4504,49 +4770,56 @@ async fn invocation_panic_after_grace_still_self_settles_exactly_once() {
     )
     .await
     .unwrap();
-    tokio::time::advance(Duration::from_millis(100)).await;
+    tokio::time::advance(tokio::time::Duration::from_millis(100)).await;
     assert_cancelled(&mut events, "cancel panicking tool").await;
 
     tool_provider.release.notify_waiters();
     wait_for_tool_completion_count(&store, &thread.context().coordinates, 1).await;
     let completions = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
-        .map(|event| serde_json::from_value::<ToolCallCompletedPayload>(event.payload).unwrap())
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
+        .map(|event| {
+            serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload).unwrap()
+        })
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), 1);
     assert!(!completions[0].success);
     assert_eq!(
         completions[0].cancellation,
-        Some(ToolCallCancellation::CancelledExceededGrace)
+        Some(crate::ToolCallCancellation::CancelledExceededGrace)
     );
 }
 
 #[tokio::test]
 async fn invocation_panic_before_cancellation_is_a_failed_completion() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let tool_provider = Arc::new(PanickingAfterGraceToolProvider {
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool_provider = std::sync::Arc::new(PanickingAfterGraceToolProvider {
         started: started_tx,
-        release: Notify::new(),
+        release: tokio::sync::Notify::new(),
     });
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider.clone()),
     );
-    let client: Arc<dyn ProviderClient> = Arc::new(RecordingClient::with_responses(vec![
-        response_tool_call_named("thread_status", serde_json::json!({"task_name": "worker"})),
-    ]));
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let client: std::sync::Arc<dyn crate::ProviderClient> =
+        std::sync::Arc::new(RecordingClient::with_responses(vec![
+            response_tool_call_named("thread_status", serde_json::json!({"task_name": "worker"})),
+        ]));
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 client,
             )
             .with_tool_router(router),
@@ -4555,8 +4828,8 @@ async fn invocation_panic_before_cancellation_is_a_failed_completion() {
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "panic-before-cancel"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "panic-before-cancel"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4570,14 +4843,16 @@ async fn invocation_panic_before_cancellation_is_a_failed_completion() {
 
     let completion = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == EventKind::ToolCallCompleted)
-        .map(|event| serde_json::from_value::<ToolCallCompletedPayload>(event.payload).unwrap())
+        .find(|event| event.kind == crate::EventKind::ToolCallCompleted)
+        .map(|event| {
+            serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload).unwrap()
+        })
         .unwrap();
     assert!(!completion.success);
     assert_eq!(completion.cancellation, None);
@@ -4586,26 +4861,32 @@ async fn invocation_panic_before_cancellation_is_a_failed_completion() {
 
 #[tokio::test]
 async fn monitor_panic_after_settlement_recovers_one_completion() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let (acknowledged_tx, mut acknowledged_rx) = mpsc::unbounded_channel();
-    let tool_provider: Arc<dyn AgentKernelToolProvider> =
-        Arc::new(CancellationAcknowledgingThreadToolProvider {
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (acknowledged_tx, mut acknowledged_rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> =
+        std::sync::Arc::new(CancellationAcknowledgingThreadToolProvider {
             started: started_tx,
             acknowledged: acknowledged_tx,
         });
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("thread_submit", serde_json::json!({"task_name": "worker"})),
     ]));
-    let inner = Arc::new(InMemorySessionStore::new());
-    let store = Arc::new(FaultingRuntimeStore::new(inner.clone()));
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let inner = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let store = std::sync::Arc::new(crate::test_support::FaultingRuntimeStore::new(
+        inner.clone(),
+    ));
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 client,
             )
             .with_tool_router(router),
@@ -4614,8 +4895,8 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "monitor-panic"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "monitor-panic"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -4628,7 +4909,7 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
     )
     .await
     .unwrap();
-    timeout(Duration::from_secs(30), started_rx.recv())
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), started_rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -4639,7 +4920,7 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
     )
     .await
     .unwrap();
-    timeout(Duration::from_secs(30), acknowledged_rx.recv())
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), acknowledged_rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -4647,7 +4928,7 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
 
     let records = inner
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -4656,7 +4937,7 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
         records
             .iter()
             .filter(|event| {
-                event.kind == EventKind::ToolCallCompleted
+                event.kind == crate::EventKind::ToolCallCompleted
                     && event.payload["subject"]["call_id"] == "call_1|fc_1"
             })
             .count(),
@@ -4672,7 +4953,7 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
             .iter()
             .filter(|message| matches!(
                 message,
-                CanonicalMessage::ToolResult { tool_call_id, .. }
+                crate::CanonicalMessage::ToolResult { tool_call_id, .. }
                     if tool_call_id == "call_1|fc_1"
             ))
             .count(),
@@ -4683,8 +4964,8 @@ async fn monitor_panic_after_settlement_recovers_one_completion() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failure() {
     for fail_after_append in [false, true] {
-        let inner = Arc::new(InMemorySessionStore::new());
-        let coordinates = ThreadCoordinates::new(
+        let inner = std::sync::Arc::new(crate::InMemorySessionStore::new());
+        let coordinates = crate::ThreadCoordinates::new(
             "tenant_a",
             "user_1",
             if fail_after_append {
@@ -4695,12 +4976,12 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
         );
         let request = inner
             .append_events(
-                &EventStreamId::for_thread(&coordinates),
-                vec![NewEventRecord::discharged(
+                &crate::EventStreamId::for_thread(&coordinates),
+                vec![crate::NewEventRecord::discharged(
                     coordinates.clone(),
-                    EventKind::ToolCallRequested,
-                    serde_json::to_value(ToolCallRequestedPayload {
-                        subject: ToolCallSubject {
+                    crate::EventKind::ToolCallRequested,
+                    serde_json::to_value(crate::ToolCallRequestedPayload {
+                        subject: crate::ToolCallSubject {
                             turn_id: "turn-1".to_string(),
                             call_id: "call-1".to_string(),
                         },
@@ -4711,11 +4992,11 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
                         holds: Vec::new(),
                     })
                     .unwrap(),
-                    EventProvenance {
-                        source_streams: vec![EventStreamId::for_thread(&coordinates)],
+                    crate::EventProvenance {
+                        source_streams: vec![crate::EventStreamId::for_thread(&coordinates)],
                         discharged_by: Some("test:detached-retry".to_string()),
                         function: Some("tool_request/v1".to_string()),
-                        ..EventProvenance::default()
+                        ..crate::EventProvenance::default()
                     },
                 )],
             )
@@ -4725,10 +5006,10 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
             .unwrap();
         inner
             .append_events(
-                &EventStreamId::for_thread(&coordinates),
-                vec![NewEventRecord::witnessed(
+                &crate::EventStreamId::for_thread(&coordinates),
+                vec![crate::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::ToolCallCompleted,
+                    crate::EventKind::ToolCallCompleted,
                     serde_json::json!({
                         "subject": {"turn_id": "unrelated-turn"},
                         "malformed": true
@@ -4737,7 +5018,7 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
             )
             .await
             .unwrap();
-        let faulting = FaultingRuntimeStore::new(inner.clone());
+        let faulting = crate::test_support::FaultingRuntimeStore::new(inner.clone());
         let faulting = if fail_after_append {
             faulting.fail_nth_after(
                 "append_events_fenced",
@@ -4751,45 +5032,50 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
                 "completion append failed before commit",
             )
         };
-        let services = RuntimeServices::new(Arc::new(faulting), RuntimeExecutionPolicy::default());
-        let turn_context = TurnContext::new(
-            ThreadContext::root(coordinates.clone()),
-            "turn-1",
-            &TurnInput::text(""),
-            CancellationToken::new(),
+        let services = crate::RuntimeServices::new(
+            std::sync::Arc::new(faulting),
+            crate::RuntimeExecutionPolicy::default(),
         );
-        let (events, mut event_rx) = broadcast::channel(16);
+        let turn_context = crate::TurnContext::new(
+            crate::ThreadContext::root(coordinates.clone()),
+            "turn-1",
+            &crate::TurnInput::text(""),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let (events, mut event_rx) = tokio::sync::broadcast::channel(16);
         let append = tokio::spawn({
             let services = services.clone();
             let turn_context = turn_context.clone();
             async move {
-                append_detached_tool_call_outcome_until_recorded(
+                crate::adapters::agent_loop::append_detached_tool_call_outcome_until_recorded(
                     &services,
                     &turn_context,
                     coordinates.thread_id,
                     &events,
-                    Ok(PreparedToolCallOutcome::Completed {
-                        call_id: "call-1".to_string(),
-                        tool_name: "thread_status".to_string(),
-                        snapshot_id: "snapshot-1".to_string(),
-                        args_fingerprint: None,
-                        source_event_id: request.id,
-                        finish_order: 0,
-                        cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
-                        outcome: Box::new(ToolExecutionOutcome {
-                            result: CanonicalMessage::tool_result(
-                                "call-1",
-                                "thread_status",
-                                "cancelled after grace",
-                                true,
-                            ),
-                            hook_records: Vec::new(),
-                            pre_model_contexts: Vec::new(),
-                            post_model_contexts: Vec::new(),
-                            permission_decision: None,
-                            duration_ms: 0,
-                        }),
-                    }),
+                    Ok(
+                        crate::adapters::agent_loop::PreparedToolCallOutcome::Completed {
+                            call_id: "call-1".to_string(),
+                            tool_name: "thread_status".to_string(),
+                            snapshot_id: "snapshot-1".to_string(),
+                            args_fingerprint: None,
+                            source_event_id: request.id,
+                            finish_order: 0,
+                            cancellation: Some(crate::ToolCallCancellation::CancelledExceededGrace),
+                            outcome: Box::new(crate::ToolExecutionOutcome {
+                                result: crate::CanonicalMessage::tool_result(
+                                    "call-1",
+                                    "thread_status",
+                                    "cancelled after grace",
+                                    true,
+                                ),
+                                hook_records: Vec::new(),
+                                pre_model_contexts: Vec::new(),
+                                post_model_contexts: Vec::new(),
+                                permission_decision: None,
+                                duration_ms: 0,
+                            }),
+                        },
+                    ),
                 )
                 .await;
             }
@@ -4797,9 +5083,9 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
         loop {
             if matches!(
                 event_rx.recv().await.unwrap(),
-                ThreadEvent::Runtime {
-                    event: RuntimeEvent {
-                        kind: RuntimeEventKind::Recovery { ref action, .. },
+                crate::ThreadEvent::Runtime {
+                    event: crate::RuntimeEvent {
+                        kind: crate::RuntimeEventKind::Recovery { ref action, .. },
                         ..
                     },
                     ..
@@ -4808,16 +5094,16 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
                 break;
             }
         }
-        tokio::time::advance(DETACHED_COMPLETION_RETRY_DELAY).await;
+        tokio::time::advance(crate::adapters::agent_loop::DETACHED_COMPLETION_RETRY_DELAY).await;
         append.await.unwrap();
 
         let completions = inner
-            .read_events(&EventStreamId::for_thread(&coordinates), None)
+            .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
             .await
             .unwrap()
             .into_iter()
             .filter(|event| {
-                event.kind == EventKind::ToolCallCompleted
+                event.kind == crate::EventKind::ToolCallCompleted
                     && event.payload["subject"]["turn_id"] == "turn-1"
                     && event.payload["subject"]["call_id"] == "call-1"
             })
@@ -4831,8 +5117,8 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
             .filter(|entry| {
                 matches!(
                     &entry.kind,
-                    SessionEntryKind::Message {
-                        message: CanonicalMessage::ToolResult { tool_call_id, .. }
+                    crate::SessionEntryKind::Message {
+                        message: crate::CanonicalMessage::ToolResult { tool_call_id, .. }
                     } if tool_call_id == "call-1"
                 )
             })
@@ -4844,8 +5130,9 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
 
 #[tokio::test]
 async fn result_append_commits_before_its_completion_event() {
-    let inner = Arc::new(InMemorySessionStore::new());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "result-before-completion");
+    let inner = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let coordinates =
+        crate::ThreadCoordinates::new("tenant_a", "user_1", "result-before-completion");
     let request = append_recovery_request(
         inner.as_ref(),
         &coordinates,
@@ -4853,16 +5140,18 @@ async fn result_append_commits_before_its_completion_event() {
     )
     .await;
     let payload =
-        serde_json::from_value::<ToolCallRequestedPayload>(request.payload.clone()).unwrap();
-    let faulting = Arc::new(FaultingRuntimeStore::new(inner.clone()).fail_nth(
-        "append_events_fenced",
-        1,
-        "completion append failed before commit",
-    ));
-    let services = RuntimeServices::new(faulting, RuntimeExecutionPolicy::default());
-    let (events, _) = broadcast::channel(8);
+        serde_json::from_value::<crate::ToolCallRequestedPayload>(request.payload.clone()).unwrap();
+    let faulting = std::sync::Arc::new(
+        crate::test_support::FaultingRuntimeStore::new(inner.clone()).fail_nth(
+            "append_events_fenced",
+            1,
+            "completion append failed before commit",
+        ),
+    );
+    let services = crate::RuntimeServices::new(faulting, crate::RuntimeExecutionPolicy::default());
+    let (events, _) = tokio::sync::broadcast::channel(8);
 
-    let err = append_tool_result_message(
+    let err = crate::adapters::agent_loop::append_tool_result_message(
         &services,
         &coordinates,
         coordinates.thread_id,
@@ -4872,7 +5161,12 @@ async fn result_append_commits_before_its_completion_event() {
         "turn-recovery".to_string(),
         "snapshot-recovery".to_string(),
         payload.args_fingerprint,
-        CanonicalMessage::tool_result("call-recovery", "recovery_tool", "persisted first", false),
+        crate::CanonicalMessage::tool_result(
+            "call-recovery",
+            "recovery_tool",
+            "persisted first",
+            false,
+        ),
         Some(1),
         Some(0),
         None,
@@ -4887,13 +5181,13 @@ async fn result_append_commits_before_its_completion_event() {
     );
 
     let records = inner
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
         .await
         .unwrap();
     assert!(
         records
             .iter()
-            .all(|event| event.kind != EventKind::ToolCallCompleted)
+            .all(|event| event.kind != crate::EventKind::ToolCallCompleted)
     );
     assert!(
         inner
@@ -4904,7 +5198,7 @@ async fn result_append_commits_before_its_completion_event() {
             .iter()
             .any(|message| matches!(
                 message,
-                CanonicalMessage::ToolResult { tool_call_id, .. }
+                crate::CanonicalMessage::ToolResult { tool_call_id, .. }
                     if tool_call_id == "call-recovery"
             ))
     );
@@ -4912,17 +5206,19 @@ async fn result_append_commits_before_its_completion_event() {
 
 #[tokio::test]
 async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "legacy-completion-collision");
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let services =
+        crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
+    let coordinates =
+        crate::ThreadCoordinates::new("tenant_a", "user_1", "legacy-completion-collision");
     let legacy_request = store
         .append_events(
-            &EventStreamId::for_thread(&coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(&coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::ToolCallRequested,
-                serde_json::to_value(ToolCallRequestedPayload {
-                    subject: ToolCallSubject {
+                crate::EventKind::ToolCallRequested,
+                serde_json::to_value(crate::ToolCallRequestedPayload {
+                    subject: crate::ToolCallSubject {
                         turn_id: "turn-recovery".to_string(),
                         call_id: "call-recovery".to_string(),
                     },
@@ -4939,7 +5235,7 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
         .unwrap()
         .pop()
         .unwrap();
-    append_tool_completion_event(
+    crate::adapters::agent_loop::append_tool_completion_event(
         &services,
         &coordinates,
         "turn-recovery".to_string(),
@@ -4961,12 +5257,12 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
     )
     .await;
     let current_payload =
-        serde_json::from_value::<ToolCallRequestedPayload>(current.payload.clone()).unwrap();
+        serde_json::from_value::<crate::ToolCallRequestedPayload>(current.payload.clone()).unwrap();
     let current_fingerprint = current_payload.args_fingerprint.clone().unwrap();
-    let (events, _) = broadcast::channel(8);
+    let (events, _) = tokio::sync::broadcast::channel(8);
 
     assert!(
-        !matching_tool_call_completed_exists(
+        !crate::adapters::agent_loop::matching_tool_call_completed_exists(
             &services,
             &coordinates,
             "turn-recovery",
@@ -4979,7 +5275,7 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
         "a legacy completion must not terminate a new fingerprinted generation"
     );
 
-    append_tool_result_message(
+    crate::adapters::agent_loop::append_tool_result_message(
         &services,
         &coordinates,
         coordinates.thread_id,
@@ -4989,7 +5285,12 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
         "turn-recovery".to_string(),
         "snapshot-recovery".to_string(),
         current_payload.args_fingerprint,
-        CanonicalMessage::tool_result("call-recovery", "recovery_tool", "current result", false),
+        crate::CanonicalMessage::tool_result(
+            "call-recovery",
+            "recovery_tool",
+            "current result",
+            false,
+        ),
         Some(1),
         Some(1),
         None,
@@ -5000,12 +5301,14 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
     .unwrap();
 
     let completions = store
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
         .await
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
-        .map(|event| serde_json::from_value::<ToolCallCompletedPayload>(event.payload).unwrap())
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
+        .map(|event| {
+            serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload).unwrap()
+        })
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), 2);
     assert!(
@@ -5014,7 +5317,7 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
             .any(|completion| completion.args_fingerprint.as_deref() == Some(&current_fingerprint))
     );
     assert!(
-        matching_tool_call_completed_exists(
+        crate::adapters::agent_loop::matching_tool_call_completed_exists(
             &services,
             &coordinates,
             "turn-recovery",
@@ -5027,7 +5330,7 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
         "the exact completion must terminate the current generation"
     );
     assert!(
-        existing_tool_result_message(
+        crate::adapters::agent_loop::existing_tool_result_message(
             &services,
             &coordinates,
             current.id,
@@ -5044,11 +5347,12 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
 
 #[tokio::test]
 async fn completion_append_is_subject_idempotent_under_concurrency() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "completion-race");
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let services =
+        crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "completion-race");
     let append = || {
-        append_tool_completion_event(
+        crate::adapters::agent_loop::append_tool_completion_event(
             &services,
             &coordinates,
             "turn-1".to_string(),
@@ -5059,7 +5363,7 @@ async fn completion_append_is_subject_idempotent_under_concurrency() {
             false,
             Some(0),
             Some(0),
-            Some(ToolCallCancellation::CancelledExceededGrace),
+            Some(crate::ToolCallCancellation::CancelledExceededGrace),
         )
     };
 
@@ -5068,26 +5372,28 @@ async fn completion_append_is_subject_idempotent_under_concurrency() {
     right.unwrap();
 
     let completions = store
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(&crate::EventStreamId::for_thread(&coordinates), None)
         .await
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
         .count();
     assert_eq!(completions, 1);
 }
 
 #[tokio::test]
 async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_window() {
-    let store = Arc::new(InMemorySessionStore::new());
-    let parent_coordinates = ThreadCoordinates::new("tenant_a", "user_1", "cancel-sweep-parent");
-    let child_coordinates = ThreadCoordinates::new("tenant_a", "user_1", "cancel-sweep-child");
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let parent_coordinates =
+        crate::ThreadCoordinates::new("tenant_a", "user_1", "cancel-sweep-parent");
+    let child_coordinates =
+        crate::ThreadCoordinates::new("tenant_a", "user_1", "cancel-sweep-child");
     let turn_submitted = store
         .append_events(
-            &EventStreamId::for_thread(&child_coordinates),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::for_thread(&child_coordinates),
+            vec![crate::NewEventRecord::witnessed(
                 child_coordinates.clone(),
-                EventKind::TurnSubmitted,
+                crate::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id": "turn-cancelled"}),
             )],
         )
@@ -5095,13 +5401,14 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .unwrap()
         .pop()
         .unwrap();
-    let request = |call_id: &str, arguments: Value| {
-        let fingerprint = args_fingerprint("thread_status", &arguments).unwrap();
-        NewEventRecord::discharged(
+    let request = |call_id: &str, arguments: serde_json::Value| {
+        let fingerprint =
+            crate::agent::tool_universe::args_fingerprint("thread_status", &arguments).unwrap();
+        crate::NewEventRecord::discharged(
             child_coordinates.clone(),
-            EventKind::ToolCallRequested,
-            serde_json::to_value(ToolCallRequestedPayload {
-                subject: ToolCallSubject {
+            crate::EventKind::ToolCallRequested,
+            serde_json::to_value(crate::ToolCallRequestedPayload {
+                subject: crate::ToolCallSubject {
                     turn_id: "turn-cancelled".to_string(),
                     call_id: call_id.to_string(),
                 },
@@ -5112,18 +5419,18 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
                 holds: Vec::new(),
             })
             .unwrap(),
-            EventProvenance {
-                source_streams: vec![EventStreamId::for_thread(&child_coordinates)],
+            crate::EventProvenance {
+                source_streams: vec![crate::EventStreamId::for_thread(&child_coordinates)],
                 source_event_ids: vec![turn_submitted.id],
                 discharged_by: Some("test:cancel-sweep".to_string()),
                 function: Some("tool_request/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         )
     };
     let requests = store
         .append_events(
-            &EventStreamId::for_thread(&child_coordinates),
+            &crate::EventStreamId::for_thread(&child_coordinates),
             vec![
                 request("call-dangling", serde_json::json!({"task_name": "old"})),
                 request("call-dangling", serde_json::json!({"task_name": "new"})),
@@ -5139,46 +5446,46 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .append_with_provenance(
             &child_coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::tool_result(
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::tool_result(
                     "call-dangling",
                     "thread_status",
                     "result persisted before the completion fact",
                     false,
                 ),
             },
-            EventProvenance {
-                source_streams: vec![EventStreamId::for_thread(&child_coordinates)],
+            crate::EventProvenance {
+                source_streams: vec![crate::EventStreamId::for_thread(&child_coordinates)],
                 source_event_ids: vec![requests[0].id],
                 discharged_by: Some("test:partial-detached-append".to_string()),
                 function: Some("session_entry_append/v1".to_string()),
-                ..EventProvenance::default()
+                ..crate::EventProvenance::default()
             },
         )
         .await
         .unwrap();
     store
         .append_events(
-            &EventStreamId::new(format!("control:{}", parent_coordinates.thread_id)),
+            &crate::EventStreamId::new(format!("control:{}", parent_coordinates.thread_id)),
             vec![
-                NewEventRecord::witnessed(
+                crate::NewEventRecord::witnessed(
                     parent_coordinates.clone(),
-                    EventKind::ThreadJoined,
+                    crate::EventKind::ThreadJoined,
                     serde_json::json!({"malformed": "unrelated legacy join"}),
                 ),
-                NewEventRecord::discharged(
+                crate::NewEventRecord::discharged(
                     parent_coordinates.clone(),
-                    EventKind::ThreadJoined,
+                    crate::EventKind::ThreadJoined,
                     serde_json::json!({
                         "child_thread_id": child_coordinates.thread_id,
                         "terminal_state": "cancelled"
                     }),
-                    EventProvenance {
-                        source_streams: vec![EventStreamId::for_thread(&child_coordinates)],
+                    crate::EventProvenance {
+                        source_streams: vec![crate::EventStreamId::for_thread(&child_coordinates)],
                         source_event_ids: vec![turn_submitted.id],
                         discharged_by: Some("test:interrupt".to_string()),
                         function: Some("thread_join/v1".to_string()),
-                        ..EventProvenance::default()
+                        ..crate::EventProvenance::default()
                     },
                 ),
             ],
@@ -5187,34 +5494,34 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .unwrap();
     store
         .append_events(
-            &EventStreamId::for_thread(&child_coordinates),
-            vec![NewEventRecord::discharged(
+            &crate::EventStreamId::for_thread(&child_coordinates),
+            vec![crate::NewEventRecord::discharged(
                 child_coordinates.clone(),
-                EventKind::ToolCallCompleted,
-                serde_json::to_value(ToolCallCompletedPayload {
-                    subject: ToolCallSubject {
+                crate::EventKind::ToolCallCompleted,
+                serde_json::to_value(crate::ToolCallCompletedPayload {
+                    subject: crate::ToolCallSubject {
                         turn_id: "turn-cancelled".to_string(),
                         call_id: "call-already-completed".to_string(),
                     },
                     snapshot_id: "snapshot-cancelled".to_string(),
                     tool_name: "thread_status".to_string(),
                     success: true,
-                    args_fingerprint: serde_json::from_value::<ToolCallRequestedPayload>(
+                    args_fingerprint: serde_json::from_value::<crate::ToolCallRequestedPayload>(
                         requests[2].payload.clone(),
                     )
                     .unwrap()
                     .args_fingerprint,
                     duration_ms: Some(7),
                     finish_order: Some(4),
-                    cancellation: Some(ToolCallCancellation::CancelledExceededGrace),
+                    cancellation: Some(crate::ToolCallCancellation::CancelledExceededGrace),
                 })
                 .unwrap(),
-                EventProvenance {
-                    source_streams: vec![EventStreamId::for_thread(&child_coordinates)],
+                crate::EventProvenance {
+                    source_streams: vec![crate::EventStreamId::for_thread(&child_coordinates)],
                     source_event_ids: vec![requests[2].id],
                     discharged_by: Some("test:late-detached-completion".to_string()),
                     function: Some("tool_result/v1".to_string()),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
@@ -5222,19 +5529,19 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .unwrap();
     store
         .append_events(
-            &EventStreamId::for_thread(&child_coordinates),
+            &crate::EventStreamId::for_thread(&child_coordinates),
             vec![
-                NewEventRecord::witnessed(
+                crate::NewEventRecord::witnessed(
                     child_coordinates.clone(),
-                    EventKind::ToolCallRequested,
+                    crate::EventKind::ToolCallRequested,
                     serde_json::json!({
                         "subject": {"turn_id": "unrelated-turn"},
                         "malformed": true
                     }),
                 ),
-                NewEventRecord::witnessed(
+                crate::NewEventRecord::witnessed(
                     child_coordinates.clone(),
-                    EventKind::ToolCallCompleted,
+                    crate::EventKind::ToolCallCompleted,
                     serde_json::json!({
                         "subject": {"turn_id": "unrelated-turn"},
                         "malformed": true
@@ -5245,10 +5552,15 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .await
         .unwrap();
 
-    let client: Arc<dyn ProviderClient> = Arc::new(RecordingClient::default());
-    let host = RuntimeHost::with_session_store(
-        Arc::new(AgentLoopFactory::new(
-            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let client: std::sync::Arc<dyn crate::ProviderClient> =
+        std::sync::Arc::new(RecordingClient::default());
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(crate::adapters::agent_loop::AgentLoopFactory::new(
+            crate::adapters::agent_loop::AgentLoopConfig::new(
+                crate::ProviderApi::OpenAIResponses,
+                "openai",
+                "gpt-test",
+            ),
             client,
         )),
         store.clone(),
@@ -5256,20 +5568,22 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
     let child = host
         .load_thread_with_topology_and_metadata(
             child_coordinates.clone(),
-            ThreadTopology::spawned_from(parent_coordinates.thread_id),
-            BTreeMap::new(),
+            crate::ThreadTopology::spawned_from(parent_coordinates.thread_id),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
     wait_for_tool_completion_count(&store, &child_coordinates, 3).await;
 
     let completed = store
-        .read_events(&EventStreamId::for_thread(&child_coordinates), None)
+        .read_events(&crate::EventStreamId::for_thread(&child_coordinates), None)
         .await
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == EventKind::ToolCallCompleted)
-        .filter_map(|event| serde_json::from_value::<ToolCallCompletedPayload>(event.payload).ok())
+        .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
+        .filter_map(|event| {
+            serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload).ok()
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         completed.len(),
@@ -5282,11 +5596,12 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
         .unwrap();
     assert!(!recovered.success);
     let latest_request =
-        serde_json::from_value::<ToolCallRequestedPayload>(requests[1].payload.clone()).unwrap();
+        serde_json::from_value::<crate::ToolCallRequestedPayload>(requests[1].payload.clone())
+            .unwrap();
     assert_eq!(recovered.args_fingerprint, latest_request.args_fingerprint);
     assert_eq!(
         recovered.cancellation,
-        Some(ToolCallCancellation::CancelledExceededGrace)
+        Some(crate::ToolCallCancellation::CancelledExceededGrace)
     );
     assert_eq!(recovered.finish_order, Some(5));
     assert_eq!(
@@ -5298,7 +5613,7 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
             .iter()
             .filter(|message| matches!(
                 message,
-                CanonicalMessage::ToolResult { tool_call_id, .. }
+                crate::CanonicalMessage::ToolResult { tool_call_id, .. }
                     if tool_call_id == "call-dangling"
             ))
             .count(),
@@ -5312,20 +5627,20 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
 #[tokio::test]
 async fn runtime_persists_tool_request_and_completion_facts() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "verlet"})),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
         runtime_factory_with_registry(provider_client, registry),
         store.clone(),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -5338,7 +5653,7 @@ async fn runtime_persists_tool_request_and_completion_facts() {
 
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -5346,7 +5661,7 @@ async fn runtime_persists_tool_request_and_completion_facts() {
     let submitted = records
         .iter()
         .find(|event| {
-            event.kind == EventKind::TurnSubmitted
+            event.kind == crate::EventKind::TurnSubmitted
                 && event.origin == crate::EventOrigin::Witnessed
                 && event.payload["turn_id"].as_str() == Some("turn-1")
         })
@@ -5354,7 +5669,7 @@ async fn runtime_persists_tool_request_and_completion_facts() {
     let assistant_session_entry = records
         .iter()
         .find(|event| {
-            event.kind == EventKind::SessionEntryAppended
+            event.kind == crate::EventKind::SessionEntryAppended
                 && event.origin == crate::EventOrigin::Discharged
                 && event.provenance.source_event_ids == vec![submitted.id]
         })
@@ -5362,7 +5677,7 @@ async fn runtime_persists_tool_request_and_completion_facts() {
     assert_ne!(assistant_session_entry.id, submitted.id);
     let request = records
         .iter()
-        .find(|event| event.kind == EventKind::ToolCallRequested)
+        .find(|event| event.kind == crate::EventKind::ToolCallRequested)
         .expect("tool call request should be durable");
     assert_eq!(request.origin, crate::EventOrigin::Discharged);
     assert_eq!(request.payload["tool_name"].as_str(), Some("echo_search"));
@@ -5370,7 +5685,11 @@ async fn runtime_persists_tool_request_and_completion_facts() {
     assert_eq!(
         request.payload["args_fingerprint"],
         serde_json::json!(
-            args_fingerprint("echo_search", &serde_json::json!({"input": "verlet"})).unwrap()
+            crate::agent::tool_universe::args_fingerprint(
+                "echo_search",
+                &serde_json::json!({"input": "verlet"})
+            )
+            .unwrap()
         )
     );
     assert_eq!(
@@ -5386,13 +5705,13 @@ async fn runtime_persists_tool_request_and_completion_facts() {
         "tool requests should point back to the assistant session entry"
     );
     assert!(records.iter().any(|event| {
-        event.kind == EventKind::SessionEntryAppended
+        event.kind == crate::EventKind::SessionEntryAppended
             && event.origin == crate::EventOrigin::Discharged
             && event.provenance.source_event_ids == vec![request.id]
     }));
     let completed = records
         .iter()
-        .find(|event| event.kind == EventKind::ToolCallCompleted)
+        .find(|event| event.kind == crate::EventKind::ToolCallCompleted)
         .expect("tool completion should be durable");
     assert_eq!(completed.origin, crate::EventOrigin::Witnessed);
     assert_eq!(completed.payload["tool_name"].as_str(), Some("echo_search"));
@@ -5402,7 +5721,7 @@ async fn runtime_persists_tool_request_and_completion_facts() {
         request.payload["args_fingerprint"]
     );
     assert!(records.iter().any(|event| {
-        event.kind == EventKind::TurnCompleted
+        event.kind == crate::EventKind::TurnCompleted
             && event.origin == crate::EventOrigin::Discharged
             && event.payload["turn_id"].as_str() == Some("turn-1")
             && !event.provenance.source_event_ids.is_empty()
@@ -5412,20 +5731,20 @@ async fn runtime_persists_tool_request_and_completion_facts() {
 #[tokio::test]
 async fn bound_tool_controller_without_terminal_fact_denies_fail_closed() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "verlet"})),
         response_text("handled denial"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
         runtime_factory_with_registry(provider_client, registry),
         store.clone(),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -5441,7 +5760,7 @@ async fn bound_tool_controller_without_terminal_fact_denies_fail_closed() {
     assert_eq!(requests.len(), 2);
     assert!(matches!(
         &requests[1].messages[2],
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             tool_name,
             content,
             is_error: true,
@@ -5452,20 +5771,20 @@ async fn bound_tool_controller_without_terminal_fact_denies_fail_closed() {
     ));
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap();
     let completed = records
         .iter()
-        .find(|event| event.kind == EventKind::ToolCallCompleted)
+        .find(|event| event.kind == crate::EventKind::ToolCallCompleted)
         .expect("denial should still write a terminal tool result fact");
     assert_eq!(completed.payload["success"].as_bool(), Some(false));
     assert!(
         records
             .iter()
-            .any(|event| event.kind == EventKind::ToolCallRequested)
+            .any(|event| event.kind == crate::EventKind::ToolCallRequested)
     );
     assert!(
         !text_messages(&thread.session_context().await.unwrap().messages)
@@ -5478,20 +5797,20 @@ async fn bound_tool_controller_without_terminal_fact_denies_fail_closed() {
 #[tokio::test]
 async fn witnessed_tool_suspension_pauses_turn_without_invoking_tool() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "verlet"})),
         response_text("should not be requested"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
         runtime_factory_with_registry(provider_client, registry),
         store.clone(),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -5513,7 +5832,7 @@ async fn witnessed_tool_suspension_pauses_turn_without_invoking_tool() {
     wait_for_thread_event(
         &store,
         &thread.context().coordinates,
-        EventKind::TurnWaiting,
+        crate::EventKind::TurnWaiting,
     )
     .await;
     wait_for_status(&mut status, crate::ThreadStatus::Idle).await;
@@ -5526,7 +5845,7 @@ async fn witnessed_tool_suspension_pauses_turn_without_invoking_tool() {
     );
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -5534,17 +5853,17 @@ async fn witnessed_tool_suspension_pauses_turn_without_invoking_tool() {
     assert!(
         records
             .iter()
-            .any(|event| event.kind == EventKind::ToolCallRequested)
+            .any(|event| event.kind == crate::EventKind::ToolCallRequested)
     );
     assert!(
         records
             .iter()
-            .all(|event| event.kind != EventKind::ToolCallCompleted)
+            .all(|event| event.kind != crate::EventKind::ToolCallCompleted)
     );
     assert!(
         records
             .iter()
-            .all(|event| event.kind != EventKind::TurnCompleted)
+            .all(|event| event.kind != crate::EventKind::TurnCompleted)
     );
     let pending =
         crate::list_pending_tool_call_suspensions(store.as_ref(), &thread.context().coordinates)
@@ -5557,20 +5876,20 @@ async fn witnessed_tool_suspension_pauses_turn_without_invoking_tool() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn resume_tool_call_consumes_decision_and_invokes_once() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "verlet"})),
         response_text("resumed final"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
         runtime_factory_with_registry(provider_client, registry),
         store.clone(),
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -5592,7 +5911,7 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
     wait_for_thread_event(
         &store,
         &thread.context().coordinates,
-        EventKind::TurnWaiting,
+        crate::EventKind::TurnWaiting,
     )
     .await;
     append_witnessed_tool_decision(
@@ -5601,7 +5920,7 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
         "snapshot-controller",
         "turn-1",
         "call_1|fc_1",
-        ToolCallDecisionOutcomePayload::Allow,
+        crate::ToolCallDecisionOutcomePayload::Allow,
     )
     .await;
     host.resume_tool_call(
@@ -5617,7 +5936,7 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
     assert_eq!(requests.len(), 2);
     assert!(matches!(
         &requests[1].messages[2],
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             tool_call_id,
             tool_name,
             content,
@@ -5629,14 +5948,14 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
     ));
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
         .unwrap();
     let request = records
         .iter()
-        .find(|event| event.kind == EventKind::ToolCallRequested)
+        .find(|event| event.kind == crate::EventKind::ToolCallRequested)
         .expect("resumed call request");
     assert_eq!(
         request.payload["holds"],
@@ -5644,14 +5963,15 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
     );
     let completion = records
         .iter()
-        .find(|event| event.kind == EventKind::ToolCallCompleted)
+        .find(|event| event.kind == crate::EventKind::ToolCallCompleted)
         .expect("resumed call completion");
     assert_eq!(completion.payload["finish_order"], 0);
     let request_payload =
-        serde_json::from_value::<ToolCallRequestedPayload>(request.payload.clone()).unwrap();
-    let services = RuntimeServices::new(store.clone(), RuntimeExecutionPolicy::default());
+        serde_json::from_value::<crate::ToolCallRequestedPayload>(request.payload.clone()).unwrap();
+    let services =
+        crate::RuntimeServices::new(store.clone(), crate::RuntimeExecutionPolicy::default());
     assert!(
-        existing_tool_result_message(
+        crate::adapters::agent_loop::existing_tool_result_message(
             &services,
             &thread.context().coordinates,
             request.id,
@@ -5667,11 +5987,11 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
     assert!(
         records
             .iter()
-            .any(|event| event.kind == EventKind::TurnCompleted)
+            .any(|event| event.kind == crate::EventKind::TurnCompleted)
     );
     let control_records = store
         .read_events(
-            &EventStreamId::new(format!(
+            &crate::EventStreamId::new(format!(
                 "control:{}",
                 thread.context().coordinates.thread_id
             )),
@@ -5682,7 +6002,7 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
     assert!(
         control_records
             .iter()
-            .any(|event| event.kind == EventKind::TurnResumed)
+            .any(|event| event.kind == crate::EventKind::TurnResumed)
     );
 
     host.resume_tool_call(
@@ -5705,7 +6025,7 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
 #[tokio::test]
 async fn suspended_batch_counts_as_one_round_when_the_turn_resumes() {
     let registry = echo_registry("echo").await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named_with_id(
             "call-wait",
             "echo_search",
@@ -5717,18 +6037,19 @@ async fn suspended_batch_counts_as_one_round_when_the_turn_resumes() {
             serde_json::json!({"input": "second"}),
         ),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let store = Arc::new(InMemorySessionStore::new());
-    let host = RuntimeHost::with_session_store(
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let host = crate::RuntimeHost::with_session_store(
         runtime_factory_with_registry(provider_client, registry),
         store.clone(),
     );
     let thread = host
         .start_thread_with_topology_and_metadata(
-            ThreadCoordinates::new("tenant_a", "user_1", "resume-round-budget"),
-            ThreadTopology::root(),
-            BTreeMap::from([(
-                THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "resume-round-budget"),
+            crate::ThreadTopology::root(),
+            std::collections::BTreeMap::from([(
+                crate::adapters::agent_loop::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA
+                    .to_string(),
                 "1".to_string(),
             )]),
         )
@@ -5752,7 +6073,7 @@ async fn suspended_batch_counts_as_one_round_when_the_turn_resumes() {
     wait_for_thread_event(
         &store,
         &thread.context().coordinates,
-        EventKind::TurnWaiting,
+        crate::EventKind::TurnWaiting,
     )
     .await;
     append_witnessed_tool_decision(
@@ -5761,7 +6082,7 @@ async fn suspended_batch_counts_as_one_round_when_the_turn_resumes() {
         "snapshot-controller",
         "turn-1",
         "call-wait",
-        ToolCallDecisionOutcomePayload::Allow,
+        crate::ToolCallDecisionOutcomePayload::Allow,
     )
     .await;
     host.resume_tool_call(
@@ -5776,7 +6097,7 @@ async fn suspended_batch_counts_as_one_round_when_the_turn_resumes() {
     assert_eq!(client.requests().len(), 2);
     let records = store
         .read_events(
-            &EventStreamId::for_thread(&thread.context().coordinates),
+            &crate::EventStreamId::for_thread(&thread.context().coordinates),
             None,
         )
         .await
@@ -5784,7 +6105,7 @@ async fn suspended_batch_counts_as_one_round_when_the_turn_resumes() {
     assert_eq!(
         records
             .iter()
-            .filter(|event| event.kind == EventKind::ToolCallRequested)
+            .filter(|event| event.kind == crate::EventKind::ToolCallRequested)
             .count(),
         1
     );
@@ -5793,7 +6114,7 @@ async fn suspended_batch_counts_as_one_round_when_the_turn_resumes() {
 #[tokio::test]
 async fn runtime_bash_tool_advertises_and_executes_operation_shell_commands() {
     let registry = named_echo_registry("search", "search").await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named(
             "bash",
             serde_json::json!({
@@ -5802,21 +6123,25 @@ async fn runtime_bash_tool_advertises_and_executes_operation_shell_commands() {
         ),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let bash_config = VirtualBashRuntimeConfig::default()
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let bash_config = crate::VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry)
-        .with_capability_grants(verlet_threads_kernel_package().capability_grants);
-    let host = RuntimeHost::new(Arc::new(
-        AgentLoopFactory::new(
-            AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+        .with_capability_grants(crate::verlet_threads_kernel_package().capability_grants);
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(
+            crate::adapters::agent_loop::AgentLoopConfig::new(
+                crate::ProviderApi::OpenAIResponses,
+                "openai",
+                "gpt-test",
+            ),
             provider_client,
         )
         .with_bash_tool(bash_config),
     ));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -5833,7 +6158,7 @@ async fn runtime_bash_tool_advertises_and_executes_operation_shell_commands() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallResult {
+            crate::RuntimeEventKind::ToolCallResult {
                 call_id,
                 output,
                 success: true,
@@ -5860,7 +6185,7 @@ async fn runtime_bash_tool_advertises_and_executes_operation_shell_commands() {
     assert!(bash_tool.description.contains("search"));
     assert!(matches!(
         &requests[1].messages[2],
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             tool_call_id,
             tool_name,
             content,
@@ -5875,7 +6200,7 @@ async fn runtime_bash_tool_advertises_and_executes_operation_shell_commands() {
 #[tokio::test]
 async fn runtime_bash_tool_executes_kernel_thread_operation_commands_without_agent_builtin() {
     let registry = kernel_thread_registry().await;
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named(
             "bash",
             serde_json::json!({
@@ -5884,22 +6209,26 @@ async fn runtime_bash_tool_executes_kernel_thread_operation_commands_without_age
         ),
         response_text("spawned child from bash"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let bash_config = VirtualBashRuntimeConfig::default()
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let bash_config = crate::VirtualBashRuntimeConfig::default()
         .with_operation_registry(registry)
-        .with_capability_grants(verlet_threads_kernel_package().capability_grants);
-    let root_factory = AgentLoopFactory::new(
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+        .with_capability_grants(crate::verlet_threads_kernel_package().capability_grants);
+    let root_factory = crate::adapters::agent_loop::AgentLoopFactory::new(
+        crate::adapters::agent_loop::AgentLoopConfig::new(
+            crate::ProviderApi::OpenAIResponses,
+            "openai",
+            "gpt-test",
+        ),
         provider_client,
     )
     .with_bash_tool(bash_config);
-    let host = RuntimeHost::new(Arc::new(RootProviderChildEchoFactory {
-        root: Arc::new(root_factory),
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(RootProviderChildEchoFactory {
+        root: std::sync::Arc::new(root_factory),
     }));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -5917,7 +6246,7 @@ async fn runtime_bash_tool_executes_kernel_thread_operation_commands_without_age
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallResult {
+            crate::RuntimeEventKind::ToolCallResult {
                 call_id,
                 success: true,
                 ..
@@ -5932,7 +6261,11 @@ async fn runtime_bash_tool_executes_kernel_thread_operation_commands_without_age
         .iter()
         .find(|tool| tool.name == "bash")
         .expect("bash tool should be advertised");
-    assert!(bash_tool.description.contains(THREAD_SPAWN_OPERATION));
+    assert!(
+        bash_tool
+            .description
+            .contains(crate::THREAD_SPAWN_OPERATION)
+    );
     assert!(!bash_tool.description.contains("agent <"));
 
     let children = host
@@ -5950,50 +6283,54 @@ async fn runtime_bash_tool_executes_kernel_thread_operation_commands_without_age
 #[tokio::test]
 async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
     let registry = echo_registry("echo").await;
-    let pre_hook = Arc::new(StaticHookHandler::new(
+    let pre_hook = std::sync::Arc::new(StaticHookHandler::new(
         "pre-echo",
-        HookEventName::PreToolUse,
+        crate::HookEventName::PreToolUse,
         Some("echo_search"),
-        HookHandlerOutput {
+        crate::HookHandlerOutput {
             updated_input: Some(serde_json::json!({"input": "rewritten"})),
             additional_context: Some("pre context".to_string()),
-            ..HookHandlerOutput::default()
+            ..crate::HookHandlerOutput::default()
         },
     ));
-    let post_hook = Arc::new(StaticHookHandler::new(
+    let post_hook = std::sync::Arc::new(StaticHookHandler::new(
         "post-echo",
-        HookEventName::PostToolUse,
+        crate::HookEventName::PostToolUse,
         Some("echo_search"),
-        HookHandlerOutput {
+        crate::HookHandlerOutput {
             replacement_output: Some("hook replacement".to_string()),
             additional_context: Some("post context".to_string()),
             feedback: Some("feedback context".to_string()),
-            ..HookHandlerOutput::default()
+            ..crate::HookHandlerOutput::default()
         },
     ));
-    let pre_handler: Arc<dyn HookHandler> = pre_hook.clone();
-    let post_handler: Arc<dyn HookHandler> = post_hook.clone();
-    let hook_pipeline = Arc::new(
-        HookPipeline::new()
+    let pre_handler: std::sync::Arc<dyn crate::HookHandler> = pre_hook.clone();
+    let post_handler: std::sync::Arc<dyn crate::HookHandler> = post_hook.clone();
+    let hook_pipeline = std::sync::Arc::new(
+        crate::HookPipeline::new()
             .with_handler(pre_handler)
             .with_handler(post_handler),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "original"})),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let host = RuntimeHost::new(Arc::new(
-        AgentLoopFactory::new(config, provider_client)
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
             .with_operation_registry(registry)
             .with_hook_pipeline(hook_pipeline),
     ));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6007,9 +6344,9 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::HookStarted {
+            crate::RuntimeEventKind::HookStarted {
                 hook_id,
-                event_name: HookEventName::PreToolUse,
+                event_name: crate::HookEventName::PreToolUse,
                 matcher: Some(matcher),
             } if hook_id == "pre-echo" && matcher == "echo_search"
         )
@@ -6017,10 +6354,10 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::HookCompleted {
+            crate::RuntimeEventKind::HookCompleted {
                 hook_id,
-                event_name: HookEventName::PostToolUse,
-                status: HookRunStatus::Completed,
+                event_name: crate::HookEventName::PostToolUse,
+                status: crate::HookRunStatus::Completed,
                 ..
             } if hook_id == "post-echo"
         )
@@ -6028,7 +6365,7 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallResult {
+            crate::RuntimeEventKind::ToolCallResult {
                 output,
                 success: true,
                 ..
@@ -6040,7 +6377,7 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
             .iter()
             .filter(|event| matches!(
                 event,
-                RuntimeEventKind::ToolCallStarted { call_id, .. } if call_id == "call_1|fc_1"
+                crate::RuntimeEventKind::ToolCallStarted { call_id, .. } if call_id == "call_1|fc_1"
             ))
             .count(),
         1
@@ -6050,7 +6387,7 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
             .iter()
             .filter(|event| matches!(
                 event,
-                RuntimeEventKind::ToolCallResult { call_id, .. } if call_id == "call_1|fc_1"
+                crate::RuntimeEventKind::ToolCallResult { call_id, .. } if call_id == "call_1|fc_1"
             ))
             .count(),
         1
@@ -6059,13 +6396,13 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
     let pre_requests = pre_hook.requests();
     assert!(matches!(
         &pre_requests[0],
-        HookRequest::PreToolUse(request)
+        crate::HookRequest::PreToolUse(request)
             if request.arguments == serde_json::json!({"input": "original"})
     ));
     let post_requests = post_hook.requests();
     assert!(matches!(
         &post_requests[0],
-        HookRequest::PostToolUse(request)
+        crate::HookRequest::PostToolUse(request)
             if request.arguments == serde_json::json!({"input": "rewritten"})
                 && request.output == "echo:rewritten"
     ));
@@ -6086,45 +6423,57 @@ async fn runtime_runs_pre_and_post_tool_hooks_around_tool_execution() {
 
 #[tokio::test]
 async fn mutating_tool_hooks_append_secret_free_witnesses_before_effects() {
-    let store = Arc::new(InMemorySessionStore::new());
+    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
     let pre_command = r#"cat >/dev/null; printf '%s' '{"updated_input":{"input":"rewritten","secret":"after-secret"}}'"#;
     let post_command = r#"cat >/dev/null; printf '%s' '{"replacement_output":"hook replacement after-secret-output"}'"#;
-    let expected_pre_command_sha256 = sha256_hex(pre_command.as_bytes());
-    let expected_post_command_sha256 = sha256_hex(post_command.as_bytes());
-    let echo_provider = Arc::new(WitnessCheckingEchoProvider {
+    let expected_pre_command_sha256 = crate::agent::contracts::sha256_hex(pre_command.as_bytes());
+    let expected_post_command_sha256 = crate::agent::contracts::sha256_hex(post_command.as_bytes());
+    let echo_provider = std::sync::Arc::new(WitnessCheckingEchoProvider {
         store: store.clone(),
         expected_command_sha256: expected_pre_command_sha256.clone(),
-        seen_arguments: Mutex::new(Vec::new()),
+        seen_arguments: std::sync::Mutex::new(Vec::new()),
     });
-    let kernel_provider: Arc<dyn AgentKernelToolProvider> = echo_provider.clone();
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let kernel_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> = echo_provider.clone();
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(kernel_provider),
     );
-    let hook_pipeline = Arc::new(
-        HookPipeline::new()
+    let hook_pipeline = std::sync::Arc::new(
+        crate::HookPipeline::new()
             .with_command_handler(
-                CommandHookHandler::new("pre-echo", HookEventName::PreToolUse, pre_command)
-                    .with_matcher("echo_search"),
+                crate::CommandHookHandler::new(
+                    "pre-echo",
+                    crate::HookEventName::PreToolUse,
+                    pre_command,
+                )
+                .with_matcher("echo_search"),
             )
             .with_command_handler(
-                CommandHookHandler::new("post-echo", HookEventName::PostToolUse, post_command)
-                    .with_matcher("echo_search"),
+                crate::CommandHookHandler::new(
+                    "post-echo",
+                    crate::HookEventName::PostToolUse,
+                    post_command,
+                )
+                .with_matcher("echo_search"),
             ),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named(
             "echo_search",
             serde_json::json!({"input":"original","secret":"before-secret"}),
         ),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(config, provider_client)
+    let host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
                 .with_tool_router(router)
                 .with_hook_pipeline(hook_pipeline),
         ),
@@ -6132,8 +6481,8 @@ async fn mutating_tool_hooks_append_secret_free_witnesses_before_effects() {
     );
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6171,11 +6520,17 @@ async fn mutating_tool_hooks_append_secret_free_witnesses_before_effects() {
     );
     assert_eq!(
         post_payload["tool_output"]["before_sha256"].as_str(),
-        Some(sha256_hex("tool original before-secret-output".as_bytes()).as_str())
+        Some(
+            crate::agent::contracts::sha256_hex("tool original before-secret-output".as_bytes())
+                .as_str()
+        )
     );
     assert_eq!(
         post_payload["tool_output"]["after_sha256"].as_str(),
-        Some(sha256_hex("hook replacement after-secret-output".as_bytes()).as_str())
+        Some(
+            crate::agent::contracts::sha256_hex("hook replacement after-secret-output".as_bytes())
+                .as_str()
+        )
     );
     for witness in &witnesses {
         assert_payload_omits_values(
@@ -6195,35 +6550,39 @@ async fn mutating_tool_hooks_append_secret_free_witnesses_before_effects() {
 #[tokio::test]
 async fn pre_tool_hook_can_block_tool_execution() {
     let registry = echo_registry("echo").await;
-    let block_hook = Arc::new(StaticHookHandler::new(
+    let block_hook = std::sync::Arc::new(StaticHookHandler::new(
         "block-echo",
-        HookEventName::PreToolUse,
+        crate::HookEventName::PreToolUse,
         Some("echo_search"),
-        HookHandlerOutput {
+        crate::HookHandlerOutput {
             should_block: true,
             block_reason: Some("blocked by hook".to_string()),
             additional_context: Some("block context".to_string()),
-            ..HookHandlerOutput::default()
+            ..crate::HookHandlerOutput::default()
         },
     ));
-    let hook_handler: Arc<dyn HookHandler> = block_hook.clone();
-    let hook_pipeline = Arc::new(HookPipeline::new().with_handler(hook_handler));
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let hook_handler: std::sync::Arc<dyn crate::HookHandler> = block_hook.clone();
+    let hook_pipeline = std::sync::Arc::new(crate::HookPipeline::new().with_handler(hook_handler));
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "original"})),
         response_text("final reply"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let host = RuntimeHost::new(Arc::new(
-        AgentLoopFactory::new(config, provider_client)
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
             .with_operation_registry(registry)
             .with_hook_pipeline(hook_pipeline),
     ));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6237,10 +6596,10 @@ async fn pre_tool_hook_can_block_tool_execution() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::HookCompleted {
+            crate::RuntimeEventKind::HookCompleted {
                 hook_id,
-                event_name: HookEventName::PreToolUse,
-                status: HookRunStatus::Blocked,
+                event_name: crate::HookEventName::PreToolUse,
+                status: crate::HookRunStatus::Blocked,
                 message: Some(message),
                 ..
             } if hook_id == "block-echo" && message == "blocked by hook"
@@ -6249,7 +6608,7 @@ async fn pre_tool_hook_can_block_tool_execution() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallResult {
+            crate::RuntimeEventKind::ToolCallResult {
                 output,
                 success: false,
                 ..
@@ -6261,7 +6620,7 @@ async fn pre_tool_hook_can_block_tool_execution() {
             .iter()
             .filter(|event| matches!(
                 event,
-                RuntimeEventKind::ToolCallStarted { call_id, .. } if call_id == "call_1|fc_1"
+                crate::RuntimeEventKind::ToolCallStarted { call_id, .. } if call_id == "call_1|fc_1"
             ))
             .count(),
         1
@@ -6271,7 +6630,7 @@ async fn pre_tool_hook_can_block_tool_execution() {
             .iter()
             .filter(|event| matches!(
                 event,
-                RuntimeEventKind::ToolCallResult { call_id, .. } if call_id == "call_1|fc_1"
+                crate::RuntimeEventKind::ToolCallResult { call_id, .. } if call_id == "call_1|fc_1"
             ))
             .count(),
         1
@@ -6286,24 +6645,32 @@ async fn pre_tool_hook_can_block_tool_execution() {
 
 #[tokio::test]
 async fn block_stop_and_observe_only_hook_witnessing() {
-    let block_store = Arc::new(InMemorySessionStore::new());
+    let block_store = std::sync::Arc::new(crate::InMemorySessionStore::new());
     let block_command = r#"cat >/dev/null; printf '%s' '{"should_block":true,"block_reason":"blocked by hook secret","additional_context":"block context secret"}'"#;
-    let block_hook_pipeline = Arc::new(
-        HookPipeline::new().with_command_handler(
-            CommandHookHandler::new("block-echo", HookEventName::PreToolUse, block_command)
-                .with_matcher("echo_search"),
+    let block_hook_pipeline = std::sync::Arc::new(
+        crate::HookPipeline::new().with_command_handler(
+            crate::CommandHookHandler::new(
+                "block-echo",
+                crate::HookEventName::PreToolUse,
+                block_command,
+            )
+            .with_matcher("echo_search"),
         ),
     );
-    let block_client = Arc::new(RecordingClient::with_responses(vec![
+    let block_client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "original"})),
         response_text("final reply"),
     ]));
-    let block_provider_client: Arc<dyn ProviderClient> = block_client.clone();
-    let mut block_config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let block_provider_client: std::sync::Arc<dyn crate::ProviderClient> = block_client.clone();
+    let mut block_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     block_config.max_tokens = 128;
-    let block_host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(block_config, block_provider_client)
+    let block_host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(block_config, block_provider_client)
                 .with_operation_registry(echo_registry("echo").await)
                 .with_hook_pipeline(block_hook_pipeline),
         ),
@@ -6311,8 +6678,8 @@ async fn block_stop_and_observe_only_hook_witnessing() {
     );
     let block_thread = block_host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_block"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_block"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6338,7 +6705,7 @@ async fn block_stop_and_observe_only_hook_witnessing() {
     let block_payload = &block_witnesses[0].payload;
     assert_eq!(
         block_payload["command_sha256"].as_str(),
-        Some(sha256_hex(block_command.as_bytes()).as_str())
+        Some(crate::agent::contracts::sha256_hex(block_command.as_bytes()).as_str())
     );
     assert_mutated_fields(block_payload, &["additional_contexts", "should_block"]);
     assert_payload_omits_values(
@@ -6346,18 +6713,26 @@ async fn block_stop_and_observe_only_hook_witnessing() {
         &["blocked by hook secret", "block context secret"],
     );
 
-    let stop_store = Arc::new(InMemorySessionStore::new());
+    let stop_store = std::sync::Arc::new(crate::InMemorySessionStore::new());
     let stop_command =
         r#"cat >/dev/null; printf '%s' '{"should_stop":true,"stop_reason":"stop secret"}'"#;
-    let stop_hook_pipeline = Arc::new(HookPipeline::new().with_command_handler(
-        CommandHookHandler::new("stop-turn", HookEventName::UserPromptSubmit, stop_command),
+    let stop_hook_pipeline = std::sync::Arc::new(crate::HookPipeline::new().with_command_handler(
+        crate::CommandHookHandler::new(
+            "stop-turn",
+            crate::HookEventName::UserPromptSubmit,
+            stop_command,
+        ),
     ));
-    let stop_client = Arc::new(RecordingClient::with_responses(vec![]));
-    let stop_provider_client: Arc<dyn ProviderClient> = stop_client.clone();
-    let stop_host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(
-                AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test"),
+    let stop_client = std::sync::Arc::new(RecordingClient::with_responses(vec![]));
+    let stop_provider_client: std::sync::Arc<dyn crate::ProviderClient> = stop_client.clone();
+    let stop_host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    crate::ProviderApi::OpenAIResponses,
+                    "openai",
+                    "gpt-test",
+                ),
                 stop_provider_client,
             )
             .with_hook_pipeline(stop_hook_pipeline),
@@ -6366,8 +6741,8 @@ async fn block_stop_and_observe_only_hook_witnessing() {
     );
     let stop_thread = stop_host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_stop"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_stop"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6398,38 +6773,48 @@ async fn block_stop_and_observe_only_hook_witnessing() {
     );
     assert_eq!(
         stop_payload["command_sha256"].as_str(),
-        Some(sha256_hex(stop_command.as_bytes()).as_str())
+        Some(crate::agent::contracts::sha256_hex(stop_command.as_bytes()).as_str())
     );
     assert_mutated_fields(stop_payload, &["should_stop"]);
     assert_payload_omits_values(stop_payload, &["stop secret"]);
 
-    let observe_store = Arc::new(InMemorySessionStore::new());
-    let observe_hook_pipeline = Arc::new(
-        HookPipeline::new().with_command_handler(
-            CommandHookHandler::new("observe-echo", HookEventName::PreToolUse, "cat >/dev/null")
-                .with_matcher("echo_search"),
+    let observe_store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let observe_hook_pipeline = std::sync::Arc::new(
+        crate::HookPipeline::new().with_command_handler(
+            crate::CommandHookHandler::new(
+                "observe-echo",
+                crate::HookEventName::PreToolUse,
+                "cat >/dev/null",
+            )
+            .with_matcher("echo_search"),
         ),
     );
-    let observe_client = Arc::new(RecordingClient::with_responses(vec![
+    let observe_client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("echo_search", serde_json::json!({"input": "observed"})),
         response_text("final reply"),
     ]));
-    let observe_provider_client: Arc<dyn ProviderClient> = observe_client.clone();
-    let mut observe_config =
-        AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let observe_provider_client: std::sync::Arc<dyn crate::ProviderClient> = observe_client.clone();
+    let mut observe_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     observe_config.max_tokens = 128;
-    let observe_host = RuntimeHost::with_session_store(
-        Arc::new(
-            AgentLoopFactory::new(observe_config, observe_provider_client)
-                .with_operation_registry(echo_registry("echo").await)
-                .with_hook_pipeline(observe_hook_pipeline),
+    let observe_host = crate::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                observe_config,
+                observe_provider_client,
+            )
+            .with_operation_registry(echo_registry("echo").await)
+            .with_hook_pipeline(observe_hook_pipeline),
         ),
         observe_store.clone(),
     );
     let observe_thread = observe_host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_observe"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_observe"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6456,13 +6841,13 @@ async fn block_stop_and_observe_only_hook_witnessing() {
 
 #[tokio::test]
 async fn runtime_passes_turn_context_to_tool_router() {
-    let kernel_provider = Arc::new(TurnContextRecordingKernelToolProvider::new());
-    let tool_provider: Arc<dyn AgentKernelToolProvider> = kernel_provider.clone();
-    let router = Arc::new(
-        AgentToolRouter::new(Arc::new(OperationRegistry::new()))
+    let kernel_provider = std::sync::Arc::new(TurnContextRecordingKernelToolProvider::new());
+    let tool_provider: std::sync::Arc<dyn crate::AgentKernelToolProvider> = kernel_provider.clone();
+    let router = std::sync::Arc::new(
+        crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
             .with_kernel_tool_provider(tool_provider),
     );
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named_with_id(
             "call_1|fc_1",
             "record_turn_context",
@@ -6475,16 +6860,21 @@ async fn runtime_passes_turn_context_to_tool_router() {
         ),
         response_text("final reply"),
     ]));
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let host = RuntimeHost::new(Arc::new(
-        AgentLoopFactory::new(config, provider_client).with_tool_router(router),
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+            .with_tool_router(router),
     ));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6522,7 +6912,7 @@ async fn runtime_passes_turn_context_to_tool_router() {
     );
     assert_eq!(
         snapshot.budget.max_tool_rounds,
-        Some(MAX_TOOL_ROUTER_ROUNDS)
+        Some(crate::adapters::agent_loop::MAX_TOOL_ROUTER_ROUNDS)
     );
     assert_eq!(snapshot.budget.max_output_tokens, Some(128));
     assert!(!snapshot.cancellation_requested);
@@ -6530,9 +6920,9 @@ async fn runtime_passes_turn_context_to_tool_router() {
 
 #[tokio::test]
 async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named(
-            THREAD_SPAWN_OPERATION,
+            crate::THREAD_SPAWN_OPERATION,
             serde_json::json!({
                 "task_name": "worker",
                 "message": "echo child-through-tool",
@@ -6541,20 +6931,24 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
         ),
         response_text("spawned child"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        crate::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    let root_factory = AgentLoopFactory::new(config, provider_client)
-        .with_tool_router(Arc::new(kernel_thread_router().await))
-        .with_thread_spawn_agent_resolver(Arc::new(StaticThreadSpawnAgentResolver));
-    let host = RuntimeHost::new(Arc::new(RootProviderChildEchoFactory {
-        root: Arc::new(root_factory),
+    let root_factory = crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+        .with_tool_router(std::sync::Arc::new(kernel_thread_router().await))
+        .with_thread_spawn_agent_resolver(std::sync::Arc::new(StaticThreadSpawnAgentResolver));
+    let host = crate::RuntimeHost::new(std::sync::Arc::new(RootProviderChildEchoFactory {
+        root: std::sync::Arc::new(root_factory),
     }));
     let store = host.runtime_store();
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6572,7 +6966,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallResult {
+            crate::RuntimeEventKind::ToolCallResult {
                 call_id,
                 output,
                 success: true,
@@ -6590,7 +6984,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
         requests[0]
             .tools
             .iter()
-            .any(|tool| tool.name == THREAD_SPAWN_OPERATION)
+            .any(|tool| tool.name == crate::THREAD_SPAWN_OPERATION)
     );
     assert_eq!(requests.len(), 2);
 
@@ -6606,7 +7000,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     let requested = wait_for_control_event(
         store.as_ref(),
         &thread.context().coordinates,
-        EventKind::ThreadSpawnRequested,
+        crate::EventKind::ThreadSpawnRequested,
     )
     .await;
     let requested_payload: crate::ThreadSpawnRequestedPayload =
@@ -6616,10 +7010,10 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     let spawned = wait_for_control_event(
         store.as_ref(),
         &thread.context().coordinates,
-        EventKind::ThreadSpawned,
+        crate::EventKind::ThreadSpawned,
     )
     .await;
-    let spawned_payload: ThreadSpawnedPayload =
+    let spawned_payload: crate::ThreadSpawnedPayload =
         serde_json::from_value(spawned.payload.clone()).unwrap();
     assert_eq!(
         spawned_payload.parent_thread_id,
@@ -6636,10 +7030,10 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     let joined = wait_for_control_event(
         store.as_ref(),
         &thread.context().coordinates,
-        EventKind::ThreadJoined,
+        crate::EventKind::ThreadJoined,
     )
     .await;
-    let joined_payload: ThreadJoinedPayload =
+    let joined_payload: crate::ThreadJoinedPayload =
         serde_json::from_value(joined.payload.clone()).unwrap();
     assert_eq!(
         joined_payload.child_thread_id,
@@ -6648,7 +7042,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     assert_eq!(joined_payload.spawned_event_id, spawned.id);
     assert_eq!(
         joined_payload.terminal_state,
-        ThreadTerminalState::Completed
+        crate::ThreadTerminalState::Completed
     );
 
     let parent_session = thread.session_context().await.unwrap();
@@ -6660,12 +7054,14 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     host.shutdown_all().await.unwrap();
 }
 
-async fn kernel_thread_registry() -> Arc<OperationRegistry> {
-    let registry = Arc::new(OperationRegistry::new());
-    let package = verlet_threads_kernel_package();
-    let mut registration =
-        KernelOperationRegistration::new(crate::VERLET_THREADS_PACKAGE, package.manifest.clone())
-            .with_capability_grants(package.capability_grants.clone());
+async fn kernel_thread_registry() -> std::sync::Arc<crate::OperationRegistry> {
+    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+    let package = crate::verlet_threads_kernel_package();
+    let mut registration = crate::KernelOperationRegistration::new(
+        crate::VERLET_THREADS_PACKAGE,
+        package.manifest.clone(),
+    )
+    .with_capability_grants(package.capability_grants.clone());
     registration.metadata.insert(
         crate::OPERATION_METADATA_RUNTIME_KIND.to_string(),
         serde_json::Value::String(crate::KERNEL_RUNTIME_KIND.to_string()),
@@ -6674,25 +7070,25 @@ async fn kernel_thread_registry() -> Arc<OperationRegistry> {
     registry
 }
 
-async fn kernel_thread_router() -> AgentToolRouter {
+async fn kernel_thread_router() -> crate::AgentToolRouter {
     let registry = kernel_thread_registry().await;
-    let package = verlet_threads_kernel_package();
-    AgentToolRouter::new(registry)
+    let package = crate::verlet_threads_kernel_package();
+    crate::AgentToolRouter::new(registry)
         .with_capability_grants(package.capability_grants)
-        .with_tool_aliases(vec![OperationToolAlias {
-            tool_name: THREAD_SPAWN_OPERATION.to_string(),
+        .with_tool_aliases(vec![crate::OperationToolAlias {
+            tool_name: crate::THREAD_SPAWN_OPERATION.to_string(),
             registered_name: crate::VERLET_THREADS_PACKAGE.to_string(),
-            operation_name: THREAD_SPAWN_OPERATION.to_string(),
+            operation_name: crate::THREAD_SPAWN_OPERATION.to_string(),
             grant_expiries: Vec::new(),
         }])
 }
 
 async fn append_tool_controller_bind_receipt(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::InMemorySessionStore,
+    coordinates: &crate::ThreadCoordinates,
     tool_name: &str,
 ) {
-    let receipt = AgentManifestBindReceipt {
+    let receipt = crate::AgentManifestBindReceipt {
         ref_uri: "agent://test/controller".to_string(),
         manifest_hash: "snapshot-controller".to_string(),
         model_profile_id: "default".to_string(),
@@ -6705,26 +7101,29 @@ async fn append_tool_controller_bind_receipt(
         skill_discovery: None,
         static_context_segments: Vec::new(),
         tool_universes: Vec::new(),
-        couplings: vec![AgentManifestCouplingBinding {
+        couplings: vec![crate::AgentManifestCouplingBinding {
             id: "tool_gate".to_string(),
-            role: CouplingRole::Controller,
-            trigger_kind: EventKind::ToolCallRequested.to_string(),
-            trigger_match: BTreeMap::from([("tool".to_string(), serde_json::json!(tool_name))]),
+            role: crate::CouplingRole::Controller,
+            trigger_kind: crate::EventKind::ToolCallRequested.to_string(),
+            trigger_match: std::collections::BTreeMap::from([(
+                "tool".to_string(),
+                serde_json::json!(tool_name),
+            )]),
             source_streams: vec!["thread".to_string()],
-            source_kinds: vec![EventKind::ToolCallRequested.to_string()],
+            source_kinds: vec![crate::EventKind::ToolCallRequested.to_string()],
             sink_stream: "control".to_string(),
-            sink_kinds: vec![EventKind::ToolCallDecision.to_string()],
+            sink_kinds: vec![crate::EventKind::ToolCallDecision.to_string()],
             function_ref: "op://policy/tool-gate@sha256:test".to_string(),
             artifact_hash: "test".to_string(),
             operation_name: Some("tool_gate".to_string()),
             grants: Vec::new(),
             grant_expiries: Vec::new(),
-            budget: AgentManifestCouplingBudget::default(),
+            budget: crate::AgentManifestCouplingBudget::default(),
             config_hash: "config".to_string(),
         }],
         granted: Vec::new(),
         grant_bindings: Vec::new(),
-        effective_runtime: AgentManifestRuntimeDefaults::default(),
+        effective_runtime: crate::AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: None,
         placement_origin: None,
@@ -6733,16 +7132,16 @@ async fn append_tool_controller_bind_receipt(
     };
     store
         .append_events(
-            &EventStreamId::for_thread(coordinates),
-            vec![NewEventRecord::discharged(
+            &crate::EventStreamId::for_thread(coordinates),
+            vec![crate::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::ManifestBindCompleted,
+                crate::EventKind::ManifestBindCompleted,
                 serde_json::to_value(receipt).unwrap(),
-                EventProvenance {
-                    source_streams: vec![EventStreamId::for_thread(coordinates)],
+                crate::EventProvenance {
+                    source_streams: vec![crate::EventStreamId::for_thread(coordinates)],
                     discharged_by: Some("binder:manifest".to_string()),
                     function: Some("bind/v1".to_string()),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
@@ -6751,11 +7150,11 @@ async fn append_tool_controller_bind_receipt(
 }
 
 async fn append_manifest_runtime_grace(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::InMemorySessionStore,
+    coordinates: &crate::ThreadCoordinates,
     cancellation_grace_ms: u64,
 ) {
-    let receipt = AgentManifestBindReceipt {
+    let receipt = crate::AgentManifestBindReceipt {
         ref_uri: "agent://test/interruption".to_string(),
         manifest_hash: "snapshot-interruption".to_string(),
         model_profile_id: "default".to_string(),
@@ -6771,9 +7170,9 @@ async fn append_manifest_runtime_grace(
         couplings: Vec::new(),
         granted: Vec::new(),
         grant_bindings: Vec::new(),
-        effective_runtime: AgentManifestRuntimeDefaults {
+        effective_runtime: crate::AgentManifestRuntimeDefaults {
             cancellation_grace_ms: Some(cancellation_grace_ms),
-            ..AgentManifestRuntimeDefaults::default()
+            ..crate::AgentManifestRuntimeDefaults::default()
         },
         overridden_keys: vec!["cancellation_grace_ms".to_string()],
         placement: None,
@@ -6783,16 +7182,16 @@ async fn append_manifest_runtime_grace(
     };
     store
         .append_events(
-            &EventStreamId::for_thread(coordinates),
-            vec![NewEventRecord::discharged(
+            &crate::EventStreamId::for_thread(coordinates),
+            vec![crate::NewEventRecord::discharged(
                 coordinates.clone(),
-                EventKind::ManifestBindCompleted,
+                crate::EventKind::ManifestBindCompleted,
                 serde_json::to_value(receipt).unwrap(),
-                EventProvenance {
-                    source_streams: vec![EventStreamId::for_thread(coordinates)],
+                crate::EventProvenance {
+                    source_streams: vec![crate::EventStreamId::for_thread(coordinates)],
                     discharged_by: Some("binder:manifest".to_string()),
                     function: Some("bind/v1".to_string()),
-                    ..EventProvenance::default()
+                    ..crate::EventProvenance::default()
                 },
             )],
         )
@@ -6801,8 +7200,8 @@ async fn append_manifest_runtime_grace(
 }
 
 async fn append_witnessed_tool_suspension(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::InMemorySessionStore,
+    coordinates: &crate::ThreadCoordinates,
     snapshot_id: &str,
     turn_id: &str,
     call_id: &str,
@@ -6810,12 +7209,12 @@ async fn append_witnessed_tool_suspension(
 ) {
     store
         .append_events(
-            &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::ToolCallSuspended,
-                serde_json::to_value(ToolCallSuspendedPayload {
-                    subject: ToolCallSubject {
+                crate::EventKind::ToolCallSuspended,
+                serde_json::to_value(crate::ToolCallSuspendedPayload {
+                    subject: crate::ToolCallSubject {
                         turn_id: turn_id.to_string(),
                         call_id: call_id.to_string(),
                     },
@@ -6831,21 +7230,21 @@ async fn append_witnessed_tool_suspension(
 }
 
 async fn append_witnessed_tool_decision(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::InMemorySessionStore,
+    coordinates: &crate::ThreadCoordinates,
     snapshot_id: &str,
     turn_id: &str,
     call_id: &str,
-    outcome: ToolCallDecisionOutcomePayload,
+    outcome: crate::ToolCallDecisionOutcomePayload,
 ) {
     store
         .append_events(
-            &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
-            vec![NewEventRecord::witnessed(
+            &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+            vec![crate::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::ToolCallDecision,
-                serde_json::to_value(ToolCallDecisionPayload {
-                    subject: ToolCallSubject {
+                crate::EventKind::ToolCallDecision,
+                serde_json::to_value(crate::ToolCallDecisionPayload {
+                    subject: crate::ToolCallSubject {
                         turn_id: turn_id.to_string(),
                         call_id: call_id.to_string(),
                     },
@@ -6861,20 +7260,20 @@ async fn append_witnessed_tool_decision(
 }
 
 async fn wait_for_thread_event(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
-    kind: EventKind,
+    store: &crate::InMemorySessionStore,
+    coordinates: &crate::ThreadCoordinates,
+    kind: crate::EventKind,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
     loop {
         let mut records = store
-            .read_events(&EventStreamId::for_thread(coordinates), None)
+            .read_events(&crate::EventStreamId::for_thread(coordinates), None)
             .await
             .unwrap();
         records.extend(
             store
                 .read_events(
-                    &EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+                    &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
                     None,
                 )
                 .await
@@ -6887,24 +7286,24 @@ async fn wait_for_thread_event(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for thread event kind {kind}"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 }
 
 async fn wait_for_tool_call_completion(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::InMemorySessionStore,
+    coordinates: &crate::ThreadCoordinates,
     turn_id: &str,
     call_id: &str,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
     loop {
         let records = store
-            .read_events(&EventStreamId::for_thread(coordinates), None)
+            .read_events(&crate::EventStreamId::for_thread(coordinates), None)
             .await
             .unwrap();
         if records.iter().any(|event| {
-            event.kind == EventKind::ToolCallCompleted
+            event.kind == crate::EventKind::ToolCallCompleted
                 && event.payload["subject"]["turn_id"].as_str() == Some(turn_id)
                 && event.payload["subject"]["call_id"].as_str() == Some(call_id)
         }) {
@@ -6918,13 +7317,13 @@ async fn wait_for_tool_call_completion(
     }
 }
 
-async fn wait_for_control_event<S: EventStore + ?Sized>(
+async fn wait_for_control_event<S: crate::EventStore + ?Sized>(
     store: &S,
-    coordinates: &ThreadCoordinates,
-    kind: EventKind,
+    coordinates: &crate::ThreadCoordinates,
+    kind: crate::EventKind,
 ) -> crate::EventRecord {
-    let stream_id = EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let stream_id = crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
     loop {
         let records = store.read_events(&stream_id, None).await.unwrap();
         if let Some(record) = records.into_iter().find(|event| event.kind == kind) {
@@ -6934,7 +7333,7 @@ async fn wait_for_control_event<S: EventStore + ?Sized>(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for control event kind {kind}"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -6942,7 +7341,7 @@ async fn wait_for_status(
     status: &mut tokio::sync::watch::Receiver<crate::ThreadStatus>,
     expected: crate::ThreadStatus,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
     loop {
         if *status.borrow() == expected {
             return;
@@ -6951,7 +7350,7 @@ async fn wait_for_status(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for status {expected:?}"
         );
-        timeout(Duration::from_secs(30), status.changed())
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), status.changed())
             .await
             .ok();
     }
@@ -6959,17 +7358,17 @@ async fn wait_for_status(
 
 #[tokio::test]
 async fn runtime_returns_error_tool_result_for_unknown_tool_and_continues() {
-    let registry = Arc::new(OperationRegistry::new());
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_tool_call_named("missing_tool", serde_json::json!({})),
         response_text("handled missing tool"),
     ]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let host = RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let host = crate::RuntimeHost::new(runtime_factory_with_registry(provider_client, registry));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -6987,7 +7386,7 @@ async fn runtime_returns_error_tool_result_for_unknown_tool_and_continues() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallResult {
+            crate::RuntimeEventKind::ToolCallResult {
                 call_id,
                 output,
                 success: false,
@@ -7000,7 +7399,7 @@ async fn runtime_returns_error_tool_result_for_unknown_tool_and_continues() {
     assert_eq!(requests.len(), 2);
     assert!(matches!(
         &requests[1].messages[2],
-        CanonicalMessage::ToolResult {
+        crate::CanonicalMessage::ToolResult {
             tool_name,
             content,
             is_error: true,
@@ -7023,38 +7422,38 @@ async fn runtime_returns_error_tool_result_for_unknown_tool_and_continues() {
 
 #[tokio::test]
 async fn streaming_runtime_emits_deltas_and_stores_final_canonical_assistant() {
-    let client = Arc::new(StreamingClient::new(vec![vec![
-        ProviderStreamEvent::TextDelta {
+    let client = std::sync::Arc::new(StreamingClient::new(vec![vec![
+        crate::ProviderStreamEvent::TextDelta {
             text: "COOL".to_string(),
         },
-        ProviderStreamEvent::ToolCallDelta {
+        crate::ProviderStreamEvent::ToolCallDelta {
             id: "call_1".to_string(),
             name: Some("bash".to_string()),
             arguments_delta: "{\"command\"".to_string(),
         },
-        ProviderStreamEvent::ToolCallDelta {
+        crate::ProviderStreamEvent::ToolCallDelta {
             id: "call_1".to_string(),
             name: None,
             arguments_delta: ":\"pwd\"}".to_string(),
         },
-        ProviderStreamEvent::Usage {
-            usage: CanonicalUsage {
+        crate::ProviderStreamEvent::Usage {
+            usage: crate::CanonicalUsage {
                 input_tokens: 5,
                 output_tokens: 6,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 1,
             },
         },
-        ProviderStreamEvent::Done {
-            stop_reason: CanonicalStopReason::ToolUse,
+        crate::ProviderStreamEvent::Done {
+            stop_reason: crate::CanonicalStopReason::ToolUse,
         },
     ]]));
-    let provider_client: Arc<dyn ProviderClient> = client.clone();
-    let host = RuntimeHost::new(streaming_runtime_factory(provider_client));
+    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = client.clone();
+    let host = crate::RuntimeHost::new(streaming_runtime_factory(provider_client));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -7065,15 +7464,13 @@ async fn streaming_runtime_emits_deltas_and_stores_final_canonical_assistant() {
         .unwrap();
     let (assistant, runtime_events) = assert_assistant_with_runtime_events(&mut events).await;
 
-    assert!(
-        runtime_events.iter().any(|event| {
-            matches!(event, RuntimeEventKind::TextDelta { text } if text == "COOL")
-        })
-    );
+    assert!(runtime_events.iter().any(|event| {
+        matches!(event, crate::RuntimeEventKind::TextDelta { text } if text == "COOL")
+    }));
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::ToolCallStarted {
+            crate::RuntimeEventKind::ToolCallStarted {
                 call_id,
                 name,
                 ..
@@ -7083,7 +7480,7 @@ async fn streaming_runtime_emits_deltas_and_stores_final_canonical_assistant() {
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            RuntimeEventKind::Usage { usage }
+            crate::RuntimeEventKind::Usage { usage }
                 if usage.input_tokens == 5
                     && usage.output_tokens == 6
                     && usage.cache_read_input_tokens == 1
@@ -7091,22 +7488,22 @@ async fn streaming_runtime_emits_deltas_and_stores_final_canonical_assistant() {
     }));
 
     match assistant {
-        CanonicalMessage::Assistant {
+        crate::CanonicalMessage::Assistant {
             content,
             usage,
             stop_reason,
             ..
         } => {
-            assert_eq!(stop_reason, CanonicalStopReason::ToolUse);
+            assert_eq!(stop_reason, crate::CanonicalStopReason::ToolUse);
             assert_eq!(usage.input_tokens, 5);
             assert_eq!(usage.output_tokens, 6);
             assert!(matches!(
                 &content[0],
-                CanonicalContent::Text { text, .. } if text == "COOL"
+                crate::CanonicalContent::Text { text, .. } if text == "COOL"
             ));
             assert!(matches!(
                 &content[1],
-                CanonicalContent::ToolCall { id, name, arguments }
+                crate::CanonicalContent::ToolCall { id, name, arguments }
                     if id == "call_1" && name == "bash" && arguments["command"] == "pwd"
             ));
         }
@@ -7122,15 +7519,15 @@ async fn streaming_runtime_emits_deltas_and_stores_final_canonical_assistant() {
 #[tokio::test]
 async fn checkpoint_resume_after_store_reopen_replays_canonical_context() {
     let path = temp_db_path("verlet-provider-resume");
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
     let checkpoint = {
-        let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+        let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
             "first reply",
         )]));
-        let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
-        let host = RuntimeHost::with_session_store(factory(client), store);
+        let store = std::sync::Arc::new(crate::SqliteSessionStore::open(&path).await.unwrap());
+        let host = crate::RuntimeHost::with_session_store(factory(client), store);
         let thread = host
-            .start_thread(coordinates.clone(), ThreadTopology::root())
+            .start_thread(coordinates.clone(), crate::ThreadTopology::root())
             .await
             .unwrap();
         let mut events = thread.subscribe_events();
@@ -7144,7 +7541,7 @@ async fn checkpoint_resume_after_store_reopen_replays_canonical_context() {
                 thread.context().coordinates.thread_id,
                 None,
                 Some("after-first".to_string()),
-                BTreeMap::new(),
+                std::collections::BTreeMap::new(),
             )
             .await
             .unwrap();
@@ -7154,11 +7551,12 @@ async fn checkpoint_resume_after_store_reopen_replays_canonical_context() {
         checkpoint
     };
 
-    let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
         "second reply",
     )]));
-    let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
-    let host = RuntimeHost::with_session_store(factory(Arc::clone(&client)), store);
+    let store = std::sync::Arc::new(crate::SqliteSessionStore::open(&path).await.unwrap());
+    let host =
+        crate::RuntimeHost::with_session_store(factory(std::sync::Arc::clone(&client)), store);
     let resumed = host
         .resume_thread_from_checkpoint(checkpoint.clone())
         .await
@@ -7191,15 +7589,15 @@ async fn checkpoint_resume_after_store_reopen_replays_canonical_context() {
 #[tokio::test]
 async fn context_compile_receipt_observation_survives_session_store_reopen() {
     let path = temp_db_path("verlet-provider-context-receipt");
-    let coordinates = ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
     {
-        let client = Arc::new(RecordingClient::with_responses(vec![response_text(
+        let client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
             "first reply",
         )]));
-        let store = Arc::new(SqliteSessionStore::open(&path).await.unwrap());
-        let host = RuntimeHost::with_session_store(factory(client), store);
+        let store = std::sync::Arc::new(crate::SqliteSessionStore::open(&path).await.unwrap());
+        let host = crate::RuntimeHost::with_session_store(factory(client), store);
         let thread = host
-            .start_thread(coordinates.clone(), ThreadTopology::root())
+            .start_thread(coordinates.clone(), crate::ThreadTopology::root())
             .await
             .unwrap();
         let mut events = thread.subscribe_events();
@@ -7213,20 +7611,23 @@ async fn context_compile_receipt_observation_survives_session_store_reopen() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     let session_events = events
         .iter()
         .filter(|event| {
-            event.kind == EventKind::SessionEntryAppended
-                && event.payload.get("runtime_kind").and_then(Value::as_str)
+            event.kind == crate::EventKind::SessionEntryAppended
+                && event
+                    .payload
+                    .get("runtime_kind")
+                    .and_then(serde_json::Value::as_str)
                     != Some("thread_started")
         })
         .collect::<Vec<_>>();
     let compile_events = events
         .iter()
-        .filter(|event| event.kind == EventKind::ContextCompileCompleted)
+        .filter(|event| event.kind == crate::EventKind::ContextCompileCompleted)
         .collect::<Vec<_>>();
     assert_eq!(session_events.len(), 2, "{events:?}");
     assert_eq!(compile_events.len(), 1, "{events:?}");
@@ -7277,19 +7678,19 @@ async fn context_compile_receipt_observation_survives_session_store_reopen() {
 
 #[tokio::test]
 async fn checkpoint_fork_diverges_from_parent_without_corrupting_active_leaves() {
-    let client = Arc::new(RecordingClient::with_responses(vec![
+    let client = std::sync::Arc::new(RecordingClient::with_responses(vec![
         response_text("root reply"),
         response_text("parent reply"),
         response_text("fork reply"),
     ]));
-    let host = RuntimeHost::with_session_store(
-        factory(Arc::clone(&client)),
-        Arc::new(InMemorySessionStore::new()),
+    let host = crate::RuntimeHost::with_session_store(
+        factory(std::sync::Arc::clone(&client)),
+        std::sync::Arc::new(crate::InMemorySessionStore::new()),
     );
     let parent = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -7304,7 +7705,7 @@ async fn checkpoint_fork_diverges_from_parent_without_corrupting_active_leaves()
             parent.context().coordinates.thread_id,
             None,
             Some("branch".to_string()),
-            BTreeMap::new(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -7357,15 +7758,15 @@ async fn checkpoint_fork_diverges_from_parent_without_corrupting_active_leaves()
 
 #[tokio::test]
 async fn cancelling_provider_turn_does_not_store_cancelled_assistant_and_thread_recovers() {
-    let client = Arc::new(ScriptedClient::new(vec![
+    let client = std::sync::Arc::new(ScriptedClient::new(vec![
         ScriptedResponse::Pending,
         ScriptedResponse::Response(response_text("after reply")),
     ]));
-    let host = RuntimeHost::new(runtime_factory(client));
+    let host = crate::RuntimeHost::new(runtime_factory(client));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -7396,15 +7797,15 @@ async fn cancelling_provider_turn_does_not_store_cancelled_assistant_and_thread_
 
 #[tokio::test]
 async fn active_submit_defaults_to_pending_user_queue() {
-    let client = Arc::new(ScriptedClient::new(vec![
+    let client = std::sync::Arc::new(ScriptedClient::new(vec![
         ScriptedResponse::Pending,
         ScriptedResponse::Response(response_text("queued reply")),
     ]));
-    let host = RuntimeHost::new(runtime_factory(client));
+    let host = crate::RuntimeHost::new(runtime_factory(client));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            ThreadTopology::root(),
+            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            crate::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -7442,18 +7843,21 @@ async fn active_submit_defaults_to_pending_user_queue() {
     );
 }
 
-async fn echo_registry(name: &str) -> Arc<OperationRegistry> {
+async fn echo_registry(name: &str) -> std::sync::Arc<crate::OperationRegistry> {
     named_echo_registry(name, "search").await
 }
 
-async fn named_echo_registry(name: &str, operation_name: &str) -> Arc<OperationRegistry> {
-    let registry = Arc::new(OperationRegistry::new());
+async fn named_echo_registry(
+    name: &str,
+    operation_name: &str,
+) -> std::sync::Arc<crate::OperationRegistry> {
+    let registry = std::sync::Arc::new(crate::OperationRegistry::new());
     let wasm = wat::parse_str(echo_operation_guest("echo", operation_name))
         .expect("echo operation fixture should compile");
     registry
-        .register(OperationRegistration::new(
+        .register(crate::OperationRegistration::new(
             name,
-            WasmRuntimeArtifact::bytes(wasm),
+            crate::WasmRuntimeArtifact::bytes(wasm),
         ))
         .await
         .unwrap();
@@ -7557,91 +7961,96 @@ fn wat_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn is_canonical_message_entry(entry: &SessionEntry) -> bool {
-    matches!(entry.kind, SessionEntryKind::Message { .. })
+fn is_canonical_message_entry(entry: &crate::SessionEntry) -> bool {
+    matches!(entry.kind, crate::SessionEntryKind::Message { .. })
 }
 
-fn temp_db_path(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+fn temp_db_path(prefix: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}.sqlite3"))
 }
 
-async fn assert_output(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
+async fn assert_output(
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+    expected: &str,
+) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::Output { text, .. } = event {
+        if let crate::ThreadEvent::Output { text, .. } = event {
             assert_eq!(text, expected);
             return;
         }
     }
 }
 
-async fn assert_stopped(events: &mut broadcast::Receiver<ThreadEvent>) {
+async fn assert_stopped(events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::Stopped { .. } => return,
-            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            crate::ThreadEvent::Stopped { .. } => return,
+            crate::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
     }
 }
 
 async fn assert_output_with_runtime_events(
-    events: &mut broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
     expected: &str,
-) -> Vec<RuntimeEventKind> {
+) -> Vec<crate::RuntimeEventKind> {
     let mut runtime_events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
-            ThreadEvent::Output { text, .. } => {
+            crate::ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
+            crate::ThreadEvent::Output { text, .. } => {
                 assert_eq!(text, expected);
                 return runtime_events;
             }
-            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            crate::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
     }
 }
 
-async fn assert_completed_terminal(events: &mut broadcast::Receiver<ThreadEvent>) {
+async fn assert_completed_terminal(
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::Runtime { event, .. }
+            crate::ThreadEvent::Runtime { event, .. }
                 if matches!(
                     event.kind,
-                    RuntimeEventKind::Terminal {
-                        state: RuntimeTerminalState::Completed,
+                    crate::RuntimeEventKind::Terminal {
+                        state: crate::RuntimeTerminalState::Completed,
                     }
                 ) =>
             {
                 return;
             }
-            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            crate::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
     }
 }
 
-fn assert_mutated_fields(payload: &Value, expected: &[&str]) {
+fn assert_mutated_fields(payload: &serde_json::Value, expected: &[&str]) {
     let fields = payload["mutated_fields"]
         .as_array()
         .expect("mutated_fields should be an array")
@@ -7651,7 +8060,7 @@ fn assert_mutated_fields(payload: &Value, expected: &[&str]) {
     assert_eq!(fields, expected);
 }
 
-fn assert_payload_omits_values(payload: &Value, forbidden_values: &[&str]) {
+fn assert_payload_omits_values(payload: &serde_json::Value, forbidden_values: &[&str]) {
     let encoded = serde_json::to_string(payload).unwrap();
     for forbidden in forbidden_values {
         assert!(
@@ -7662,18 +8071,18 @@ fn assert_payload_omits_values(payload: &Value, forbidden_values: &[&str]) {
 }
 
 async fn assert_failed_with_runtime_events(
-    events: &mut broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
     expected_message_fragment: &str,
-) -> Vec<RuntimeEventKind> {
+) -> Vec<crate::RuntimeEventKind> {
     let mut runtime_events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
-            ThreadEvent::Failed { message, .. } => {
+            crate::ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
+            crate::ThreadEvent::Failed { message, .. } => {
                 assert!(
                     message.contains(expected_message_fragment),
                     "failure message {message:?} did not contain {expected_message_fragment:?}"
@@ -7686,20 +8095,20 @@ async fn assert_failed_with_runtime_events(
 }
 
 async fn assert_compaction(
-    events: &mut broadcast::Receiver<ThreadEvent>,
-    expected_trigger: CompactionTrigger,
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+    expected_trigger: crate::CompactionTrigger,
     expected_summary: &str,
 ) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::Runtime {
+            crate::ThreadEvent::Runtime {
                 event:
-                    RuntimeEvent {
-                        kind: RuntimeEventKind::Compaction { trigger, summary },
+                    crate::RuntimeEvent {
+                        kind: crate::RuntimeEventKind::Compaction { trigger, summary },
                         ..
                     },
                 ..
@@ -7708,27 +8117,30 @@ async fn assert_compaction(
                 assert_eq!(summary, expected_summary);
                 return;
             }
-            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            crate::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
     }
 }
 
-async fn assert_user_mirror(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
+async fn assert_user_mirror(
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+    expected: &str,
+) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::CanonicalMirror { entry, .. } = event
-            && let SessionEntryKind::Message {
-                message: CanonicalMessage::User { content, .. },
+        if let crate::ThreadEvent::CanonicalMirror { entry, .. } = event
+            && let crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::User { content, .. },
             } = entry.kind
         {
             let text = content
                 .iter()
                 .find_map(|content| match content {
-                    CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                    crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .unwrap_or_default();
@@ -7739,16 +8151,16 @@ async fn assert_user_mirror(events: &mut broadcast::Receiver<ThreadEvent>, expec
 }
 
 async fn assert_assistant_mirror(
-    events: &mut broadcast::Receiver<ThreadEvent>,
-) -> CanonicalMessage {
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+) -> crate::CanonicalMessage {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::CanonicalMirror { entry, .. } = event {
-            if let SessionEntryKind::Message { message } = entry.kind {
-                if matches!(message, CanonicalMessage::Assistant { .. }) {
+        if let crate::ThreadEvent::CanonicalMirror { entry, .. } = event {
+            if let crate::SessionEntryKind::Message { message } = entry.kind {
+                if matches!(message, crate::CanonicalMessage::Assistant { .. }) {
                     return message;
                 }
             }
@@ -7757,62 +8169,65 @@ async fn assert_assistant_mirror(
 }
 
 async fn assert_assistant_with_runtime_events(
-    events: &mut broadcast::Receiver<ThreadEvent>,
-) -> (CanonicalMessage, Vec<RuntimeEventKind>) {
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+) -> (crate::CanonicalMessage, Vec<crate::RuntimeEventKind>) {
     let mut runtime_events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
-            ThreadEvent::CanonicalMirror { entry, .. } => {
-                if let SessionEntryKind::Message { message } = entry.kind
-                    && matches!(message, CanonicalMessage::Assistant { .. })
+            crate::ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
+            crate::ThreadEvent::CanonicalMirror { entry, .. } => {
+                if let crate::SessionEntryKind::Message { message } = entry.kind
+                    && matches!(message, crate::CanonicalMessage::Assistant { .. })
                 {
                     return (message, runtime_events);
                 }
             }
-            ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            crate::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
             _ => {}
         }
     }
 }
 
-async fn assert_cancelled(events: &mut broadcast::Receiver<ThreadEvent>, expected: &str) {
+async fn assert_cancelled(
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+    expected: &str,
+) {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::Cancelled { reason, .. } = event {
+        if let crate::ThreadEvent::Cancelled { reason, .. } = event {
             assert_eq!(reason, expected);
             return;
         }
     }
 }
 
-fn drain_has_cancelled(events: &mut broadcast::Receiver<ThreadEvent>) -> bool {
+fn drain_has_cancelled(events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>) -> bool {
     let mut cancelled = false;
     while let Ok(event) = events.try_recv() {
-        cancelled |= matches!(event, ThreadEvent::Cancelled { .. });
+        cancelled |= matches!(event, crate::ThreadEvent::Cancelled { .. });
     }
     cancelled
 }
 
 async fn wait_for_tool_completion_count(
-    store: &InMemorySessionStore,
-    coordinates: &ThreadCoordinates,
+    store: &crate::InMemorySessionStore,
+    coordinates: &crate::ThreadCoordinates,
     expected: usize,
 ) {
     for _ in 0..100 {
         let count = store
-            .read_events(&EventStreamId::for_thread(coordinates), None)
+            .read_events(&crate::EventStreamId::for_thread(coordinates), None)
             .await
             .unwrap()
             .into_iter()
-            .filter(|event| event.kind == EventKind::ToolCallCompleted)
+            .filter(|event| event.kind == crate::EventKind::ToolCallCompleted)
             .count();
         if count == expected {
             return;
@@ -7823,15 +8238,15 @@ async fn wait_for_tool_completion_count(
 }
 
 async fn assert_signal(
-    events: &mut broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
     expected: crate::ThreadSignalKind,
 ) -> crate::ThreadSignal {
     loop {
-        let event = timeout(Duration::from_secs(30), events.recv())
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
-        if let ThreadEvent::Signal { signal, .. } = event
+        if let crate::ThreadEvent::Signal { signal, .. } = event
             && signal.kind == expected
         {
             return signal;

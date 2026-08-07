@@ -1,28 +1,4 @@
-use crate::kernel::process_handle_dispatch::{ProcessHandleDispatcher, command_digest};
-use crate::{
-    ActiveMandate, CHANNEL_EMIT_OPERATION, KernelOperationDispatcher, MANDATE_LIST_OPERATION,
-    MANDATE_REVOKE_OPERATION, MANDATE_START_OPERATION, MandateCatchUpPolicy,
-    MandateSchedulePayload, MandateStartRequest, NOTIFY_PREVIEW_OPERATION, PROCESS_EXEC_OPERATION,
-    PROCESS_POLL_OPERATION, PROCESS_TERMINATE_OPERATION, PROCESS_WRITE_OPERATION,
-    RuntimeKernelControl, THREAD_CANCEL_OPERATION, THREAD_SPAWN_OPERATION, THREAD_STATUS_OPERATION,
-    THREAD_SUBMIT_OPERATION, THREAD_WAIT_OPERATION, ThreadContext, ThreadId, TurnInput,
-    VERLET_NOTIFY_PACKAGE, VERLET_PROCESS_PACKAGE, VERLET_SCHEDULE_PACKAGE, VERLET_THREADS_PACKAGE,
-    VerletError, VerletResult, parse_mandate_event_id,
-};
-use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-use verlet_process::{
-    AsyncExecutionManager, AsyncProcessOwner, AsyncProcessSnapshot, AsyncProcessStartRequest,
-    ExecutionDeadline, HostBashLiveBackend, LiveProcessBackend, VerletProcessId,
-};
-use verlet_runtime_contracts::DispatchId;
+use base64::Engine as _;
 
 const APP_SERVER_CWD_METADATA: &str = "cooldis.app_server.cwd";
 const DEFAULT_PROCESS_TIMEOUT_MS: u64 = 30_000;
@@ -32,13 +8,13 @@ const DEFAULT_PROCESS_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct KernelThreadOperationProvider {
-    control: RuntimeKernelControl,
-    caller: ThreadContext,
-    agent_resolver: Option<Arc<dyn KernelThreadSpawnAgentResolver>>,
+    control: crate::RuntimeKernelControl,
+    caller: crate::ThreadContext,
+    agent_resolver: Option<std::sync::Arc<dyn KernelThreadSpawnAgentResolver>>,
 }
 
 impl KernelThreadOperationProvider {
-    pub fn new(control: RuntimeKernelControl, caller: ThreadContext) -> Self {
+    pub fn new(control: crate::RuntimeKernelControl, caller: crate::ThreadContext) -> Self {
         Self {
             control,
             caller,
@@ -48,13 +24,17 @@ impl KernelThreadOperationProvider {
 
     pub fn with_agent_resolver(
         mut self,
-        resolver: Arc<dyn KernelThreadSpawnAgentResolver>,
+        resolver: std::sync::Arc<dyn KernelThreadSpawnAgentResolver>,
     ) -> Self {
         self.agent_resolver = Some(resolver);
         self
     }
 
-    async fn invoke_json(&self, operation_name: &str, arguments: Value) -> VerletResult<Value> {
+    async fn invoke_json(
+        &self,
+        operation_name: &str,
+        arguments: serde_json::Value,
+    ) -> crate::VerletResult<serde_json::Value> {
         self.invoke_json_with_dispatch(operation_name, arguments, None)
             .await
     }
@@ -62,16 +42,21 @@ impl KernelThreadOperationProvider {
     async fn invoke_json_with_dispatch(
         &self,
         operation_name: &str,
-        arguments: Value,
-        injected_dispatch_id: Option<DispatchId>,
-    ) -> VerletResult<Value> {
+        arguments: serde_json::Value,
+        injected_dispatch_id: Option<verlet_runtime_contracts::DispatchId>,
+    ) -> crate::VerletResult<serde_json::Value> {
         let value = match operation_name {
-            THREAD_SPAWN_OPERATION => {
+            crate::THREAD_SPAWN_OPERATION => {
                 let args: ThreadSpawnArgs = decode_args(operation_name, arguments)?;
                 require_non_empty(&args.task_name, "task_name")?;
                 let dispatch_id = injected_dispatch_id
-                    .or_else(|| args.dispatch_id.map(DispatchId::new))
-                    .unwrap_or_else(|| DispatchId::new(uuid::Uuid::now_v7().to_string()));
+                    .or_else(|| {
+                        args.dispatch_id
+                            .map(verlet_runtime_contracts::DispatchId::new)
+                    })
+                    .unwrap_or_else(|| {
+                        verlet_runtime_contracts::DispatchId::new(uuid::Uuid::now_v7().to_string())
+                    });
                 let receipt = self
                     .control
                     .dispatch_thread_spawn(
@@ -84,13 +69,13 @@ impl KernelThreadOperationProvider {
                     )
                     .await
                     .map_err(|err| model_thread_spawn_error(&args.task_name, err))?;
-                json!({
+                serde_json::json!({
                     "operation": "cooldis.thread_spawn",
                     "task_name": args.task_name,
                     "status": receipt.status,
                 })
             }
-            THREAD_SUBMIT_OPERATION => {
+            crate::THREAD_SUBMIT_OPERATION => {
                 let args: ThreadSubmitArgs = decode_args(operation_name, arguments)?;
                 let resolution = self
                     .control
@@ -102,15 +87,20 @@ impl KernelThreadOperationProvider {
                 let target_thread_id =
                     resolved_thread_id(operation_name, &args.task_name, &resolution.handle.id)?;
                 let dispatch_id = injected_dispatch_id
-                    .or_else(|| args.dispatch_id.map(DispatchId::new))
-                    .unwrap_or_else(|| DispatchId::new(uuid::Uuid::now_v7().to_string()));
+                    .or_else(|| {
+                        args.dispatch_id
+                            .map(verlet_runtime_contracts::DispatchId::new)
+                    })
+                    .unwrap_or_else(|| {
+                        verlet_runtime_contracts::DispatchId::new(uuid::Uuid::now_v7().to_string())
+                    });
                 let receipt = self
                     .control
                     .submit_to_thread_with_dispatch(
                         &self.caller,
                         target_thread_id,
                         dispatch_id,
-                        TurnInput::text(args.message),
+                        crate::TurnInput::text(args.message),
                     )
                     .await
                     .map_err(|err| {
@@ -121,13 +111,13 @@ impl KernelThreadOperationProvider {
                             err,
                         )
                     })?;
-                json!({
+                serde_json::json!({
                     "operation": "cooldis.thread_submit",
                     "task_name": args.task_name,
                     "status": receipt.status,
                 })
             }
-            THREAD_WAIT_OPERATION => {
+            crate::THREAD_WAIT_OPERATION => {
                 let args: ThreadWaitArgs = decode_args(operation_name, arguments)?;
                 let resolution = self
                     .control
@@ -150,13 +140,13 @@ impl KernelThreadOperationProvider {
                             err,
                         )
                     })?;
-                json!({
+                serde_json::json!({
                     "operation": "cooldis.thread_wait",
                     "task_name": args.task_name,
                     "status": receipt.status,
                 })
             }
-            THREAD_STATUS_OPERATION => {
+            crate::THREAD_STATUS_OPERATION => {
                 let args: ThreadStatusArgs = decode_args(operation_name, arguments)?;
                 let resolution = self
                     .control
@@ -179,13 +169,13 @@ impl KernelThreadOperationProvider {
                             err,
                         )
                     })?;
-                json!({
+                serde_json::json!({
                     "operation": "cooldis.thread_status",
                     "task_name": args.task_name,
                     "status": receipt.status,
                 })
             }
-            THREAD_CANCEL_OPERATION => {
+            crate::THREAD_CANCEL_OPERATION => {
                 let args: ThreadCancelArgs = decode_args(operation_name, arguments)?;
                 let resolution = self
                     .control
@@ -212,15 +202,16 @@ impl KernelThreadOperationProvider {
                             err,
                         )
                     })?;
-                json!({
+                serde_json::json!({
                     "operation": "cooldis.thread_cancel",
                     "task_name": args.task_name,
                     "status": receipt.status,
                 })
             }
             _ => {
-                return Err(VerletError::RuntimeExecution(format!(
-                    "unknown kernel operation {VERLET_THREADS_PACKAGE}/{operation_name}"
+                return Err(crate::VerletError::RuntimeExecution(format!(
+                    "unknown kernel operation {VERLET_THREADS_PACKAGE}/{operation_name}",
+                    VERLET_THREADS_PACKAGE = crate::VERLET_THREADS_PACKAGE
                 )));
             }
         };
@@ -230,18 +221,22 @@ impl KernelThreadOperationProvider {
 
 #[derive(Clone)]
 pub struct KernelScheduleOperationProvider {
-    control: RuntimeKernelControl,
-    caller: ThreadContext,
+    control: crate::RuntimeKernelControl,
+    caller: crate::ThreadContext,
 }
 
 impl KernelScheduleOperationProvider {
-    pub fn new(control: RuntimeKernelControl, caller: ThreadContext) -> Self {
+    pub fn new(control: crate::RuntimeKernelControl, caller: crate::ThreadContext) -> Self {
         Self { control, caller }
     }
 
-    async fn invoke_json(&self, operation_name: &str, arguments: Value) -> VerletResult<Value> {
+    async fn invoke_json(
+        &self,
+        operation_name: &str,
+        arguments: serde_json::Value,
+    ) -> crate::VerletResult<serde_json::Value> {
         let value = match operation_name {
-            MANDATE_START_OPERATION => {
+            crate::MANDATE_START_OPERATION => {
                 let args: MandateStartArgs = decode_schedule_args(operation_name, arguments)?;
                 let target_thread_id = optional_target_thread_id(
                     &self.caller,
@@ -253,7 +248,7 @@ impl KernelScheduleOperationProvider {
                     .start_mandate(
                         &self.caller,
                         target_thread_id,
-                        MandateStartRequest {
+                        crate::MandateStartRequest {
                             schedule: args.schedule,
                             max_occurrences: args.max_occurrences,
                             catch_up: args.catch_up,
@@ -263,7 +258,7 @@ impl KernelScheduleOperationProvider {
                         },
                     )
                     .await?;
-                json!({
+                serde_json::json!({
                     "operation": "cooldis.mandate_start",
                     "status": "started",
                     "thread_id": target_thread_id.to_string(),
@@ -272,19 +267,19 @@ impl KernelScheduleOperationProvider {
                     "sequence": receipt.event.sequence.get(),
                 })
             }
-            MANDATE_REVOKE_OPERATION => {
+            crate::MANDATE_REVOKE_OPERATION => {
                 let args: MandateRevokeArgs = decode_schedule_args(operation_name, arguments)?;
                 let target_thread_id = optional_target_thread_id(
                     &self.caller,
                     args.thread_id.as_deref(),
                     "thread_id",
                 )?;
-                let mandate_event_id = parse_mandate_event_id(&args.mandate_event_id)?;
+                let mandate_event_id = crate::parse_mandate_event_id(&args.mandate_event_id)?;
                 let receipt = self
                     .control
                     .revoke_mandate(&self.caller, target_thread_id, mandate_event_id)
                     .await?;
-                json!({
+                serde_json::json!({
                     "operation": "cooldis.mandate_revoke",
                     "status": receipt.status.as_str(),
                     "thread_id": target_thread_id.to_string(),
@@ -292,7 +287,7 @@ impl KernelScheduleOperationProvider {
                     "revoked_event_id": receipt.revoke_event.id.to_string(),
                 })
             }
-            MANDATE_LIST_OPERATION => {
+            crate::MANDATE_LIST_OPERATION => {
                 let args: MandateListArgs = decode_schedule_args(operation_name, arguments)?;
                 let target_thread_id = optional_target_thread_id(
                     &self.caller,
@@ -306,15 +301,16 @@ impl KernelScheduleOperationProvider {
                     .iter()
                     .map(active_mandate_json)
                     .collect::<Vec<_>>();
-                json!({
+                serde_json::json!({
                     "operation": "cooldis.mandate_list",
                     "thread_id": target_thread_id.to_string(),
                     "mandates": mandates,
                 })
             }
             _ => {
-                return Err(VerletError::RuntimeExecution(format!(
-                    "unknown kernel operation {VERLET_SCHEDULE_PACKAGE}/{operation_name}"
+                return Err(crate::VerletError::RuntimeExecution(format!(
+                    "unknown kernel operation {VERLET_SCHEDULE_PACKAGE}/{operation_name}",
+                    VERLET_SCHEDULE_PACKAGE = crate::VERLET_SCHEDULE_PACKAGE
                 )));
             }
         };
@@ -324,42 +320,55 @@ impl KernelScheduleOperationProvider {
 
 #[derive(Clone)]
 pub struct KernelProcessOperationProvider {
-    caller: ThreadContext,
-    process_manager: AsyncExecutionManager,
-    live_backend: Arc<dyn LiveProcessBackend>,
-    default_cwd: PathBuf,
+    caller: crate::ThreadContext,
+    process_manager: verlet_process::AsyncExecutionManager,
+    live_backend: std::sync::Arc<dyn verlet_process::LiveProcessBackend>,
+    default_cwd: std::path::PathBuf,
     default_output_cap_bytes: usize,
-    process_dispatcher: Option<ProcessHandleDispatcher>,
+    process_dispatcher: Option<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
 }
 
 impl KernelProcessOperationProvider {
-    pub fn new(caller: ThreadContext, default_cwd: impl Into<PathBuf>) -> Self {
+    pub fn new(caller: crate::ThreadContext, default_cwd: impl Into<std::path::PathBuf>) -> Self {
         Self {
             caller,
-            process_manager: AsyncExecutionManager::default(),
-            live_backend: Arc::new(HostBashLiveBackend),
+            process_manager: verlet_process::AsyncExecutionManager::default(),
+            live_backend: std::sync::Arc::new(verlet_process::HostBashLiveBackend),
             default_cwd: default_cwd.into(),
             default_output_cap_bytes: DEFAULT_PROCESS_OUTPUT_CAP_BYTES,
             process_dispatcher: None,
         }
     }
 
-    pub fn with_process_manager(mut self, process_manager: AsyncExecutionManager) -> Self {
+    pub fn with_process_manager(
+        mut self,
+        process_manager: verlet_process::AsyncExecutionManager,
+    ) -> Self {
         self.process_manager = process_manager;
         self
     }
 
-    pub fn with_backend(mut self, backend: Arc<dyn LiveProcessBackend>) -> Self {
+    pub fn with_backend(
+        mut self,
+        backend: std::sync::Arc<dyn verlet_process::LiveProcessBackend>,
+    ) -> Self {
         self.live_backend = backend;
         self
     }
 
-    pub fn with_process_dispatcher(mut self, dispatcher: ProcessHandleDispatcher) -> Self {
+    pub fn with_process_dispatcher(
+        mut self,
+        dispatcher: crate::kernel::process_handle_dispatch::ProcessHandleDispatcher,
+    ) -> Self {
         self.process_dispatcher = Some(dispatcher);
         self
     }
 
-    async fn invoke_json(&self, operation_name: &str, arguments: Value) -> VerletResult<Value> {
+    async fn invoke_json(
+        &self,
+        operation_name: &str,
+        arguments: serde_json::Value,
+    ) -> crate::VerletResult<serde_json::Value> {
         self.invoke_json_with_dispatch(operation_name, arguments, None)
             .await
     }
@@ -367,21 +376,22 @@ impl KernelProcessOperationProvider {
     async fn invoke_json_with_dispatch(
         &self,
         operation_name: &str,
-        arguments: Value,
-        injected_dispatch_id: Option<DispatchId>,
-    ) -> VerletResult<Value> {
+        arguments: serde_json::Value,
+        injected_dispatch_id: Option<verlet_runtime_contracts::DispatchId>,
+    ) -> crate::VerletResult<serde_json::Value> {
         let value = match operation_name {
-            PROCESS_EXEC_OPERATION => {
+            crate::PROCESS_EXEC_OPERATION => {
                 let args: ProcessExecArgs = decode_process_args(operation_name, arguments)?;
                 let explicit_dispatch_id = args.dispatch_id.clone();
                 let command_bytes = serde_json::to_vec(&args.command).map_err(|err| {
-                    VerletError::RuntimeExecution(format!(
+                    crate::VerletError::RuntimeExecution(format!(
                         "encode process command for dispatch digest: {err}"
                     ))
                 })?;
                 if args.command.is_empty() {
-                    return Err(VerletError::RuntimeExecution(format!(
-                        "operation {VERLET_PROCESS_PACKAGE}/{operation_name} requires a non-empty command argv"
+                    return Err(crate::VerletError::RuntimeExecution(format!(
+                        "operation {VERLET_PROCESS_PACKAGE}/{operation_name} requires a non-empty command argv",
+                        VERLET_PROCESS_PACKAGE = crate::VERLET_PROCESS_PACKAGE
                     )));
                 }
                 let default_cwd = self.effective_default_cwd();
@@ -390,24 +400,30 @@ impl KernelProcessOperationProvider {
                     .env
                     .into_iter()
                     .map(|(key, value)| (key, Some(value)))
-                    .collect::<BTreeMap<_, _>>();
-                let timeout =
-                    Duration::from_millis(args.timeout_ms.unwrap_or(DEFAULT_PROCESS_TIMEOUT_MS));
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                let timeout = std::time::Duration::from_millis(
+                    args.timeout_ms.unwrap_or(DEFAULT_PROCESS_TIMEOUT_MS),
+                );
                 let output_cap =
                     process_output_cap(args.output_bytes_cap, self.default_output_cap_bytes);
                 let yield_time = process_yield_time(args.yield_time_ms);
-                let request = AsyncProcessStartRequest::host_command(args.command, cwd)
-                    .with_owner(self.process_owner("kernel-operation:cooldis-process/process_exec"))
-                    .with_env(env)
-                    .pipe_stdin(args.stream_stdin)
-                    .with_deadline(ExecutionDeadline::from_now(timeout))
-                    .with_yield_time(yield_time)
-                    .with_output_cap_bytes(output_cap);
+                let request =
+                    verlet_process::AsyncProcessStartRequest::host_command(args.command, cwd)
+                        .with_owner(
+                            self.process_owner("kernel-operation:cooldis-process/process_exec"),
+                        )
+                        .with_env(env)
+                        .pipe_stdin(args.stream_stdin)
+                        .with_deadline(verlet_process::ExecutionDeadline::from_now(timeout))
+                        .with_yield_time(yield_time)
+                        .with_output_cap_bytes(output_cap);
                 let dispatch_id = injected_dispatch_id
-                    .or_else(|| explicit_dispatch_id.map(DispatchId::new))
-                    .unwrap_or_else(|| DispatchId::new(uuid::Uuid::now_v7().to_string()));
+                    .or_else(|| explicit_dispatch_id.map(verlet_runtime_contracts::DispatchId::new))
+                    .unwrap_or_else(|| {
+                        verlet_runtime_contracts::DispatchId::new(uuid::Uuid::now_v7().to_string())
+                    });
                 let dispatcher = self.process_dispatcher.as_ref().ok_or_else(|| {
-                    VerletError::RuntimeExecution(
+                    crate::VerletError::RuntimeExecution(
                         "process_exec requires the durable process dispatch ingress lane"
                             .to_string(),
                     )
@@ -416,18 +432,18 @@ impl KernelProcessOperationProvider {
                     .dispatch_start(
                         &self.caller.coordinates,
                         dispatch_id.clone(),
-                        command_digest(&command_bytes),
+                        crate::kernel::process_handle_dispatch::command_digest(&command_bytes),
                         self.process_manager.clone(),
-                        Arc::clone(&self.live_backend),
+                        std::sync::Arc::clone(&self.live_backend),
                         request,
                     )
                     .await?;
                 let mut value =
                     process_snapshot_output_json("cooldis.process_exec", &outcome.snapshot);
-                value["dispatch_id"] = json!(dispatch_id.to_string());
+                value["dispatch_id"] = serde_json::json!(dispatch_id.to_string());
                 value
             }
-            PROCESS_POLL_OPERATION => {
+            crate::PROCESS_POLL_OPERATION => {
                 let args: ProcessHandleArgs = decode_process_args(operation_name, arguments)?;
                 let process_id = parse_process_id(&args.process_id, "process_id")?;
                 self.require_process_handle(process_id).await?;
@@ -441,14 +457,15 @@ impl KernelProcessOperationProvider {
                     .await?;
                 process_snapshot_output_json("cooldis.process_poll", &outcome.snapshot)
             }
-            PROCESS_WRITE_OPERATION => {
+            crate::PROCESS_WRITE_OPERATION => {
                 let args: ProcessWriteArgs = decode_process_args(operation_name, arguments)?;
                 let process_id = parse_process_id(&args.process_id, "process_id")?;
                 self.require_process_handle(process_id).await?;
-                let bytes = STANDARD.decode(args.delta_base64).map_err(|err| {
-                    VerletError::RuntimeExecution(format!(
-                        "operation {VERLET_PROCESS_PACKAGE}/{operation_name} requires valid base64 delta_base64: {err}"
-                    ))
+                let bytes = base64::engine::general_purpose::STANDARD.decode(args.delta_base64).map_err(|err| {
+                    crate::VerletError::RuntimeExecution(format!(
+                        "operation {VERLET_PROCESS_PACKAGE}/{operation_name} requires valid base64 delta_base64: {err}",
+                                                             VERLET_PROCESS_PACKAGE = crate::VERLET_PROCESS_PACKAGE
+                                                         ))
                 })?;
                 let outcome = self
                     .process_manager
@@ -461,7 +478,7 @@ impl KernelProcessOperationProvider {
                     .await?;
                 process_snapshot_output_json("cooldis.process_write", &outcome.snapshot)
             }
-            PROCESS_TERMINATE_OPERATION => {
+            crate::PROCESS_TERMINATE_OPERATION => {
                 let args: ProcessTerminateArgs = decode_process_args(operation_name, arguments)?;
                 let process_id = parse_process_id(&args.process_id, "process_id")?;
                 self.require_process_handle(process_id).await?;
@@ -478,16 +495,17 @@ impl KernelProcessOperationProvider {
                 process_snapshot_output_json("cooldis.process_terminate", &outcome.snapshot)
             }
             _ => {
-                return Err(VerletError::RuntimeExecution(format!(
-                    "unknown kernel operation {VERLET_PROCESS_PACKAGE}/{operation_name}"
+                return Err(crate::VerletError::RuntimeExecution(format!(
+                    "unknown kernel operation {VERLET_PROCESS_PACKAGE}/{operation_name}",
+                    VERLET_PROCESS_PACKAGE = crate::VERLET_PROCESS_PACKAGE
                 )));
             }
         };
         Ok(value)
     }
 
-    fn process_owner(&self, surface: &str) -> AsyncProcessOwner {
-        AsyncProcessOwner {
+    fn process_owner(&self, surface: &str) -> verlet_process::AsyncProcessOwner {
+        verlet_process::AsyncProcessOwner {
             thread_id: Some(self.caller.coordinates.thread_id.to_string()),
             turn_id: None,
             call_id: None,
@@ -495,11 +513,14 @@ impl KernelProcessOperationProvider {
         }
     }
 
-    async fn require_process_handle(&self, process_id: VerletProcessId) -> VerletResult<()> {
+    async fn require_process_handle(
+        &self,
+        process_id: verlet_process::VerletProcessId,
+    ) -> crate::VerletResult<()> {
         self.process_dispatcher
             .as_ref()
             .ok_or_else(|| {
-                VerletError::RuntimeExecution(
+                crate::VerletError::RuntimeExecution(
                     "process handle verbs require the durable process dispatch ingress lane"
                         .to_string(),
                 )
@@ -509,12 +530,12 @@ impl KernelProcessOperationProvider {
             .map(|_| ())
     }
 
-    fn effective_default_cwd(&self) -> PathBuf {
+    fn effective_default_cwd(&self) -> std::path::PathBuf {
         self.caller
             .metadata
             .get(APP_SERVER_CWD_METADATA)
             .filter(|cwd| !cwd.trim().is_empty())
-            .map(PathBuf::from)
+            .map(std::path::PathBuf::from)
             .unwrap_or_else(|| self.default_cwd.clone())
     }
 }
@@ -523,9 +544,13 @@ impl KernelProcessOperationProvider {
 pub struct KernelNotifyOperationProvider;
 
 impl KernelNotifyOperationProvider {
-    async fn invoke_json(&self, operation_name: &str, arguments: Value) -> VerletResult<Value> {
+    async fn invoke_json(
+        &self,
+        operation_name: &str,
+        arguments: serde_json::Value,
+    ) -> crate::VerletResult<serde_json::Value> {
         let value = match operation_name {
-            NOTIFY_PREVIEW_OPERATION => {
+            crate::NOTIFY_PREVIEW_OPERATION => {
                 let args: NotifyPreviewArgs = decode_notify_args(operation_name, arguments)?;
                 let NotifyPreviewArgs {
                     channel,
@@ -535,7 +560,7 @@ impl KernelNotifyOperationProvider {
                 } = args;
                 require_non_empty(&channel, "channel")?;
                 require_non_empty(&body, "body")?;
-                let mut value = json!({
+                let mut value = serde_json::json!({
                     "operation": "cooldis.notify_preview",
                     "status": "recorded",
                     "delivery": "not_sent",
@@ -546,11 +571,11 @@ impl KernelNotifyOperationProvider {
                     "reason": "V1 records notification intent; channel-specific delivery adapters are explicit operations."
                 });
                 if let Some(subject) = subject {
-                    value["subject"] = json!(subject);
+                    value["subject"] = serde_json::json!(subject);
                 }
                 value
             }
-            CHANNEL_EMIT_OPERATION => {
+            crate::CHANNEL_EMIT_OPERATION => {
                 let args: ChannelEmitArgs = decode_notify_args(operation_name, arguments)?;
                 let ChannelEmitArgs {
                     channel,
@@ -559,7 +584,7 @@ impl KernelNotifyOperationProvider {
                 } = args;
                 require_non_empty(&channel, "channel")?;
                 require_non_empty(&message, "message")?;
-                let mut value = json!({
+                let mut value = serde_json::json!({
                     "operation": "cooldis.channel_emit",
                     "status": "recorded",
                     "delivery": "not_sent",
@@ -569,13 +594,14 @@ impl KernelNotifyOperationProvider {
                     "reason": "V1 records channel egress intent; channel-specific delivery adapters are explicit operations."
                 });
                 if let Some(thread_id) = thread_id {
-                    value["thread_id"] = json!(thread_id);
+                    value["thread_id"] = serde_json::json!(thread_id);
                 }
                 value
             }
             _ => {
-                return Err(VerletError::RuntimeExecution(format!(
-                    "unknown kernel operation {VERLET_NOTIFY_PACKAGE}/{operation_name}"
+                return Err(crate::VerletError::RuntimeExecution(format!(
+                    "unknown kernel operation {VERLET_NOTIFY_PACKAGE}/{operation_name}",
+                    VERLET_NOTIFY_PACKAGE = crate::VERLET_NOTIFY_PACKAGE
                 )));
             }
         };
@@ -585,35 +611,36 @@ impl KernelNotifyOperationProvider {
 
 #[derive(Clone, Debug)]
 pub struct KernelThreadSpawnAgentBinding {
-    pub metadata: BTreeMap<String, String>,
-    pub compile_receipt: Value,
-    pub bind_receipt: Value,
+    pub metadata: std::collections::BTreeMap<String, String>,
+    pub compile_receipt: serde_json::Value,
+    pub bind_receipt: serde_json::Value,
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait KernelThreadSpawnAgentResolver: Send + Sync {
     /// Alias used when the model omits `agent_ref`. Runtime integrations with a
     /// synthesized default manifest return that alias; lower-level runtimes may
     /// retain the unbound compatibility path by returning `None`.
-    fn default_agent_ref(&self, _caller: &ThreadContext) -> Option<String> {
+    fn default_agent_ref(&self, _caller: &crate::ThreadContext) -> Option<String> {
         None
     }
 
     async fn resolve_agent_ref(
         &self,
-        caller: &ThreadContext,
+        caller: &crate::ThreadContext,
         agent_ref: &str,
-    ) -> VerletResult<KernelThreadSpawnAgentBinding>;
+    ) -> crate::VerletResult<KernelThreadSpawnAgentBinding>;
 }
 
-#[async_trait]
-impl KernelOperationDispatcher for KernelThreadOperationProvider {
+#[async_trait::async_trait]
+impl crate::KernelOperationDispatcher for KernelThreadOperationProvider {
     async fn invoke_kernel_operation(
         &self,
         operation_name: &str,
         input: Vec<u8>,
     ) -> verlet_operations::VerletResult<Vec<u8>> {
-        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let arguments: serde_json::Value =
+            serde_json::from_slice(&input).map_err(operations_runtime_error)?;
         let value = self
             .invoke_json(operation_name, arguments)
             .await
@@ -625,13 +652,14 @@ impl KernelOperationDispatcher for KernelThreadOperationProvider {
         &self,
         operation_name: &str,
         input: Vec<u8>,
-        metadata: BTreeMap<String, Value>,
+        metadata: std::collections::BTreeMap<String, serde_json::Value>,
     ) -> verlet_operations::VerletResult<Vec<u8>> {
-        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let arguments: serde_json::Value =
+            serde_json::from_slice(&input).map_err(operations_runtime_error)?;
         let dispatch_id = metadata
             .get("cooldis.tool_call_id")
-            .and_then(Value::as_str)
-            .map(DispatchId::new);
+            .and_then(serde_json::Value::as_str)
+            .map(verlet_runtime_contracts::DispatchId::new);
         let value = self
             .invoke_json_with_dispatch(operation_name, arguments, dispatch_id)
             .await
@@ -640,14 +668,15 @@ impl KernelOperationDispatcher for KernelThreadOperationProvider {
     }
 }
 
-#[async_trait]
-impl KernelOperationDispatcher for KernelScheduleOperationProvider {
+#[async_trait::async_trait]
+impl crate::KernelOperationDispatcher for KernelScheduleOperationProvider {
     async fn invoke_kernel_operation(
         &self,
         operation_name: &str,
         input: Vec<u8>,
     ) -> verlet_operations::VerletResult<Vec<u8>> {
-        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let arguments: serde_json::Value =
+            serde_json::from_slice(&input).map_err(operations_runtime_error)?;
         let value = self
             .invoke_json(operation_name, arguments)
             .await
@@ -656,14 +685,15 @@ impl KernelOperationDispatcher for KernelScheduleOperationProvider {
     }
 }
 
-#[async_trait]
-impl KernelOperationDispatcher for KernelProcessOperationProvider {
+#[async_trait::async_trait]
+impl crate::KernelOperationDispatcher for KernelProcessOperationProvider {
     async fn invoke_kernel_operation(
         &self,
         operation_name: &str,
         input: Vec<u8>,
     ) -> verlet_operations::VerletResult<Vec<u8>> {
-        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let arguments: serde_json::Value =
+            serde_json::from_slice(&input).map_err(operations_runtime_error)?;
         let value = self
             .invoke_json(operation_name, arguments)
             .await
@@ -675,13 +705,14 @@ impl KernelOperationDispatcher for KernelProcessOperationProvider {
         &self,
         operation_name: &str,
         input: Vec<u8>,
-        metadata: BTreeMap<String, Value>,
+        metadata: std::collections::BTreeMap<String, serde_json::Value>,
     ) -> verlet_operations::VerletResult<Vec<u8>> {
-        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let arguments: serde_json::Value =
+            serde_json::from_slice(&input).map_err(operations_runtime_error)?;
         let dispatch_id = metadata
             .get("cooldis.tool_call_id")
-            .and_then(Value::as_str)
-            .map(DispatchId::new);
+            .and_then(serde_json::Value::as_str)
+            .map(verlet_runtime_contracts::DispatchId::new);
         let value = self
             .invoke_json_with_dispatch(operation_name, arguments, dispatch_id)
             .await
@@ -690,14 +721,15 @@ impl KernelOperationDispatcher for KernelProcessOperationProvider {
     }
 }
 
-#[async_trait]
-impl KernelOperationDispatcher for KernelNotifyOperationProvider {
+#[async_trait::async_trait]
+impl crate::KernelOperationDispatcher for KernelNotifyOperationProvider {
     async fn invoke_kernel_operation(
         &self,
         operation_name: &str,
         input: Vec<u8>,
     ) -> verlet_operations::VerletResult<Vec<u8>> {
-        let arguments: Value = serde_json::from_slice(&input).map_err(operations_runtime_error)?;
+        let arguments: serde_json::Value =
+            serde_json::from_slice(&input).map_err(operations_runtime_error)?;
         let value = self
             .invoke_json(operation_name, arguments)
             .await
@@ -706,7 +738,7 @@ impl KernelOperationDispatcher for KernelNotifyOperationProvider {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadSpawnArgs {
     task_name: String,
@@ -717,7 +749,7 @@ struct ThreadSpawnArgs {
     dispatch_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadSubmitArgs {
     task_name: String,
@@ -726,7 +758,7 @@ struct ThreadSubmitArgs {
     dispatch_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadWaitArgs {
     task_name: String,
@@ -734,35 +766,35 @@ struct ThreadWaitArgs {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadStatusArgs {
     task_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadCancelArgs {
     task_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MandateStartArgs {
     #[serde(default)]
     thread_id: Option<String>,
-    schedule: MandateSchedulePayload,
+    schedule: crate::MandateSchedulePayload,
     #[serde(default)]
     max_occurrences: Option<u32>,
     #[serde(default)]
-    catch_up: Option<MandateCatchUpPolicy>,
+    catch_up: Option<crate::MandateCatchUpPolicy>,
     #[serde(default)]
     input_template: Option<String>,
     #[serde(default)]
     expires_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MandateRevokeArgs {
     #[serde(default)]
@@ -770,21 +802,21 @@ struct MandateRevokeArgs {
     mandate_event_id: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MandateListArgs {
     #[serde(default)]
     thread_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessExecArgs {
     command: Vec<String>,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
-    env: BTreeMap<String, String>,
+    env: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     stream_stdin: bool,
     #[serde(default)]
@@ -797,7 +829,7 @@ struct ProcessExecArgs {
     dispatch_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessHandleArgs {
     process_id: String,
@@ -807,7 +839,7 @@ struct ProcessHandleArgs {
     output_bytes_cap: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessWriteArgs {
     process_id: String,
@@ -818,7 +850,7 @@ struct ProcessWriteArgs {
     output_bytes_cap: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessTerminateArgs {
     process_id: String,
@@ -828,7 +860,7 @@ struct ProcessTerminateArgs {
     yield_time_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NotifyPreviewArgs {
     channel: String,
@@ -839,7 +871,7 @@ struct NotifyPreviewArgs {
     severity: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChannelEmitArgs {
     channel: String,
@@ -848,50 +880,57 @@ struct ChannelEmitArgs {
     thread_id: Option<String>,
 }
 
-fn decode_args<T: DeserializeOwned>(operation_name: &str, arguments: Value) -> VerletResult<T> {
-    serde_json::from_value(arguments).map_err(|err| {
-        VerletError::RuntimeExecution(format!(
-            "operation {VERLET_THREADS_PACKAGE}/{operation_name} has invalid arguments: {err}"
-        ))
-    })
-}
-
-fn decode_schedule_args<T: DeserializeOwned>(
+fn decode_args<T: serde::de::DeserializeOwned>(
     operation_name: &str,
-    arguments: Value,
-) -> VerletResult<T> {
+    arguments: serde_json::Value,
+) -> crate::VerletResult<T> {
     serde_json::from_value(arguments).map_err(|err| {
-        VerletError::RuntimeExecution(format!(
-            "operation {VERLET_SCHEDULE_PACKAGE}/{operation_name} has invalid arguments: {err}"
+        crate::VerletError::RuntimeExecution(format!(
+            "operation {VERLET_THREADS_PACKAGE}/{operation_name} has invalid arguments: {err}",
+            VERLET_THREADS_PACKAGE = crate::VERLET_THREADS_PACKAGE
         ))
     })
 }
 
-fn decode_process_args<T: DeserializeOwned>(
+fn decode_schedule_args<T: serde::de::DeserializeOwned>(
     operation_name: &str,
-    arguments: Value,
-) -> VerletResult<T> {
+    arguments: serde_json::Value,
+) -> crate::VerletResult<T> {
     serde_json::from_value(arguments).map_err(|err| {
-        VerletError::RuntimeExecution(format!(
-            "operation {VERLET_PROCESS_PACKAGE}/{operation_name} has invalid arguments: {err}"
+        crate::VerletError::RuntimeExecution(format!(
+            "operation {VERLET_SCHEDULE_PACKAGE}/{operation_name} has invalid arguments: {err}",
+            VERLET_SCHEDULE_PACKAGE = crate::VERLET_SCHEDULE_PACKAGE
         ))
     })
 }
 
-fn decode_notify_args<T: DeserializeOwned>(
+fn decode_process_args<T: serde::de::DeserializeOwned>(
     operation_name: &str,
-    arguments: Value,
-) -> VerletResult<T> {
+    arguments: serde_json::Value,
+) -> crate::VerletResult<T> {
     serde_json::from_value(arguments).map_err(|err| {
-        VerletError::RuntimeExecution(format!(
-            "operation {VERLET_NOTIFY_PACKAGE}/{operation_name} has invalid arguments: {err}"
+        crate::VerletError::RuntimeExecution(format!(
+            "operation {VERLET_PROCESS_PACKAGE}/{operation_name} has invalid arguments: {err}",
+            VERLET_PROCESS_PACKAGE = crate::VERLET_PROCESS_PACKAGE
         ))
     })
 }
 
-fn require_non_empty(value: &str, field: &str) -> VerletResult<()> {
+fn decode_notify_args<T: serde::de::DeserializeOwned>(
+    operation_name: &str,
+    arguments: serde_json::Value,
+) -> crate::VerletResult<T> {
+    serde_json::from_value(arguments).map_err(|err| {
+        crate::VerletError::RuntimeExecution(format!(
+            "operation {VERLET_NOTIFY_PACKAGE}/{operation_name} has invalid arguments: {err}",
+            VERLET_NOTIFY_PACKAGE = crate::VERLET_NOTIFY_PACKAGE
+        ))
+    })
+}
+
+fn require_non_empty(value: &str, field: &str) -> crate::VerletResult<()> {
     if value.trim().is_empty() {
-        return Err(VerletError::RuntimeExecution(format!(
+        return Err(crate::VerletError::RuntimeExecution(format!(
             "{field} must not be empty"
         )));
     }
@@ -902,14 +941,14 @@ fn resolved_thread_id(
     operation_name: &str,
     task_name: &str,
     handle_id: &str,
-) -> VerletResult<ThreadId> {
-    ThreadId::parse_str(handle_id).map_err(|err| {
+) -> crate::VerletResult<crate::ThreadId> {
+    crate::ThreadId::parse_str(handle_id).map_err(|err| {
         model_task_dispatch_error(operation_name, task_name, "resolved handle decode", err)
     })
 }
 
-fn task_target_unavailable(operation_name: &str, task_name: &str) -> VerletError {
-    VerletError::RuntimeExecution(format!(
+fn task_target_unavailable(operation_name: &str, task_name: &str) -> crate::VerletError {
+    crate::VerletError::RuntimeExecution(format!(
         "{operation_name} task_name {task_name:?} target is not available"
     ))
 }
@@ -917,13 +956,13 @@ fn task_target_unavailable(operation_name: &str, task_name: &str) -> VerletError
 fn model_task_resolution_error(
     operation_name: &str,
     task_name: &str,
-    err: VerletError,
-) -> VerletError {
+    err: crate::VerletError,
+) -> crate::VerletError {
     let safe_not_found = format!("thread task_name {task_name:?} was not found under this parent");
     let safe_ambiguity = format!("thread task_name {task_name:?} is ambiguous under this parent");
     if matches!(
         &err,
-        VerletError::RuntimeExecution(message)
+        crate::VerletError::RuntimeExecution(message)
             if message == "thread task_name must not be empty"
                 || message == &safe_not_found
                 || message == &safe_ambiguity
@@ -937,13 +976,13 @@ fn model_task_resolution_error(
     }
 }
 
-fn model_thread_spawn_error(task_name: &str, err: VerletError) -> VerletError {
+fn model_thread_spawn_error(task_name: &str, err: crate::VerletError) -> crate::VerletError {
     let safe_duplicate = format!(
         "thread_spawn task_name {task_name:?} is already bound under this parent; retry with the original dispatch or choose a new task_name"
     );
     if matches!(
         &err,
-        VerletError::RuntimeExecution(message)
+        crate::VerletError::RuntimeExecution(message)
             if message == &safe_duplicate
     ) {
         err
@@ -951,7 +990,7 @@ fn model_thread_spawn_error(task_name: &str, err: VerletError) -> VerletError {
         eprintln!(
             "verlet model thread operation thread_spawn task_name {task_name:?} dispatch failed: {err}"
         );
-        VerletError::RuntimeExecution(format!("thread_spawn task_name {task_name:?} failed"))
+        crate::VerletError::RuntimeExecution(format!("thread_spawn task_name {task_name:?} failed"))
     }
 }
 
@@ -960,7 +999,7 @@ fn model_task_dispatch_error(
     task_name: &str,
     phase: &str,
     err: impl std::fmt::Display,
-) -> VerletError {
+) -> crate::VerletError {
     eprintln!(
         "verlet model thread operation {operation_name} task_name {task_name:?} {phase} failed: {err}"
     );
@@ -968,32 +1007,41 @@ fn model_task_dispatch_error(
 }
 
 fn optional_target_thread_id(
-    caller: &ThreadContext,
+    caller: &crate::ThreadContext,
     value: Option<&str>,
     field: &str,
-) -> VerletResult<ThreadId> {
+) -> crate::VerletResult<crate::ThreadId> {
     match value {
         Some(value) => parse_thread_id(value, field),
         None => Ok(caller.coordinates.thread_id),
     }
 }
 
-fn parse_thread_id(value: &str, field: &str) -> VerletResult<ThreadId> {
-    ThreadId::parse_str(value).map_err(|err| {
-        VerletError::RuntimeExecution(format!("{field} is not a valid Verlet thread id: {err}"))
+fn parse_thread_id(value: &str, field: &str) -> crate::VerletResult<crate::ThreadId> {
+    crate::ThreadId::parse_str(value).map_err(|err| {
+        crate::VerletError::RuntimeExecution(format!(
+            "{field} is not a valid Verlet thread id: {err}"
+        ))
     })
 }
 
-fn parse_process_id(value: &str, field: &str) -> VerletResult<VerletProcessId> {
-    value.parse::<VerletProcessId>().map_err(|err| {
-        VerletError::RuntimeExecution(format!("{field} is not a valid Verlet process id: {err}"))
-    })
+fn parse_process_id(
+    value: &str,
+    field: &str,
+) -> crate::VerletResult<verlet_process::VerletProcessId> {
+    value
+        .parse::<verlet_process::VerletProcessId>()
+        .map_err(|err| {
+            crate::VerletError::RuntimeExecution(format!(
+                "{field} is not a valid Verlet process id: {err}"
+            ))
+        })
 }
 
-fn resolve_process_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
+fn resolve_process_cwd(default_cwd: &std::path::Path, cwd: Option<&str>) -> std::path::PathBuf {
     match cwd {
         Some(cwd) if !cwd.trim().is_empty() => {
-            let path = PathBuf::from(cwd);
+            let path = std::path::PathBuf::from(cwd);
             if path.is_absolute() {
                 path
             } else {
@@ -1004,8 +1052,8 @@ fn resolve_process_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
     }
 }
 
-fn process_yield_time(yield_time_ms: Option<u64>) -> Duration {
-    Duration::from_millis(
+fn process_yield_time(yield_time_ms: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_millis(
         yield_time_ms
             .unwrap_or(DEFAULT_PROCESS_YIELD_MS)
             .min(MAX_PROCESS_YIELD_MS),
@@ -1018,8 +1066,11 @@ fn process_output_cap(output_bytes_cap: Option<usize>, default_cap: usize) -> us
         .clamp(1, default_cap.max(1))
 }
 
-fn process_snapshot_output_json(operation: &str, snapshot: &AsyncProcessSnapshot) -> Value {
-    let mut value = json!({
+fn process_snapshot_output_json(
+    operation: &str,
+    snapshot: &verlet_process::AsyncProcessSnapshot,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
         "operation": operation,
         "status": snapshot.status.as_str(),
         "backend": &snapshot.backend,
@@ -1032,16 +1083,16 @@ fn process_snapshot_output_json(operation: &str, snapshot: &AsyncProcessSnapshot
         "event_count": snapshot.events.len(),
     });
     if let Some(process_id) = snapshot.process_id {
-        value["process_id"] = json!(process_id.to_string());
+        value["process_id"] = serde_json::json!(process_id.to_string());
     }
     if let Some(exit_code) = snapshot.exit_code {
-        value["exit_code"] = json!(exit_code);
+        value["exit_code"] = serde_json::json!(exit_code);
     }
     value
 }
 
-fn active_mandate_json(mandate: &ActiveMandate) -> Value {
-    json!({
+fn active_mandate_json(mandate: &crate::ActiveMandate) -> serde_json::Value {
+    serde_json::json!({
         "mandate_event_id": mandate.event.id.to_string(),
         "mandate_id": mandate.payload.mandate_id.clone(),
         "thread_id": mandate

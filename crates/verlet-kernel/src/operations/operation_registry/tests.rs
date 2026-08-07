@@ -1,6 +1,3 @@
-use super::*;
-use crate::{VerletProcessBackend, WasmOperationEventKind, WasmOperationValueKind};
-
 fn operation_guest(prefix: &str, required_capabilities: Vec<&str>) -> String {
     let manifest = serde_json::json!({
         "abi": "cooldis.operation/0.1",
@@ -191,10 +188,12 @@ fn wat_guest(wat: impl AsRef<str>) -> Vec<u8> {
 
 #[tokio::test]
 async fn registry_publishes_describes_and_invokes_operation() {
-    let registry = OperationRegistry::new();
-    let registration = OperationRegistration::new(
+    let registry = crate::operations::operation_registry::OperationRegistry::new();
+    let registration = crate::operations::operation_registry::OperationRegistration::new(
         "search",
-        WasmRuntimeArtifact::bytes(wat_guest(operation_guest("search:", Vec::new()))),
+        crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+            operation_guest("search:", Vec::new()),
+        )),
     )
     .with_metadata("owner", "test");
 
@@ -215,13 +214,12 @@ async fn registry_publishes_describes_and_invokes_operation() {
 
 #[tokio::test]
 async fn registry_filters_selected_operations_and_rejects_excluded_invokes() {
-    let registry = OperationRegistry::new();
-    let registration = OperationRegistration::new(
+    let registry = crate::operations::operation_registry::OperationRegistry::new();
+    let registration = crate::operations::operation_registry::OperationRegistration::new(
         "analytics",
-        WasmRuntimeArtifact::bytes(wat_guest(multi_operation_guest(
-            "profile:",
-            &["profile", "summarize"],
-        ))),
+        crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+            multi_operation_guest("profile:", &["profile", "summarize"]),
+        )),
     )
     .with_operation_names(["profile"]);
 
@@ -270,12 +268,16 @@ async fn registry_filters_selected_operations_and_rejects_excluded_invokes() {
 
 #[tokio::test]
 async fn registry_invokes_operation_as_process_handle() {
-    let registry = OperationRegistry::new();
+    let registry = crate::operations::operation_registry::OperationRegistry::new();
     registry
-        .register(OperationRegistration::new(
-            "search",
-            WasmRuntimeArtifact::bytes(wat_guest(operation_guest("search:", Vec::new()))),
-        ))
+        .register(
+            crate::operations::operation_registry::OperationRegistration::new(
+                "search",
+                crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+                    operation_guest("search:", Vec::new()),
+                )),
+            ),
+        )
         .await
         .unwrap();
 
@@ -285,7 +287,10 @@ async fn registry_invokes_operation_as_process_handle() {
         .unwrap();
     let output = process.output();
 
-    assert_eq!(process.backend(), &VerletProcessBackend::WasmOperation);
+    assert_eq!(
+        process.backend(),
+        &crate::VerletProcessBackend::WasmOperation
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "search:process");
     assert_eq!(output.stderr, Vec::<u8>::new());
     assert_eq!(output.exit_code(), Some(0));
@@ -295,13 +300,12 @@ async fn registry_invokes_operation_as_process_handle() {
 
 #[tokio::test]
 async fn registry_rejects_publish_when_manifest_grants_are_missing() {
-    let registry = OperationRegistry::new();
-    let registration = OperationRegistration::new(
+    let registry = crate::operations::operation_registry::OperationRegistry::new();
+    let registration = crate::operations::operation_registry::OperationRegistration::new(
         "search",
-        WasmRuntimeArtifact::bytes(wat_guest(operation_guest(
-            "search:",
-            vec!["net.http:POST:https://api.example.invalid"],
-        ))),
+        crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+            operation_guest("search:", vec!["net.http:POST:https://api.example.invalid"]),
+        )),
     );
 
     let err = registry.register(registration).await.unwrap_err();
@@ -311,21 +315,24 @@ async fn registry_rejects_publish_when_manifest_grants_are_missing() {
 
 #[tokio::test]
 async fn registry_replaces_atomically_after_validation() {
-    let registry = OperationRegistry::new();
+    let registry = crate::operations::operation_registry::OperationRegistry::new();
     registry
-        .register(OperationRegistration::new(
-            "search",
-            WasmRuntimeArtifact::bytes(wat_guest(operation_guest("v1:", Vec::new()))),
-        ))
+        .register(
+            crate::operations::operation_registry::OperationRegistration::new(
+                "search",
+                crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+                    operation_guest("v1:", Vec::new()),
+                )),
+            ),
+        )
         .await
         .unwrap();
 
-    let invalid_replacement = OperationRegistration::new(
+    let invalid_replacement = crate::operations::operation_registry::OperationRegistration::new(
         "search",
-        WasmRuntimeArtifact::bytes(wat_guest(operation_guest(
-            "v2:",
-            vec!["secret:EXAMPLE_API_KEY"],
-        ))),
+        crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+            operation_guest("v2:", vec!["secret:EXAMPLE_API_KEY"]),
+        )),
     );
     let err = registry.register(invalid_replacement).await.unwrap_err();
     assert!(err.to_string().contains("secret:EXAMPLE_API_KEY"));
@@ -339,19 +346,27 @@ async fn registry_replaces_atomically_after_validation() {
 
 #[tokio::test]
 async fn registry_replaces_after_valid_registration() {
-    let registry = OperationRegistry::new();
+    let registry = crate::operations::operation_registry::OperationRegistry::new();
     registry
-        .register(OperationRegistration::new(
-            "search",
-            WasmRuntimeArtifact::bytes(wat_guest(operation_guest("v1:", Vec::new()))),
-        ))
+        .register(
+            crate::operations::operation_registry::OperationRegistration::new(
+                "search",
+                crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+                    operation_guest("v1:", Vec::new()),
+                )),
+            ),
+        )
         .await
         .unwrap();
     registry
-        .register(OperationRegistration::new(
-            "search",
-            WasmRuntimeArtifact::bytes(wat_guest(operation_guest("v2:", Vec::new()))),
-        ))
+        .register(
+            crate::operations::operation_registry::OperationRegistration::new(
+                "search",
+                crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+                    operation_guest("v2:", Vec::new()),
+                )),
+            ),
+        )
         .await
         .unwrap();
 
@@ -364,12 +379,16 @@ async fn registry_replaces_after_valid_registration() {
 
 #[tokio::test]
 async fn registry_derives_cli_http_llm_and_mcp_projections() {
-    let registry = OperationRegistry::new();
+    let registry = crate::operations::operation_registry::OperationRegistry::new();
     let record = registry
-        .register(OperationRegistration::new(
-            "Example Search",
-            WasmRuntimeArtifact::bytes(wat_guest(operation_guest("search:", Vec::new()))),
-        ))
+        .register(
+            crate::operations::operation_registry::OperationRegistration::new(
+                "Example Search",
+                crate::operations::operation_registry::WasmRuntimeArtifact::bytes(wat_guest(
+                    operation_guest("search:", Vec::new()),
+                )),
+            ),
+        )
         .await
         .unwrap();
 
@@ -385,21 +404,24 @@ async fn registry_derives_cli_http_llm_and_mcp_projections() {
         projection.process.command,
         "verlet run Example Search search"
     );
-    assert_eq!(projection.process.stderr, WasmOperationEventKind::None);
+    assert_eq!(
+        projection.process.stderr,
+        crate::WasmOperationEventKind::None
+    );
     assert_eq!(projection.http.method, "POST");
     assert_eq!(projection.http.path, "/operations/Example Search/search");
     assert_eq!(projection.llm_tool.name, "example_search_search");
     assert_eq!(projection.mcp.tool_name, "example_search_search");
     assert_eq!(
-        projection_tool_name("http-fetch", "http_fetch"),
+        crate::operations::operation_registry::projection_tool_name("http-fetch", "http_fetch"),
         "http_fetch"
     );
     assert_eq!(
-        projection_tool_name("document", "extract_text"),
+        crate::operations::operation_registry::projection_tool_name("document", "extract_text"),
         "document_extract_text"
     );
-    assert_eq!(projection.input, WasmOperationValueKind::Bytes);
-    assert_eq!(projection.output, WasmOperationValueKind::Bytes);
+    assert_eq!(projection.input, crate::WasmOperationValueKind::Bytes);
+    assert_eq!(projection.output, crate::WasmOperationValueKind::Bytes);
     assert_eq!(projection.abi.registered_name, "Example Search");
     assert_eq!(projection.abi.operation_name, "search");
     assert_eq!(projection.abi.source_ports[0].name, "input");

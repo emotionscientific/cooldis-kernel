@@ -1,40 +1,28 @@
-use crate::{
-    ExternalCommandRequest, ExternalCommandResult, ExternalExecutorKind, FileDeltaKind,
-    OperationEvent, OperationEventStream, OperationExitStatus, OperationLogLevel,
-    VerletProcessResult, VirtualCommandOutput,
-};
-use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
-use uuid::Uuid;
-use verlet_abi::{InvocationContext, WasmOperationDefinition, WasmOperationManifest};
+use futures_util::StreamExt as _;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct VerletProcessId(Uuid);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct VerletProcessId(uuid::Uuid);
 
-static FORCE_DETERMINISTIC_PROCESS_IDS: AtomicBool = AtomicBool::new(false);
-static NEXT_DETERMINISTIC_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
+static FORCE_DETERMINISTIC_PROCESS_IDS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static NEXT_DETERMINISTIC_PROCESS_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 pub fn set_deterministic_process_ids_for_tests(enabled: bool) {
-    FORCE_DETERMINISTIC_PROCESS_IDS.store(enabled, Ordering::SeqCst);
+    FORCE_DETERMINISTIC_PROCESS_IDS.store(enabled, std::sync::atomic::Ordering::SeqCst);
     if enabled {
-        NEXT_DETERMINISTIC_PROCESS_ID.store(1, Ordering::SeqCst);
+        NEXT_DETERMINISTIC_PROCESS_ID.store(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl VerletProcessId {
     pub fn new() -> Self {
-        if FORCE_DETERMINISTIC_PROCESS_IDS.load(Ordering::SeqCst) {
-            let next = NEXT_DETERMINISTIC_PROCESS_ID.fetch_add(1, Ordering::SeqCst);
-            return Self(Uuid::from_u128(u128::from(next)));
+        if FORCE_DETERMINISTIC_PROCESS_IDS.load(std::sync::atomic::Ordering::SeqCst) {
+            let next =
+                NEXT_DETERMINISTIC_PROCESS_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Self(uuid::Uuid::from_u128(u128::from(next)));
         }
-        Self(Uuid::now_v7())
+        Self(uuid::Uuid::now_v7())
     }
 }
 
@@ -54,11 +42,11 @@ impl std::str::FromStr for VerletProcessId {
     type Err = uuid::Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Uuid::parse_str(value).map(Self)
+        uuid::Uuid::parse_str(value).map(Self)
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerletProcessBackend {
     VirtualBash,
@@ -71,7 +59,7 @@ pub enum VerletProcessBackend {
     Other(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletProcessExitStatus {
     pub code: Option<i32>,
     pub success: bool,
@@ -90,8 +78,8 @@ impl VerletProcessExitStatus {
     }
 }
 
-impl From<OperationExitStatus> for VerletProcessExitStatus {
-    fn from(status: OperationExitStatus) -> Self {
+impl From<crate::bridge::OperationExitStatus> for VerletProcessExitStatus {
+    fn from(status: crate::bridge::OperationExitStatus) -> Self {
         Self {
             code: status.code,
             success: status.success,
@@ -99,7 +87,7 @@ impl From<OperationExitStatus> for VerletProcessExitStatus {
     }
 }
 
-impl From<VerletProcessExitStatus> for OperationExitStatus {
+impl From<VerletProcessExitStatus> for crate::bridge::OperationExitStatus {
     fn from(status: VerletProcessExitStatus) -> Self {
         Self {
             code: status.code,
@@ -108,7 +96,7 @@ impl From<VerletProcessExitStatus> for OperationExitStatus {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VerletProcessTerminalState {
     Completed {
@@ -127,7 +115,7 @@ pub enum VerletProcessTerminalState {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VerletProcessEventKind {
     Started {
@@ -140,18 +128,18 @@ pub enum VerletProcessEventKind {
         bytes: Vec<u8>,
     },
     Log {
-        level: OperationLogLevel,
+        level: crate::bridge::OperationLogLevel,
         message: String,
     },
     Artifact {
         artifact_id: String,
-        path: Option<PathBuf>,
+        path: Option<std::path::PathBuf>,
         mime_type: Option<String>,
     },
     FileDelta {
-        kind: FileDeltaKind,
-        path: PathBuf,
-        target: Option<PathBuf>,
+        kind: crate::bridge::FileDeltaKind,
+        path: std::path::PathBuf,
+        target: Option<std::path::PathBuf>,
     },
     Frame {
         frame_id: String,
@@ -212,7 +200,7 @@ impl VerletProcessEventKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletProcessEvent {
     pub process_id: VerletProcessId,
     pub sequence: u64,
@@ -221,7 +209,7 @@ pub struct VerletProcessEvent {
     pub kind: VerletProcessEventKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletProcessOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -261,27 +249,27 @@ impl VerletProcessOutput {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletProcessArtifact {
     pub artifact_id: String,
-    pub path: Option<PathBuf>,
+    pub path: Option<std::path::PathBuf>,
     pub mime_type: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletProcessFileDelta {
-    pub kind: FileDeltaKind,
-    pub path: PathBuf,
-    pub target: Option<PathBuf>,
+    pub kind: crate::bridge::FileDeltaKind,
+    pub path: std::path::PathBuf,
+    pub target: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WasmOperationOutput {
-    pub manifest: WasmOperationManifest,
-    pub operation: WasmOperationDefinition,
+    pub manifest: verlet_abi::WasmOperationManifest,
+    pub operation: verlet_abi::WasmOperationDefinition,
     pub output: Vec<u8>,
     pub events: Vec<u8>,
-    pub invocation_context: InvocationContext,
+    pub invocation_context: verlet_abi::InvocationContext,
 }
 
 #[derive(Clone)]
@@ -289,13 +277,13 @@ pub struct VerletProcessHandle {
     process_id: VerletProcessId,
     backend: VerletProcessBackend,
     label: String,
-    inner: Arc<VerletProcessLogInner>,
+    inner: std::sync::Arc<VerletProcessLogInner>,
 }
 
 struct VerletProcessLogInner {
-    events: Mutex<Vec<VerletProcessEvent>>,
-    next_sequence: AtomicU64,
-    live_tx: broadcast::Sender<VerletProcessEvent>,
+    events: std::sync::Mutex<Vec<VerletProcessEvent>>,
+    next_sequence: std::sync::atomic::AtomicU64,
+    live_tx: tokio::sync::broadcast::Sender<VerletProcessEvent>,
 }
 
 impl VerletProcessHandle {
@@ -311,14 +299,14 @@ impl VerletProcessHandle {
         backend: VerletProcessBackend,
         label: impl Into<String>,
     ) -> Self {
-        let (live_tx, _) = broadcast::channel(1024);
+        let (live_tx, _) = tokio::sync::broadcast::channel(1024);
         Self {
             process_id,
             backend,
             label: label.into(),
-            inner: Arc::new(VerletProcessLogInner {
-                events: Mutex::new(Vec::new()),
-                next_sequence: AtomicU64::new(0),
+            inner: std::sync::Arc::new(VerletProcessLogInner {
+                events: std::sync::Mutex::new(Vec::new()),
+                next_sequence: std::sync::atomic::AtomicU64::new(0),
                 live_tx,
             }),
         }
@@ -336,7 +324,7 @@ impl VerletProcessHandle {
         &self.label
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<VerletProcessEvent> {
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<VerletProcessEvent> {
         self.inner.live_tx.subscribe()
     }
 
@@ -347,7 +335,11 @@ impl VerletProcessHandle {
     pub fn record(&self, kind: VerletProcessEventKind) -> VerletProcessEvent {
         let event = VerletProcessEvent {
             process_id: self.process_id,
-            sequence: self.inner.next_sequence.fetch_add(1, Ordering::SeqCst) + 1,
+            sequence: self
+                .inner
+                .next_sequence
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1,
             timestamp_ms: unix_timestamp_ms(),
             backend: self.backend.clone(),
             kind,
@@ -404,7 +396,10 @@ impl VerletProcessHandle {
         }
     }
 
-    pub fn from_virtual_command(command: impl Into<String>, output: VirtualCommandOutput) -> Self {
+    pub fn from_virtual_command(
+        command: impl Into<String>,
+        output: crate::execution::VirtualCommandOutput,
+    ) -> Self {
         let command = command.into();
         let stdout_truncated = output.stdout_truncated;
         let stderr_truncated = output.stderr_truncated;
@@ -428,7 +423,7 @@ impl VerletProcessHandle {
                 stderr: stderr_truncated,
             });
             process.record(VerletProcessEventKind::Log {
-                level: OperationLogLevel::Warn,
+                level: crate::bridge::OperationLogLevel::Warn,
                 message: format!(
                     "process output was truncated: stdout={stdout_truncated}, stderr={stderr_truncated}"
                 ),
@@ -439,15 +434,17 @@ impl VerletProcessHandle {
     }
 
     pub fn from_external_command(
-        request: &ExternalCommandRequest,
-        result: ExternalCommandResult,
+        request: &crate::execution::ExternalCommandRequest,
+        result: crate::execution::ExternalCommandResult,
     ) -> Self {
         let output = result.output;
         let stdout_truncated = output.stdout_truncated;
         let stderr_truncated = output.stderr_truncated;
         let backend = match request.executor {
-            ExternalExecutorKind::HostBash => VerletProcessBackend::HostBash,
-            ExternalExecutorKind::RemoteLinux => VerletProcessBackend::RemoteLinux,
+            crate::execution::ExternalExecutorKind::HostBash => VerletProcessBackend::HostBash,
+            crate::execution::ExternalExecutorKind::RemoteLinux => {
+                VerletProcessBackend::RemoteLinux
+            }
         };
         let label = request.label();
         let process = Self::new(backend, label.clone());
@@ -466,7 +463,7 @@ impl VerletProcessHandle {
         }
         for write in result.file_writes {
             process.record(VerletProcessEventKind::FileDelta {
-                kind: FileDeltaKind::Write,
+                kind: crate::bridge::FileDeltaKind::Write,
                 path: write.path,
                 target: None,
             });
@@ -477,7 +474,7 @@ impl VerletProcessHandle {
                 stderr: stderr_truncated,
             });
             process.record(VerletProcessEventKind::Log {
-                level: OperationLogLevel::Warn,
+                level: crate::bridge::OperationLogLevel::Warn,
                 message: format!(
                     "process output was truncated: stdout={stdout_truncated}, stderr={stderr_truncated}"
                 ),
@@ -516,15 +513,21 @@ impl VerletProcessHandle {
         process
     }
 
-    pub fn record_bridge_event(&self, event: OperationEvent) -> VerletProcessEvent {
+    pub fn record_bridge_event(&self, event: crate::bridge::OperationEvent) -> VerletProcessEvent {
         self.record(match event {
-            OperationEvent::Started { .. } => VerletProcessEventKind::Started { command: None },
-            OperationEvent::Stdout { bytes, .. } => VerletProcessEventKind::Stdout { bytes },
-            OperationEvent::Stderr { bytes, .. } => VerletProcessEventKind::Stderr { bytes },
-            OperationEvent::Log { level, message, .. } => {
+            crate::bridge::OperationEvent::Started { .. } => {
+                VerletProcessEventKind::Started { command: None }
+            }
+            crate::bridge::OperationEvent::Stdout { bytes, .. } => {
+                VerletProcessEventKind::Stdout { bytes }
+            }
+            crate::bridge::OperationEvent::Stderr { bytes, .. } => {
+                VerletProcessEventKind::Stderr { bytes }
+            }
+            crate::bridge::OperationEvent::Log { level, message, .. } => {
                 VerletProcessEventKind::Log { level, message }
             }
-            OperationEvent::Artifact {
+            crate::bridge::OperationEvent::Artifact {
                 artifact_id,
                 path,
                 mime_type,
@@ -534,10 +537,10 @@ impl VerletProcessHandle {
                 path,
                 mime_type,
             },
-            OperationEvent::FileDelta {
+            crate::bridge::OperationEvent::FileDelta {
                 kind, path, target, ..
             } => VerletProcessEventKind::FileDelta { kind, path, target },
-            OperationEvent::Frame {
+            crate::bridge::OperationEvent::Frame {
                 frame_id,
                 mime_type,
                 ..
@@ -545,19 +548,24 @@ impl VerletProcessHandle {
                 frame_id,
                 mime_type,
             },
-            OperationEvent::Completed { status, .. } => VerletProcessEventKind::Completed {
-                status: status.into(),
-            },
-            OperationEvent::Failed { code, message, .. } => {
+            crate::bridge::OperationEvent::Completed { status, .. } => {
+                VerletProcessEventKind::Completed {
+                    status: status.into(),
+                }
+            }
+            crate::bridge::OperationEvent::Failed { code, message, .. } => {
                 VerletProcessEventKind::Failed { code, message }
             }
-            OperationEvent::Cancelled { reason, .. } => {
+            crate::bridge::OperationEvent::Cancelled { reason, .. } => {
                 VerletProcessEventKind::Cancelled { reason }
             }
         })
     }
 
-    pub fn from_bridge_events(label: impl Into<String>, events: Vec<OperationEvent>) -> Self {
+    pub fn from_bridge_events(
+        label: impl Into<String>,
+        events: Vec<crate::bridge::OperationEvent>,
+    ) -> Self {
         let process = Self::new(VerletProcessBackend::Bridge, label);
         for event in events {
             process.record_bridge_event(event);
@@ -567,8 +575,8 @@ impl VerletProcessHandle {
 
     pub fn attach_bridge_event_stream(
         &self,
-        mut stream: OperationEventStream,
-    ) -> JoinHandle<VerletProcessResult<()>> {
+        mut stream: crate::bridge::OperationEventStream,
+    ) -> tokio::task::JoinHandle<crate::VerletProcessResult<()>> {
         let process = self.clone();
         tokio::spawn(async move {
             while let Some(event) = stream.next().await {
@@ -579,7 +587,7 @@ impl VerletProcessHandle {
     }
 }
 
-impl From<&VerletProcessOutput> for VirtualCommandOutput {
+impl From<&VerletProcessOutput> for crate::execution::VirtualCommandOutput {
     fn from(output: &VerletProcessOutput) -> Self {
         Self {
             stdout: output.stdout_text_lossy(),
@@ -605,8 +613,8 @@ fn record_exit_from_virtual_output(process: &VerletProcessHandle, exit_code: i32
 }
 
 fn unix_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }

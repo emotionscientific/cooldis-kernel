@@ -1,26 +1,23 @@
-use super::SqliteSessionStore;
-use std::time::{SystemTime, UNIX_EPOCH};
-use verlet_history::*;
-use verlet_runtime_contracts::ThreadCoordinates;
-use verlet_sqlite::{Connection, Db, DbConfig, params};
-
+use verlet_history::EventStore as _;
+use verlet_history::ObservationStore as _;
+use verlet_history::SessionStore as _;
 const RUSQLITE_HISTORY_STREAM_V0: &[u8] =
     include_bytes!("../tests/fixtures/rusqlite-history-stream-v0.sqlite3");
 
-fn coords(tenant: &str, user: &str, session: &str) -> ThreadCoordinates {
-    ThreadCoordinates::new(tenant, user, session)
+fn coords(tenant: &str, user: &str, session: &str) -> verlet_runtime_contracts::ThreadCoordinates {
+    verlet_runtime_contracts::ThreadCoordinates::new(tenant, user, session)
 }
 
-fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
+fn message_texts(messages: &[verlet_history::CanonicalMessage]) -> Vec<&str> {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => content
+            verlet_history::CanonicalMessage::User { content, .. }
+            | verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .find_map(|content| match content {
-                    CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                    verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .unwrap_or(""),
@@ -28,13 +25,15 @@ fn message_texts(messages: &[CanonicalMessage]) -> Vec<&str> {
         .collect()
 }
 
-async fn assert_fenced_append_conformance(store: &dyn EventStore) -> EventStreamId {
+async fn assert_fenced_append_conformance(
+    store: &dyn verlet_history::EventStore,
+) -> verlet_history::EventStreamId {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let record = |entry_id: &str| {
-        NewEventRecord::witnessed(
+        verlet_history::NewEventRecord::witnessed(
             coordinates.clone(),
-            EventKind::SessionEntryAppended,
+            verlet_history::EventKind::SessionEntryAppended,
             serde_json::json!({"entry_id": entry_id}),
         )
     };
@@ -42,7 +41,7 @@ async fn assert_fenced_append_conformance(store: &dyn EventStore) -> EventStream
     let initial = store
         .append_events_fenced(
             &stream_id,
-            EventSequence::new(1),
+            verlet_history::EventSequence::new(1),
             vec![record("entry-1"), record("entry-2")],
         )
         .await
@@ -65,14 +64,14 @@ async fn assert_fenced_append_conformance(store: &dyn EventStore) -> EventStream
     let err = store
         .append_events_fenced(
             &stream_id,
-            EventSequence::new(3),
+            verlet_history::EventSequence::new(3),
             vec![record("losing-entry-1"), record("losing-entry-2")],
         )
         .await
         .unwrap_err();
     assert!(matches!(
         err,
-        HistoryError::AppendFenceConflict {
+        verlet_history::HistoryError::AppendFenceConflict {
             stream_id: conflict_stream,
             expected_next_sequence: 3,
             actual_next_sequence: 4,
@@ -83,17 +82,21 @@ async fn assert_fenced_append_conformance(store: &dyn EventStore) -> EventStream
         serde_json::to_vec(&store.read_events(&stream_id, None).await.unwrap()).unwrap();
     assert_eq!(after_conflict, before_conflict);
 
-    let duplicate_stream = EventStreamId::new("duplicate-id-stream");
+    let duplicate_stream = verlet_history::EventStreamId::new("duplicate-id-stream");
     let mut duplicate = record("duplicate-event-id");
     let duplicate_event_id = initial[0].id;
     duplicate.id = duplicate_event_id;
     let duplicate_err = store
-        .append_events_fenced(&duplicate_stream, EventSequence::new(1), vec![duplicate])
+        .append_events_fenced(
+            &duplicate_stream,
+            verlet_history::EventSequence::new(1),
+            vec![duplicate],
+        )
         .await
         .unwrap_err();
     assert!(matches!(
         duplicate_err,
-        HistoryError::DuplicateEventId(event_id) if event_id == duplicate_event_id
+        verlet_history::HistoryError::DuplicateEventId(event_id) if event_id == duplicate_event_id
     ));
     assert!(
         store
@@ -107,18 +110,18 @@ async fn assert_fenced_append_conformance(store: &dyn EventStore) -> EventStream
 
 #[tokio::test]
 async fn in_memory_store_honors_fenced_append_conformance() {
-    assert_fenced_append_conformance(&InMemorySessionStore::new()).await;
+    assert_fenced_append_conformance(&verlet_history::InMemorySessionStore::new()).await;
 }
 
 #[tokio::test]
 async fn sqlite_store_honors_fenced_append_conformance() {
     let path = temp_db_path("verlet-history-fenced-append");
-    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
 
     let stream_id = assert_fenced_append_conformance(&store).await;
 
     drop(store);
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.read_events(&stream_id, None).await.unwrap().len(),
         3
@@ -130,26 +133,28 @@ async fn sqlite_store_honors_fenced_append_conformance() {
 async fn sqlite_read_only_store_replays_and_rejects_writes() {
     let path = temp_db_path("verlet-history-read-only");
     let coordinates = coords("tenant-read-only", "user-read-only", "session-read-only");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let seed = NewEventRecord::witnessed(
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let seed = verlet_history::NewEventRecord::witnessed(
         coordinates.clone(),
-        EventKind::TurnSubmitted,
+        verlet_history::EventKind::TurnSubmitted,
         serde_json::json!({"turn_id": "seed"}),
     );
-    let denied = NewEventRecord::witnessed(
+    let denied = verlet_history::NewEventRecord::witnessed(
         coordinates,
-        EventKind::TurnSubmitted,
+        verlet_history::EventKind::TurnSubmitted,
         serde_json::json!({"turn_id": "denied"}),
     );
 
-    let writable = SqliteSessionStore::open(&path).await.unwrap();
+    let writable = crate::SqliteSessionStore::open(&path).await.unwrap();
     writable
         .append_events(&stream_id, vec![seed])
         .await
         .unwrap();
     drop(writable);
 
-    let read_only = SqliteSessionStore::open_read_only(&path).await.unwrap();
+    let read_only = crate::SqliteSessionStore::open_read_only(&path)
+        .await
+        .unwrap();
     assert_eq!(
         read_only.read_events(&stream_id, None).await.unwrap().len(),
         1
@@ -162,7 +167,7 @@ async fn sqlite_read_only_store_replays_and_rejects_writes() {
     );
     drop(read_only);
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.read_events(&stream_id, None).await.unwrap().len(),
         1
@@ -175,12 +180,12 @@ async fn sqlite_read_only_store_replays_and_rejects_writes() {
 async fn sqlite_read_only_store_rejects_a_missing_database() {
     let path = temp_db_path("verlet-history-read-only-missing");
 
-    let error = SqliteSessionStore::open_read_only(&path)
+    let error = crate::SqliteSessionStore::open_read_only(&path)
         .await
         .err()
         .expect("read-only open must not create a missing database");
 
-    assert!(matches!(error, HistoryError::Storage(_)));
+    assert!(matches!(error, verlet_history::HistoryError::Storage(_)));
     assert!(!path.exists());
 }
 
@@ -189,10 +194,10 @@ async fn turso_replays_rusqlite_created_stream_store_decode_compat_fixture() {
     let path = temp_db_path("verlet-history-rusqlite-decode-compat");
     std::fs::write(&path, RUSQLITE_HISTORY_STREAM_V0).unwrap();
 
-    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
     let events = store
         .read_events(
-            &EventStreamId::new("thread:018f0000-0000-7000-8000-000000000413"),
+            &verlet_history::EventStreamId::new("thread:018f0000-0000-7000-8000-000000000413"),
             None,
         )
         .await
@@ -200,12 +205,15 @@ async fn turso_replays_rusqlite_created_stream_store_decode_compat_fixture() {
 
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].sequence.get(), 1);
-    assert_eq!(events[0].kind, EventKind::TurnSubmitted);
-    assert_eq!(events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(events[0].kind, verlet_history::EventKind::TurnSubmitted);
+    assert_eq!(events[0].origin, verlet_history::EventOrigin::Witnessed);
     assert_eq!(events[0].payload["turn_id"], "legacy-turn");
     assert_eq!(events[1].sequence.get(), 2);
-    assert_eq!(events[1].kind, EventKind::ContextCompileCompleted);
-    assert_eq!(events[1].origin, EventOrigin::Discharged);
+    assert_eq!(
+        events[1].kind,
+        verlet_history::EventKind::ContextCompileCompleted
+    );
+    assert_eq!(events[1].origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(events[1].payload["output_hash"], "sha256:legacy-rusqlite");
     assert_eq!(
         events[1].provenance.discharged_by.as_deref(),
@@ -229,7 +237,7 @@ async fn concurrent_legacy_store_opens_apply_additive_migrations_idempotently() 
         let barrier = barrier.clone();
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
-            SqliteSessionStore::open(path).await
+            crate::SqliteSessionStore::open(path).await
         }));
     }
 
@@ -237,10 +245,10 @@ async fn concurrent_legacy_store_opens_apply_additive_migrations_idempotently() 
         handle.await.unwrap().unwrap();
     }
 
-    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
     let events = store
         .read_events(
-            &EventStreamId::new("thread:018f0000-0000-7000-8000-000000000413"),
+            &verlet_history::EventStreamId::new("thread:018f0000-0000-7000-8000-000000000413"),
             None,
         )
         .await
@@ -254,18 +262,18 @@ async fn concurrent_legacy_store_opens_apply_additive_migrations_idempotently() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_store_appends_serialize_stream_sequence_without_interleaving() {
     let path = temp_db_path("verlet-history-concurrent-appends");
-    let db = Db::open(
+    let db = verlet_sqlite::Db::open(
         &path,
-        DbConfig {
+        verlet_sqlite::DbConfig {
             busy_timeout: std::time::Duration::ZERO,
-            ..DbConfig::default()
+            ..verlet_sqlite::DbConfig::default()
         },
     )
     .await
     .unwrap();
-    let store = SqliteSessionStore::from_db(db).await.unwrap();
+    let store = crate::SqliteSessionStore::from_db(db).await.unwrap();
     let coordinates = coords("tenant-concurrent", "user-concurrent", "session-concurrent");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     // A zero busy timeout turns this into a serialization contract rather
     // than a timing test: any second writer admitted while the first owns the
     // WAL lock fails immediately, even on a fast machine.
@@ -283,9 +291,9 @@ async fn concurrent_store_appends_serialize_stream_sequence_without_interleaving
             store
                 .append_events(
                     &stream_id,
-                    vec![NewEventRecord::witnessed(
+                    vec![verlet_history::NewEventRecord::witnessed(
                         coordinates,
-                        EventKind::TurnSubmitted,
+                        verlet_history::EventKind::TurnSubmitted,
                         serde_json::json!({"turn_id": format!("turn-{worker}")}),
                     )],
                 )
@@ -316,7 +324,7 @@ async fn turso_pre19_reopens_pre18_database_with_committed_wal() {
     let path = temp_db_path("verlet-history-turso-pre18-wal");
     let wal_path = std::path::PathBuf::from(format!("{}-wal", path.display()));
     let decode_fixture = |encoded: &str| {
-        use base64::Engine;
+        use base64::Engine as _;
         base64::engine::general_purpose::STANDARD
             .decode(encoded.trim())
             .unwrap()
@@ -340,7 +348,7 @@ async fn turso_pre19_reopens_pre18_database_with_committed_wal() {
         "pre.18 fixture must leave a committed WAL for pre.19 to recover"
     );
 
-    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
     let database = store.sqlite_database();
     let connection = database.connect().await.unwrap();
     let mut rows = connection
@@ -354,13 +362,13 @@ async fn turso_pre19_reopens_pre18_database_with_committed_wal() {
     drop(connection);
     drop(database);
     let coordinates = coords("tenant-pre18", "user-pre18", "session-pre18");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     store
         .append_events(
             &stream_id,
-            vec![NewEventRecord::witnessed(
+            vec![verlet_history::NewEventRecord::witnessed(
                 coordinates,
-                EventKind::TurnSubmitted,
+                verlet_history::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id": "continued-by-pre19"}),
             )],
         )
@@ -368,7 +376,7 @@ async fn turso_pre19_reopens_pre18_database_with_committed_wal() {
         .unwrap();
     drop(store);
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.read_events(&stream_id, None).await.unwrap().len(),
         1
@@ -402,14 +410,14 @@ async fn turso_pre19_reopens_pre18_database_with_committed_wal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_append_finishes_atomically_and_releases_the_write_lock() {
     let path = temp_db_path("verlet-history-cancelled-append");
-    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
     let coordinates = coords("tenant-cancel", "user-cancel", "session-cancel");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let records = (0..1_000)
         .map(|index| {
-            NewEventRecord::witnessed(
+            verlet_history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                EventKind::TurnSubmitted,
+                verlet_history::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id": format!("cancelled-{index}")}),
             )
         })
@@ -419,11 +427,11 @@ async fn cancelling_append_finishes_atomically_and_releases_the_write_lock() {
     let append =
         tokio::spawn(async move { append_store.append_events(&append_stream_id, records).await });
 
-    let probe_db = Db::open(
+    let probe_db = verlet_sqlite::Db::open(
         &path,
-        DbConfig {
+        verlet_sqlite::DbConfig {
             busy_timeout: std::time::Duration::ZERO,
-            ..DbConfig::default()
+            ..verlet_sqlite::DbConfig::default()
         },
     )
     .await
@@ -460,9 +468,9 @@ async fn cancelling_append_finishes_atomically_and_releases_the_write_lock() {
         let attempt = store
             .append_events(
                 &stream_id,
-                vec![NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({"turn_id": "committed"}),
                 )],
             )
@@ -502,28 +510,28 @@ async fn cancelling_append_finishes_atomically_and_releases_the_write_lock() {
 async fn sqlite_store_persists_canonical_history_across_reopen() {
     let path = temp_db_path("verlet-history-persist");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let assistant = CanonicalMessage::assistant_with_usage(
+    let assistant = verlet_history::CanonicalMessage::assistant_with_usage(
         "openai",
-        ProviderApi::OpenAIResponses,
+        verlet_history::ProviderApi::OpenAIResponses,
         "gpt-test",
-        vec![CanonicalContent::text("hello back")],
-        CanonicalUsage {
+        vec![verlet_history::CanonicalContent::text("hello back")],
+        verlet_history::CanonicalUsage {
             input_tokens: 3,
             output_tokens: 4,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 1,
         },
-        CanonicalStopReason::EndTurn,
+        verlet_history::CanonicalStopReason::EndTurn,
     );
 
     {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         store
             .append(
                 &coordinates,
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("hello"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text("hello"),
                 },
             )
             .await
@@ -532,7 +540,7 @@ async fn sqlite_store_persists_canonical_history_across_reopen() {
             .append(
                 &coordinates,
                 None,
-                SessionEntryKind::Message {
+                verlet_history::SessionEntryKind::Message {
                     message: assistant.clone(),
                 },
             )
@@ -540,7 +548,7 @@ async fn sqlite_store_persists_canonical_history_across_reopen() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let context = reopened.build_context(&coordinates).await.unwrap();
     assert_eq!(
         message_texts(&context.messages),
@@ -566,13 +574,13 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
     let path = temp_db_path("verlet-history-branch-selection-rebuild");
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let (selected, other, advanced) = {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         let root = store
             .append(
                 &coordinates,
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("root"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text("root"),
                 },
             )
             .await
@@ -581,8 +589,8 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
             .append(
                 &coordinates,
                 Some(root.entry_id),
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("selected"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text("selected"),
                 },
             )
             .await
@@ -591,8 +599,8 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
             .append(
                 &coordinates,
                 Some(root.entry_id),
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("other"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text("other"),
                 },
             )
             .await
@@ -605,8 +613,10 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
             .append(
                 &coordinates,
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("advanced selected branch"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text(
+                        "advanced selected branch",
+                    ),
                 },
             )
             .await
@@ -621,7 +631,7 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
             .await
             .unwrap();
     }
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.active_leaf(&coordinates).await.unwrap(),
         Some(advanced)
@@ -633,12 +643,12 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
         connection
             .execute(
                 "UPDATE active_leaves SET entry_id = ?1 WHERE thread_id = ?2",
-                params![other.to_string(), coordinates.thread_id.to_string()],
+                verlet_sqlite::params![other.to_string(), coordinates.thread_id.to_string()],
             )
             .await
             .unwrap();
     }
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.active_leaf(&coordinates).await.unwrap(),
         Some(advanced)
@@ -651,34 +661,40 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
         connection
             .execute(
                 "INSERT INTO active_leaves (thread_id, entry_id) VALUES (?1, ?2)",
-                params![coordinates.thread_id.to_string(), other.to_string()],
+                verlet_sqlite::params![coordinates.thread_id.to_string(), other.to_string()],
             )
             .await
             .unwrap();
     }
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(reopened.active_leaf(&coordinates).await.unwrap(), None);
 
     let events = reopened
-        .read_events(&EventStreamId::for_thread(&coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let selections = events
         .iter()
-        .filter(|event| event.kind == EventKind::ThreadBranchSelected)
+        .filter(|event| event.kind == verlet_history::EventKind::ThreadBranchSelected)
         .map(|event| {
-            serde_json::from_value::<ThreadBranchSelectedPayload>(event.payload.clone()).unwrap()
+            serde_json::from_value::<verlet_history::ThreadBranchSelectedPayload>(
+                event.payload.clone(),
+            )
+            .unwrap()
         })
         .collect::<Vec<_>>();
     assert_eq!(
         selections,
         vec![
-            ThreadBranchSelectedPayload {
+            verlet_history::ThreadBranchSelectedPayload {
                 thread_id: coordinates.thread_id,
                 selected_entry_id: Some(selected),
                 prior_entry_id: Some(other),
             },
-            ThreadBranchSelectedPayload {
+            verlet_history::ThreadBranchSelectedPayload {
                 thread_id: coordinates.thread_id,
                 selected_entry_id: None,
                 prior_entry_id: Some(advanced),
@@ -694,13 +710,13 @@ async fn sqlite_rebuilds_selected_branch_from_journal_after_cache_loss_or_corrup
 async fn sqlite_store_resumes_active_branch_and_compaction() {
     let path = temp_db_path("verlet-history-branch");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
     let root = store
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("root"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("root"),
             },
         )
         .await
@@ -709,8 +725,8 @@ async fn sqlite_store_resumes_active_branch_and_compaction() {
         .append(
             &coordinates,
             Some(root.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("left"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("left"),
             },
         )
         .await
@@ -719,7 +735,7 @@ async fn sqlite_store_resumes_active_branch_and_compaction() {
         .append(
             &coordinates,
             Some(root.entry_id),
-            SessionEntryKind::Compaction {
+            verlet_history::SessionEntryKind::Compaction {
                 summary: "root summary".to_string(),
             },
         )
@@ -727,7 +743,7 @@ async fn sqlite_store_resumes_active_branch_and_compaction() {
         .unwrap();
     drop(store);
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(
         reopened.active_leaf(&coordinates).await.unwrap(),
         Some(right.entry_id)
@@ -749,14 +765,14 @@ async fn sqlite_store_resumes_active_branch_and_compaction() {
 
 #[tokio::test]
 async fn sqlite_store_rejects_parent_from_wrong_coordinate_scope() {
-    let store = SqliteSessionStore::in_memory().await.unwrap();
+    let store = crate::SqliteSessionStore::in_memory().await.unwrap();
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let root = store
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("root"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("root"),
             },
         )
         .await
@@ -768,26 +784,29 @@ async fn sqlite_store_rejects_parent_from_wrong_coordinate_scope() {
         .append(
             &wrong_scope,
             Some(root.entry_id),
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("bad"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("bad"),
             },
         )
         .await
         .unwrap_err();
 
-    assert!(matches!(err, HistoryError::ThreadScopeMismatch { .. }));
+    assert!(matches!(
+        err,
+        verlet_history::HistoryError::ThreadScopeMismatch { .. }
+    ));
 }
 
 #[tokio::test]
 async fn clone_and_select_reject_checkpoint_leaf_from_wrong_scope() {
-    let store = SqliteSessionStore::in_memory().await.unwrap();
+    let store = crate::SqliteSessionStore::in_memory().await.unwrap();
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let leaf = store
         .append(
             &coordinates,
             None,
-            SessionEntryKind::Message {
-                message: CanonicalMessage::user_text("root"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("root"),
             },
         )
         .await
@@ -801,7 +820,7 @@ async fn clone_and_select_reject_checkpoint_leaf_from_wrong_scope() {
         .unwrap_err();
     assert!(matches!(
         select_err,
-        HistoryError::ThreadScopeMismatch { .. }
+        verlet_history::HistoryError::ThreadScopeMismatch { .. }
     ));
 
     let target = coords("tenant_a", "user_1", "session_2");
@@ -811,7 +830,7 @@ async fn clone_and_select_reject_checkpoint_leaf_from_wrong_scope() {
         .unwrap_err();
     assert!(matches!(
         clone_err,
-        HistoryError::ThreadScopeMismatch { .. }
+        verlet_history::HistoryError::ThreadScopeMismatch { .. }
     ));
 }
 
@@ -823,13 +842,13 @@ async fn sqlite_fork_by_reference_survives_reopen_without_copying_entries() {
     let root;
     let source_leaf;
     {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         root = store
             .append(
                 &source,
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("root"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text("root"),
                 },
             )
             .await
@@ -838,8 +857,8 @@ async fn sqlite_fork_by_reference_survives_reopen_without_copying_entries() {
             .append(
                 &source,
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("source"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text("source"),
                 },
             )
             .await
@@ -848,23 +867,23 @@ async fn sqlite_fork_by_reference_survives_reopen_without_copying_entries() {
             .fork_by_reference(
                 &source,
                 &target,
-                ThreadBaseRef {
+                verlet_history::ThreadBaseRef {
                     child_thread_id: target.thread_id,
                     parent_thread_id: source.thread_id,
                     parent_checkpoint_id: None,
                     parent_leaf_entry_id: Some(source_leaf.entry_id),
-                    parent_stream_id: EventStreamId::for_thread(&source),
+                    parent_stream_id: verlet_history::EventStreamId::for_thread(&source),
                     parent_stream_to_sequence: None,
                     parent_binding_snapshot_id: None,
-                    reason: ThreadForkReason::ToolAdded,
-                    created_at_ms: now_ms(),
+                    reason: verlet_history::ThreadForkReason::ToolAdded,
+                    created_at_ms: verlet_history::now_ms(),
                 },
             )
             .await
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let target_context = reopened.build_context(&target).await.unwrap();
     assert_eq!(
         message_texts(&target_context.messages),
@@ -876,16 +895,16 @@ async fn sqlite_fork_by_reference_survives_reopen_without_copying_entries() {
     }));
     assert_eq!(
         target_context.source_cuts,
-        vec![SessionContextSourceCut {
+        vec![verlet_history::SessionContextSourceCut {
             coordinates: source.clone(),
-            stream_id: EventStreamId::for_thread(&source),
+            stream_id: verlet_history::EventStreamId::for_thread(&source),
             inherited: true,
             entry_ids: vec![root.entry_id, source_leaf.entry_id],
         }]
     );
     assert!(
         reopened
-            .read_events(&EventStreamId::for_thread(&target), None)
+            .read_events(&verlet_history::EventStreamId::for_thread(&target), None)
             .await
             .unwrap()
             .is_empty()
@@ -896,45 +915,45 @@ async fn sqlite_fork_by_reference_survives_reopen_without_copying_entries() {
 
 #[tokio::test]
 async fn sqlite_fork_by_reference_rejects_missing_parent_cut() {
-    let store = SqliteSessionStore::in_memory().await.unwrap();
+    let store = crate::SqliteSessionStore::in_memory().await.unwrap();
     let source = coords("tenant_a", "user_1", "session_1");
     let target = coords("tenant_a", "user_1", "session_1");
-    let missing = SessionEntryId::new();
+    let missing = verlet_history::SessionEntryId::new();
 
     let err = store
         .fork_by_reference(
             &source,
             &target,
-            ThreadBaseRef {
+            verlet_history::ThreadBaseRef {
                 child_thread_id: target.thread_id,
                 parent_thread_id: source.thread_id,
                 parent_checkpoint_id: None,
                 parent_leaf_entry_id: Some(missing),
-                parent_stream_id: EventStreamId::for_thread(&source),
+                parent_stream_id: verlet_history::EventStreamId::for_thread(&source),
                 parent_stream_to_sequence: None,
                 parent_binding_snapshot_id: None,
-                reason: ThreadForkReason::Manual,
-                created_at_ms: now_ms(),
+                reason: verlet_history::ThreadForkReason::Manual,
+                created_at_ms: verlet_history::now_ms(),
             },
         )
         .await
         .unwrap_err();
 
-    assert!(matches!(err, HistoryError::EntryNotFound(id) if id == missing));
+    assert!(matches!(err, verlet_history::HistoryError::EntryNotFound(id) if id == missing));
 }
 
 #[tokio::test]
 async fn sqlite_events_reject_discharged_records_without_provenance() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let record = NewEventRecord::discharged(
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let record = verlet_history::NewEventRecord::discharged(
         coordinates.clone(),
-        EventKind::ContextCompileCompleted,
+        verlet_history::EventKind::ContextCompileCompleted,
         serde_json::json!({"output_hash": "sha256:test"}),
-        EventProvenance::default(),
+        verlet_history::EventProvenance::default(),
     );
     let record_id = record.id;
-    let store = SqliteSessionStore::in_memory().await.unwrap();
+    let store = crate::SqliteSessionStore::in_memory().await.unwrap();
 
     let err = store
         .append_events(&stream_id, vec![record])
@@ -942,7 +961,7 @@ async fn sqlite_events_reject_discharged_records_without_provenance() {
         .unwrap_err();
     assert!(matches!(
         err,
-        HistoryError::DischargedWithoutProvenance(id) if id == record_id
+        verlet_history::HistoryError::DischargedWithoutProvenance(id) if id == record_id
     ));
     assert!(
         store
@@ -957,24 +976,26 @@ async fn sqlite_events_reject_discharged_records_without_provenance() {
 async fn sqlite_events_validate_stream_schema_before_commit() {
     let path = temp_db_path("verlet-history-stream-schema-invalid");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let valid = NewEventRecord::witnessed(
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let valid = verlet_history::NewEventRecord::witnessed(
         coordinates.clone(),
-        EventKind::SessionEntryAppended,
+        verlet_history::EventKind::SessionEntryAppended,
         serde_json::json!({"entry_id": "entry-1"}),
     );
-    let invalid = NewEventRecord::witnessed(
+    let invalid = verlet_history::NewEventRecord::witnessed(
         coordinates,
-        EventKind::TurnSubmitted,
+        verlet_history::EventKind::TurnSubmitted,
         serde_json::json!("not-an-object-payload"),
     );
-    let store = SqliteSessionStore::open(&path).await.unwrap();
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
 
     let err = store
         .append_events(&stream_id, vec![valid.clone(), invalid])
         .await
         .unwrap_err();
-    assert!(matches!(err, HistoryError::Codec(message) if message.contains("expected object")));
+    assert!(
+        matches!(err, verlet_history::HistoryError::Codec(message) if message.contains("expected object"))
+    );
     assert!(
         store
             .read_events(&stream_id, None)
@@ -994,33 +1015,33 @@ async fn sqlite_events_validate_stream_schema_before_commit() {
 async fn sqlite_events_round_trip_origin_and_provenance() {
     let path = temp_db_path("verlet-history-event-origin");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let provenance = EventProvenance {
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let provenance = verlet_history::EventProvenance {
         source_streams: vec![stream_id.clone()],
-        source_range: Some(ObservationSourceRange {
+        source_range: Some(verlet_history::ObservationSourceRange {
             stream_id: stream_id.clone(),
-            from_sequence: EventSequence::new(1),
-            to_sequence: EventSequence::new(1),
+            from_sequence: verlet_history::EventSequence::new(1),
+            to_sequence: verlet_history::EventSequence::new(1),
         }),
         discharged_by: Some("projection:context-compiler".to_string()),
         function: Some("naive_assembly/v1".to_string()),
-        ..EventProvenance::default()
+        ..verlet_history::EventProvenance::default()
     };
 
     {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
                 vec![
-                    NewEventRecord::witnessed(
+                    verlet_history::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::SessionEntryAppended,
+                        verlet_history::EventKind::SessionEntryAppended,
                         serde_json::json!({"entry_id": "entry-1"}),
                     ),
-                    NewEventRecord::discharged(
+                    verlet_history::NewEventRecord::discharged(
                         coordinates.clone(),
-                        EventKind::ContextCompileCompleted,
+                        verlet_history::EventKind::ContextCompileCompleted,
                         serde_json::json!({"output_hash": "sha256:test"}),
                         provenance.clone(),
                     ),
@@ -1030,14 +1051,20 @@ async fn sqlite_events_round_trip_origin_and_provenance() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 2);
-    assert_eq!(events[0].kind, EventKind::SessionEntryAppended);
-    assert_eq!(events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(
+        events[0].kind,
+        verlet_history::EventKind::SessionEntryAppended
+    );
+    assert_eq!(events[0].origin, verlet_history::EventOrigin::Witnessed);
     assert!(events[0].provenance.is_empty());
-    assert_eq!(events[1].kind, EventKind::ContextCompileCompleted);
-    assert_eq!(events[1].origin, EventOrigin::Discharged);
+    assert_eq!(
+        events[1].kind,
+        verlet_history::EventKind::ContextCompileCompleted
+    );
+    assert_eq!(events[1].origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(events[1].provenance, provenance);
     assert_eq!(events[1].payload["output_hash"], "sha256:test");
 
@@ -1048,33 +1075,33 @@ async fn sqlite_events_round_trip_origin_and_provenance() {
 async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
     let path = temp_db_path("verlet-history-stream-schema-v1-context");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let provenance = EventProvenance {
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let provenance = verlet_history::EventProvenance {
         source_streams: vec![stream_id.clone()],
-        source_ranges: vec![ObservationSourceRange {
+        source_ranges: vec![verlet_history::ObservationSourceRange {
             stream_id: stream_id.clone(),
-            from_sequence: EventSequence::new(1),
-            to_sequence: EventSequence::new(2),
+            from_sequence: verlet_history::EventSequence::new(1),
+            to_sequence: verlet_history::EventSequence::new(2),
         }],
         discharged_by: Some("projection:context-summarizer".to_string()),
         function: Some("op://verlet/context-summarize@sha256:test".to_string()),
-        ..EventProvenance::default()
+        ..verlet_history::EventProvenance::default()
     };
 
     {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
                 vec![
-                    NewEventRecord::witnessed(
+                    verlet_history::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::TurnSubmitted,
+                        verlet_history::EventKind::TurnSubmitted,
                         serde_json::json!({"schema": "cooldis.event.turn.submitted/1"}),
                     ),
-                    NewEventRecord::discharged(
+                    verlet_history::NewEventRecord::discharged(
                         coordinates.clone(),
-                        EventKind::ContextSummaryCompleted,
+                        verlet_history::EventKind::ContextSummaryCompleted,
                         serde_json::json!({
                             "schema": "cooldis.event.context.summary.completed/1",
                             "role": "summary_checkpoint",
@@ -1090,9 +1117,9 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
                         }),
                         provenance.clone(),
                     ),
-                    NewEventRecord::discharged(
+                    verlet_history::NewEventRecord::discharged(
                         coordinates.clone(),
-                        EventKind::ContextReadPlanSet,
+                        verlet_history::EventKind::ContextReadPlanSet,
                         serde_json::json!({
                             "schema": "cooldis.event.context.read_plan.set/1",
                             "scope": "thread",
@@ -1108,11 +1135,11 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
                                 }]
                             }
                         }),
-                        EventProvenance {
+                        verlet_history::EventProvenance {
                             source_streams: vec![stream_id.clone()],
                             discharged_by: Some("controller:context-budget".to_string()),
                             function: Some("context_read_plan/v1".to_string()),
-                            ..EventProvenance::default()
+                            ..verlet_history::EventProvenance::default()
                         },
                     ),
                 ],
@@ -1121,7 +1148,7 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let envelopes = reopened
         .read_events(&stream_id, None)
         .await
@@ -1130,7 +1157,7 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
         .map(|event| event.to_stream_record_v1())
         .collect::<Vec<_>>();
     assert_eq!(envelopes.len(), 3);
-    assert_eq!(envelopes[0].schema, STREAM_RECORD_SCHEMA_V1);
+    assert_eq!(envelopes[0].schema, verlet_history::STREAM_RECORD_SCHEMA_V1);
     assert_eq!(
         envelopes[1].payload_schema,
         "cooldis.event.context.summary.completed/1"
@@ -1139,7 +1166,7 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
         envelopes[1].payload["text"],
         "Earlier turns established the search plan."
     );
-    assert_eq!(envelopes[1].origin, EventOrigin::Discharged);
+    assert_eq!(envelopes[1].origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(
         envelopes[2].payload_schema,
         "cooldis.event.context.read_plan.set/1"
@@ -1158,21 +1185,29 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
         sqlite_event_schema_columns(&path).await,
         vec![
             (
-                EventKind::TurnSubmitted.as_str().to_string(),
-                STREAM_RECORD_SCHEMA_V1.to_string(),
-                EventKind::TurnSubmitted.payload_schema_id().to_string()
-            ),
-            (
-                EventKind::ContextSummaryCompleted.as_str().to_string(),
-                STREAM_RECORD_SCHEMA_V1.to_string(),
-                EventKind::ContextSummaryCompleted
+                verlet_history::EventKind::TurnSubmitted
+                    .as_str()
+                    .to_string(),
+                verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
+                verlet_history::EventKind::TurnSubmitted
                     .payload_schema_id()
                     .to_string()
             ),
             (
-                EventKind::ContextReadPlanSet.as_str().to_string(),
-                STREAM_RECORD_SCHEMA_V1.to_string(),
-                EventKind::ContextReadPlanSet
+                verlet_history::EventKind::ContextSummaryCompleted
+                    .as_str()
+                    .to_string(),
+                verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
+                verlet_history::EventKind::ContextSummaryCompleted
+                    .payload_schema_id()
+                    .to_string()
+            ),
+            (
+                verlet_history::EventKind::ContextReadPlanSet
+                    .as_str()
+                    .to_string(),
+                verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
+                verlet_history::EventKind::ContextReadPlanSet
                     .payload_schema_id()
                     .to_string()
             ),
@@ -1186,21 +1221,21 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
 async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_reopen() {
     let path = temp_db_path("verlet-history-stream-cursor-v1");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let cursor = {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         let appended = store
             .append_events(
                 &stream_id,
                 vec![
-                    NewEventRecord::witnessed(
+                    verlet_history::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::TurnSubmitted,
+                        verlet_history::EventKind::TurnSubmitted,
                         serde_json::json!({"schema": "cooldis.event.turn.submitted/1", "turn_id": "turn-1"}),
                     ),
-                    NewEventRecord::witnessed(
+                    verlet_history::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::ToolCallCompleted,
+                        verlet_history::EventKind::ToolCallCompleted,
                         serde_json::json!({
                             "schema": "cooldis.event.tool.call.completed/1",
                             "subject": {"turn_id": "turn-1", "call_id": "call-1"},
@@ -1210,9 +1245,9 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
                             "cancellation": "cancelled_exceeded_grace"
                         }),
                     ),
-                    NewEventRecord::witnessed(
+                    verlet_history::NewEventRecord::witnessed(
                         coordinates,
-                        EventKind::TurnCompleted,
+                        verlet_history::EventKind::TurnCompleted,
                         serde_json::json!({"schema": "cooldis.event.turn.completed/1", "turn_id": "turn-1"}),
                     ),
                 ],
@@ -1222,7 +1257,7 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
         appended[0].cursor_v1()
     };
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let replay = reopened
         .read_events_after_cursor(&stream_id, &cursor)
         .await
@@ -1234,14 +1269,14 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
-    assert_eq!(replay[0].kind, EventKind::ToolCallCompleted);
+    assert_eq!(replay[0].kind, verlet_history::EventKind::ToolCallCompleted);
     assert_eq!(
         replay[0].payload["cancellation"],
         serde_json::json!("cancelled_exceeded_grace")
     );
-    assert_eq!(replay[1].kind, EventKind::TurnCompleted);
+    assert_eq!(replay[1].kind, verlet_history::EventKind::TurnCompleted);
 
-    let tampered = StreamCursorV1 {
+    let tampered = verlet_history::StreamCursorV1 {
         event_id: replay[1].id,
         ..cursor
     };
@@ -1249,7 +1284,10 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
         .read_events_after_cursor(&stream_id, &tampered)
         .await
         .unwrap_err();
-    assert!(matches!(err, HistoryError::StreamCursorMismatch { .. }));
+    assert!(matches!(
+        err,
+        verlet_history::HistoryError::StreamCursorMismatch { .. }
+    ));
 
     let _ = std::fs::remove_file(path);
 }
@@ -1258,39 +1296,39 @@ async fn sqlite_stream_cursor_replays_strictly_after_verified_position_across_re
 async fn sqlite_round_trips_declared_coupling_event_kinds() {
     let path = temp_db_path("verlet-history-declared-coupling-kinds");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let provenance = EventProvenance {
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let provenance = verlet_history::EventProvenance {
         source_streams: vec![stream_id.clone()],
         discharged_by: Some("controller:test".to_string()),
         function: Some("op://policy/test@sha256:abc".to_string()),
-        ..EventProvenance::default()
+        ..verlet_history::EventProvenance::default()
     };
 
     {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
                 vec![
-                    NewEventRecord::witnessed(
+                    verlet_history::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::TurnSubmitted,
+                        verlet_history::EventKind::TurnSubmitted,
                         serde_json::json!({"turn_id": "turn-1"}),
                     ),
-                    NewEventRecord::discharged(
+                    verlet_history::NewEventRecord::discharged(
                         coordinates.clone(),
-                        EventKind::ToolCallSuspended,
+                        verlet_history::EventKind::ToolCallSuspended,
                         serde_json::json!({"call_id": "call-1"}),
                         provenance.clone(),
                     ),
-                    NewEventRecord::witnessed(
+                    verlet_history::NewEventRecord::witnessed(
                         coordinates.clone(),
-                        EventKind::ApprovalResolved,
+                        verlet_history::EventKind::ApprovalResolved,
                         serde_json::json!({"approval_id": "approval-1"}),
                     ),
-                    NewEventRecord::discharged(
+                    verlet_history::NewEventRecord::discharged(
                         coordinates.clone(),
-                        EventKind::CouplingRunCompleted,
+                        verlet_history::EventKind::CouplingRunCompleted,
                         serde_json::json!({"coupling_id": "test"}),
                         provenance.clone(),
                     ),
@@ -1300,7 +1338,7 @@ async fn sqlite_round_trips_declared_coupling_event_kinds() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     assert_eq!(
         events
@@ -1314,12 +1352,12 @@ async fn sqlite_round_trips_declared_coupling_event_kinds() {
             "coupling.run.completed",
         ]
     );
-    assert_eq!(events[0].origin, EventOrigin::Witnessed);
-    assert_eq!(events[1].origin, EventOrigin::Discharged);
+    assert_eq!(events[0].origin, verlet_history::EventOrigin::Witnessed);
+    assert_eq!(events[1].origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(events[1].provenance, provenance);
-    assert_eq!(events[2].origin, EventOrigin::Witnessed);
+    assert_eq!(events[2].origin, verlet_history::EventOrigin::Witnessed);
     assert!(events[2].provenance.is_empty());
-    assert_eq!(events[3].origin, EventOrigin::Discharged);
+    assert_eq!(events[3].origin, verlet_history::EventOrigin::Discharged);
 
     let _ = std::fs::remove_file(path);
 }
@@ -1328,9 +1366,9 @@ async fn sqlite_round_trips_declared_coupling_event_kinds() {
 async fn sqlite_event_load_fails_closed_on_unknown_kind() {
     let path = temp_db_path("verlet-history-unknown-kind");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         drop(store);
         let (_db, connection) = raw_connection(&path).await;
         connection
@@ -1349,15 +1387,15 @@ async fn sqlite_event_load_fails_closed_on_unknown_kind() {
                         provenance_json,
                         payload_json
                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    EventRecordId::new().to_string(),
+                verlet_sqlite::params![
+                    verlet_history::EventRecordId::new().to_string(),
                     stream_id.as_str(),
                     1_i64,
                     coordinates.thread_id.to_string(),
                     coordinates.tenant_id.as_str(),
                     coordinates.user_id.as_str(),
                     coordinates.session_id.as_str(),
-                    now_ms(),
+                    verlet_history::now_ms(),
                     "unknown.event.kind",
                     "witnessed",
                     "{}",
@@ -1368,9 +1406,11 @@ async fn sqlite_event_load_fails_closed_on_unknown_kind() {
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let err = reopened.read_events(&stream_id, None).await.unwrap_err();
-    assert!(matches!(err, HistoryError::Codec(message) if message.contains("unknown event kind")));
+    assert!(
+        matches!(err, verlet_history::HistoryError::Codec(message) if message.contains("unknown event kind"))
+    );
 
     let _ = std::fs::remove_file(path);
 }
@@ -1379,15 +1419,15 @@ async fn sqlite_event_load_fails_closed_on_unknown_kind() {
 async fn sqlite_event_load_fails_closed_on_payload_schema_drift() {
     let path = temp_db_path("verlet-history-payload-schema-drift");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
-                vec![NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates,
-                    EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({"schema": "cooldis.event.turn.submitted/1"}),
                 )],
             )
@@ -1398,15 +1438,17 @@ async fn sqlite_event_load_fails_closed_on_payload_schema_drift() {
         connection
             .execute(
                 "UPDATE event_records SET payload_schema = ?1",
-                params!["cooldis.event.other/1"],
+                verlet_sqlite::params!["cooldis.event.other/1"],
             )
             .await
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let err = reopened.read_events(&stream_id, None).await.unwrap_err();
-    assert!(matches!(err, HistoryError::Codec(message) if message.contains("payload_schema")));
+    assert!(
+        matches!(err, verlet_history::HistoryError::Codec(message) if message.contains("payload_schema"))
+    );
 
     let _ = std::fs::remove_file(path);
 }
@@ -1415,17 +1457,17 @@ async fn sqlite_event_load_fails_closed_on_payload_schema_drift() {
 async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() {
     let path = temp_db_path("verlet-history-egress-requested-replay-invalid");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         store
             .append_events(
                 &stream_id,
-                vec![NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates,
-                    EventKind::IoEgressRequested,
+                    verlet_history::EventKind::IoEgressRequested,
                     serde_json::json!({
-                        "schema": EventKind::IoEgressRequested.payload_schema_id(),
+                        "schema": verlet_history::EventKind::IoEgressRequested.payload_schema_id(),
                         "egress_kind": {
                             "type": "platform_action",
                             "action": "reaction",
@@ -1436,11 +1478,11 @@ async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() 
                         },
                         "requested_by_tool_call_id": "call_1"
                     }),
-                    EventProvenance {
+                    verlet_history::EventProvenance {
                         source_streams: vec![stream_id.clone()],
                         discharged_by: Some("rpc:append_events".to_string()),
                         function: Some("io_egress_requested/v1".to_string()),
-                        ..EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -1451,9 +1493,9 @@ async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() 
         connection
             .execute(
                 "UPDATE event_records SET payload_json = ?1",
-                params![
+                verlet_sqlite::params![
                     serde_json::json!({
-                        "schema": EventKind::IoEgressRequested.payload_schema_id(),
+                        "schema": verlet_history::EventKind::IoEgressRequested.payload_schema_id(),
                         "requested_by_tool_call_id": "call_1"
                     })
                     .to_string()
@@ -1463,9 +1505,11 @@ async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() 
             .unwrap();
     }
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let err = reopened.read_events(&stream_id, None).await.unwrap_err();
-    assert!(matches!(err, HistoryError::Codec(message) if message.contains("egress_kind")));
+    assert!(
+        matches!(err, verlet_history::HistoryError::Codec(message) if message.contains("egress_kind"))
+    );
 
     let _ = std::fs::remove_file(path);
 }
@@ -1474,24 +1518,24 @@ async fn sqlite_event_load_validates_io_egress_requested_payload_after_reopen() 
 async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
     let path = temp_db_path("verlet-history-legacy-events");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
-    let user_entry = SessionEntry::new(
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let user_entry = verlet_history::SessionEntry::new(
         coordinates.clone(),
         None,
-        SessionEntryKind::Message {
-            message: CanonicalMessage::user_text("hello"),
+        verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::user_text("hello"),
         },
     );
-    let assistant_entry = SessionEntry::new(
+    let assistant_entry = verlet_history::SessionEntry::new(
         coordinates.clone(),
         Some(user_entry.entry_id),
-        SessionEntryKind::Message {
-            message: CanonicalMessage::assistant(
+        verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::assistant(
                 "openai",
-                ProviderApi::OpenAIResponses,
+                verlet_history::ProviderApi::OpenAIResponses,
                 "gpt-test",
-                vec![CanonicalContent::text("hello back")],
-                CanonicalStopReason::EndTurn,
+                vec![verlet_history::CanonicalContent::text("hello back")],
+                verlet_history::CanonicalStopReason::EndTurn,
             ),
         },
     );
@@ -1520,17 +1564,17 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
         for (sequence, kind, payload_json) in [
             (
                 1_i64,
-                EventKind::SessionEntryAppended,
+                verlet_history::EventKind::SessionEntryAppended,
                 serde_json::to_string(&user_entry).unwrap(),
             ),
             (
                 2_i64,
-                EventKind::SessionEntryAppended,
+                verlet_history::EventKind::SessionEntryAppended,
                 serde_json::to_string(&assistant_entry).unwrap(),
             ),
             (
                 3_i64,
-                EventKind::ContextCompileCompleted,
+                verlet_history::EventKind::ContextCompileCompleted,
                 serde_json::to_string(&serde_json::json!({
                     "output_hash": "sha256:test",
                 }))
@@ -1551,15 +1595,15 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
                             kind,
                             payload_json
                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        EventRecordId::new().to_string(),
+                    verlet_sqlite::params![
+                        verlet_history::EventRecordId::new().to_string(),
                         stream_id.as_str(),
                         sequence,
                         coordinates.thread_id.to_string(),
                         coordinates.tenant_id.as_str(),
                         coordinates.user_id.as_str(),
                         coordinates.session_id.as_str(),
-                        now_ms(),
+                        verlet_history::now_ms(),
                         kind.as_str(),
                         payload_json,
                     ],
@@ -1569,19 +1613,25 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
         }
     }
 
-    let migrated = SqliteSessionStore::open(&path).await.unwrap();
+    let migrated = crate::SqliteSessionStore::open(&path).await.unwrap();
     let events = migrated.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 3);
-    assert_eq!(events[0].kind, EventKind::SessionEntryAppended);
-    assert_eq!(events[0].origin, EventOrigin::Witnessed);
+    assert_eq!(
+        events[0].kind,
+        verlet_history::EventKind::SessionEntryAppended
+    );
+    assert_eq!(events[0].origin, verlet_history::EventOrigin::Witnessed);
     assert!(events[0].provenance.is_empty());
-    assert_eq!(events[1].kind, EventKind::SessionEntryAppended);
-    assert_eq!(events[1].origin, EventOrigin::Discharged);
+    assert_eq!(
+        events[1].kind,
+        verlet_history::EventKind::SessionEntryAppended
+    );
+    assert_eq!(events[1].origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(
         events[1].provenance,
-        EventProvenance {
+        verlet_history::EventProvenance {
             discharged_by: Some("migration:origin-backfill@v1".to_string()),
-            ..EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         }
     );
     assert_ne!(
@@ -1589,42 +1639,51 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
         Some("propagator:agent-loop")
     );
     assert!(events[1].provenance.source_event_ids.is_empty());
-    assert_eq!(events[2].kind, EventKind::ContextCompileCompleted);
-    assert_eq!(events[2].origin, EventOrigin::Discharged);
+    assert_eq!(
+        events[2].kind,
+        verlet_history::EventKind::ContextCompileCompleted
+    );
+    assert_eq!(events[2].origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(
         events[2].provenance,
-        EventProvenance {
+        verlet_history::EventProvenance {
             discharged_by: Some("migration:origin-backfill@v1".to_string()),
-            ..EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         }
     );
     assert!(
         events
             .iter()
-            .filter(|event| event.origin == EventOrigin::Discharged)
+            .filter(|event| event.origin == verlet_history::EventOrigin::Discharged)
             .all(|event| !event.provenance.is_empty())
     );
     assert_eq!(
         sqlite_event_schema_columns(&path).await,
         vec![
             (
-                EventKind::SessionEntryAppended.as_str().to_string(),
-                STREAM_RECORD_SCHEMA_V1.to_string(),
-                EventKind::SessionEntryAppended
+                verlet_history::EventKind::SessionEntryAppended
+                    .as_str()
+                    .to_string(),
+                verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
+                verlet_history::EventKind::SessionEntryAppended
                     .payload_schema_id()
                     .to_string()
             ),
             (
-                EventKind::SessionEntryAppended.as_str().to_string(),
-                STREAM_RECORD_SCHEMA_V1.to_string(),
-                EventKind::SessionEntryAppended
+                verlet_history::EventKind::SessionEntryAppended
+                    .as_str()
+                    .to_string(),
+                verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
+                verlet_history::EventKind::SessionEntryAppended
                     .payload_schema_id()
                     .to_string()
             ),
             (
-                EventKind::ContextCompileCompleted.as_str().to_string(),
-                STREAM_RECORD_SCHEMA_V1.to_string(),
-                EventKind::ContextCompileCompleted
+                verlet_history::EventKind::ContextCompileCompleted
+                    .as_str()
+                    .to_string(),
+                verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
+                verlet_history::EventKind::ContextCompileCompleted
                     .payload_schema_id()
                     .to_string()
             ),
@@ -1638,16 +1697,16 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
 async fn sqlite_event_and_observation_records_survive_reopen_with_provenance() {
     let path = temp_db_path("verlet-history-events");
     let coordinates = coords("tenant_a", "user_1", "session_1");
-    let stream_id = EventStreamId::for_thread(&coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
 
     let receipt_id = {
-        let store = SqliteSessionStore::open(&path).await.unwrap();
+        let store = crate::SqliteSessionStore::open(&path).await.unwrap();
         let entry = store
             .append(
                 &coordinates,
                 None,
-                SessionEntryKind::Message {
-                    message: CanonicalMessage::user_text("hello"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text("hello"),
                 },
             )
             .await
@@ -1655,12 +1714,15 @@ async fn sqlite_event_and_observation_records_survive_reopen_with_provenance() {
 
         let events = store.read_events(&stream_id, None).await.unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, EventKind::SessionEntryAppended);
+        assert_eq!(
+            events[0].kind,
+            verlet_history::EventKind::SessionEntryAppended
+        );
         assert_eq!(events[0].payload["entry_id"], entry.entry_id.to_string());
 
         let receipt = store
             .append_observation(
-                NewObservationRecord::new(
+                verlet_history::NewObservationRecord::new(
                     "compiled_context_receipt",
                     coordinates.clone(),
                     serde_json::json!({
@@ -1668,15 +1730,15 @@ async fn sqlite_event_and_observation_records_survive_reopen_with_provenance() {
                         "output_hash": "sha256:test",
                     }),
                 )
-                .with_provenance(ObservationProvenance {
+                .with_provenance(verlet_history::ObservationProvenance {
                     source_streams: vec![stream_id.clone()],
                     source_event_ids: vec![events[0].id],
-                    source_range: Some(ObservationSourceRange {
+                    source_range: Some(verlet_history::ObservationSourceRange {
                         stream_id: stream_id.clone(),
                         from_sequence: events[0].sequence,
                         to_sequence: events[0].sequence,
                     }),
-                    source_ranges: vec![ObservationSourceRange {
+                    source_ranges: vec![verlet_history::ObservationSourceRange {
                         stream_id: stream_id.clone(),
                         from_sequence: events[0].sequence,
                         to_sequence: events[0].sequence,
@@ -1690,7 +1752,7 @@ async fn sqlite_event_and_observation_records_survive_reopen_with_provenance() {
         receipt.id
     };
 
-    let reopened = SqliteSessionStore::open(&path).await.unwrap();
+    let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let events = reopened.read_events(&stream_id, None).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].sequence.get(), 1);
@@ -1724,15 +1786,17 @@ async fn sqlite_event_and_observation_records_survive_reopen_with_provenance() {
 }
 
 fn temp_db_path(prefix: &str) -> std::path::PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}.sqlite3"))
 }
 
-async fn raw_connection(path: &std::path::Path) -> (Db, Connection) {
-    let db = Db::open(path, DbConfig::default()).await.unwrap();
+async fn raw_connection(path: &std::path::Path) -> (verlet_sqlite::Db, verlet_sqlite::Connection) {
+    let db = verlet_sqlite::Db::open(path, verlet_sqlite::DbConfig::default())
+        .await
+        .unwrap();
     let connection = db.connect().await.unwrap();
     (db, connection)
 }

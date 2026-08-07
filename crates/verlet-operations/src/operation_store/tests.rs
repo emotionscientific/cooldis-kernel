@@ -1,25 +1,21 @@
-use super::*;
-use uuid::Uuid;
-use verlet_abi::{WasmOperationDefinition, WasmOperationValueKind};
-
-fn temp_dir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("verlet-{label}-{}", Uuid::now_v7()));
-    fs::create_dir_all(&path).unwrap();
+fn temp_dir(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("verlet-{label}-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&path).unwrap();
     path
 }
 
-fn test_manifest() -> WasmOperationManifest {
+fn test_manifest() -> verlet_abi::WasmOperationManifest {
     test_manifest_with_operation("cat")
 }
 
-fn test_manifest_with_operation(operation_name: &str) -> WasmOperationManifest {
-    WasmOperationManifest {
+fn test_manifest_with_operation(operation_name: &str) -> verlet_abi::WasmOperationManifest {
+    verlet_abi::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
-        operations: vec![WasmOperationDefinition {
+        operations: vec![verlet_abi::WasmOperationDefinition {
             id: 1,
             name: operation_name.to_string(),
-            input: WasmOperationValueKind::Text,
-            output: WasmOperationValueKind::Text,
+            input: verlet_abi::WasmOperationValueKind::Text,
+            output: verlet_abi::WasmOperationValueKind::Text,
             events: Default::default(),
             mode: Default::default(),
             required_capabilities: vec![],
@@ -27,28 +23,32 @@ fn test_manifest_with_operation(operation_name: &str) -> WasmOperationManifest {
     }
 }
 
-fn test_record(name: &str, hash: &str, operation_name: &str) -> PublishedOperationRecord {
+fn test_record(
+    name: &str,
+    hash: &str,
+    operation_name: &str,
+) -> crate::operation_store::PublishedOperationRecord {
     let manifest = test_manifest_with_operation(operation_name);
-    let registered = RegisteredOperation {
+    let registered = crate::RegisteredOperation {
         name: name.to_string(),
         manifest: manifest.clone(),
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
-    PublishedOperationRecord {
-        schema_version: RECORD_SCHEMA_VERSION,
+    crate::operation_store::PublishedOperationRecord {
+        schema_version: crate::operation_store::RECORD_SCHEMA_VERSION,
         name: name.to_string(),
         active_artifact_hash: hash.to_string(),
         manifest,
         projections: registered.projections(),
         interface: None,
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
-        source: PublishedOperationSource::Wasm {
-            bin_path: PathBuf::from(format!("{name}.wasm")),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
+        source: crate::operation_store::PublishedOperationSource::Wasm {
+            bin_path: std::path::PathBuf::from(format!("{name}.wasm")),
         },
-        build: PublishedOperationBuild {
-            artifact_path: PathBuf::from(format!("{name}.wasm")),
+        build: crate::operation_store::PublishedOperationBuild {
+            artifact_path: std::path::PathBuf::from(format!("{name}.wasm")),
             published_at_ms: 1,
         },
     }
@@ -57,7 +57,7 @@ fn test_record(name: &str, hash: &str, operation_name: &str) -> PublishedOperati
 #[test]
 fn blob_store_put_get_and_detects_corruption() {
     let root = temp_dir("blob-store");
-    let store = OperationBlobStore::new(root.join("blobs"));
+    let store = crate::operation_store::OperationBlobStore::new(root.join("blobs"));
     let hash = store.put(b"hello wasm-ish bytes").unwrap();
 
     assert_eq!(
@@ -68,7 +68,7 @@ fn blob_store_put_get_and_detects_corruption() {
     assert_eq!(store.get(&"0".repeat(64)).unwrap(), None);
 
     let path = store.artifact_path(&hash).unwrap();
-    fs::write(path, b"corrupt").unwrap();
+    std::fs::write(path, b"corrupt").unwrap();
     let err = store.get(&hash).unwrap_err().to_string();
     assert!(err.contains("hash mismatch"), "{err}");
 }
@@ -76,47 +76,49 @@ fn blob_store_put_get_and_detects_corruption() {
 #[test]
 fn published_record_round_trips_and_validates_projection() {
     let manifest = test_manifest();
-    let registered = RegisteredOperation {
+    let registered = crate::RegisteredOperation {
         name: "tailcat".to_string(),
         manifest: manifest.clone(),
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
-    let record = PublishedOperationRecord {
-        schema_version: RECORD_SCHEMA_VERSION,
+    let record = crate::operation_store::PublishedOperationRecord {
+        schema_version: crate::operation_store::RECORD_SCHEMA_VERSION,
         name: "tailcat".to_string(),
         active_artifact_hash: "a".repeat(64),
         manifest,
         projections: registered.projections(),
         interface: None,
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
-        source: PublishedOperationSource::Wasm {
-            bin_path: PathBuf::from("tool.wasm"),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
+        source: crate::operation_store::PublishedOperationSource::Wasm {
+            bin_path: std::path::PathBuf::from("tool.wasm"),
         },
-        build: PublishedOperationBuild {
-            artifact_path: PathBuf::from("tool.wasm"),
+        build: crate::operation_store::PublishedOperationBuild {
+            artifact_path: std::path::PathBuf::from("tool.wasm"),
             published_at_ms: 1,
         },
     };
 
     record.validate().unwrap();
     let json = serde_json::to_vec(&record).unwrap();
-    let decoded: PublishedOperationRecord = serde_json::from_slice(&json).unwrap();
+    let decoded: crate::operation_store::PublishedOperationRecord =
+        serde_json::from_slice(&json).unwrap();
     assert_eq!(decoded, record);
 }
 
 #[test]
 fn legacy_wasm_source_deserializes_after_import_source_is_added() {
-    let source: PublishedOperationSource = serde_json::from_value(serde_json::json!({
-        "kind": "wasm",
-        "bin_path": "tool.wasm"
-    }))
-    .unwrap();
+    let source: crate::operation_store::PublishedOperationSource =
+        serde_json::from_value(serde_json::json!({
+            "kind": "wasm",
+            "bin_path": "tool.wasm"
+        }))
+        .unwrap();
     assert_eq!(
         source,
-        PublishedOperationSource::Wasm {
-            bin_path: PathBuf::from("tool.wasm")
+        crate::operation_store::PublishedOperationSource::Wasm {
+            bin_path: std::path::PathBuf::from("tool.wasm")
         }
     );
 }
@@ -124,8 +126,8 @@ fn legacy_wasm_source_deserializes_after_import_source_is_added() {
 #[test]
 fn imported_record_rejects_invalid_spec_provenance_hash() {
     let mut record = test_record("catalog", &"a".repeat(64), "search");
-    record.source = PublishedOperationSource::Import {
-        manifest_path: PathBuf::from("catalog.import.toml"),
+    record.source = crate::operation_store::PublishedOperationSource::Import {
+        manifest_path: std::path::PathBuf::from("catalog.import.toml"),
         spec_sha256: "not-a-sha256".to_string(),
     };
 
@@ -136,26 +138,26 @@ fn imported_record_rejects_invalid_spec_provenance_hash() {
 #[test]
 fn record_validation_rejects_stale_projection() {
     let manifest = test_manifest();
-    let registered = RegisteredOperation {
+    let registered = crate::RegisteredOperation {
         name: "tailcat".to_string(),
         manifest: manifest.clone(),
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
-    let mut record = PublishedOperationRecord {
-        schema_version: RECORD_SCHEMA_VERSION,
+    let mut record = crate::operation_store::PublishedOperationRecord {
+        schema_version: crate::operation_store::RECORD_SCHEMA_VERSION,
         name: "tailcat".to_string(),
         active_artifact_hash: "b".repeat(64),
         manifest,
         projections: registered.projections(),
         interface: None,
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
-        source: PublishedOperationSource::Wasm {
-            bin_path: PathBuf::from("tool.wasm"),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
+        source: crate::operation_store::PublishedOperationSource::Wasm {
+            bin_path: std::path::PathBuf::from("tool.wasm"),
         },
-        build: PublishedOperationBuild {
-            artifact_path: PathBuf::from("tool.wasm"),
+        build: crate::operation_store::PublishedOperationBuild {
+            artifact_path: std::path::PathBuf::from("tool.wasm"),
             published_at_ms: 1,
         },
     };
@@ -167,30 +169,30 @@ fn record_validation_rejects_stale_projection() {
 
 #[test]
 fn record_validation_rejects_manifest_without_operations() {
-    let manifest = WasmOperationManifest {
+    let manifest = verlet_abi::WasmOperationManifest {
         abi: "cooldis.operation/0.1".to_string(),
         operations: vec![],
     };
-    let registered = RegisteredOperation {
+    let registered = crate::RegisteredOperation {
         name: "empty".to_string(),
         manifest: manifest.clone(),
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
     };
-    let record = PublishedOperationRecord {
-        schema_version: RECORD_SCHEMA_VERSION,
+    let record = crate::operation_store::PublishedOperationRecord {
+        schema_version: crate::operation_store::RECORD_SCHEMA_VERSION,
         name: "empty".to_string(),
         active_artifact_hash: "c".repeat(64),
         manifest,
         projections: registered.projections(),
         interface: None,
-        capability_grants: BTreeSet::new(),
-        metadata: BTreeMap::new(),
-        source: PublishedOperationSource::Wasm {
-            bin_path: PathBuf::from("tool.wasm"),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
+        source: crate::operation_store::PublishedOperationSource::Wasm {
+            bin_path: std::path::PathBuf::from("tool.wasm"),
         },
-        build: PublishedOperationBuild {
-            artifact_path: PathBuf::from("tool.wasm"),
+        build: crate::operation_store::PublishedOperationBuild {
+            artifact_path: std::path::PathBuf::from("tool.wasm"),
             published_at_ms: 1,
         },
     };
@@ -201,7 +203,7 @@ fn record_validation_rejects_manifest_without_operations() {
 
 #[test]
 fn capsule_binding_scope_json_uses_camel_case_and_accepts_legacy_snake_case() {
-    let scope = CapsuleBindingScope::thread("tenant-a", "thread-a");
+    let scope = crate::operation_store::CapsuleBindingScope::thread("tenant-a", "thread-a");
     let value = serde_json::to_value(&scope).unwrap();
     assert_eq!(value["kind"].as_str(), Some("thread"));
     assert_eq!(value["tenantId"].as_str(), Some("tenant-a"));
@@ -209,19 +211,20 @@ fn capsule_binding_scope_json_uses_camel_case_and_accepts_legacy_snake_case() {
     assert!(value.get("tenant_id").is_none());
     assert!(value.get("thread_id").is_none());
 
-    let legacy: CapsuleBindingScope = serde_json::from_value(serde_json::json!({
-        "kind": "thread",
-        "tenant_id": "tenant-a",
-        "thread_id": "thread-a"
-    }))
-    .unwrap();
+    let legacy: crate::operation_store::CapsuleBindingScope =
+        serde_json::from_value(serde_json::json!({
+            "kind": "thread",
+            "tenant_id": "tenant-a",
+            "thread_id": "thread-a"
+        }))
+        .unwrap();
     assert_eq!(legacy, scope);
 }
 
 #[test]
 fn version_records_preserve_old_artifacts_after_active_record_moves() {
     let root = temp_dir("operation-versions");
-    let registry = LocalOperationRegistry::new(&root);
+    let registry = crate::operation_store::LocalOperationRegistry::new(&root);
     let old_hash = "d".repeat(64);
     let new_hash = "e".repeat(64);
     let old_record = test_record("search", &old_hash, "search_old");
@@ -250,13 +253,13 @@ fn version_records_preserve_old_artifacts_after_active_record_moves() {
         new_hash
     );
 
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn binding_snapshot_merges_scopes_and_tombstones_inherited_binding() {
     let root = temp_dir("capsule-bindings");
-    let registry = LocalOperationRegistry::new(&root);
+    let registry = crate::operation_store::LocalOperationRegistry::new(&root);
     let global_hash = "1".repeat(64);
     let tenant_hash = "2".repeat(64);
     let thread_hash = "3".repeat(64);
@@ -269,27 +272,33 @@ fn binding_snapshot_merges_scopes_and_tombstones_inherited_binding() {
     }
 
     registry
-        .bind_capsule_operation(CapsuleBindingScope::global(), "global", &global_hash)
+        .bind_capsule_operation(
+            crate::operation_store::CapsuleBindingScope::global(),
+            "global",
+            &global_hash,
+        )
         .unwrap();
     registry
         .bind_capsule_operation(
-            CapsuleBindingScope::tenant("tenant-a"),
+            crate::operation_store::CapsuleBindingScope::tenant("tenant-a"),
             "tenant",
             &tenant_hash,
         )
         .unwrap();
     registry
         .bind_capsule_operation(
-            CapsuleBindingScope::thread("tenant-a", "thread-a"),
+            crate::operation_store::CapsuleBindingScope::thread("tenant-a", "thread-a"),
             "thread",
             &thread_hash,
         )
         .unwrap();
 
     let snapshot = registry
-        .resolve_capsule_binding_snapshot(CapsuleBindingResolutionRequest::for_thread(
-            "tenant-a", "thread-a",
-        ))
+        .resolve_capsule_binding_snapshot(
+            crate::operation_store::CapsuleBindingResolutionRequest::for_thread(
+                "tenant-a", "thread-a",
+            ),
+        )
         .unwrap();
     assert_eq!(
         snapshot
@@ -302,14 +311,16 @@ fn binding_snapshot_merges_scopes_and_tombstones_inherited_binding() {
 
     registry
         .unbind_capsule_operation(
-            CapsuleBindingScope::thread("tenant-a", "thread-a"),
+            crate::operation_store::CapsuleBindingScope::thread("tenant-a", "thread-a"),
             "global",
         )
         .unwrap();
     let snapshot = registry
-        .resolve_capsule_binding_snapshot(CapsuleBindingResolutionRequest::for_thread(
-            "tenant-a", "thread-a",
-        ))
+        .resolve_capsule_binding_snapshot(
+            crate::operation_store::CapsuleBindingResolutionRequest::for_thread(
+                "tenant-a", "thread-a",
+            ),
+        )
         .unwrap();
     assert_eq!(
         snapshot
@@ -320,19 +331,23 @@ fn binding_snapshot_merges_scopes_and_tombstones_inherited_binding() {
         vec!["tenant", "thread"]
     );
 
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn binding_rejects_missing_version() {
     let root = temp_dir("capsule-binding-missing-version");
-    let registry = LocalOperationRegistry::new(&root);
+    let registry = crate::operation_store::LocalOperationRegistry::new(&root);
     let err = registry
-        .bind_capsule_operation(CapsuleBindingScope::global(), "missing", &"f".repeat(64))
+        .bind_capsule_operation(
+            crate::operation_store::CapsuleBindingScope::global(),
+            "missing",
+            &"f".repeat(64),
+        )
         .unwrap_err()
         .to_string();
 
     assert!(err.contains("version"), "{err}");
 
-    let _ = fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root);
 }

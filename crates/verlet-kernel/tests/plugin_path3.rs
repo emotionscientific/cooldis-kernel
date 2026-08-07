@@ -1,49 +1,37 @@
 mod support;
 
-use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use support::{ScriptedProviderClient, collect_until_output, response_text, response_tool_call};
-use uuid::Uuid;
-use verlet::{
-    AgentLoopConfig, AgentLoopFactory, BashkitExecutionHarness, LocalOperationRegistry,
-    LocalPluginCatalog, LocalPluginCatalogConfig, PluginMount, ProviderApi,
-    PublishOperationRequest, PublishedOperationSource, RuntimeHost, RustWasmBuildOptions,
-    ThreadCoordinates, ThreadTopology, VirtualBashRuntimeConfig, build_rust_wasm_module,
-};
-
 #[tokio::test]
 async fn path3_local_plugin_build_publish_mount_and_agent_confirm() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let temp = temp_dir("path3-plugin");
     let registry_root = temp.join("plugins");
     let workspace = temp.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-    fs::write(workspace.join("input.txt"), "published before mount\n").unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("input.txt"), "published before mount\n").unwrap();
 
-    let build = build_rust_wasm_module(RustWasmBuildOptions::new(&module_path)).unwrap();
-    LocalOperationRegistry::new(&registry_root)
-        .publish_artifact(PublishOperationRequest {
+    let build =
+        verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(&module_path)).unwrap();
+    verlet::LocalOperationRegistry::new(&registry_root)
+        .publish_artifact(verlet::PublishOperationRequest {
             name: "tailcat".to_string(),
             artifact_path: build.artifact_path,
-            source: PublishedOperationSource::Rust {
+            source: verlet::PublishedOperationSource::Rust {
                 module_path,
                 release: true,
             },
             interface: None,
-            capability_grants: BTreeSet::new(),
-            metadata: BTreeMap::new(),
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
         })
         .await
         .unwrap();
 
-    fs::write(workspace.join("input.txt"), "hello from live plugin fs\n").unwrap();
-    let catalog = LocalPluginCatalog::load(
-        LocalPluginCatalogConfig::new(&registry_root)
-            .with_mount(PluginMount::host_read_only("/workspace", &workspace)),
+    std::fs::write(workspace.join("input.txt"), "hello from live plugin fs\n").unwrap();
+    let catalog = verlet::LocalPluginCatalog::load(
+        verlet::LocalPluginCatalogConfig::new(&registry_root).with_mount(
+            verlet::PluginMount::host_read_only("/workspace", &workspace),
+        ),
     )
     .await
     .unwrap();
@@ -59,19 +47,25 @@ async fn path3_local_plugin_build_publish_mount_and_agent_confirm() {
         "hello from live plugin fs\n"
     );
 
-    let client = Arc::new(ScriptedProviderClient::with_responses(vec![
-        response_tool_call("tailcat_cat", json!({"input": "/workspace/input.txt"})),
-        response_text("confirmed: hello from live plugin fs"),
-    ]));
-    let mut config = AgentLoopConfig::new(ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
+        vec![
+            crate::support::response_tool_call(
+                "tailcat_cat",
+                serde_json::json!({"input": "/workspace/input.txt"}),
+            ),
+            crate::support::response_text("confirmed: hello from live plugin fs"),
+        ],
+    ));
+    let mut config =
+        verlet::AgentLoopConfig::new(verlet::ProviderApi::OpenAIResponses, "openai", "gpt-test");
     config.max_tokens = 128;
-    let factory = AgentLoopFactory::new(config, client.clone())
+    let factory = verlet::AgentLoopFactory::new(config, client.clone())
         .with_operation_registry(catalog.operation_registry());
-    let host = RuntimeHost::new(Arc::new(factory));
+    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = host
         .start_thread(
-            ThreadCoordinates::new("tenant_a", "user_1", "plugin_session"),
-            ThreadTopology::root(),
+            verlet::ThreadCoordinates::new("tenant_a", "user_1", "plugin_session"),
+            verlet::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -84,7 +78,7 @@ async fn path3_local_plugin_build_publish_mount_and_agent_confirm() {
     )
     .await
     .unwrap();
-    collect_until_output(&mut events, "confirmed: hello from live plugin fs").await;
+    crate::support::collect_until_output(&mut events, "confirmed: hello from live plugin fs").await;
 
     let requests = client.requests();
     assert!(
@@ -96,7 +90,7 @@ async fn path3_local_plugin_build_publish_mount_and_agent_confirm() {
     let second_request_text = requests[1]
         .messages
         .iter()
-        .map(support::text_from_message)
+        .map(crate::support::text_from_message)
         .collect::<Vec<_>>()
         .join("\n");
     assert!(second_request_text.contains("hello from live plugin fs\n"));
@@ -108,20 +102,21 @@ async fn path3_local_plugin_build_publish_mount_and_agent_confirm() {
 
 #[tokio::test]
 async fn catalog_workspace_vfs_is_shared_with_virtual_bash() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let temp = temp_dir("path3-catalog-bash-workspace");
     let registry_root = temp.join("plugins");
 
     publish_workspace_reader(&registry_root, &module_path).await;
 
-    let catalog = LocalPluginCatalog::load(LocalPluginCatalogConfig::new(&registry_root))
-        .await
-        .unwrap();
-    let config = VirtualBashRuntimeConfig::default()
+    let catalog =
+        verlet::LocalPluginCatalog::load(verlet::LocalPluginCatalogConfig::new(&registry_root))
+            .await
+            .unwrap();
+    let config = verlet::VirtualBashRuntimeConfig::default()
         .with_operation_registry(catalog.operation_registry())
         .with_workspace_vfs(catalog.vfs());
-    let mut harness = BashkitExecutionHarness::new(config).await.unwrap();
+    let mut harness = verlet::BashkitExecutionHarness::new(config).await.unwrap();
 
     let output = harness
         .execute(
@@ -138,25 +133,26 @@ async fn catalog_workspace_vfs_is_shared_with_virtual_bash() {
 
 #[tokio::test]
 async fn shared_workspace_vfs_preserves_catalog_mounts() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let temp = temp_dir("path3-shared-catalog-mount");
     let registry_root = temp.join("plugins");
     let workspace = temp.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-    fs::write(workspace.join("input.txt"), "catalog mount survives\n").unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("input.txt"), "catalog mount survives\n").unwrap();
     publish_workspace_reader(&registry_root, &module_path).await;
 
-    let catalog = LocalPluginCatalog::load(
-        LocalPluginCatalogConfig::new(&registry_root)
-            .with_mount(PluginMount::host_read_only("/workspace", &workspace)),
+    let catalog = verlet::LocalPluginCatalog::load(
+        verlet::LocalPluginCatalogConfig::new(&registry_root).with_mount(
+            verlet::PluginMount::host_read_only("/workspace", &workspace),
+        ),
     )
     .await
     .unwrap();
-    let config = VirtualBashRuntimeConfig::default()
+    let config = verlet::VirtualBashRuntimeConfig::default()
         .with_operation_registry(catalog.operation_registry())
         .with_workspace_vfs(catalog.vfs());
-    let mut harness = BashkitExecutionHarness::new(config).await.unwrap();
+    let mut harness = verlet::BashkitExecutionHarness::new(config).await.unwrap();
 
     let output = harness
         .execute("printf /workspace/input.txt | verlet run workspace-reader cat")
@@ -167,26 +163,27 @@ async fn shared_workspace_vfs_preserves_catalog_mounts() {
     assert_eq!(output.stdout, "catalog mount survives\n");
 }
 
-async fn publish_workspace_reader(registry_root: &Path, module_path: &Path) {
-    let build = build_rust_wasm_module(RustWasmBuildOptions::new(module_path)).unwrap();
-    LocalOperationRegistry::new(registry_root)
-        .publish_artifact(PublishOperationRequest {
+async fn publish_workspace_reader(registry_root: &std::path::Path, module_path: &std::path::Path) {
+    let build =
+        verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(module_path)).unwrap();
+    verlet::LocalOperationRegistry::new(registry_root)
+        .publish_artifact(verlet::PublishOperationRequest {
             name: "workspace-reader".to_string(),
             artifact_path: build.artifact_path,
-            source: PublishedOperationSource::Rust {
+            source: verlet::PublishedOperationSource::Rust {
                 module_path: module_path.to_path_buf(),
                 release: true,
             },
             interface: None,
-            capability_grants: BTreeSet::new(),
-            metadata: BTreeMap::new(),
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
         })
         .await
         .unwrap();
 }
 
-fn temp_dir(prefix: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::now_v7()));
-    fs::create_dir_all(&path).unwrap();
+fn temp_dir(prefix: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&path).unwrap();
     path
 }

@@ -1,34 +1,11 @@
-use async_trait::async_trait;
-use chrono::{TimeZone, Utc};
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
-use uuid::Uuid;
-use verlet::daemon::remote_store::endpoint::{
-    SqliteSyncEndpoint, SyncPullSource, SyncPushGate, SyncPushOutcome, SyncPushRejectionReason,
-    SyncPushRequestV1, VerletDaemonSyncConfig,
-};
-use verlet::daemon::remote_store::endpoint_http::{DaemonSyncHttpServer, HttpSyncClient};
-use verlet::daemon::remote_store::lease::{
-    SqliteStreamLeaseAuthority, StreamLeaseAuthority, StreamLeaseLineage, StreamPrefixScope,
-    SyncCredentialAuthority,
-};
-use verlet::daemon::remote_store::propagator::{
-    LocalFirstStreamPropagator, PropagationStep, SqlitePropagationStateStore,
-    StreamPropagationState, StreamPropagator,
-};
-use verlet::{
-    AppServerListenAddr, CodexTuiConnectConfig, CodexTuiTestClient, DaemonClock, EventKind,
-    EventSequence, EventStore, EventStreamId, NewEventRecord, SqliteSessionStore,
-    SystemDaemonClock, VerletError, VerletResult,
-};
-use verlet_runtime_contracts::{DispatchId, ThreadCoordinates};
+use chrono::TimeZone as _;
+use tokio::io::AsyncBufReadExt as _;
+use verlet::EventStore as _;
+use verlet::daemon::remote_store::endpoint::SyncPullSource as _;
+use verlet::daemon::remote_store::endpoint::SyncPushGate as _;
+use verlet::daemon::remote_store::lease::StreamLeaseAuthority as _;
+use verlet::daemon::remote_store::lease::SyncCredentialAuthority as _;
+use verlet::daemon::remote_store::propagator::StreamPropagator as _;
 
 const LEASE_RACE_DST_SEED: u64 = 0x4290_0000_0000_0001;
 const OFFLINE_WINDOW_DST_SEED: u64 = 0x4290_0000_0000_0002;
@@ -36,41 +13,44 @@ const OFFLINE_WINDOW_DST_SEED: u64 = 0x4290_0000_0000_0002;
 #[derive(Clone)]
 struct FixedClock(i64);
 
-impl DaemonClock for FixedClock {
-    fn now(&self) -> chrono::DateTime<Utc> {
-        Utc.timestamp_millis_opt(self.0)
+impl verlet::DaemonClock for FixedClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc
+            .timestamp_millis_opt(self.0)
             .single()
             .expect("test timestamp should be representable")
     }
 }
 
 struct Fixture {
-    parent_path: PathBuf,
-    parent_store: SqliteSessionStore,
-    authority: Arc<SqliteStreamLeaseAuthority>,
-    endpoint: Arc<SqliteSyncEndpoint>,
-    clock: Arc<FixedClock>,
+    parent_path: std::path::PathBuf,
+    parent_store: verlet::SqliteSessionStore,
+    authority: std::sync::Arc<verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority>,
+    endpoint: std::sync::Arc<verlet::daemon::remote_store::endpoint::SqliteSyncEndpoint>,
+    clock: std::sync::Arc<FixedClock>,
 }
 
 impl Fixture {
     async fn new(name: &str) -> Self {
         let parent_path = temp_db_path(&format!("{name}-parent"));
-        let parent_store = SqliteSessionStore::open(&parent_path).await.unwrap();
-        let clock = Arc::new(FixedClock(1_700_000_000_000));
-        let authority = Arc::new(
-            SqliteStreamLeaseAuthority::new(
+        let parent_store = verlet::SqliteSessionStore::open(&parent_path)
+            .await
+            .unwrap();
+        let clock = std::sync::Arc::new(FixedClock(1_700_000_000_000));
+        let authority = std::sync::Arc::new(
+            verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
                 parent_store.clone(),
-                VerletDaemonSyncConfig::default(),
-                Arc::clone(&clock) as Arc<dyn DaemonClock>,
+                verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default(),
+                std::sync::Arc::clone(&clock) as std::sync::Arc<dyn verlet::DaemonClock>,
             )
             .await
             .unwrap(),
         );
-        let endpoint = Arc::new(
-            SqliteSyncEndpoint::new(
+        let endpoint = std::sync::Arc::new(
+            verlet::daemon::remote_store::endpoint::SqliteSyncEndpoint::new(
                 parent_store.clone(),
-                Arc::clone(&authority),
-                Arc::clone(&clock) as Arc<dyn DaemonClock>,
+                std::sync::Arc::clone(&authority),
+                std::sync::Arc::clone(&clock) as std::sync::Arc<dyn verlet::DaemonClock>,
             )
             .await
             .unwrap(),
@@ -88,7 +68,7 @@ impl Fixture {
         &self,
         scope: &str,
         dispatch: &str,
-        lineage: StreamLeaseLineage,
+        lineage: verlet::daemon::remote_store::lease::StreamLeaseLineage,
     ) -> (
         verlet::daemon::remote_store::lease::StreamLeaseGrantV1,
         String,
@@ -96,8 +76,8 @@ impl Fixture {
         let grant = self
             .authority
             .grant_lease(
-                &StreamPrefixScope::new(scope),
-                &DispatchId::new(dispatch),
+                &verlet::daemon::remote_store::lease::StreamPrefixScope::new(scope),
+                &verlet_runtime_contracts::DispatchId::new(dispatch),
                 lineage,
             )
             .await
@@ -114,18 +94,18 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
         .credential(
             "thread:prefix-a",
             "dispatch-a",
-            StreamLeaseLineage::default(),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let stream_id = EventStreamId::new("thread:prefix-b");
+    let stream_id = verlet::EventStreamId::new("thread:prefix-b");
     let request = request_for(&stream_id, &grant.lease_id, vec![record("outside-scope")]);
 
     let outcome = fixture.endpoint.push(&token, request).await.unwrap();
     assert!(matches!(
         outcome,
-        SyncPushOutcome::Rejected {
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome::Rejected {
             rejection: verlet::daemon::remote_store::endpoint::SyncPushRejectionV1 {
-                reason: SyncPushRejectionReason::ScopeViolation { .. },
+                reason: verlet::daemon::remote_store::endpoint::SyncPushRejectionReason::ScopeViolation { .. },
                 ..
             }
         }
@@ -146,7 +126,7 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
         .unwrap();
     assert!(matches!(
         fixture.endpoint.pull_after(&token, &stream_id, None).await,
-        Err(VerletError::History(message)) if message == "sync pull not authorized"
+        Err(verlet::VerletError::History(message)) if message == "sync pull not authorized"
     ));
 
     let witnessed = fixture
@@ -162,22 +142,22 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
     drop(fixture.endpoint);
     drop(fixture.authority);
     drop(fixture.parent_store);
-    let reopened_store = SqliteSessionStore::open(&fixture.parent_path)
+    let reopened_store = verlet::SqliteSessionStore::open(&fixture.parent_path)
         .await
         .unwrap();
-    let reopened_authority = Arc::new(
-        SqliteStreamLeaseAuthority::new(
+    let reopened_authority = std::sync::Arc::new(
+        verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
             reopened_store.clone(),
-            VerletDaemonSyncConfig::default(),
-            Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+            verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default(),
+            std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
         )
         .await
         .unwrap(),
     );
-    let reopened = SqliteSyncEndpoint::new(
+    let reopened = verlet::daemon::remote_store::endpoint::SqliteSyncEndpoint::new(
         reopened_store,
         reopened_authority,
-        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
     )
     .await
     .unwrap();
@@ -194,38 +174,38 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
 #[tokio::test]
 async fn superseding_propagators_commit_one_batch_and_witness_the_loser() {
     let fixture = Fixture::new(&format!("lease-race-{LEASE_RACE_DST_SEED:016x}")).await;
-    let stream_id = EventStreamId::new("thread:racing-child");
+    let stream_id = verlet::EventStreamId::new("thread:racing-child");
     let (first, first_token) = fixture
         .credential(
             stream_id.as_str(),
             "dispatch-first",
-            StreamLeaseLineage::default(),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
     let (successor, successor_token) = fixture
         .credential(
             stream_id.as_str(),
             "dispatch-successor",
-            StreamLeaseLineage {
+            verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(first.lease_id.clone()),
             },
         )
         .await;
-    let local = SqliteSessionStore::in_memory().await.unwrap();
+    let local = verlet::SqliteSessionStore::in_memory().await.unwrap();
     let event = local
         .append_events(&stream_id, vec![record("raced")])
         .await
         .unwrap()
         .remove(0)
         .to_stream_record_v1();
-    let losing = SyncPushRequestV1 {
+    let losing = verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
         schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
         stream_id: stream_id.clone(),
         lease_id: first.lease_id,
-        expected_next_sequence: EventSequence::new(1),
+        expected_next_sequence: verlet::EventSequence::new(1),
         records: vec![event.clone()],
     };
-    let winning = SyncPushRequestV1 {
+    let winning = verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
         lease_id: successor.lease_id,
         ..losing.clone()
     };
@@ -244,14 +224,17 @@ async fn superseding_propagators_commit_one_batch_and_witness_the_loser() {
     };
     assert!(matches!(
         loser.unwrap(),
-        SyncPushOutcome::Rejected {
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome::Rejected {
             rejection: verlet::daemon::remote_store::endpoint::SyncPushRejectionV1 {
-                reason: SyncPushRejectionReason::CredentialUnknown,
+                reason: verlet::daemon::remote_store::endpoint::SyncPushRejectionReason::CredentialUnknown,
                 ..
             }
         }
     ));
-    assert!(matches!(winner.unwrap(), SyncPushOutcome::Accepted { .. }));
+    assert!(matches!(
+        winner.unwrap(),
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { .. }
+    ));
     let parent_events = fixture
         .parent_store
         .read_events(&stream_id, None)
@@ -271,28 +254,32 @@ async fn superseding_propagators_commit_one_batch_and_witness_the_loser() {
 }
 
 struct LoseAcceptedResponse {
-    inner: Arc<SqliteSyncEndpoint>,
-    lose_once: AtomicBool,
-    offline: AtomicBool,
+    inner: std::sync::Arc<verlet::daemon::remote_store::endpoint::SqliteSyncEndpoint>,
+    lose_once: std::sync::atomic::AtomicBool,
+    offline: std::sync::atomic::AtomicBool,
 }
 
-#[async_trait]
-impl SyncPushGate for LoseAcceptedResponse {
+#[async_trait::async_trait]
+impl verlet::daemon::remote_store::endpoint::SyncPushGate for LoseAcceptedResponse {
     async fn push(
         &self,
         bearer_token: &str,
-        request: SyncPushRequestV1,
-    ) -> VerletResult<SyncPushOutcome> {
-        if self.offline.load(Ordering::SeqCst) {
-            return Err(VerletError::RuntimeExecution(
+        request: verlet::daemon::remote_store::endpoint::SyncPushRequestV1,
+    ) -> verlet::VerletResult<verlet::daemon::remote_store::endpoint::SyncPushOutcome> {
+        if self.offline.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(verlet::VerletError::RuntimeExecution(
                 "injected endpoint outage".to_string(),
             ));
         }
         let outcome = self.inner.push(bearer_token, request).await?;
-        if matches!(outcome, SyncPushOutcome::Accepted { .. })
-            && self.lose_once.swap(false, Ordering::SeqCst)
+        if matches!(
+            outcome,
+            verlet::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { .. }
+        ) && self
+            .lose_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(VerletError::RuntimeExecution(
+            return Err(verlet::VerletError::RuntimeExecution(
                 "injected lost response after durable ack".to_string(),
             ));
         }
@@ -303,12 +290,12 @@ impl SyncPushGate for LoseAcceptedResponse {
 #[tokio::test]
 async fn synthetic_queue_pull_kind_cannot_be_pushed_into_a_real_stream() {
     let fixture = Fixture::new("queue-kind-push-rejected").await;
-    let stream_id = EventStreamId::new("thread:queue-kind-push-rejected");
+    let stream_id = verlet::EventStreamId::new("thread:queue-kind-push-rejected");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
             "dispatch-queue-kind-push-rejected",
-            StreamLeaseLineage::default(),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
     let mut request = request_for(
@@ -322,9 +309,9 @@ async fn synthetic_queue_pull_kind_cannot_be_pushed_into_a_real_stream() {
     let outcome = fixture.endpoint.push(&token, request).await.unwrap();
     assert!(matches!(
         outcome,
-        SyncPushOutcome::Rejected {
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome::Rejected {
             rejection: verlet::daemon::remote_store::endpoint::SyncPushRejectionV1 {
-                reason: SyncPushRejectionReason::RequestInvalid { detail },
+                reason: verlet::daemon::remote_store::endpoint::SyncPushRejectionReason::RequestInvalid { detail },
                 ..
             }
         } if detail == "record kind is not in the frozen event vocabulary"
@@ -342,39 +329,43 @@ async fn synthetic_queue_pull_kind_cannot_be_pushed_into_a_real_stream() {
 #[tokio::test]
 async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
     let fixture = Fixture::new(&format!("lost-ack-offline-{OFFLINE_WINDOW_DST_SEED:016x}")).await;
-    let stream_id = EventStreamId::new("thread:offline-child");
+    let stream_id = verlet::EventStreamId::new("thread:offline-child");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
             "dispatch-child",
-            StreamLeaseLineage::default(),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
     let child_path = temp_db_path(&format!(
         "lost-ack-offline-child-{OFFLINE_WINDOW_DST_SEED:016x}"
     ));
-    let child_store = SqliteSessionStore::open(&child_path).await.unwrap();
-    let state_store = Arc::new(
-        SqlitePropagationStateStore::new(child_store.clone())
-            .await
-            .unwrap(),
+    let child_store = verlet::SqliteSessionStore::open(&child_path).await.unwrap();
+    let state_store = std::sync::Arc::new(
+        verlet::daemon::remote_store::propagator::SqlitePropagationStateStore::new(
+            child_store.clone(),
+        )
+        .await
+        .unwrap(),
     );
-    let push = Arc::new(LoseAcceptedResponse {
-        inner: Arc::clone(&fixture.endpoint),
-        lose_once: AtomicBool::new(false),
-        offline: AtomicBool::new(false),
+    let push = std::sync::Arc::new(LoseAcceptedResponse {
+        inner: std::sync::Arc::clone(&fixture.endpoint),
+        lose_once: std::sync::atomic::AtomicBool::new(false),
+        offline: std::sync::atomic::AtomicBool::new(false),
     });
-    let propagator = LocalFirstStreamPropagator::new(
+    let propagator = verlet::daemon::remote_store::propagator::LocalFirstStreamPropagator::new(
         child_store.clone(),
-        Arc::clone(&push) as Arc<dyn SyncPushGate>,
-        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPullSource>,
-        Arc::clone(&fixture.endpoint)
-            as Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+        std::sync::Arc::clone(&push)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncPushGate>,
+        std::sync::Arc::clone(&fixture.endpoint)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncPullSource>,
+        std::sync::Arc::clone(&fixture.endpoint)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store.clone(),
         token.clone(),
-        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
     );
-    let mut state = StreamPropagationState {
+    let mut state = verlet::daemon::remote_store::propagator::StreamPropagationState {
         stream_id: stream_id.clone(),
         lease: grant,
         pushed_through: None,
@@ -392,7 +383,7 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
         ]
     };
     for (index, cut) in cuts.into_iter().enumerate() {
-        let sequence = EventSequence::new(index as i64 + 1);
+        let sequence = verlet::EventSequence::new(index as i64 + 1);
         child_store
             .append_events(
                 &stream_id,
@@ -402,10 +393,11 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
             .unwrap();
         match cut {
             OfflineFaultCut::CommitBeforeResponse => {
-                push.lose_once.store(true, Ordering::SeqCst);
+                push.lose_once
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 assert_eq!(
                     propagator.propagate_once(&mut state).await.unwrap(),
-                    PropagationStep::EndpointUnavailable,
+                    verlet::daemon::remote_store::propagator::PropagationStep::EndpointUnavailable,
                     "seed {OFFLINE_WINDOW_DST_SEED:#x}: response must be lost after commit"
                 );
             }
@@ -420,7 +412,7 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
                     .endpoint
                     .push(
                         &token,
-                        SyncPushRequestV1 {
+                        verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
                             schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1
                                 .to_string(),
                             stream_id: stream_id.clone(),
@@ -431,7 +423,10 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
                     )
                     .await
                     .unwrap();
-                assert!(matches!(outcome, SyncPushOutcome::Accepted { .. }));
+                assert!(matches!(
+                    outcome,
+                    verlet::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { .. }
+                ));
                 // A hard process kill here loses the in-memory ack before the
                 // child-side propagation state transaction can begin.
             }
@@ -443,28 +438,30 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
         );
         assert_eq!(
             propagator.propagate_once(&mut state).await.unwrap(),
-            PropagationStep::Advanced {
+            verlet::daemon::remote_store::propagator::PropagationStep::Advanced {
                 pushed_through: sequence
             },
             "seed {OFFLINE_WINDOW_DST_SEED:#x}: sequence conflict must adopt an identical batch"
         );
     }
 
-    push.offline.store(true, Ordering::SeqCst);
+    push.offline
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     child_store
         .append_events(&stream_id, vec![record("offline-three")])
         .await
         .unwrap();
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
-        PropagationStep::EndpointUnavailable
+        verlet::daemon::remote_store::propagator::PropagationStep::EndpointUnavailable
     );
-    assert_eq!(state.pushed_through, Some(EventSequence::new(2)));
-    push.offline.store(false, Ordering::SeqCst);
+    assert_eq!(state.pushed_through, Some(verlet::EventSequence::new(2)));
+    push.offline
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
-        PropagationStep::Advanced {
-            pushed_through: EventSequence::new(3)
+        verlet::daemon::remote_store::propagator::PropagationStep::Advanced {
+            pushed_through: verlet::EventSequence::new(3)
         }
     );
 
@@ -485,15 +482,15 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
 #[tokio::test]
 async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead() {
     let fixture = Fixture::new("remote-matching-ahead").await;
-    let stream_id = EventStreamId::new("thread:remote-matching-ahead");
+    let stream_id = verlet::EventStreamId::new("thread:remote-matching-ahead");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
             "dispatch-remote-matching-ahead",
-            StreamLeaseLineage::default(),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let child_store = SqliteSessionStore::in_memory().await.unwrap();
+    let child_store = verlet::SqliteSessionStore::in_memory().await.unwrap();
     let local = child_store
         .append_events(
             &stream_id,
@@ -509,35 +506,39 @@ async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead
             .endpoint
             .push(
                 &token,
-                SyncPushRequestV1 {
+                verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
                     schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
                     stream_id: stream_id.clone(),
                     lease_id: grant.lease_id.clone(),
-                    expected_next_sequence: EventSequence::new(1),
+                    expected_next_sequence: verlet::EventSequence::new(1),
                     records: local,
                 },
             )
             .await
             .unwrap(),
-        SyncPushOutcome::Accepted { .. }
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { .. }
     ));
-    let state_store = Arc::new(
-        SqlitePropagationStateStore::new(child_store.clone())
-            .await
-            .unwrap(),
+    let state_store = std::sync::Arc::new(
+        verlet::daemon::remote_store::propagator::SqlitePropagationStateStore::new(
+            child_store.clone(),
+        )
+        .await
+        .unwrap(),
     );
-    let propagator = LocalFirstStreamPropagator::new(
+    let propagator = verlet::daemon::remote_store::propagator::LocalFirstStreamPropagator::new(
         child_store,
-        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPushGate>,
-        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPullSource>,
-        Arc::clone(&fixture.endpoint)
-            as Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+        std::sync::Arc::clone(&fixture.endpoint)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncPushGate>,
+        std::sync::Arc::clone(&fixture.endpoint)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncPullSource>,
+        std::sync::Arc::clone(&fixture.endpoint)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store,
         token,
-        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
     )
     .with_batch_size(1);
-    let mut state = StreamPropagationState {
+    let mut state = verlet::daemon::remote_store::propagator::StreamPropagationState {
         stream_id,
         lease: grant,
         pushed_through: None,
@@ -546,34 +547,34 @@ async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead
 
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
-        PropagationStep::Advanced {
-            pushed_through: EventSequence::new(1)
+        verlet::daemon::remote_store::propagator::PropagationStep::Advanced {
+            pushed_through: verlet::EventSequence::new(1)
         }
     );
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
-        PropagationStep::Advanced {
-            pushed_through: EventSequence::new(2)
+        verlet::daemon::remote_store::propagator::PropagationStep::Advanced {
+            pushed_through: verlet::EventSequence::new(2)
         }
     );
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
-        PropagationStep::Converged
+        verlet::daemon::remote_store::propagator::PropagationStep::Converged
     );
 }
 
 #[tokio::test]
 async fn reconciliation_rejects_remote_records_past_the_local_tail() {
     let fixture = Fixture::new("remote-unmatched-ahead").await;
-    let stream_id = EventStreamId::new("thread:remote-unmatched-ahead");
+    let stream_id = verlet::EventStreamId::new("thread:remote-unmatched-ahead");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
             "dispatch-remote-unmatched-ahead",
-            StreamLeaseLineage::default(),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let child_store = SqliteSessionStore::in_memory().await.unwrap();
+    let child_store = verlet::SqliteSessionStore::in_memory().await.unwrap();
     let local = child_store
         .append_events(&stream_id, vec![record("local-only-one")])
         .await
@@ -585,40 +586,44 @@ async fn reconciliation_rejects_remote_records_past_the_local_tail() {
             .endpoint
             .push(
                 &token,
-                SyncPushRequestV1 {
+                verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
                     schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
                     stream_id: stream_id.clone(),
                     lease_id: grant.lease_id.clone(),
-                    expected_next_sequence: EventSequence::new(1),
+                    expected_next_sequence: verlet::EventSequence::new(1),
                     records: vec![local],
                 },
             )
             .await
             .unwrap(),
-        SyncPushOutcome::Accepted { .. }
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { .. }
     ));
     fixture
         .parent_store
         .append_events(&stream_id, vec![record("remote-only-two")])
         .await
         .unwrap();
-    let state_store = Arc::new(
-        SqlitePropagationStateStore::new(child_store.clone())
-            .await
-            .unwrap(),
+    let state_store = std::sync::Arc::new(
+        verlet::daemon::remote_store::propagator::SqlitePropagationStateStore::new(
+            child_store.clone(),
+        )
+        .await
+        .unwrap(),
     );
-    let propagator = LocalFirstStreamPropagator::new(
+    let propagator = verlet::daemon::remote_store::propagator::LocalFirstStreamPropagator::new(
         child_store,
-        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPushGate>,
-        Arc::clone(&fixture.endpoint) as Arc<dyn SyncPullSource>,
-        Arc::clone(&fixture.endpoint)
-            as Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
+        std::sync::Arc::clone(&fixture.endpoint)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncPushGate>,
+        std::sync::Arc::clone(&fixture.endpoint)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncPullSource>,
+        std::sync::Arc::clone(&fixture.endpoint)
+            as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store,
         token,
-        Arc::clone(&fixture.clock) as Arc<dyn DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
     )
     .with_batch_size(1);
-    let mut state = StreamPropagationState {
+    let mut state = verlet::daemon::remote_store::propagator::StreamPropagationState {
         stream_id,
         lease: grant,
         pushed_through: None,
@@ -626,8 +631,8 @@ async fn reconciliation_rejects_remote_records_past_the_local_tail() {
 
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
-        PropagationStep::StreamDiverged {
-            actual_next_sequence: EventSequence::new(3)
+        verlet::daemon::remote_store::propagator::PropagationStep::StreamDiverged {
+            actual_next_sequence: verlet::EventSequence::new(3)
         }
     );
     assert_eq!(state.pushed_through, None);
@@ -636,45 +641,50 @@ async fn reconciliation_rejects_remote_records_past_the_local_tail() {
 #[tokio::test]
 async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and_socket() {
     let fixture = Fixture::new("http-projection").await;
-    let stream_id = EventStreamId::new("thread:http-child");
+    let stream_id = verlet::EventStreamId::new("thread:http-child");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
             "dispatch-http-child",
-            StreamLeaseLineage::default(),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let local = SqliteSessionStore::in_memory().await.unwrap();
+    let local = verlet::SqliteSessionStore::in_memory().await.unwrap();
     let event = local
         .append_events(&stream_id, vec![record("over-http")])
         .await
         .unwrap()
         .remove(0)
         .to_stream_record_v1();
-    let server = DaemonSyncHttpServer::bind(
-        AppServerListenAddr::parse("ws://127.0.0.1:0").unwrap(),
-        Arc::clone(&fixture.endpoint),
+    let server = verlet::daemon::remote_store::endpoint_http::DaemonSyncHttpServer::bind(
+        verlet::AppServerListenAddr::parse("ws://127.0.0.1:0").unwrap(),
+        std::sync::Arc::clone(&fixture.endpoint),
     )
     .await
     .unwrap();
     let addr = server.local_addr().unwrap().unwrap();
     let task = tokio::spawn(server.serve());
-    let client = HttpSyncClient::new(format!("http://{addr}")).unwrap();
+    let client =
+        verlet::daemon::remote_store::endpoint_http::HttpSyncClient::new(format!("http://{addr}"))
+            .unwrap();
 
     let outcome = client
         .push(
             &token,
-            SyncPushRequestV1 {
+            verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
                 schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
                 stream_id: stream_id.clone(),
                 lease_id: grant.lease_id,
-                expected_next_sequence: EventSequence::new(1),
+                expected_next_sequence: verlet::EventSequence::new(1),
                 records: vec![event.clone()],
             },
         )
         .await
         .unwrap();
-    assert!(matches!(outcome, SyncPushOutcome::Accepted { .. }));
+    assert!(matches!(
+        outcome,
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { .. }
+    ));
     assert_eq!(
         client.pull_after(&token, &stream_id, None).await.unwrap(),
         vec![event]
@@ -690,15 +700,15 @@ async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and
 #[tokio::test]
 async fn unix_http_projection_removes_socket_when_serve_is_cancelled() {
     let fixture = Fixture::new("unix-http-cleanup").await;
-    let stream_id = EventStreamId::new("thread:unix-child");
+    let stream_id = verlet::EventStreamId::new("thread:unix-child");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
             "dispatch-unix-child",
-            StreamLeaseLineage::default(),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let local = SqliteSessionStore::in_memory().await.unwrap();
+    let local = verlet::SqliteSessionStore::in_memory().await.unwrap();
     let event = local
         .append_events(&stream_id, vec![record("over-unix-http")])
         .await
@@ -707,31 +717,35 @@ async fn unix_http_projection_removes_socket_when_serve_is_cancelled() {
         .to_stream_record_v1();
     let root = temp_root_path("unix-http-cleanup");
     let socket = root.join("run/sync.sock");
-    let server = DaemonSyncHttpServer::bind(
-        AppServerListenAddr::Unix(socket.clone()),
-        Arc::clone(&fixture.endpoint),
+    let server = verlet::daemon::remote_store::endpoint_http::DaemonSyncHttpServer::bind(
+        verlet::AppServerListenAddr::Unix(socket.clone()),
+        std::sync::Arc::clone(&fixture.endpoint),
     )
     .await
     .unwrap();
     assert!(socket.exists());
 
     let task = tokio::spawn(server.serve());
-    let client = HttpSyncClient::new(format!("unix://{}", socket.display())).unwrap();
+    let client = verlet::daemon::remote_store::endpoint_http::HttpSyncClient::new(format!(
+        "unix://{}",
+        socket.display()
+    ))
+    .unwrap();
     assert!(matches!(
         client
             .push(
                 &token,
-                SyncPushRequestV1 {
+                verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
                     schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
                     stream_id: stream_id.clone(),
                     lease_id: grant.lease_id,
-                    expected_next_sequence: EventSequence::new(1),
+                    expected_next_sequence: verlet::EventSequence::new(1),
                     records: vec![event.clone()],
                 },
             )
             .await
             .unwrap(),
-        SyncPushOutcome::Accepted { .. }
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { .. }
     ));
     assert_eq!(
         client.pull_after(&token, &stream_id, None).await.unwrap(),
@@ -748,24 +762,27 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
     let daemon_root = temp_root_path("process-daemon");
     let parent_path = daemon_root.join("state/session_history.sqlite3");
     let child_path = temp_db_path("process-child");
-    let stream_id = EventStreamId::new("thread:process-child");
-    let store = SqliteSessionStore::open(&parent_path).await.unwrap();
-    let clock: Arc<dyn DaemonClock> = Arc::new(SystemDaemonClock);
-    let authority = SqliteStreamLeaseAuthority::new(
+    let stream_id = verlet::EventStreamId::new("thread:process-child");
+    let store = verlet::SqliteSessionStore::open(&parent_path)
+        .await
+        .unwrap();
+    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
+        std::sync::Arc::new(verlet::SystemDaemonClock);
+    let authority = verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
         store.clone(),
-        VerletDaemonSyncConfig {
+        verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
             lease_ttl_secs: 300,
-            ..VerletDaemonSyncConfig::default()
+            ..verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default()
         },
-        Arc::clone(&clock),
+        std::sync::Arc::clone(&clock),
     )
     .await
     .unwrap();
     let first = authority
         .grant_lease(
-            &StreamPrefixScope::new(stream_id.as_str()),
-            &DispatchId::new("dispatch-process-first"),
-            StreamLeaseLineage::default(),
+            &verlet::daemon::remote_store::lease::StreamPrefixScope::new(stream_id.as_str()),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-process-first"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
         .unwrap();
@@ -834,31 +851,36 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
         &first,
     );
     let parked_stdout = parked.stdout.take().unwrap();
-    let mut parked_lines = BufReader::new(parked_stdout).lines();
-    let ready = timeout(Duration::from_secs(30), parked_lines.next_line())
-        .await
-        .expect("child park readiness timed out")
-        .unwrap()
-        .unwrap();
+    let mut parked_lines = tokio::io::BufReader::new(parked_stdout).lines();
+    let ready = tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        parked_lines.next_line(),
+    )
+    .await
+    .expect("child park readiness timed out")
+    .unwrap()
+    .unwrap();
     assert_eq!(ready, "READY child tail persisted");
     stop_process(&mut parked).await;
 
-    let store = SqliteSessionStore::open(&parent_path).await.unwrap();
-    let authority = SqliteStreamLeaseAuthority::new(
+    let store = verlet::SqliteSessionStore::open(&parent_path)
+        .await
+        .unwrap();
+    let authority = verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
         store.clone(),
-        VerletDaemonSyncConfig {
+        verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
             lease_ttl_secs: 300,
-            ..VerletDaemonSyncConfig::default()
+            ..verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default()
         },
-        Arc::new(SystemDaemonClock),
+        std::sync::Arc::new(verlet::SystemDaemonClock),
     )
     .await
     .unwrap();
     let successor = authority
         .grant_lease(
-            &StreamPrefixScope::new(stream_id.as_str()),
-            &DispatchId::new("dispatch-process-successor"),
-            StreamLeaseLineage {
+            &verlet::daemon::remote_store::lease::StreamPrefixScope::new(stream_id.as_str()),
+            &verlet_runtime_contracts::DispatchId::new("dispatch-process-successor"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(first.lease_id.clone()),
             },
         )
@@ -908,8 +930,10 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
     assert_eq!(final_converged, "STEP converged");
     final_parent.stop().await;
 
-    let parent_store = SqliteSessionStore::open(&parent_path).await.unwrap();
-    let child_store = SqliteSessionStore::open(&child_path).await.unwrap();
+    let parent_store = verlet::SqliteSessionStore::open(&parent_path)
+        .await
+        .unwrap();
+    let child_store = verlet::SqliteSessionStore::open(&child_path).await.unwrap();
     let parent = parent_store.read_events(&stream_id, None).await.unwrap();
     let child = child_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(parent, child);
@@ -945,9 +969,9 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
     let child_thread_id = verlet_runtime_contracts::ThreadId::parse_str(child_id).unwrap();
     let parent_thread_id = verlet_runtime_contracts::ThreadId::parse_str(&parent.id).unwrap();
     let store_path = root.join("state/session_history.sqlite3");
-    let child_stream = EventStreamId::new(format!("thread:{child_id}"));
+    let child_stream = verlet::EventStreamId::new(format!("thread:{child_id}"));
 
-    timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             let child = client
                 .request(
@@ -979,7 +1003,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
         }
     })
     .await
@@ -1013,7 +1037,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
             .is_err(),
         "same dispatch with a different payload must be rejected"
     );
-    timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             let child = client
                 .request(
@@ -1031,7 +1055,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
         }
     })
     .await
@@ -1043,22 +1067,22 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
         .join("state/remote-children")
         .join(child_thread_id.to_string())
         .join("state/session_history.sqlite3");
-    timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
-            match SqliteSessionStore::open(&child_store_path).await {
+            match verlet::SqliteSessionStore::open(&child_store_path).await {
                 Ok(store) => break store,
-                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                Err(_) => tokio::time::sleep(tokio::time::Duration::from_millis(20)).await,
             }
         }
     })
     .await
     .expect("remote child process retained its SQLite lock after daemon shutdown");
-    let store = SqliteSessionStore::open(&store_path).await.unwrap();
+    let store = verlet::SqliteSessionStore::open(&store_path).await.unwrap();
     let child_events = store.read_events(&child_stream, None).await.unwrap();
     assert_eq!(
         child_events
             .iter()
-            .filter(|event| event.kind == EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet::EventKind::TurnSubmitted)
             .count(),
         2,
         "spawn plus one idempotently retried submit must produce two child deliveries"
@@ -1067,7 +1091,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
         child_events
             .iter()
             .filter(|event| {
-                event.kind == EventKind::TurnSubmitted
+                event.kind == verlet::EventKind::TurnSubmitted
                     && event.payload["turn_id"] == "thread-submit-emo-430-submit-dispatch"
             })
             .count(),
@@ -1075,7 +1099,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
         "same-dispatch submit retry must fold to one child turn"
     );
     assert!(child_events.iter().any(|event| {
-        event.kind == EventKind::PlacementDecision && event.payload["placement"] == "remote"
+        event.kind == verlet::EventKind::PlacementDecision && event.payload["placement"] == "remote"
     }));
     assert!(
         root.join("state/remote-children")
@@ -1117,7 +1141,7 @@ async fn remote_child_survives_sync_endpoint_outage_and_converges_after_restore(
         .await
         .unwrap();
     let child_id = spawned["threadId"].as_str().unwrap().to_string();
-    timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             let child = client
                 .request(
@@ -1129,7 +1153,7 @@ async fn remote_child_survives_sync_endpoint_outage_and_converges_after_restore(
             if event_page_has_kind(&child, "turn.completed") {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
         }
     })
     .await
@@ -1148,10 +1172,10 @@ async fn remote_child_survives_sync_endpoint_outage_and_converges_after_restore(
         )
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
     std::fs::rename(&parked_socket, &sync_socket).unwrap();
 
-    timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             let child = client
                 .request(
@@ -1170,7 +1194,7 @@ async fn remote_child_survives_sync_endpoint_outage_and_converges_after_restore(
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
         }
     })
     .await
@@ -1238,21 +1262,21 @@ provider = "local"
         escape_toml(sync_listen),
     );
     std::fs::write(&config_path, config).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .arg("daemon")
         .arg("run")
         .arg("--config")
         .arg(&config_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
     let stderr = child.stderr.take().unwrap();
-    let (ready_tx, ready_rx) = oneshot::channel();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let drain = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
         let mut ready_tx = Some(ready_tx);
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(url) = line.strip_prefix("verlet daemon sync endpoint listening on ")
@@ -1262,7 +1286,7 @@ provider = "local"
             }
         }
     });
-    let url = timeout(Duration::from_secs(30), ready_rx)
+    let url = tokio::time::timeout(tokio::time::Duration::from_secs(30), ready_rx)
         .await
         .expect("daemon sync readiness timed out")
         .expect("daemon exited before sync readiness");
@@ -1283,19 +1307,19 @@ provider = "local"
 }
 
 struct DaemonProcess {
-    child: Child,
-    drain: JoinHandle<()>,
+    child: tokio::process::Child,
+    drain: tokio::task::JoinHandle<()>,
 }
 
 impl DaemonProcess {
     async fn stop(mut self) {
         self.child.start_kill().unwrap();
-        let status = timeout(Duration::from_secs(30), self.child.wait())
+        let status = tokio::time::timeout(tokio::time::Duration::from_secs(30), self.child.wait())
             .await
             .expect("daemon did not terminate")
             .unwrap();
         assert!(!status.success());
-        let _ = timeout(Duration::from_secs(30), &mut self.drain).await;
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(30), &mut self.drain).await;
     }
 }
 
@@ -1325,15 +1349,15 @@ fn escape_toml(value: &str) -> String {
 
 async fn connect_daemon_client(
     socket: &std::path::Path,
-) -> CodexTuiTestClient<tokio::net::UnixStream> {
+) -> verlet::CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
     for _ in 0..1_500 {
         if socket.exists() {
-            match CodexTuiTestClient::connect_unix(
+            match verlet::CodexTuiTestClient::connect_unix(
                 socket,
-                CodexTuiConnectConfig {
+                verlet::CodexTuiConnectConfig {
                     client_name: "verlet-remote-placement-e2e".to_string(),
-                    ..CodexTuiConnectConfig::default()
+                    ..verlet::CodexTuiConnectConfig::default()
                 },
             )
             .await
@@ -1342,7 +1366,7 @@ async fn connect_daemon_client(
                 Err(error) => last_error = Some(error.to_string()),
             }
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
     }
     panic!(
         "timed out waiting for daemon socket {}; last error: {}",
@@ -1357,8 +1381,8 @@ fn event_page_has_kind(page: &serde_json::Value, kind: &str) -> bool {
         .is_some_and(|events| events.iter().any(|event| event["kind"] == kind))
 }
 
-fn temp_root_path(name: &str) -> PathBuf {
-    let id = Uuid::now_v7().simple().to_string();
+fn temp_root_path(name: &str) -> std::path::PathBuf {
+    let id = uuid::Uuid::now_v7().simple().to_string();
     std::path::Path::new("/tmp").join(format!("cdis-{name}-{}", &id[..12]))
 }
 
@@ -1368,7 +1392,7 @@ async fn run_sync_child(
     label: Option<&str>,
     endpoint_url: &str,
     token: &str,
-    stream_id: &EventStreamId,
+    stream_id: &verlet::EventStreamId,
     grant: &verlet::daemon::remote_store::lease::StreamLeaseGrantV1,
 ) -> String {
     let output = spawn_sync_child(
@@ -1404,10 +1428,10 @@ fn spawn_sync_child(
     label: Option<&str>,
     endpoint_url: &str,
     token: &str,
-    stream_id: &EventStreamId,
+    stream_id: &verlet::EventStreamId,
     grant: &verlet::daemon::remote_store::lease::StreamLeaseGrantV1,
-) -> Child {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_verlet-sync-test-peer"));
+) -> tokio::process::Child {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet-sync-test-peer"));
     command
         .arg(mode)
         .arg(child_path)
@@ -1419,15 +1443,15 @@ fn spawn_sync_child(
             "VERLET_SYNC_TEST_GRANT",
             serde_json::to_string(grant).unwrap(),
         )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     command.spawn().unwrap()
 }
 
-async fn stop_process(child: &mut Child) {
+async fn stop_process(child: &mut tokio::process::Child) {
     child.start_kill().unwrap();
-    let status = timeout(Duration::from_secs(30), child.wait())
+    let status = tokio::time::timeout(tokio::time::Duration::from_secs(30), child.wait())
         .await
         .expect("process did not terminate")
         .unwrap();
@@ -1435,39 +1459,39 @@ async fn stop_process(child: &mut Child) {
 }
 
 fn request_for(
-    stream_id: &EventStreamId,
+    stream_id: &verlet::EventStreamId,
     lease_id: &verlet::daemon::remote_store::lease::StreamLeaseId,
-    records: Vec<NewEventRecord>,
-) -> SyncPushRequestV1 {
+    records: Vec<verlet::NewEventRecord>,
+) -> verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
     let envelopes = records
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
             verlet::EventRecord::from_new(
                 stream_id.clone(),
-                EventSequence::new(index as i64 + 1),
+                verlet::EventSequence::new(index as i64 + 1),
                 record,
             )
             .to_stream_record_v1()
         })
         .collect();
-    SyncPushRequestV1 {
+    verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
         schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
         stream_id: stream_id.clone(),
         lease_id: lease_id.clone(),
-        expected_next_sequence: EventSequence::new(1),
+        expected_next_sequence: verlet::EventSequence::new(1),
         records: envelopes,
     }
 }
 
-fn record(entry_id: &str) -> NewEventRecord {
-    NewEventRecord::witnessed(
-        ThreadCoordinates::new("tenant-a", "user-a", "session-a"),
-        EventKind::SessionEntryAppended,
+fn record(entry_id: &str) -> verlet::NewEventRecord {
+    verlet::NewEventRecord::witnessed(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant-a", "user-a", "session-a"),
+        verlet::EventKind::SessionEntryAppended,
         serde_json::json!({"entry_id": entry_id}),
     )
 }
 
-fn temp_db_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("verlet-{name}-{}.sqlite3", Uuid::now_v7()))
+fn temp_db_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("verlet-{name}-{}.sqlite3", uuid::Uuid::now_v7()))
 }

@@ -1,10 +1,6 @@
-use std::path::PathBuf;
-use std::process::Command;
-use uuid::Uuid;
-
 #[test]
 fn verlet_cli_builds_rust_source_and_runs_cat_tail() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
     let mount = format!(
         "/workspace={}",
@@ -40,7 +36,7 @@ fn verlet_cli_builds_rust_source_and_runs_cat_tail() {
 
 #[test]
 fn verlet_coupling_init_scaffold_tests_builds_and_validates_package() {
-    let temp = std::env::temp_dir().join(format!("verlet-coupling-init-{}", Uuid::now_v7()));
+    let temp = std::env::temp_dir().join(format!("verlet-coupling-init-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&temp).unwrap();
     let scaffold = temp.join("counter-coupling");
 
@@ -70,11 +66,11 @@ fn verlet_coupling_init_scaffold_tests_builds_and_validates_package() {
 }
 
 fn run_verlet<const N: usize>(args: [&str; N]) -> String {
-    run_verlet_in(&PathBuf::from("."), args)
+    run_verlet_in(&std::path::PathBuf::from("."), args)
 }
 
-fn run_verlet_in<const N: usize>(current_dir: &PathBuf, args: [&str; N]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_verlet"))
+fn run_verlet_in<const N: usize>(current_dir: &std::path::PathBuf, args: [&str; N]) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .current_dir(current_dir)
         .args(args)
         .output()
@@ -88,8 +84,8 @@ fn run_verlet_in<const N: usize>(current_dir: &PathBuf, args: [&str; N]) -> Stri
     String::from_utf8(output.stdout).expect("verlet output should be utf8")
 }
 
-fn run_command(current_dir: &PathBuf, program: &str, args: &[&str]) -> String {
-    let output = Command::new(program)
+fn run_command(current_dir: &std::path::PathBuf, program: &str, args: &[&str]) -> String {
+    let output = std::process::Command::new(program)
         .current_dir(current_dir)
         .args(args)
         .output()

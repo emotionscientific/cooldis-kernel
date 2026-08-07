@@ -1,13 +1,11 @@
-use super::connection::*;
-use super::subscriptions::wait_for_initial_thread_status;
-use super::*;
-use crate::{PlacementTarget, ThreadCoordinates};
+use crate::SessionStore as _;
+use crate::ThreadMetadataStore as _;
 
 const THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA: &str = "cooldis.remote_placement_projection";
 
 #[derive(Default)]
 pub(super) struct AppServerState {
-    pub(super) threads: HashMap<String, AppServerThreadState>,
+    pub(super) threads: std::collections::HashMap<String, AppServerThreadState>,
 }
 
 #[derive(Clone)]
@@ -15,28 +13,28 @@ pub(super) struct AppServerThreadState {
     pub(super) thread_id: String,
     pub(super) session_id: String,
     pub(super) parent_thread_id: Option<String>,
-    pub(super) topology: ThreadTopology,
-    pub(super) cwd: PathBuf,
+    pub(super) topology: crate::ThreadTopology,
+    pub(super) cwd: std::path::PathBuf,
     pub(super) model_provider: String,
     pub(super) created_at_ms: u64,
     pub(super) updated_at_ms: u64,
-    pub(super) status: ThreadStatus,
+    pub(super) status: crate::ThreadStatus,
     pub(super) preview: String,
     pub(super) ephemeral: bool,
     pub(super) name: Option<String>,
-    pub(super) thinking: Option<ThinkingConfig>,
-    pub(super) turns: BTreeMap<String, AppServerTurnState>,
+    pub(super) thinking: Option<crate::ThinkingConfig>,
+    pub(super) turns: std::collections::BTreeMap<String, AppServerTurnState>,
     pub(super) active_turn_id: Option<String>,
 }
 
 #[derive(Clone)]
 pub(super) struct AppServerTurnState {
     pub(super) id: String,
-    pub(super) items: Vec<Value>,
+    pub(super) items: Vec<serde_json::Value>,
     pub(super) status: AppServerTurnStatus,
     pub(super) started_at_ms: u64,
     pub(super) completed_at_ms: Option<u64>,
-    pub(super) error: Option<Value>,
+    pub(super) error: Option<serde_json::Value>,
     pub(super) assistant_item_id: String,
     pub(super) assistant_text: String,
     pub(super) assistant_started: bool,
@@ -59,47 +57,52 @@ pub(super) enum AppServerTurnStatus {
 
 #[derive(Clone)]
 pub(super) struct AppServerThreadLifecycleSink {
-    inner: Weak<VerletAppServerInner>,
+    inner: std::sync::Weak<crate::adapters::app_server::VerletAppServerInner>,
 }
 
 impl AppServerThreadLifecycleSink {
-    pub(super) fn new(app: &VerletAppServer) -> Self {
+    pub(super) fn new(app: &crate::adapters::app_server::VerletAppServer) -> Self {
         Self {
-            inner: Arc::downgrade(&app.inner),
+            inner: std::sync::Arc::downgrade(&app.inner),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ThreadLifecycleSink for AppServerThreadLifecycleSink {
-    async fn thread_started(&self, handle: RuntimeThreadHandle) -> VerletResult<()> {
+impl crate::ThreadLifecycleSink for AppServerThreadLifecycleSink {
+    async fn thread_started(&self, handle: crate::RuntimeThreadHandle) -> crate::VerletResult<()> {
         if handle.context().parent_thread_id.is_none() {
             return Ok(());
         }
         let Some(inner) = self.inner.upgrade() else {
             return Ok(());
         };
-        VerletAppServer { inner }
+        crate::adapters::app_server::VerletAppServer { inner }
             .register_runtime_thread(handle)
             .await
     }
 }
 
 pub(crate) async fn recover_unwitnessed_workspace_metadata_as_unbound(
-    supervisor: &VerletSupervisor,
-    record: &mut ThreadLifecycleRecord,
-) -> VerletResult<()> {
-    let Some(raw) = record.metadata.get(THREAD_AGENT_WORKSPACE_METADATA) else {
+    supervisor: &crate::VerletSupervisor,
+    record: &mut crate::ThreadLifecycleRecord,
+) -> crate::VerletResult<()> {
+    let Some(raw) = record
+        .metadata
+        .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
+    else {
         return Ok(());
     };
-    let stored = match serde_json::from_str::<AgentManifestResolvedWorkspaceMount>(raw) {
+    let stored = match serde_json::from_str::<crate::AgentManifestResolvedWorkspaceMount>(raw) {
         Ok(stored) => stored,
         Err(err) => {
             eprintln!(
                 "verlet recovered invalid stored manifest workspace as unbound for thread {}: {err}",
                 record.coordinates.thread_id
             );
-            record.metadata.remove(THREAD_AGENT_WORKSPACE_METADATA);
+            record
+                .metadata
+                .remove(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA);
             return Ok(());
         }
     };
@@ -127,19 +130,21 @@ pub(crate) async fn recover_unwitnessed_workspace_metadata_as_unbound(
             "verlet recovered unwitnessed stored manifest workspace as unbound for thread {}",
             record.coordinates.thread_id
         );
-        record.metadata.remove(THREAD_AGENT_WORKSPACE_METADATA);
+        record
+            .metadata
+            .remove(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA);
     }
     Ok(())
 }
 
-impl VerletAppServer {
-    pub(super) async fn load_threads_from_metadata(&self) -> VerletResult<()> {
+impl crate::adapters::app_server::VerletAppServer {
+    pub(super) async fn load_threads_from_metadata(&self) -> crate::VerletResult<()> {
         let records = self
             .inner
             .metadata_store
             .list_thread_lifecycle_for_user(&self.inner.tenant_id, &self.inner.user_id)
             .await
-            .map_err(metadata_store_error)?;
+            .map_err(crate::adapters::app_server::metadata_store_error)?;
         for mut record in records {
             recover_unwitnessed_workspace_metadata_as_unbound(&self.inner.supervisor, &mut record)
                 .await?;
@@ -167,7 +172,8 @@ impl VerletAppServer {
                 .supervisor
                 .load_thread_from_lifecycle(record.clone())
                 .await?;
-            wait_for_initial_thread_status(&handle).await;
+            crate::adapters::app_server::subscriptions::wait_for_initial_thread_status(&handle)
+                .await;
             if let Err(err) = self.rebind_loaded_manifest_thread(&handle).await {
                 let _ = self
                     .inner
@@ -179,12 +185,12 @@ impl VerletAppServer {
                     record.coordinates.thread_id,
                     record
                         .metadata
-                        .get(THREAD_AGENT_REF_METADATA)
+                        .get(crate::adapters::app_server::THREAD_AGENT_REF_METADATA)
                         .map(String::as_str)
                         .unwrap_or("<none>"),
                     record
                         .metadata
-                        .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+                        .get(crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA)
                         .map(String::as_str)
                         .unwrap_or("<none>")
                 );
@@ -202,18 +208,21 @@ impl VerletAppServer {
     pub(super) async fn load_thread_from_metadata(
         &self,
         thread_id: &str,
-        parsed: ThreadId,
-    ) -> Result<RuntimeThreadHandle, JsonRpcErrorError> {
+        parsed: crate::ThreadId,
+    ) -> Result<
+        crate::RuntimeThreadHandle,
+        crate::adapters::app_server::connection::JsonRpcErrorError,
+    > {
         let mut record = self
             .inner
             .metadata_store
             .get_thread_lifecycle(parsed)
             .await
-            .map_err(metadata_store_jsonrpc_error)?
-            .ok_or_else(|| thread_not_found(thread_id))?;
+            .map_err(crate::adapters::app_server::metadata_store_jsonrpc_error)?
+            .ok_or_else(|| crate::adapters::app_server::connection::thread_not_found(thread_id))?;
         recover_unwitnessed_workspace_metadata_as_unbound(&self.inner.supervisor, &mut record)
             .await
-            .map_err(internal_error)?;
+            .map_err(crate::adapters::app_server::connection::internal_error)?;
         if record.coordinates.tenant_id != self.inner.tenant_id
             || record.coordinates.user_id != self.inner.user_id
             || !is_loadable_lifecycle_status(record.status)
@@ -222,27 +231,29 @@ impl VerletAppServer {
                 .get(THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA)
                 .is_some_and(|value| value == "true")
         {
-            return Err(thread_not_found(thread_id));
+            return Err(crate::adapters::app_server::connection::thread_not_found(
+                thread_id,
+            ));
         }
         let handle = self
             .inner
             .supervisor
             .load_thread_from_lifecycle(record.clone())
             .await
-            .map_err(internal_error)?;
-        wait_for_initial_thread_status(&handle).await;
+            .map_err(crate::adapters::app_server::connection::internal_error)?;
+        crate::adapters::app_server::subscriptions::wait_for_initial_thread_status(&handle).await;
         if let Err(err) = self.rebind_loaded_manifest_thread(&handle).await {
             let _ = self
                 .inner
                 .supervisor
                 .shutdown_thread_at(&handle.context().coordinates)
                 .await;
-            return Err(internal_error(err));
+            return Err(crate::adapters::app_server::connection::internal_error(err));
         }
         let thread_state = self
             .thread_state_from_lifecycle(&record, handle.status())
             .await
-            .map_err(internal_error)?;
+            .map_err(crate::adapters::app_server::connection::internal_error)?;
         let mut state = self.inner.state.write().await;
         state
             .threads
@@ -252,24 +263,25 @@ impl VerletAppServer {
 
     pub(super) async fn rebind_loaded_manifest_thread(
         &self,
-        handle: &RuntimeThreadHandle,
-    ) -> VerletResult<Option<(crate::EventRecord, crate::EventRecord)>> {
+        handle: &crate::RuntimeThreadHandle,
+    ) -> crate::VerletResult<Option<(crate::EventRecord, crate::EventRecord)>> {
         let metadata = &handle.context().metadata;
-        let Some(agent_ref) = metadata.get(THREAD_AGENT_REF_METADATA) else {
+        let Some(agent_ref) = metadata.get(crate::adapters::app_server::THREAD_AGENT_REF_METADATA)
+        else {
             return Ok(None);
         };
         let expected_hash = metadata
-            .get(THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .get(crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA)
             .ok_or_else(|| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "manifest thread {agent_ref:?} is missing stored manifest hash"
                 ))
             })?;
         let overrides = metadata
-            .get(THREAD_AGENT_RUNTIME_OVERRIDES_METADATA)
+            .get(crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA)
             .map(|value| {
-                serde_json::from_str::<AgentManifestBindOverrides>(value).map_err(|err| {
-                    VerletError::RuntimeFactory(format!(
+                serde_json::from_str::<crate::AgentManifestBindOverrides>(value).map_err(|err| {
+                    crate::VerletError::RuntimeFactory(format!(
                         "stored manifest runtime overrides are invalid: {err}"
                     ))
                 })
@@ -277,21 +289,21 @@ impl VerletAppServer {
             .transpose()?
             .unwrap_or_default();
         let placement = metadata
-            .get(THREAD_AGENT_PLACEMENT_METADATA)
-            .map(|value| match serde_json::from_str::<AgentManifestPlacementBinding>(value) {
+            .get(crate::adapters::app_server::THREAD_AGENT_PLACEMENT_METADATA)
+            .map(|value| match serde_json::from_str::<crate::AgentManifestPlacementBinding>(value) {
                 Ok(placement) => placement,
                 Err(err) => {
                     eprintln!(
                         "verlet app-server defaulted invalid stored manifest placement to local for thread {}: {err}",
                         handle.context().coordinates.thread_id
                     );
-                    AgentManifestPlacementBinding::default()
+                    crate::AgentManifestPlacementBinding::default()
                 }
             });
         let stored_workspace = metadata
-            .get(THREAD_AGENT_WORKSPACE_METADATA)
+            .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
             .and_then(|value| {
-                match serde_json::from_str::<AgentManifestResolvedWorkspaceMount>(value) {
+                match serde_json::from_str::<crate::AgentManifestResolvedWorkspaceMount>(value) {
                     Ok(workspace) => Some(workspace),
                     Err(err) => {
                         eprintln!(
@@ -304,7 +316,7 @@ impl VerletAppServer {
             });
         let workspace_binding = stored_workspace
             .as_ref()
-            .map(AgentManifestResolvedWorkspaceMount::binding);
+            .map(crate::AgentManifestResolvedWorkspaceMount::binding);
         let stored_skill_packages = thread_manifest_skill_packages(handle.context())?;
         let stored_skill_discovery = thread_manifest_skill_discovery(handle.context())?;
         let stored_skill_context_segments =
@@ -333,7 +345,7 @@ impl VerletAppServer {
                     &stored_skill_packages,
                 ) => {}
             Some(_) => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "stored skill package metadata disagrees with the durable manifest bind witness for thread {}",
                     handle.context().coordinates.thread_id
                 )));
@@ -341,7 +353,7 @@ impl VerletAppServer {
             None if stored_skill_packages.is_empty()
                 && stored_skill_context_segments.is_empty() => {}
             None => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "stored skill package metadata has no durable manifest bind witness for thread {}",
                     handle.context().coordinates.thread_id
                 )));
@@ -353,42 +365,44 @@ impl VerletAppServer {
         ) {
             (Some(witness), Some(stored)) if witness == stored => {}
             (Some(_), _) | (_, Some(_)) => {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "stored skill discovery metadata disagrees with the durable manifest bind witness for thread {}",
                     handle.context().coordinates.thread_id
                 )));
             }
             (None, None) => {}
         }
-        let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let registry = crate::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         if &record.manifest_hash != expected_hash {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "manifest thread stored hash {expected_hash} but {agent_ref:?} loaded {}",
                 record.manifest_hash
             )));
         }
         let mut provider_surface = self.agent_manifest_provider_surface().await?;
-        if record.name == default_manifest::DEFAULT_AGENT_NAME
+        if record.name == crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAME
             && matches!(
                 record.namespace.as_deref(),
                 Some(
-                    default_manifest::DEFAULT_AGENT_NAMESPACE
-                        | default_manifest::LEGACY_DEFAULT_AGENT_NAMESPACE
+                    crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAMESPACE
+                        | crate::adapters::app_server::default_manifest::LEGACY_DEFAULT_AGENT_NAMESPACE
                 )
             )
             && metadata
-                .get(THREAD_AGENT_PROVIDER_ID_METADATA)
+                .get(crate::adapters::app_server::THREAD_AGENT_PROVIDER_ID_METADATA)
                 .is_some_and(|provider_id| provider_id == &provider_surface.provider_id)
-            && let Some(model_id) = metadata.get(THREAD_AGENT_MODEL_ID_METADATA)
+            && let Some(model_id) = metadata.get(crate::adapters::app_server::THREAD_AGENT_MODEL_ID_METADATA)
         {
             provider_surface.model_ids.insert(model_id.clone());
         }
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
         let model_selection = metadata
-            .get(THREAD_AGENT_MODEL_PROFILE_ID_METADATA)
-            .map(|profile_id| AgentManifestModelProfileSelection::profile_id(profile_id.clone()))
+            .get(crate::adapters::app_server::THREAD_AGENT_MODEL_PROFILE_ID_METADATA)
+            .map(|profile_id| {
+                crate::AgentManifestModelProfileSelection::profile_id(profile_id.clone())
+            })
             .unwrap_or_default();
         let bound = crate::agent::manifest_bind::bind_published_agent_record_with_placement_and_skill_witness(
             &record,
@@ -413,7 +427,7 @@ impl VerletAppServer {
         )
         .await?;
         if bound.bind_receipt.workspace != stored_workspace {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored manifest workspace binding drifted for thread {}",
                 handle.context().coordinates.thread_id
             )));
@@ -421,7 +435,7 @@ impl VerletAppServer {
         if witnessed_skill_packages.is_some()
             && bound.skill_context_segments != stored_skill_context_segments
         {
-            return Err(VerletError::RuntimeFactory(format!(
+            return Err(crate::VerletError::RuntimeFactory(format!(
                 "stored skill context metadata disagrees with the pinned skill packages for thread {}",
                 handle.context().coordinates.thread_id
             )));
@@ -429,20 +443,20 @@ impl VerletAppServer {
         record_bound_agent_receipts(handle, &bound).await.map(Some)
     }
 
-    pub(crate) fn agent_registry_root(&self) -> &Path {
+    pub(crate) fn agent_registry_root(&self) -> &std::path::Path {
         &self.inner.agent_registry_root
     }
 
     pub(crate) async fn validate_daemon_route_agent_ref(
         &self,
         agent_ref: &str,
-    ) -> VerletResult<()> {
+    ) -> crate::VerletResult<()> {
         if !agent_ref.starts_with("agent://") {
-            return Err(VerletError::RuntimeFactory(
+            return Err(crate::VerletError::RuntimeFactory(
                 "daemon route agent_ref must be an agent:// ref".to_string(),
             ));
         }
-        AgentRecordRef::parse(agent_ref)?;
+        crate::AgentRecordRef::parse(agent_ref)?;
         self.bind_daemon_route_agent(agent_ref).await?;
         Ok(())
     }
@@ -450,12 +464,12 @@ impl VerletAppServer {
     pub(crate) async fn bind_daemon_route_agent(
         &self,
         agent_ref: &str,
-    ) -> VerletResult<KernelThreadSpawnAgentBinding> {
+    ) -> crate::VerletResult<crate::KernelThreadSpawnAgentBinding> {
         let bound = self
             .bind_app_server_agent_ref(
                 agent_ref,
-                &AgentManifestModelProfileSelection::default(),
-                &AgentManifestBindOverrides::default(),
+                &crate::AgentManifestModelProfileSelection::default(),
+                &crate::AgentManifestBindOverrides::default(),
                 None,
                 None,
             )
@@ -472,17 +486,17 @@ impl VerletAppServer {
     pub(super) async fn bind_app_server_agent_ref(
         &self,
         agent_ref: &str,
-        model_selection: &AgentManifestModelProfileSelection,
-        overrides: &AgentManifestBindOverrides,
-        placement_override: Option<&AgentManifestPlacementBinding>,
-        workspace_override: Option<&AgentManifestWorkspaceBinding>,
-    ) -> VerletResult<AgentManifestBoundThread> {
-        let registry = LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        model_selection: &crate::AgentManifestModelProfileSelection,
+        overrides: &crate::AgentManifestBindOverrides,
+        placement_override: Option<&crate::AgentManifestPlacementBinding>,
+        workspace_override: Option<&crate::AgentManifestWorkspaceBinding>,
+    ) -> crate::VerletResult<crate::AgentManifestBoundThread> {
+        let registry = crate::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let provider_surface = self.agent_manifest_provider_surface().await?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
-        bind_published_agent_record_with_placement(
+        crate::bind_published_agent_record_with_placement(
             &record,
             alias,
             &provider_surface,
@@ -504,9 +518,9 @@ impl VerletAppServer {
 
     pub(super) async fn thread_state_from_lifecycle(
         &self,
-        record: &ThreadLifecycleRecord,
-        status: ThreadStatus,
-    ) -> VerletResult<AppServerThreadState> {
+        record: &crate::ThreadLifecycleRecord,
+        status: crate::ThreadStatus,
+    ) -> crate::VerletResult<AppServerThreadState> {
         let (preview, turns) = self.thread_history_from_lifecycle(record).await?;
         Ok(AppServerThreadState {
             thread_id: record.coordinates.thread_id.to_string(),
@@ -516,7 +530,7 @@ impl VerletAppServer {
             cwd: thread_lifecycle_cwd(record).unwrap_or_else(|| self.inner.cwd.clone()),
             model_provider: record
                 .metadata
-                .get(THREAD_APP_SERVER_MODEL_PROVIDER_METADATA)
+                .get(crate::adapters::app_server::THREAD_APP_SERVER_MODEL_PROVIDER_METADATA)
                 .cloned()
                 .unwrap_or_else(|| self.inner.model_provider.clone()),
             created_at_ms: record.created_at_ms,
@@ -525,11 +539,11 @@ impl VerletAppServer {
             preview,
             ephemeral: record
                 .metadata
-                .get(THREAD_APP_SERVER_EPHEMERAL_METADATA)
+                .get(crate::adapters::app_server::THREAD_APP_SERVER_EPHEMERAL_METADATA)
                 .is_some_and(|value| value == "true"),
             name: record
                 .metadata
-                .get(THREAD_APP_SERVER_NAME_METADATA)
+                .get(crate::adapters::app_server::THREAD_APP_SERVER_NAME_METADATA)
                 .filter(|value| !value.trim().is_empty())
                 .cloned(),
             thinking: thread_lifecycle_thinking(record)?,
@@ -541,42 +555,45 @@ impl VerletAppServer {
     /// Rebuild the app-server thread projection from durable session history.
     pub(super) async fn thread_history_from_lifecycle(
         &self,
-        record: &ThreadLifecycleRecord,
-    ) -> VerletResult<(String, BTreeMap<String, AppServerTurnState>)> {
-        let store = SqliteSessionStore::open(&self.inner.session_store_path)
+        record: &crate::ThreadLifecycleRecord,
+    ) -> crate::VerletResult<(
+        String,
+        std::collections::BTreeMap<String, AppServerTurnState>,
+    )> {
+        let store = crate::SqliteSessionStore::open(&self.inner.session_store_path)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::VerletError::History(err.to_string()))?;
         let context = store
             .build_context(&record.coordinates)
             .await
-            .map_err(|err| VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::VerletError::History(err.to_string()))?;
         Ok(app_server_turns_from_session_entries(&context.entries))
     }
 
     pub(super) async fn persist_thread_lifecycle(
         &self,
-        handle: &RuntimeThreadHandle,
-    ) -> Result<(), JsonRpcErrorError> {
-        self.persist_thread_lifecycle_with_metadata(handle, BTreeMap::new())
+        handle: &crate::RuntimeThreadHandle,
+    ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
+        self.persist_thread_lifecycle_with_metadata(handle, std::collections::BTreeMap::new())
             .await
     }
 
     pub(super) async fn persist_thread_lifecycle_with_metadata(
         &self,
-        handle: &RuntimeThreadHandle,
-        metadata: BTreeMap<String, String>,
-    ) -> Result<(), JsonRpcErrorError> {
+        handle: &crate::RuntimeThreadHandle,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
         self.persist_thread_lifecycle_record_with_metadata(handle, metadata)
             .await
             .map(|_| ())
-            .map_err(internal_error)
+            .map_err(crate::adapters::app_server::connection::internal_error)
     }
 
     pub(super) async fn persist_thread_lifecycle_record_with_metadata(
         &self,
-        handle: &RuntimeThreadHandle,
-        metadata: BTreeMap<String, String>,
-    ) -> VerletResult<ThreadLifecycleRecord> {
+        handle: &crate::RuntimeThreadHandle,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> crate::VerletResult<crate::ThreadLifecycleRecord> {
         let mut record = handle.lifecycle_record().await;
         let handle_metadata = record.metadata.clone();
         if let Some(existing) = self
@@ -584,7 +601,7 @@ impl VerletAppServer {
             .metadata_store
             .get_thread_lifecycle(record.coordinates.thread_id)
             .await
-            .map_err(metadata_store_error)?
+            .map_err(crate::adapters::app_server::metadata_store_error)?
         {
             record.metadata = existing.metadata;
             record.metadata.extend(handle_metadata);
@@ -594,17 +611,20 @@ impl VerletAppServer {
             .metadata_store
             .upsert_thread_lifecycle(record.clone())
             .await
-            .map_err(metadata_store_error)?;
+            .map_err(crate::adapters::app_server::metadata_store_error)?;
         Ok(record)
     }
 
     pub(super) async fn register_runtime_thread(
         &self,
-        handle: RuntimeThreadHandle,
-    ) -> VerletResult<()> {
-        wait_for_initial_thread_status(&handle).await;
+        handle: crate::RuntimeThreadHandle,
+    ) -> crate::VerletResult<()> {
+        crate::adapters::app_server::subscriptions::wait_for_initial_thread_status(&handle).await;
         let record = self
-            .persist_thread_lifecycle_record_with_metadata(&handle, BTreeMap::new())
+            .persist_thread_lifecycle_record_with_metadata(
+                &handle,
+                std::collections::BTreeMap::new(),
+            )
             .await?;
         let thread_id = record.coordinates.thread_id.to_string();
         let thread_state = self
@@ -624,7 +644,7 @@ impl VerletAppServer {
     pub(super) fn spawn_lifecycle_persistence_watcher(
         &self,
         thread_id: String,
-        handle: RuntimeThreadHandle,
+        handle: crate::RuntimeThreadHandle,
     ) {
         let app = self.clone();
         tokio::spawn(async move {
@@ -636,7 +656,10 @@ impl VerletAppServer {
                 }
                 let status_value = *status.borrow_and_update();
                 if let Err(err) = app
-                    .persist_thread_lifecycle_record_with_metadata(&handle, BTreeMap::new())
+                    .persist_thread_lifecycle_record_with_metadata(
+                        &handle,
+                        std::collections::BTreeMap::new(),
+                    )
                     .await
                 {
                     eprintln!(
@@ -648,10 +671,13 @@ impl VerletAppServer {
                     let mut state = app.inner.state.write().await;
                     if let Some(thread) = state.threads.get_mut(&thread_id) {
                         thread.status = status_value;
-                        thread.updated_at_ms = now_ms();
+                        thread.updated_at_ms = crate::adapters::app_server::connection::now_ms();
                     }
                 }
-                if matches!(status_value, ThreadStatus::Stopped | ThreadStatus::Failed) {
+                if matches!(
+                    status_value,
+                    crate::ThreadStatus::Stopped | crate::ThreadStatus::Failed
+                ) {
                     break;
                 }
             }
@@ -662,30 +688,30 @@ impl VerletAppServer {
         &self,
         thread_id: &str,
         include_turns: bool,
-    ) -> Result<Value, JsonRpcErrorError> {
+    ) -> Result<serde_json::Value, crate::adapters::app_server::connection::JsonRpcErrorError> {
         let state = self.inner.state.read().await;
         let thread = state
             .threads
             .get(thread_id)
-            .ok_or_else(|| thread_not_found(thread_id))?;
+            .ok_or_else(|| crate::adapters::app_server::connection::thread_not_found(thread_id))?;
         Ok(thread_json(thread, include_turns))
     }
 
     pub(super) async fn register_remote_thread_projection(
         &self,
-        parent: &RuntimeThreadHandle,
+        parent: &crate::RuntimeThreadHandle,
         receipt: &crate::AgentProcessSpawnReceipt,
-    ) -> Result<Value, JsonRpcErrorError> {
+    ) -> Result<serde_json::Value, crate::adapters::app_server::connection::JsonRpcErrorError> {
         let parent_context = parent.context();
-        let child_context = ThreadContext::with_topology_and_metadata(
-            ThreadCoordinates {
+        let child_context = crate::ThreadContext::with_topology_and_metadata(
+            crate::ThreadCoordinates {
                 tenant_id: parent_context.coordinates.tenant_id.clone(),
                 user_id: parent_context.coordinates.user_id.clone(),
                 session_id: parent_context.coordinates.session_id.clone(),
                 thread_id: receipt.thread_id,
             },
-            ThreadTopology::spawned_from(parent_context.coordinates.thread_id),
-            BTreeMap::from([
+            crate::ThreadTopology::spawned_from(parent_context.coordinates.thread_id),
+            std::collections::BTreeMap::from([
                 ("agent_process_v1".to_string(), "true".to_string()),
                 (
                     THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA.to_string(),
@@ -693,7 +719,7 @@ impl VerletAppServer {
                 ),
             ]),
         );
-        let lifecycle = ThreadLifecycleRecord::new(
+        let lifecycle = crate::ThreadLifecycleRecord::new(
             &child_context,
             receipt.status.into(),
             child_context.metadata.clone(),
@@ -702,8 +728,8 @@ impl VerletAppServer {
             .metadata_store
             .upsert_thread_lifecycle(lifecycle)
             .await
-            .map_err(metadata_store_jsonrpc_error)?;
-        let now = now_ms();
+            .map_err(crate::adapters::app_server::metadata_store_jsonrpc_error)?;
+        let now = crate::adapters::app_server::connection::now_ms();
         let state = AppServerThreadState {
             thread_id: receipt.thread_id.to_string(),
             session_id: child_context.coordinates.session_id,
@@ -718,7 +744,7 @@ impl VerletAppServer {
             ephemeral: false,
             name: receipt.task_name.clone(),
             thinking: None,
-            turns: BTreeMap::new(),
+            turns: std::collections::BTreeMap::new(),
             active_turn_id: Some(receipt.submitted_turn_id.clone()),
         };
         let thread_id = receipt.thread_id.to_string();
@@ -734,21 +760,21 @@ impl VerletAppServer {
 
 pub(super) fn require_local_binding_surface(
     surface: &str,
-    bound: &AgentManifestBoundThread,
-) -> VerletResult<()> {
+    bound: &crate::AgentManifestBoundThread,
+) -> crate::VerletResult<()> {
     let target = bound
         .bind_receipt
         .placement
         .as_ref()
         .map(|placement| placement.target.clone())
-        .unwrap_or(PlacementTarget::Local);
-    if target != PlacementTarget::Local {
-        return Err(VerletError::RuntimeFactory(format!(
+        .unwrap_or(crate::PlacementTarget::Local);
+    if target != crate::PlacementTarget::Local {
+        return Err(crate::VerletError::RuntimeFactory(format!(
             "{surface} does not execute placement target {}; remote placement is supported by thread/spawn",
             match target {
-                PlacementTarget::Local => "local",
-                PlacementTarget::Remote => "remote",
-                PlacementTarget::Sandbox => "sandbox",
+                crate::PlacementTarget::Local => "local",
+                crate::PlacementTarget::Remote => "remote",
+                crate::PlacementTarget::Sandbox => "sandbox",
             }
         )));
     }
@@ -756,18 +782,18 @@ pub(super) fn require_local_binding_surface(
 }
 
 impl AppServerTurnState {
-    pub(super) fn new(id: String, input: Vec<Value>) -> Self {
+    pub(super) fn new(id: String, input: Vec<serde_json::Value>) -> Self {
         let assistant_item_id = format!("{id}:agent-message");
         let thinking_item_id = format!("{id}:agent-thinking");
         Self {
             id: id.clone(),
-            items: vec![json!({
+            items: vec![serde_json::json!({
                 "type": "userMessage",
                 "id": format!("{id}:user-message"),
                 "content": input,
             })],
             status: AppServerTurnStatus::InProgress,
-            started_at_ms: now_ms(),
+            started_at_ms: crate::adapters::app_server::connection::now_ms(),
             completed_at_ms: None,
             error: None,
             assistant_item_id,
@@ -783,7 +809,7 @@ impl AppServerTurnState {
         }
     }
 
-    pub(super) fn restored(id: String, started_at_ms: u64, items: Vec<Value>) -> Self {
+    pub(super) fn restored(id: String, started_at_ms: u64, items: Vec<serde_json::Value>) -> Self {
         let assistant_item_id = format!("{id}:agent-message");
         let thinking_item_id = format!("{id}:agent-thinking");
         Self {
@@ -807,7 +833,9 @@ impl AppServerTurnState {
     }
 }
 
-pub(super) fn finalize_turn_payload(turn: &mut AppServerTurnState) -> (Value, Vec<Value>) {
+pub(super) fn finalize_turn_payload(
+    turn: &mut AppServerTurnState,
+) -> (serde_json::Value, Vec<serde_json::Value>) {
     let should_complete_message = turn.assistant_started && !turn.assistant_completed;
     let should_complete_thinking = turn.thinking_started && !turn.thinking_completed;
     finalize_agent_message_item(turn);
@@ -815,14 +843,16 @@ pub(super) fn finalize_turn_payload(turn: &mut AppServerTurnState) -> (Value, Ve
     let mut items = Vec::new();
     if should_complete_message
         && let Some(item) = turn.items.iter().find(|item| {
-            item.get("id").and_then(Value::as_str) == Some(turn.assistant_item_id.as_str())
+            item.get("id").and_then(serde_json::Value::as_str)
+                == Some(turn.assistant_item_id.as_str())
         })
     {
         items.push(item.clone());
     }
     if should_complete_thinking
         && let Some(item) = turn.items.iter().find(|item| {
-            item.get("id").and_then(Value::as_str) == Some(turn.thinking_item_id.as_str())
+            item.get("id").and_then(serde_json::Value::as_str)
+                == Some(turn.thinking_item_id.as_str())
         })
     {
         items.push(item.clone());
@@ -837,7 +867,7 @@ pub(super) fn finalize_agent_message_item(turn: &mut AppServerTurnState) {
     let item_id = turn.assistant_item_id.clone();
     let final_item = agent_message_item(turn);
     for item in &mut turn.items {
-        if item.get("id").and_then(Value::as_str) == Some(item_id.as_str()) {
+        if item.get("id").and_then(serde_json::Value::as_str) == Some(item_id.as_str()) {
             *item = final_item;
             break;
         }
@@ -852,7 +882,7 @@ pub(super) fn finalize_agent_thinking_item(turn: &mut AppServerTurnState) {
     let item_id = turn.thinking_item_id.clone();
     let final_item = agent_thinking_item(turn);
     for item in &mut turn.items {
-        if item.get("id").and_then(Value::as_str) == Some(item_id.as_str()) {
+        if item.get("id").and_then(serde_json::Value::as_str) == Some(item_id.as_str()) {
             *item = final_item;
             break;
         }
@@ -860,12 +890,12 @@ pub(super) fn finalize_agent_thinking_item(turn: &mut AppServerTurnState) {
     turn.thinking_completed = true;
 }
 
-pub(super) fn agent_message_item(turn: &AppServerTurnState) -> Value {
+pub(super) fn agent_message_item(turn: &AppServerTurnState) -> serde_json::Value {
     agent_message_item_from_text(&turn.assistant_item_id, &turn.assistant_text)
 }
 
-pub(super) fn agent_message_item_from_text(id: &str, text: &str) -> Value {
-    json!({
+pub(super) fn agent_message_item_from_text(id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
         "type": "agentMessage",
         "id": id,
         "text": text,
@@ -875,12 +905,12 @@ pub(super) fn agent_message_item_from_text(id: &str, text: &str) -> Value {
     })
 }
 
-pub(super) fn agent_thinking_item(turn: &AppServerTurnState) -> Value {
+pub(super) fn agent_thinking_item(turn: &AppServerTurnState) -> serde_json::Value {
     agent_thinking_item_from_text(&turn.thinking_item_id, &turn.thinking_text)
 }
 
-pub(super) fn agent_thinking_item_from_text(id: &str, text: &str) -> Value {
-    json!({
+pub(super) fn agent_thinking_item_from_text(id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
         "type": "agentThinking",
         "id": id,
         "text": text,
@@ -893,17 +923,17 @@ pub(super) fn agent_thinking_item_from_text(id: &str, text: &str) -> Value {
 pub(super) fn command_execution_item(
     id: &str,
     command: &str,
-    cwd: &Path,
+    cwd: &std::path::Path,
     status: &str,
     aggregated_output: Option<String>,
     exit_code: Option<i32>,
     duration_ms: Option<u64>,
-) -> Value {
-    json!({
+) -> serde_json::Value {
+    serde_json::json!({
         "type": "commandExecution",
         "id": id,
         "command": command,
-        "cwd": cwd_string(cwd),
+        "cwd": crate::adapters::app_server::connection::cwd_string(cwd),
         "processId": null,
         "source": "userShell",
         "status": status,
@@ -914,13 +944,13 @@ pub(super) fn command_execution_item(
     })
 }
 
-pub(super) fn thread_json(thread: &AppServerThreadState, include_turns: bool) -> Value {
+pub(super) fn thread_json(thread: &AppServerThreadState, include_turns: bool) -> serde_json::Value {
     let turns = if include_turns {
         thread.turns.values().map(turn_json).collect::<Vec<_>>()
     } else {
         Vec::new()
     };
-    json!({
+    serde_json::json!({
         "id": thread.thread_id,
         "sessionId": thread.session_id,
         "forkedFromId": thread.parent_thread_id,
@@ -934,7 +964,7 @@ pub(super) fn thread_json(thread: &AppServerThreadState, include_turns: bool) ->
         "updatedAt": thread.updated_at_ms / 1000,
         "status": thread_status_json(thread.status),
         "path": null,
-        "cwd": cwd_string(&thread.cwd),
+        "cwd": crate::adapters::app_server::connection::cwd_string(&thread.cwd),
         "cliVersion": env!("CARGO_PKG_VERSION"),
         "source": "appServer",
         "threadSource": null,
@@ -946,12 +976,12 @@ pub(super) fn thread_json(thread: &AppServerThreadState, include_turns: bool) ->
     })
 }
 
-pub(super) fn turn_json(turn: &AppServerTurnState) -> Value {
+pub(super) fn turn_json(turn: &AppServerTurnState) -> serde_json::Value {
     let completed_at = turn.completed_at_ms.map(|ms| ms / 1000);
     let duration_ms = turn
         .completed_at_ms
         .map(|completed| completed.saturating_sub(turn.started_at_ms));
-    json!({
+    serde_json::json!({
         "id": turn.id,
         "items": turn.items,
         "itemsView": "full",
@@ -963,14 +993,16 @@ pub(super) fn turn_json(turn: &AppServerTurnState) -> Value {
     })
 }
 
-pub(super) fn thread_status_json(status: ThreadStatus) -> Value {
+pub(super) fn thread_status_json(status: crate::ThreadStatus) -> serde_json::Value {
     match status {
-        ThreadStatus::Starting | ThreadStatus::Running | ThreadStatus::Cancelling => {
-            json!({ "type": "active", "activeFlags": [] })
+        crate::ThreadStatus::Starting
+        | crate::ThreadStatus::Running
+        | crate::ThreadStatus::Cancelling => {
+            serde_json::json!({ "type": "active", "activeFlags": [] })
         }
-        ThreadStatus::Idle => json!({ "type": "idle" }),
-        ThreadStatus::Stopped => json!({ "type": "notLoaded" }),
-        ThreadStatus::Failed => json!({ "type": "systemError" }),
+        crate::ThreadStatus::Idle => serde_json::json!({ "type": "idle" }),
+        crate::ThreadStatus::Stopped => serde_json::json!({ "type": "notLoaded" }),
+        crate::ThreadStatus::Failed => serde_json::json!({ "type": "systemError" }),
     }
 }
 
@@ -983,23 +1015,23 @@ pub(super) fn turn_status_string(status: AppServerTurnStatus) -> &'static str {
     }
 }
 
-pub(super) fn turn_input_from_values(input: &[Value]) -> TurnInput {
+pub(super) fn turn_input_from_values(input: &[serde_json::Value]) -> crate::TurnInput {
     let mut content = Vec::new();
     for item in input {
-        match item.get("type").and_then(Value::as_str) {
+        match item.get("type").and_then(serde_json::Value::as_str) {
             Some("text") => {
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    content.push(TurnContent::text(text.to_string()));
+                if let Some(text) = item.get("text").and_then(serde_json::Value::as_str) {
+                    content.push(crate::TurnContent::text(text.to_string()));
                 }
             }
             Some("localImage") => {
-                if let Some(path) = item.get("path").and_then(Value::as_str) {
-                    content.push(TurnContent::file_ref(PathBuf::from(path)));
+                if let Some(path) = item.get("path").and_then(serde_json::Value::as_str) {
+                    content.push(crate::TurnContent::file_ref(std::path::PathBuf::from(path)));
                 }
             }
             Some("mention") | Some("skill") => {
-                if let Some(name) = item.get("name").and_then(Value::as_str) {
-                    content.push(TurnContent::text(format!("@{name}")));
+                if let Some(name) = item.get("name").and_then(serde_json::Value::as_str) {
+                    content.push(crate::TurnContent::text(format!("@{name}")));
                 }
             }
             Some("image") => {}
@@ -1007,129 +1039,136 @@ pub(super) fn turn_input_from_values(input: &[Value]) -> TurnInput {
         }
     }
     if content.is_empty() {
-        content.push(TurnContent::text(""));
+        content.push(crate::TurnContent::text(""));
     }
-    TurnInput::new(content)
+    crate::TurnInput::new(content)
 }
 
 pub(super) fn deserialize_optional_thinking<'de, D>(
     deserializer: D,
-) -> Result<Option<ThinkingConfig>, D::Error>
+) -> Result<Option<crate::ThinkingConfig>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value = <Option<Value> as serde::Deserialize>::deserialize(deserializer)?;
+    let value = <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
     value
         .map(|value| thinking_from_app_server_value(&value).map_err(serde::de::Error::custom))
         .transpose()
 }
 
-pub(super) fn thinking_from_app_server_value(value: &Value) -> Result<ThinkingConfig, String> {
+pub(super) fn thinking_from_app_server_value(
+    value: &serde_json::Value,
+) -> Result<crate::ThinkingConfig, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "thinking must be an object".to_string())?;
     let kind = object
         .get("type")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "thinking.type is required".to_string())?;
     match kind {
         "effort" => {
             let effort = object
                 .get("effort")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "thinking.effort is required".to_string())?;
             let effort = match effort {
-                "low" => ThinkingEffort::Low,
-                "medium" => ThinkingEffort::Medium,
-                "high" => ThinkingEffort::High,
-                "xhigh" => ThinkingEffort::XHigh,
-                "max" => ThinkingEffort::Max,
+                "low" => crate::ThinkingEffort::Low,
+                "medium" => crate::ThinkingEffort::Medium,
+                "high" => crate::ThinkingEffort::High,
+                "xhigh" => crate::ThinkingEffort::XHigh,
+                "max" => crate::ThinkingEffort::Max,
                 other => return Err(format!("unsupported thinking effort {other:?}")),
             };
-            Ok(ThinkingConfig::Effort { effort })
+            Ok(crate::ThinkingConfig::Effort { effort })
         }
         "budget" => {
             let budget_tokens = object
                 .get("budgetTokens")
-                .and_then(Value::as_u64)
+                .and_then(serde_json::Value::as_u64)
                 .filter(|value| *value <= u64::from(u32::MAX))
                 .ok_or_else(|| "thinking.budgetTokens must be a u32".to_string())?
                 as u32;
-            Ok(ThinkingConfig::Budget { budget_tokens })
+            Ok(crate::ThinkingConfig::Budget { budget_tokens })
         }
-        "disabled" => Ok(ThinkingConfig::Disabled),
+        "disabled" => Ok(crate::ThinkingConfig::Disabled),
         other => Err(format!("unsupported thinking type {other:?}")),
     }
 }
 
-pub(super) fn app_server_thinking_json(thinking: &Option<ThinkingConfig>) -> Value {
+pub(super) fn app_server_thinking_json(
+    thinking: &Option<crate::ThinkingConfig>,
+) -> serde_json::Value {
     thinking
         .as_ref()
         .map(app_server_thinking_value)
-        .unwrap_or(Value::Null)
+        .unwrap_or(serde_json::Value::Null)
 }
 
-pub(super) fn app_server_thinking_value(thinking: &ThinkingConfig) -> Value {
+pub(super) fn app_server_thinking_value(thinking: &crate::ThinkingConfig) -> serde_json::Value {
     match thinking {
-        ThinkingConfig::Effort { effort } => json!({
+        crate::ThinkingConfig::Effort { effort } => serde_json::json!({
             "type": "effort",
             "effort": match effort {
-                ThinkingEffort::Low => "low",
-                ThinkingEffort::Medium => "medium",
-                ThinkingEffort::High => "high",
-                ThinkingEffort::XHigh => "xhigh",
-                ThinkingEffort::Max => "max",
-                ThinkingEffort::Other(value) => value.as_str(),
+                crate::ThinkingEffort::Low => "low",
+                crate::ThinkingEffort::Medium => "medium",
+                crate::ThinkingEffort::High => "high",
+                crate::ThinkingEffort::XHigh => "xhigh",
+                crate::ThinkingEffort::Max => "max",
+                crate::ThinkingEffort::Other(value) => value.as_str(),
             },
         }),
-        ThinkingConfig::Budget { budget_tokens } => json!({
+        crate::ThinkingConfig::Budget { budget_tokens } => serde_json::json!({
             "type": "budget",
             "budgetTokens": budget_tokens,
         }),
-        ThinkingConfig::Disabled => json!({ "type": "disabled" }),
+        crate::ThinkingConfig::Disabled => serde_json::json!({ "type": "disabled" }),
     }
 }
 
 pub(super) fn encode_app_server_thinking(
-    thinking: &ThinkingConfig,
-) -> Result<String, JsonRpcErrorError> {
+    thinking: &crate::ThinkingConfig,
+) -> Result<String, crate::adapters::app_server::connection::JsonRpcErrorError> {
     serde_json::to_string(&app_server_thinking_value(thinking)).map_err(|err| {
-        jsonrpc_error(
+        crate::adapters::app_server::connection::jsonrpc_error(
             -32602,
             format!("failed to encode app-server thinking config: {err}"),
         )
     })
 }
 
-pub(super) fn user_input_preview(input: &[Value]) -> String {
+pub(super) fn user_input_preview(input: &[serde_json::Value]) -> String {
     input
         .iter()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 pub(super) fn app_server_turns_from_session_entries(
-    entries: &[SessionEntry],
-) -> (String, BTreeMap<String, AppServerTurnState>) {
+    entries: &[crate::SessionEntry],
+) -> (
+    String,
+    std::collections::BTreeMap<String, AppServerTurnState>,
+) {
     let mut preview = String::new();
-    let mut turns = BTreeMap::new();
+    let mut turns = std::collections::BTreeMap::new();
     let mut current_turn_id = None;
 
     for entry in entries {
-        let (SessionEntryKind::Message { message }
-        | SessionEntryKind::CustomContextMessage { message }) = &entry.kind
+        let (crate::SessionEntryKind::Message { message }
+        | crate::SessionEntryKind::CustomContextMessage { message }) = &entry.kind
         else {
             continue;
         };
         match message {
-            CanonicalMessage::User { content, .. } => {
+            crate::CanonicalMessage::User { content, .. } => {
                 let text_content = canonical_text_content_items(content);
                 if preview.is_empty() {
                     preview = text_content_preview(&text_content);
                 }
                 let turn_id = format!("turn-{}", entry.entry_id);
-                let item = json!({
+                let item = serde_json::json!({
                     "type": "userMessage",
                     "id": format!("{turn_id}:user-message"),
                     "content": text_content,
@@ -1142,7 +1181,7 @@ pub(super) fn app_server_turns_from_session_entries(
                 turns.insert(turn_id.clone(), turn);
                 current_turn_id = Some(turn_id);
             }
-            CanonicalMessage::Assistant { content, .. } => {
+            crate::CanonicalMessage::Assistant { content, .. } => {
                 let Some(turn_id) = current_turn_id.clone() else {
                     continue;
                 };
@@ -1171,7 +1210,7 @@ pub(super) fn app_server_turns_from_session_entries(
                 turn.status = AppServerTurnStatus::Completed;
                 turn.completed_at_ms = Some(entry_created_at_ms(entry));
             }
-            CanonicalMessage::ToolResult { .. } => {}
+            crate::CanonicalMessage::ToolResult { .. } => {}
         }
     }
 
@@ -1181,11 +1220,11 @@ pub(super) fn app_server_turns_from_session_entries(
 struct RestoredAssistantItems {
     text: String,
     thinking: String,
-    items: Vec<Value>,
+    items: Vec<serde_json::Value>,
 }
 
 fn restored_assistant_items_from_canonical_content(
-    content: &[CanonicalContent],
+    content: &[crate::CanonicalContent],
     assistant_item_id: &str,
     thinking_item_id: &str,
 ) -> RestoredAssistantItems {
@@ -1203,21 +1242,21 @@ fn restored_assistant_items_from_canonical_content(
 
     for content in content {
         match content {
-            CanonicalContent::Text { text: value, .. } => {
+            crate::CanonicalContent::Text { text: value, .. } => {
                 if !value.is_empty() && !text_seen {
                     order.push(ItemKind::Message);
                     text_seen = true;
                 }
                 text.push_str(value);
             }
-            CanonicalContent::Thinking { text: value, .. } => {
+            crate::CanonicalContent::Thinking { text: value, .. } => {
                 if !value.is_empty() && !thinking_seen {
                     order.push(ItemKind::Thinking);
                     thinking_seen = true;
                 }
                 thinking.push_str(value);
             }
-            CanonicalContent::Image { .. } | CanonicalContent::ToolCall { .. } => {}
+            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {}
         }
     }
 
@@ -1241,33 +1280,39 @@ fn restored_assistant_items_from_canonical_content(
     }
 }
 
-pub(super) fn canonical_text_content_items(content: &[CanonicalContent]) -> Vec<Value> {
+pub(super) fn canonical_text_content_items(
+    content: &[crate::CanonicalContent],
+) -> Vec<serde_json::Value> {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(json!({ "type": "text", "text": text })),
-            CanonicalContent::Image { .. } | CanonicalContent::ToolCall { .. } => None,
-            CanonicalContent::Thinking { .. } => None,
+            crate::CanonicalContent::Text { text, .. } => {
+                Some(serde_json::json!({ "type": "text", "text": text }))
+            }
+            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {
+                None
+            }
+            crate::CanonicalContent::Thinking { .. } => None,
         })
         .collect()
 }
 
-pub(super) fn text_content_preview(content: &[Value]) -> String {
+pub(super) fn text_content_preview(content: &[serde_json::Value]) -> String {
     content
         .iter()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-pub(super) fn entry_created_at_ms(entry: &SessionEntry) -> u64 {
+pub(super) fn entry_created_at_ms(entry: &crate::SessionEntry) -> u64 {
     entry.created_at_ms.max(0) as u64
 }
 
-pub(super) fn resolve_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
+pub(super) fn resolve_cwd(default_cwd: &std::path::Path, cwd: Option<&str>) -> std::path::PathBuf {
     match cwd {
         Some(cwd) if !cwd.trim().is_empty() => {
-            let path = PathBuf::from(cwd);
+            let path = std::path::PathBuf::from(cwd);
             if path.is_absolute() {
                 path
             } else {
@@ -1278,12 +1323,14 @@ pub(super) fn resolve_cwd(default_cwd: &Path, cwd: Option<&str>) -> PathBuf {
     }
 }
 
-pub(super) fn normalize_registry_roots(config: &mut VerletAppServerConfig) {
-    let blob_registry_root_was_default =
-        config.blob_registry_root == Path::new(DEFAULT_BLOB_REGISTRY_ROOT);
+pub(super) fn normalize_registry_roots(
+    config: &mut crate::adapters::app_server::VerletAppServerConfig,
+) {
+    let blob_registry_root_was_default = config.blob_registry_root
+        == std::path::Path::new(crate::adapters::app_server::DEFAULT_BLOB_REGISTRY_ROOT);
     config.agent_registry_root = resolve_path_against_cwd(&config.cwd, &config.agent_registry_root);
     config.blob_registry_root = if blob_registry_root_was_default {
-        default_blob_registry_root_for_agent_registry_root(&config.agent_registry_root)
+        crate::default_blob_registry_root_for_agent_registry_root(&config.agent_registry_root)
     } else {
         resolve_path_against_cwd(&config.cwd, &config.blob_registry_root)
     };
@@ -1294,7 +1341,10 @@ pub(super) fn normalize_registry_roots(config: &mut VerletAppServerConfig) {
     }
 }
 
-pub(super) fn resolve_path_against_cwd(cwd: &Path, path: &Path) -> PathBuf {
+pub(super) fn resolve_path_against_cwd(
+    cwd: &std::path::Path,
+    path: &std::path::Path,
+) -> std::path::PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1303,29 +1353,36 @@ pub(super) fn resolve_path_against_cwd(cwd: &Path, path: &Path) -> PathBuf {
 }
 
 pub(super) fn thread_start_topology(
-    params: &ThreadStartParams,
-) -> Result<ThreadTopology, JsonRpcErrorError> {
+    params: &crate::adapters::app_server::connection::ThreadStartParams,
+) -> Result<crate::ThreadTopology, crate::adapters::app_server::connection::JsonRpcErrorError> {
     match (&params.topology, &params.parent_thread_id) {
-        (Some(_), Some(_)) => Err(jsonrpc_error(
+        (Some(_), Some(_)) => Err(crate::adapters::app_server::connection::jsonrpc_error(
             -32602,
             "thread/start accepts either topology or parentThreadId, not both",
         )),
         (Some(topology), None) => Ok(topology.clone()),
         (None, Some(parent_thread_id)) => {
-            let parent_thread_id = ThreadId::parse_str(parent_thread_id)
-                .map_err(|err| jsonrpc_error(-32602, format!("invalid parentThreadId: {err}")))?;
-            Ok(ThreadTopology::spawned_from(parent_thread_id))
+            let parent_thread_id = crate::ThreadId::parse_str(parent_thread_id).map_err(|err| {
+                crate::adapters::app_server::connection::jsonrpc_error(
+                    -32602,
+                    format!("invalid parentThreadId: {err}"),
+                )
+            })?;
+            Ok(crate::ThreadTopology::spawned_from(parent_thread_id))
         }
-        (None, None) => Ok(ThreadTopology::root()),
+        (None, None) => Ok(crate::ThreadTopology::root()),
     }
 }
 
 pub(super) fn thread_start_metadata(
-    params: &ThreadStartParams,
-    cwd: &Path,
+    params: &crate::adapters::app_server::connection::ThreadStartParams,
+    cwd: &std::path::Path,
     model_provider: &str,
     ephemeral: bool,
-) -> Result<BTreeMap<String, String>, JsonRpcErrorError> {
+) -> Result<
+    std::collections::BTreeMap<String, String>,
+    crate::adapters::app_server::connection::JsonRpcErrorError,
+> {
     let mut metadata = app_server_thread_metadata(cwd, model_provider, ephemeral);
     if let Some(thinking) = &params.thinking {
         insert_app_server_thinking_metadata(&mut metadata, Some(thinking))?;
@@ -1334,12 +1391,12 @@ pub(super) fn thread_start_metadata(
 }
 
 pub(super) fn insert_app_server_thinking_metadata(
-    metadata: &mut BTreeMap<String, String>,
-    thinking: Option<&ThinkingConfig>,
-) -> Result<(), JsonRpcErrorError> {
+    metadata: &mut std::collections::BTreeMap<String, String>,
+    thinking: Option<&crate::ThinkingConfig>,
+) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
     if let Some(thinking) = thinking {
         metadata.insert(
-            THREAD_APP_SERVER_THINKING_METADATA.to_string(),
+            crate::adapters::app_server::THREAD_APP_SERVER_THINKING_METADATA.to_string(),
             encode_app_server_thinking(thinking)?,
         );
     }
@@ -1347,61 +1404,67 @@ pub(super) fn insert_app_server_thinking_metadata(
 }
 
 pub(super) fn append_bound_agent_metadata(
-    metadata: &mut BTreeMap<String, String>,
-    bound: &AgentManifestBoundThread,
-    overrides: Option<&AgentManifestBindOverrides>,
-    operation_registry_root: Option<&Path>,
-) -> Result<(), JsonRpcErrorError> {
+    metadata: &mut std::collections::BTreeMap<String, String>,
+    bound: &crate::AgentManifestBoundThread,
+    overrides: Option<&crate::AgentManifestBindOverrides>,
+    operation_registry_root: Option<&std::path::Path>,
+) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
     metadata.insert(
-        THREAD_AGENT_REF_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_REF_METADATA.to_string(),
         bound.bind_receipt.ref_uri.clone(),
     );
     metadata.insert(
-        THREAD_AGENT_MANIFEST_HASH_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA.to_string(),
         bound.bind_receipt.manifest_hash.clone(),
     );
     metadata.insert(
-        THREAD_AGENT_SOURCE_HASH_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_SOURCE_HASH_METADATA.to_string(),
         bound.compile_receipt.source_hash.clone(),
     );
     metadata.insert(
-        THREAD_AGENT_MODEL_PROFILE_ID_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_MODEL_PROFILE_ID_METADATA.to_string(),
         bound.bind_receipt.model_profile_id.clone(),
     );
     metadata.insert(
-        THREAD_AGENT_PROVIDER_ID_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_PROVIDER_ID_METADATA.to_string(),
         bound.bind_receipt.provider_id.clone(),
     );
     metadata.insert(
-        THREAD_AGENT_MODEL_ID_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_MODEL_ID_METADATA.to_string(),
         bound.bind_receipt.model_id.clone(),
     );
     if let Some(placement) = &bound.bind_receipt.placement {
         let encoded = serde_json::to_string(placement).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest placement binding: {err}"),
             )
         })?;
-        metadata.insert(THREAD_AGENT_PLACEMENT_METADATA.to_string(), encoded);
+        metadata.insert(
+            crate::adapters::app_server::THREAD_AGENT_PLACEMENT_METADATA.to_string(),
+            encoded,
+        );
     }
     if let Some(workspace) = &bound.bind_receipt.workspace {
         let encoded = serde_json::to_string(workspace).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest workspace binding: {err}"),
             )
         })?;
-        metadata.insert(THREAD_AGENT_WORKSPACE_METADATA.to_string(), encoded);
+        metadata.insert(
+            crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA.to_string(),
+            encoded,
+        );
     }
     if let Some(instruction) = manifest_tool_use_system_instruction(bound) {
         metadata.insert(
-            THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
+            crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
             instruction,
         );
     }
     metadata.insert(
-        THREAD_AGENT_RUNTIME_STREAMING_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_AGENT_RUNTIME_STREAMING_METADATA.to_string(),
         bound.bind_receipt.effective_runtime.streaming.to_string(),
     );
     if let Some(max_tool_rounds) = bound.bind_receipt.effective_runtime.max_tool_rounds {
@@ -1410,7 +1473,7 @@ pub(super) fn append_bound_agent_metadata(
             crate::AgentManifestMaxToolRounds::Unlimited => "unlimited".to_string(),
         };
         metadata.insert(
-            THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
+            crate::adapters::app_server::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA.to_string(),
             value,
         );
     }
@@ -1421,55 +1484,61 @@ pub(super) fn append_bound_agent_metadata(
         .auto_at_text_bytes
     {
         metadata.insert(
-            THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA.to_string(),
+            crate::adapters::app_server::THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA.to_string(),
             auto_at_text_bytes.to_string(),
         );
     }
     if !bound.operation_bindings.is_empty() {
         let encoded = serde_json::to_string(&bound.operation_bindings).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest operation bindings: {err}"),
             )
         })?;
         metadata.insert(
-            THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+            crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
             encoded,
         );
     }
     if !bound.skill_packages.is_empty() {
         let encoded = serde_json::to_string(&bound.skill_packages).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest skill package bindings: {err}"),
             )
         })?;
-        metadata.insert(THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(), encoded);
+        metadata.insert(
+            crate::THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(),
+            encoded,
+        );
     }
     if let Some(discovery) = &bound.skill_discovery {
         let encoded = serde_json::to_string(discovery).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest skill discovery witness: {err}"),
             )
         })?;
-        metadata.insert(THREAD_AGENT_SKILL_DISCOVERY_METADATA.to_string(), encoded);
+        metadata.insert(
+            crate::THREAD_AGENT_SKILL_DISCOVERY_METADATA.to_string(),
+            encoded,
+        );
     }
     if !bound.skill_context_segments.is_empty() {
         let encoded = serde_json::to_string(&bound.skill_context_segments).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest skill context segments: {err}"),
             )
         })?;
         metadata.insert(
-            THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA.to_string(),
+            crate::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA.to_string(),
             encoded,
         );
     }
     if !bound.static_context_segments.is_empty() {
         let encoded = serde_json::to_string(&bound.static_context_segments).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest static context segments: {err}"),
             )
@@ -1481,41 +1550,50 @@ pub(super) fn append_bound_agent_metadata(
     }
     if !bound.tool_universes.is_empty() {
         let encoded = serde_json::to_string(&bound.tool_universes).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest tool universes: {err}"),
             )
         })?;
-        metadata.insert(THREAD_AGENT_TOOL_UNIVERSES_METADATA.to_string(), encoded);
+        metadata.insert(
+            crate::adapters::app_server::THREAD_AGENT_TOOL_UNIVERSES_METADATA.to_string(),
+            encoded,
+        );
     }
     if !bound.coupling_set.couplings.is_empty() {
         let encoded = serde_json::to_string(&bound.coupling_set).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest bound coupling set: {err}"),
             )
         })?;
-        metadata.insert(THREAD_BOUND_COUPLING_SET_METADATA.to_string(), encoded);
+        metadata.insert(
+            crate::THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
+            encoded,
+        );
         if let Some(root) = operation_registry_root {
             metadata.insert(
-                THREAD_OPERATION_REGISTRY_ROOT_METADATA.to_string(),
+                crate::THREAD_OPERATION_REGISTRY_ROOT_METADATA.to_string(),
                 root.display().to_string(),
             );
         }
     }
     if let Some(overrides) = overrides {
         let encoded = serde_json::to_string(overrides).map_err(|err| {
-            jsonrpc_error(
+            crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("failed to encode manifest runtime overrides: {err}"),
             )
         })?;
-        metadata.insert(THREAD_AGENT_RUNTIME_OVERRIDES_METADATA.to_string(), encoded);
+        metadata.insert(
+            crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA.to_string(),
+            encoded,
+        );
     }
     Ok(())
 }
 
-fn manifest_tool_use_system_instruction(bound: &AgentManifestBoundThread) -> Option<String> {
+fn manifest_tool_use_system_instruction(bound: &crate::AgentManifestBoundThread) -> Option<String> {
     if bound.bind_receipt.tool_ids.is_empty() {
         return None;
     }
@@ -1527,19 +1605,21 @@ fn manifest_tool_use_system_instruction(bound: &AgentManifestBoundThread) -> Opt
     ))
 }
 
-fn legacy_manifest_tool_use_system_instruction(context: &ThreadContext) -> Option<String> {
+fn legacy_manifest_tool_use_system_instruction(context: &crate::ThreadContext) -> Option<String> {
     let has_tool_metadata = context
         .metadata
-        .get(THREAD_AGENT_OPERATION_BINDINGS_METADATA)
+        .get(crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA)
         .is_some_and(|value| !value.trim().is_empty())
         || context
             .metadata
-            .get(THREAD_AGENT_TOOL_UNIVERSES_METADATA)
+            .get(crate::adapters::app_server::THREAD_AGENT_TOOL_UNIVERSES_METADATA)
             .is_some_and(|value| !value.trim().is_empty());
     if !has_tool_metadata {
         return None;
     }
-    let agent_ref = context.metadata.get(THREAD_AGENT_REF_METADATA)?;
+    let agent_ref = context
+        .metadata
+        .get(crate::adapters::app_server::THREAD_AGENT_REF_METADATA)?;
     Some(manifest_tool_use_instruction_text(agent_ref, None))
 }
 
@@ -1561,14 +1641,16 @@ is present in the conversation.",
 }
 
 pub(super) async fn record_bound_agent_receipts(
-    handle: &RuntimeThreadHandle,
-    bound: &AgentManifestBoundThread,
-) -> VerletResult<(crate::EventRecord, crate::EventRecord)> {
+    handle: &crate::RuntimeThreadHandle,
+    bound: &crate::AgentManifestBoundThread,
+) -> crate::VerletResult<(crate::EventRecord, crate::EventRecord)> {
     let compile_payload = serde_json::to_value(&bound.compile_receipt).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to encode manifest compile receipt: {err}"))
+        crate::VerletError::RuntimeFactory(format!(
+            "failed to encode manifest compile receipt: {err}"
+        ))
     })?;
     let bind_payload = serde_json::to_value(&bound.bind_receipt).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to encode manifest bind receipt: {err}"))
+        crate::VerletError::RuntimeFactory(format!("failed to encode manifest bind receipt: {err}"))
     })?;
     let manifest_events = handle
         .record_manifest_receipts(compile_payload, bind_payload)
@@ -1577,13 +1659,13 @@ pub(super) async fn record_bound_agent_receipts(
         .tool_universes
         .iter()
         .map(|binding| {
-            serde_json::to_value(ToolUniverseDiscoveryReceipt::from_discovery(
+            serde_json::to_value(crate::ToolUniverseDiscoveryReceipt::from_discovery(
                 &binding.discovery,
             ))
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "failed to encode tool universe discovery receipt: {err}"
             ))
         })?;
@@ -1594,8 +1676,8 @@ pub(super) async fn record_bound_agent_receipts(
 }
 
 pub(crate) async fn active_manifest_receipt_payloads(
-    handle: &RuntimeThreadHandle,
-) -> VerletResult<Option<(Value, Value)>> {
+    handle: &crate::RuntimeThreadHandle,
+) -> crate::VerletResult<Option<(serde_json::Value, serde_json::Value)>> {
     let events = handle.read_thread_events(None).await?;
     let Some(bind) = events
         .iter()
@@ -1605,7 +1687,7 @@ pub(crate) async fn active_manifest_receipt_payloads(
         return Ok(None);
     };
     let compile_id = bind.provenance.source_event_ids.first().ok_or_else(|| {
-        VerletError::History(
+        crate::VerletError::History(
             "active manifest bind receipt does not witness a compile receipt".to_string(),
         )
     })?;
@@ -1615,7 +1697,7 @@ pub(crate) async fn active_manifest_receipt_payloads(
             event.id == *compile_id && event.kind == crate::EventKind::ManifestCompileCompleted
         })
         .ok_or_else(|| {
-            VerletError::History(
+            crate::VerletError::History(
                 "active manifest bind receipt references an unavailable compile receipt"
                     .to_string(),
             )
@@ -1623,17 +1705,20 @@ pub(crate) async fn active_manifest_receipt_payloads(
     Ok(Some((compile.payload.clone(), bind.payload.clone())))
 }
 
-impl VerletAppServer {
+impl crate::adapters::app_server::VerletAppServer {
     pub(super) async fn witness_bound_agent_and_persist_lifecycle(
         &self,
-        handle: RuntimeThreadHandle,
-        bound: AgentManifestBoundThread,
-    ) -> Result<(), JsonRpcErrorError> {
+        handle: crate::RuntimeThreadHandle,
+        bound: crate::AgentManifestBoundThread,
+    ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
         let app = self.clone();
         self.witness_and_persist_lifecycle(handle, move |handle| async move {
             record_bound_agent_receipts(&handle, &bound).await?;
-            app.persist_thread_lifecycle_record_with_metadata(&handle, BTreeMap::new())
-                .await?;
+            app.persist_thread_lifecycle_record_with_metadata(
+                &handle,
+                std::collections::BTreeMap::new(),
+            )
+            .await?;
             Ok(())
         })
         .await
@@ -1641,17 +1726,20 @@ impl VerletAppServer {
 
     pub(super) async fn witness_manifest_payloads_and_persist_lifecycle(
         &self,
-        handle: RuntimeThreadHandle,
-        compile_payload: Value,
-        bind_payload: Value,
-    ) -> Result<(), JsonRpcErrorError> {
+        handle: crate::RuntimeThreadHandle,
+        compile_payload: serde_json::Value,
+        bind_payload: serde_json::Value,
+    ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
         let app = self.clone();
         self.witness_and_persist_lifecycle(handle, move |handle| async move {
             handle
                 .record_manifest_receipts(compile_payload, bind_payload)
                 .await?;
-            app.persist_thread_lifecycle_record_with_metadata(&handle, BTreeMap::new())
-                .await?;
+            app.persist_thread_lifecycle_record_with_metadata(
+                &handle,
+                std::collections::BTreeMap::new(),
+            )
+            .await?;
             Ok(())
         })
         .await
@@ -1659,51 +1747,55 @@ impl VerletAppServer {
 
     pub(super) async fn witness_and_persist_lifecycle<F, Fut>(
         &self,
-        handle: RuntimeThreadHandle,
+        handle: crate::RuntimeThreadHandle,
         operation: F,
-    ) -> Result<(), JsonRpcErrorError>
+    ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError>
     where
-        F: FnOnce(RuntimeThreadHandle) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = VerletResult<()>> + Send + 'static,
+        F: FnOnce(crate::RuntimeThreadHandle) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = crate::VerletResult<()>> + Send + 'static,
     {
         let supervisor = self.inner.supervisor.clone();
         let coordinates = handle.context().coordinates.clone();
         tokio::spawn(async move {
             if let Err(err) = operation(handle.clone()).await {
                 let _ = supervisor.shutdown_thread_at(&coordinates).await;
-                return Err(internal_error(err));
+                return Err(crate::adapters::app_server::connection::internal_error(err));
             }
             Ok(())
         })
         .await
         .map_err(|err| {
-            internal_error(VerletError::RuntimeFactory(format!(
-                "manifest lifecycle witness task failed: {err}"
-            )))
+            crate::adapters::app_server::connection::internal_error(
+                crate::VerletError::RuntimeFactory(format!(
+                    "manifest lifecycle witness task failed: {err}"
+                )),
+            )
         })?
     }
 }
 
 fn kernel_thread_spawn_agent_binding(
-    bound: &AgentManifestBoundThread,
-    cwd_root: &Path,
-    operation_registry_root: Option<&Path>,
-    overrides: Option<&AgentManifestBindOverrides>,
-) -> VerletResult<KernelThreadSpawnAgentBinding> {
+    bound: &crate::AgentManifestBoundThread,
+    cwd_root: &std::path::Path,
+    operation_registry_root: Option<&std::path::Path>,
+    overrides: Option<&crate::AgentManifestBindOverrides>,
+) -> crate::VerletResult<crate::KernelThreadSpawnAgentBinding> {
     let cwd = resolve_cwd(
         cwd_root,
         Some(bound.bind_receipt.effective_runtime.default_cwd.as_str()),
     );
     let mut metadata = app_server_thread_metadata(&cwd, &bound.bind_receipt.provider_id, false);
     append_bound_agent_metadata(&mut metadata, bound, overrides, operation_registry_root)
-        .map_err(|err| VerletError::RuntimeFactory(err.message))?;
+        .map_err(|err| crate::VerletError::RuntimeFactory(err.message))?;
     let compile_receipt = serde_json::to_value(&bound.compile_receipt).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to encode manifest compile receipt: {err}"))
+        crate::VerletError::RuntimeFactory(format!(
+            "failed to encode manifest compile receipt: {err}"
+        ))
     })?;
     let bind_receipt = serde_json::to_value(&bound.bind_receipt).map_err(|err| {
-        VerletError::RuntimeFactory(format!("failed to encode manifest bind receipt: {err}"))
+        crate::VerletError::RuntimeFactory(format!("failed to encode manifest bind receipt: {err}"))
     })?;
-    Ok(KernelThreadSpawnAgentBinding {
+    Ok(crate::KernelThreadSpawnAgentBinding {
         metadata,
         compile_receipt,
         bind_receipt,
@@ -1711,100 +1803,109 @@ fn kernel_thread_spawn_agent_binding(
 }
 
 pub(super) fn app_server_thread_metadata(
-    cwd: &Path,
+    cwd: &std::path::Path,
     model_provider: &str,
     ephemeral: bool,
-) -> BTreeMap<String, String> {
+) -> std::collections::BTreeMap<String, String> {
     app_server_thread_metadata_with_name(cwd, model_provider, ephemeral, None)
 }
 
 pub(super) fn app_server_thread_metadata_with_name(
-    cwd: &Path,
+    cwd: &std::path::Path,
     model_provider: &str,
     ephemeral: bool,
     name: Option<&str>,
-) -> BTreeMap<String, String> {
-    let mut metadata = BTreeMap::new();
-    metadata.insert(THREAD_APP_SERVER_CWD_METADATA.to_string(), cwd_string(cwd));
+) -> std::collections::BTreeMap<String, String> {
+    let mut metadata = std::collections::BTreeMap::new();
     metadata.insert(
-        THREAD_APP_SERVER_MODEL_PROVIDER_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_APP_SERVER_CWD_METADATA.to_string(),
+        crate::adapters::app_server::connection::cwd_string(cwd),
+    );
+    metadata.insert(
+        crate::adapters::app_server::THREAD_APP_SERVER_MODEL_PROVIDER_METADATA.to_string(),
         model_provider.to_string(),
     );
     metadata.insert(
-        THREAD_APP_SERVER_EPHEMERAL_METADATA.to_string(),
+        crate::adapters::app_server::THREAD_APP_SERVER_EPHEMERAL_METADATA.to_string(),
         ephemeral.to_string(),
     );
     if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
         metadata.insert(
-            THREAD_APP_SERVER_NAME_METADATA.to_string(),
+            crate::adapters::app_server::THREAD_APP_SERVER_NAME_METADATA.to_string(),
             name.to_string(),
         );
     }
     metadata
 }
 
-pub(super) fn thread_lifecycle_cwd(record: &ThreadLifecycleRecord) -> Option<PathBuf> {
+pub(super) fn thread_lifecycle_cwd(
+    record: &crate::ThreadLifecycleRecord,
+) -> Option<std::path::PathBuf> {
     record
         .metadata
-        .get(THREAD_APP_SERVER_CWD_METADATA)
+        .get(crate::adapters::app_server::THREAD_APP_SERVER_CWD_METADATA)
         .filter(|cwd| !cwd.trim().is_empty())
-        .map(PathBuf::from)
+        .map(std::path::PathBuf::from)
 }
 
 pub(super) fn thread_lifecycle_thinking(
-    record: &ThreadLifecycleRecord,
-) -> VerletResult<Option<ThinkingConfig>> {
+    record: &crate::ThreadLifecycleRecord,
+) -> crate::VerletResult<Option<crate::ThinkingConfig>> {
     thread_metadata_thinking(&record.metadata)
 }
 
 pub(super) fn thread_metadata_thinking(
-    metadata: &BTreeMap<String, String>,
-) -> VerletResult<Option<ThinkingConfig>> {
+    metadata: &std::collections::BTreeMap<String, String>,
+) -> crate::VerletResult<Option<crate::ThinkingConfig>> {
     metadata
-        .get(THREAD_APP_SERVER_THINKING_METADATA)
+        .get(crate::adapters::app_server::THREAD_APP_SERVER_THINKING_METADATA)
         .map(|raw| {
-            let value = serde_json::from_str::<Value>(raw).map_err(|err| {
-                VerletError::RuntimeFactory(format!("thread thinking metadata is invalid: {err}"))
+            let value = serde_json::from_str::<serde_json::Value>(raw).map_err(|err| {
+                crate::VerletError::RuntimeFactory(format!(
+                    "thread thinking metadata is invalid: {err}"
+                ))
             })?;
             thinking_from_app_server_value(&value).map_err(|err| {
-                VerletError::RuntimeFactory(format!("thread thinking metadata is invalid: {err}"))
+                crate::VerletError::RuntimeFactory(format!(
+                    "thread thinking metadata is invalid: {err}"
+                ))
             })
         })
         .transpose()
 }
 
-pub(super) fn is_loadable_lifecycle_status(status: ThreadLifecycleStatus) -> bool {
+pub(super) fn is_loadable_lifecycle_status(status: crate::ThreadLifecycleStatus) -> bool {
     !matches!(
         status,
-        ThreadLifecycleStatus::Stopped | ThreadLifecycleStatus::Failed
+        crate::ThreadLifecycleStatus::Stopped | crate::ThreadLifecycleStatus::Failed
     )
 }
 
 pub(super) fn thread_manifest_operation_bindings(
-    context: &ThreadContext,
-) -> VerletResult<Vec<AgentManifestOperationBinding>> {
+    context: &crate::ThreadContext,
+) -> crate::VerletResult<Vec<crate::AgentManifestOperationBinding>> {
     let Some(raw) = context
         .metadata
-        .get(THREAD_AGENT_OPERATION_BINDINGS_METADATA)
+        .get(crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA)
     else {
         return Ok(Vec::new());
     };
-    serde_json::from_str::<Vec<AgentManifestOperationBinding>>(raw).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+    serde_json::from_str::<Vec<crate::AgentManifestOperationBinding>>(raw).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
             "thread manifest operation bindings are invalid: {err}"
         ))
     })
 }
 
 pub(super) fn thread_manifest_workspace_mount(
-    context: &ThreadContext,
-) -> VerletResult<Option<AgentManifestResolvedWorkspaceMount>> {
+    context: &crate::ThreadContext,
+) -> crate::VerletResult<Option<crate::AgentManifestResolvedWorkspaceMount>> {
     context
         .metadata
-        .get(THREAD_AGENT_WORKSPACE_METADATA)
+        .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
         .map(|raw| {
-            serde_json::from_str::<AgentManifestResolvedWorkspaceMount>(raw).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+            serde_json::from_str::<crate::AgentManifestResolvedWorkspaceMount>(raw).map_err(|err| {
+                crate::VerletError::RuntimeFactory(format!(
                     "thread manifest workspace binding is invalid: {err}"
                 ))
             })
@@ -1813,13 +1914,18 @@ pub(super) fn thread_manifest_workspace_mount(
 }
 
 pub(super) fn thread_manifest_tool_universes(
-    context: &ThreadContext,
-) -> VerletResult<Vec<ToolUniverseBinding>> {
-    let Some(raw) = context.metadata.get(THREAD_AGENT_TOOL_UNIVERSES_METADATA) else {
+    context: &crate::ThreadContext,
+) -> crate::VerletResult<Vec<crate::ToolUniverseBinding>> {
+    let Some(raw) = context
+        .metadata
+        .get(crate::adapters::app_server::THREAD_AGENT_TOOL_UNIVERSES_METADATA)
+    else {
         return Ok(Vec::new());
     };
-    let bindings = serde_json::from_str::<Vec<ToolUniverseBinding>>(raw).map_err(|err| {
-        VerletError::RuntimeFactory(format!("thread manifest tool universes are invalid: {err}"))
+    let bindings = serde_json::from_str::<Vec<crate::ToolUniverseBinding>>(raw).map_err(|err| {
+        crate::VerletError::RuntimeFactory(format!(
+            "thread manifest tool universes are invalid: {err}"
+        ))
     })?;
     for binding in &bindings {
         binding.validate()?;
@@ -1828,14 +1934,17 @@ pub(super) fn thread_manifest_tool_universes(
 }
 
 pub(super) fn thread_manifest_skill_packages(
-    context: &ThreadContext,
-) -> VerletResult<Vec<AgentManifestSkillPackageBinding>> {
-    let Some(raw) = context.metadata.get(THREAD_AGENT_SKILL_PACKAGES_METADATA) else {
+    context: &crate::ThreadContext,
+) -> crate::VerletResult<Vec<crate::AgentManifestSkillPackageBinding>> {
+    let Some(raw) = context
+        .metadata
+        .get(crate::THREAD_AGENT_SKILL_PACKAGES_METADATA)
+    else {
         return Ok(Vec::new());
     };
-    let bindings =
-        serde_json::from_str::<Vec<AgentManifestSkillPackageBinding>>(raw).map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+    let bindings = serde_json::from_str::<Vec<crate::AgentManifestSkillPackageBinding>>(raw)
+        .map_err(|err| {
+            crate::VerletError::RuntimeFactory(format!(
                 "thread manifest skill package bindings are invalid: {err}"
             ))
         })?;
@@ -1843,14 +1952,14 @@ pub(super) fn thread_manifest_skill_packages(
 }
 
 pub(super) fn thread_manifest_skill_discovery(
-    context: &ThreadContext,
-) -> VerletResult<Option<AgentManifestSkillDiscovery>> {
+    context: &crate::ThreadContext,
+) -> crate::VerletResult<Option<crate::AgentManifestSkillDiscovery>> {
     context
         .metadata
-        .get(THREAD_AGENT_SKILL_DISCOVERY_METADATA)
+        .get(crate::THREAD_AGENT_SKILL_DISCOVERY_METADATA)
         .map(|raw| {
             serde_json::from_str(raw).map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "thread manifest skill discovery witness is invalid: {err}"
                 ))
             })
@@ -1859,58 +1968,61 @@ pub(super) fn thread_manifest_skill_discovery(
 }
 
 pub(super) fn thread_manifest_skill_context_segments(
-    context: &ThreadContext,
-) -> VerletResult<Vec<crate::AgentManifestStaticContextSegment>> {
+    context: &crate::ThreadContext,
+) -> crate::VerletResult<Vec<crate::AgentManifestStaticContextSegment>> {
     let Some(raw) = context
         .metadata
-        .get(THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+        .get(crate::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
     else {
         return Ok(Vec::new());
     };
     serde_json::from_str(raw).map_err(|err| {
-        VerletError::RuntimeFactory(format!(
+        crate::VerletError::RuntimeFactory(format!(
             "thread manifest skill context segments are invalid: {err}"
         ))
     })
 }
 
 pub(super) struct CapsuleBindingRuntimeFactory {
-    pub(super) config: AgentLoopConfig,
-    pub(super) client: Arc<dyn ProviderClient>,
-    pub(super) capsule_bindings: CapsuleBindingsConfig,
-    pub(super) secret_resolver: Option<Arc<dyn SecretResolver>>,
-    pub(super) metadata_store_path: Option<PathBuf>,
-    pub(super) secret_store_path: Option<PathBuf>,
-    pub(super) session_store_path: Option<PathBuf>,
-    pub(super) agent_registry_root: Option<PathBuf>,
-    pub(super) blob_registry_root: Option<PathBuf>,
-    pub(super) skill_registry_root: Option<PathBuf>,
-    pub(super) cwd: Option<PathBuf>,
-    pub(super) default_placement: AgentManifestPlacementBinding,
-    pub(super) default_workspace: Option<AgentManifestWorkspaceBinding>,
-    pub(super) remote_event_store_served: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) config: crate::AgentLoopConfig,
+    pub(super) client: std::sync::Arc<dyn crate::ProviderClient>,
+    pub(super) capsule_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
+    pub(super) secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
+    pub(super) metadata_store_path: Option<std::path::PathBuf>,
+    pub(super) secret_store_path: Option<std::path::PathBuf>,
+    pub(super) session_store_path: Option<std::path::PathBuf>,
+    pub(super) agent_registry_root: Option<std::path::PathBuf>,
+    pub(super) blob_registry_root: Option<std::path::PathBuf>,
+    pub(super) skill_registry_root: Option<std::path::PathBuf>,
+    pub(super) cwd: Option<std::path::PathBuf>,
+    pub(super) default_placement: crate::AgentManifestPlacementBinding,
+    pub(super) default_workspace: Option<crate::AgentManifestWorkspaceBinding>,
+    pub(super) remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct ThreadOperationCatalog {
-    registry: Arc<crate::OperationRegistry>,
-    tool_aliases: Vec<OperationToolAlias>,
+    registry: std::sync::Arc<crate::OperationRegistry>,
+    tool_aliases: Vec<crate::OperationToolAlias>,
     capability_grant_expiries: Vec<crate::AgentManifestGrantExpiry>,
     /// The per-thread workspace VFS installed into catalog-loaded operations and
     /// virtual bash so filesystem surfaces do not drift into separate trees.
-    workspace_vfs: Arc<crate::VerletVfs>,
+    workspace_vfs: std::sync::Arc<crate::VerletVfs>,
 }
 
 #[async_trait::async_trait]
-impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
-    async fn build(&self, context: &ThreadContext) -> VerletResult<Box<dyn AgentRuntime>> {
+impl crate::AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
+    async fn build(
+        &self,
+        context: &crate::ThreadContext,
+    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
         let mut config = self.config.clone();
         apply_manifest_runtime_metadata(context, &mut config)?;
-        let mut factory = AgentLoopFactory::new(config, Arc::clone(&self.client));
+        let mut factory = crate::AgentLoopFactory::new(config, std::sync::Arc::clone(&self.client));
         if let Some(policy) = manifest_compaction_policy(context)? {
             factory = factory.with_compaction_policy(policy);
         }
         if let Some(resolver) = self.thread_spawn_agent_resolver() {
-            factory = factory.with_thread_spawn_agent_resolver(Arc::new(resolver));
+            factory = factory.with_thread_spawn_agent_resolver(std::sync::Arc::new(resolver));
         }
         let mut tool_router = None;
         let skill_files = self.skill_mount_files_for_thread(context).await?;
@@ -1923,13 +2035,13 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
             } = catalog;
             let capability_grants = operation_registry_capability_grants(&registry).await;
             tool_router = Some(
-                AgentToolRouter::new(Arc::clone(&registry))
+                crate::AgentToolRouter::new(std::sync::Arc::clone(&registry))
                     .with_tool_aliases(tool_aliases)
                     .with_capability_grants(capability_grants.clone())
                     .with_capability_grant_expiries(capability_grant_expiries.clone()),
             );
             factory = factory.with_bash_tool(bash_config_with_skill_files(
-                VirtualBashRuntimeConfig::default()
+                crate::VirtualBashRuntimeConfig::default()
                     .with_operation_registry(registry)
                     .with_workspace_vfs(workspace_vfs)
                     .with_capability_grants(capability_grants)
@@ -1938,19 +2050,23 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
             ));
         } else if !skill_files.is_empty() {
             factory = factory.with_bash_tool(bash_config_with_skill_files(
-                VirtualBashRuntimeConfig::default(),
+                crate::VirtualBashRuntimeConfig::default(),
                 &skill_files,
             ));
         }
         if let Some(tool_universe_surface) = self.tool_universe_search_surface(context).await? {
             let router = tool_router
                 .take()
-                .unwrap_or_else(|| AgentToolRouter::new(Arc::new(OperationRegistry::new())))
-                .with_kernel_tool_provider(Arc::new(tool_universe_surface));
+                .unwrap_or_else(|| {
+                    crate::AgentToolRouter::new(
+                        std::sync::Arc::new(crate::OperationRegistry::new()),
+                    )
+                })
+                .with_kernel_tool_provider(std::sync::Arc::new(tool_universe_surface));
             tool_router = Some(router);
         }
         if let Some(tool_router) = tool_router {
-            factory = factory.with_tool_router(Arc::new(tool_router));
+            factory = factory.with_tool_router(std::sync::Arc::new(tool_router));
         }
         factory.build(context).await
     }
@@ -1958,37 +2074,37 @@ impl AgentRuntimeFactory for CapsuleBindingRuntimeFactory {
 
 #[derive(Clone)]
 pub(super) struct AppServerThreadSpawnAgentResolver {
-    agent_registry_root: PathBuf,
-    operation_registry_root: Option<PathBuf>,
-    blob_registry_root: Option<PathBuf>,
-    skill_registry_root: Option<PathBuf>,
-    metadata_store_path: Option<PathBuf>,
-    secret_store_path: Option<PathBuf>,
-    cwd: PathBuf,
-    provider_surface: AgentManifestProviderSurface,
-    default_placement: AgentManifestPlacementBinding,
-    default_workspace: Option<AgentManifestWorkspaceBinding>,
-    remote_event_store_served: Arc<std::sync::atomic::AtomicBool>,
-    placement_override: Option<AgentManifestPlacementBinding>,
-    workspace_override: Option<AgentManifestWorkspaceBinding>,
+    agent_registry_root: std::path::PathBuf,
+    operation_registry_root: Option<std::path::PathBuf>,
+    blob_registry_root: Option<std::path::PathBuf>,
+    skill_registry_root: Option<std::path::PathBuf>,
+    metadata_store_path: Option<std::path::PathBuf>,
+    secret_store_path: Option<std::path::PathBuf>,
+    cwd: std::path::PathBuf,
+    provider_surface: crate::AgentManifestProviderSurface,
+    default_placement: crate::AgentManifestPlacementBinding,
+    default_workspace: Option<crate::AgentManifestWorkspaceBinding>,
+    remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    placement_override: Option<crate::AgentManifestPlacementBinding>,
+    workspace_override: Option<crate::AgentManifestWorkspaceBinding>,
 }
 
 #[async_trait::async_trait]
-impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
-    fn default_agent_ref(&self, _caller: &ThreadContext) -> Option<String> {
-        Some(default_manifest::DEFAULT_AGENT_REF.to_string())
+impl crate::KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
+    fn default_agent_ref(&self, _caller: &crate::ThreadContext) -> Option<String> {
+        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF.to_string())
     }
 
     async fn resolve_agent_ref(
         &self,
-        _caller: &ThreadContext,
+        _caller: &crate::ThreadContext,
         agent_ref: &str,
-    ) -> VerletResult<KernelThreadSpawnAgentBinding> {
-        let registry = LocalAgentRegistry::new(self.agent_registry_root.clone());
+    ) -> crate::VerletResult<crate::KernelThreadSpawnAgentBinding> {
+        let registry = crate::LocalAgentRegistry::new(self.agent_registry_root.clone());
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
-        let bound = bind_published_agent_record_with_placement(
+        let bound = crate::bind_published_agent_record_with_placement(
             &record,
             alias,
             &self.provider_surface,
@@ -1999,8 +2115,8 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
             tool_universe_discoverer
                 .as_ref()
                 .map(|discoverer| discoverer as &dyn crate::ToolUniverseDiscoverer),
-            &AgentManifestModelProfileSelection::default(),
-            &AgentManifestBindOverrides::default(),
+            &crate::AgentManifestModelProfileSelection::default(),
+            &crate::AgentManifestBindOverrides::default(),
             Some(&self.default_placement),
             self.placement_override.as_ref(),
             self.default_workspace.as_ref(),
@@ -2019,49 +2135,53 @@ impl KernelThreadSpawnAgentResolver for AppServerThreadSpawnAgentResolver {
 }
 
 impl AppServerThreadSpawnAgentResolver {
-    async fn configured_mcp_server_refs(&self) -> VerletResult<BTreeSet<String>> {
+    async fn configured_mcp_server_refs(
+        &self,
+    ) -> crate::VerletResult<std::collections::BTreeSet<String>> {
         let Some(metadata_store_path) = &self.metadata_store_path else {
-            return Ok(BTreeSet::new());
+            return Ok(std::collections::BTreeSet::new());
         };
-        let registry = SqliteMcpSourceRegistry::open_async(metadata_store_path)
+        let registry = crate::SqliteMcpSourceRegistry::open_async(metadata_store_path)
             .await
-            .map_err(|err| VerletError::RuntimeFactory(err.to_string()))?;
+            .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?;
         Ok(registry
             .list_sources_async()
             .await
-            .map_err(|err| VerletError::RuntimeFactory(err.to_string()))?
+            .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?
             .into_iter()
             .map(|source| format!("mcp://{}", source.name))
             .collect())
     }
 
-    async fn tool_universe_discoverer(&self) -> VerletResult<Option<McpToolUniverseDiscoverer>> {
+    async fn tool_universe_discoverer(
+        &self,
+    ) -> crate::VerletResult<Option<crate::McpToolUniverseDiscoverer>> {
         let Some(metadata_store_path) = &self.metadata_store_path else {
             return Ok(None);
         };
-        let registry = SqliteMcpSourceRegistry::open_async(metadata_store_path)
+        let registry = crate::SqliteMcpSourceRegistry::open_async(metadata_store_path)
             .await
-            .map_err(|err| VerletError::RuntimeFactory(err.to_string()))?;
+            .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?;
         let secret_store_path = self
             .secret_store_path
             .as_ref()
             .unwrap_or(metadata_store_path);
-        let secret_store = SqliteSecretStore::open(secret_store_path)
+        let secret_store = crate::SqliteSecretStore::open(secret_store_path)
             .await
-            .map_err(secret_store_error)?;
-        Ok(Some(McpToolUniverseDiscoverer::new(
+            .map_err(crate::adapters::app_server::secret_store_error)?;
+        Ok(Some(crate::McpToolUniverseDiscoverer::new(
             registry,
-            Some(Arc::new(secret_store)),
+            Some(std::sync::Arc::new(secret_store)),
         )))
     }
 }
 
-impl VerletAppServer {
+impl crate::adapters::app_server::VerletAppServer {
     pub(super) async fn app_server_thread_spawn_agent_resolver(
         &self,
-        placement_override: Option<AgentManifestPlacementBinding>,
-        workspace_override: Option<AgentManifestWorkspaceBinding>,
-    ) -> VerletResult<AppServerThreadSpawnAgentResolver> {
+        placement_override: Option<crate::AgentManifestPlacementBinding>,
+        workspace_override: Option<crate::AgentManifestWorkspaceBinding>,
+    ) -> crate::VerletResult<AppServerThreadSpawnAgentResolver> {
         Ok(AppServerThreadSpawnAgentResolver {
             agent_registry_root: self.inner.agent_registry_root.clone(),
             operation_registry_root: self.inner.capsule_bindings.registry_root.clone(),
@@ -2073,7 +2193,7 @@ impl VerletAppServer {
             provider_surface: self.agent_manifest_provider_surface().await?,
             default_placement: self.inner.default_placement.clone(),
             default_workspace: self.inner.default_workspace.clone(),
-            remote_event_store_served: Arc::clone(&self.inner.remote_event_store_served),
+            remote_event_store_served: std::sync::Arc::clone(&self.inner.remote_event_store_served),
             placement_override,
             workspace_override,
         })
@@ -2097,7 +2217,7 @@ impl CapsuleBindingRuntimeFactory {
             provider_surface: provider_surface_for_runtime_config(&self.config),
             default_placement: self.default_placement.clone(),
             default_workspace: self.default_workspace.clone(),
-            remote_event_store_served: Arc::clone(&self.remote_event_store_served),
+            remote_event_store_served: std::sync::Arc::clone(&self.remote_event_store_served),
             placement_override: None,
             workspace_override: None,
         })
@@ -2105,31 +2225,31 @@ impl CapsuleBindingRuntimeFactory {
 
     async fn skill_mount_files_for_thread(
         &self,
-        context: &ThreadContext,
-    ) -> VerletResult<Vec<VirtualFile>> {
+        context: &crate::ThreadContext,
+    ) -> crate::VerletResult<Vec<crate::VirtualFile>> {
         let bindings = thread_manifest_skill_packages(context)?;
         if bindings.is_empty() {
             return Ok(Vec::new());
         }
         let registry_root = self.skill_registry_root.as_ref().ok_or_else(|| {
-            VerletError::RuntimeFactory(
+            crate::VerletError::RuntimeFactory(
                 "skill package bindings require an app-server skill registry root".to_string(),
             )
         })?;
-        let registry = LocalSkillRegistry::new(registry_root);
+        let registry = crate::LocalSkillRegistry::new(registry_root);
         let mut files = Vec::new();
-        let mut names = BTreeSet::new();
+        let mut names = std::collections::BTreeSet::new();
         for binding in bindings {
             let record = registry
                 .load_version_record(&binding.package_name, &binding.artifact_hash)
                 .map_err(|err| {
-                    VerletError::RuntimeFactory(format!(
+                    crate::VerletError::RuntimeFactory(format!(
                         "manifest skill package binding {:?}@sha256:{} was not found: {err}",
                         binding.package_name, binding.artifact_hash
                     ))
                 })?;
             if record.ref_uri() != binding.ref_uri {
-                return Err(VerletError::RuntimeFactory(format!(
+                return Err(crate::VerletError::RuntimeFactory(format!(
                     "manifest skill package binding {:?} ref drift: receipt {}, registry {}",
                     binding.resource_name,
                     binding.ref_uri,
@@ -2138,13 +2258,13 @@ impl CapsuleBindingRuntimeFactory {
             }
             for skill in record.package.skills {
                 if !names.insert(skill.name.clone()) {
-                    return Err(VerletError::RuntimeFactory(format!(
+                    return Err(crate::VerletError::RuntimeFactory(format!(
                         "manifest skill packages contain duplicate /skills/{}.md",
                         skill.name
                     )));
                 }
-                files.push(VirtualFile::new(
-                    PathBuf::from(format!("{}.md", skill.name)),
+                files.push(crate::VirtualFile::new(
+                    std::path::PathBuf::from(format!("{}.md", skill.name)),
                     skill.body.into_bytes(),
                 ));
             }
@@ -2154,8 +2274,8 @@ impl CapsuleBindingRuntimeFactory {
 
     async fn operation_catalog_for_thread(
         &self,
-        context: &ThreadContext,
-    ) -> VerletResult<Option<ThreadOperationCatalog>> {
+        context: &crate::ThreadContext,
+    ) -> crate::VerletResult<Option<ThreadOperationCatalog>> {
         let manifest_operation_bindings = thread_manifest_operation_bindings(context)?;
         let workspace = thread_manifest_workspace_mount(context)?;
         if manifest_operation_bindings.is_empty() && workspace.is_none() {
@@ -2166,23 +2286,24 @@ impl CapsuleBindingRuntimeFactory {
         // lexicon-allow: capsule - existing app-server config field
         let registry_root = match &self.capsule_bindings.registry_root {
             Some(registry_root) => registry_root.clone(),
-            None if manifest_operation_bindings.is_empty() => {
-                self.cwd.clone().unwrap_or_else(|| PathBuf::from("."))
-            }
+            None if manifest_operation_bindings.is_empty() => self
+                .cwd
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
             // lexicon-allow: capsule - existing app-server config field
             None => {
                 // lexicon-allow: capsule - existing app-server config error text
-                return Err(VerletError::RuntimeFactory(
+                return Err(crate::VerletError::RuntimeFactory(
                     "capsule bindings require a registry root".to_string(), // lexicon-allow: capsule - existing app-server config error text
                 ));
             }
         };
-        let registry = LocalOperationRegistry::new(&registry_root);
+        let registry = crate::LocalOperationRegistry::new(&registry_root);
         let mut records = Vec::new();
         let mut tool_aliases = Vec::new();
         let mut capability_grant_expiries = Vec::new();
         for binding in manifest_operation_bindings {
-            let AgentManifestOperationBinding {
+            let crate::AgentManifestOperationBinding {
                 name,
                 artifact_hash,
                 effect_class: _,
@@ -2192,29 +2313,27 @@ impl CapsuleBindingRuntimeFactory {
                 direct_tools,
             } = binding;
             capability_grant_expiries.extend(grant_expiries);
-            tool_aliases.extend(
-                direct_tools
-                    .into_iter()
-                    .map(|direct_tool| OperationToolAlias {
-                        tool_name: direct_tool.tool_name,
-                        registered_name: name.clone(),
-                        operation_name: direct_tool.operation,
-                        grant_expiries: direct_tool.grant_expiries,
-                    }),
-            );
+            tool_aliases.extend(direct_tools.into_iter().map(|direct_tool| {
+                crate::OperationToolAlias {
+                    tool_name: direct_tool.tool_name,
+                    registered_name: name.clone(),
+                    operation_name: direct_tool.operation,
+                    grant_expiries: direct_tool.grant_expiries,
+                }
+            }));
             let mut record = registry
                 .load_version_record(&name, &artifact_hash)
                 .map_err(|err| {
-                    VerletError::RuntimeFactory(format!(
+                    crate::VerletError::RuntimeFactory(format!(
                         "manifest operation binding {:?}@sha256:{} was not found: {err}",
                         name, artifact_hash
                     ))
                 })?;
             apply_manifest_operation_grants(&mut record, grants);
             let record = if operations.is_empty() {
-                LocalPluginCatalogRecord::whole_record(record)
+                crate::LocalPluginCatalogRecord::whole_record(record)
             } else {
-                LocalPluginCatalogRecord::selected_operations(record, operations)
+                crate::LocalPluginCatalogRecord::selected_operations(record, operations)
             };
             records.push(record);
         }
@@ -2222,23 +2341,29 @@ impl CapsuleBindingRuntimeFactory {
             .into_iter()
             .map(|workspace| match workspace.mode {
                 crate::AgentManifestWorkspaceMode::ReadOnly => {
-                    PluginMount::pinned_host_read_only(workspace.guest_path, workspace.host_path)
+                    crate::PluginMount::pinned_host_read_only(
+                        workspace.guest_path,
+                        workspace.host_path,
+                    )
                 }
                 crate::AgentManifestWorkspaceMode::ReadWrite => {
-                    PluginMount::pinned_host_read_write(workspace.guest_path, workspace.host_path)
+                    crate::PluginMount::pinned_host_read_write(
+                        workspace.guest_path,
+                        workspace.host_path,
+                    )
                 }
             })
             .collect();
         let catalog = if let Some(secret_resolver) = &self.secret_resolver {
-            LocalPluginCatalog::load_selected_records_with_secret_resolver(
+            crate::LocalPluginCatalog::load_selected_records_with_secret_resolver(
                 registry_root.clone(),
                 records,
                 mounts,
-                Arc::clone(secret_resolver),
+                std::sync::Arc::clone(secret_resolver),
             )
             .await?
         } else {
-            LocalPluginCatalog::load_selected_records(registry_root, records, mounts).await?
+            crate::LocalPluginCatalog::load_selected_records(registry_root, records, mounts).await?
         };
         Ok(Some(ThreadOperationCatalog {
             registry: catalog.operation_registry(),
@@ -2250,41 +2375,41 @@ impl CapsuleBindingRuntimeFactory {
 
     async fn tool_universe_search_surface(
         &self,
-        context: &ThreadContext,
-    ) -> VerletResult<Option<ToolUniverseSearchSurface>> {
+        context: &crate::ThreadContext,
+    ) -> crate::VerletResult<Option<crate::ToolUniverseSearchSurface>> {
         let bindings = thread_manifest_tool_universes(context)?;
         if bindings.is_empty() {
             return Ok(None);
         }
         let metadata_store_path = self.metadata_store_path.as_ref().ok_or_else(|| {
-            VerletError::RuntimeFactory(
+            crate::VerletError::RuntimeFactory(
                 "tool universe bindings require an app-server metadata store path".to_string(),
             )
         })?;
         let session_store_path = self.session_store_path.as_ref().ok_or_else(|| {
-            VerletError::RuntimeFactory(
+            crate::VerletError::RuntimeFactory(
                 "tool universe bindings require an app-server session store path".to_string(),
             )
         })?;
-        let registry = SqliteMcpSourceRegistry::open_async(metadata_store_path)
+        let registry = crate::SqliteMcpSourceRegistry::open_async(metadata_store_path)
             .await
-            .map_err(|err| VerletError::RuntimeFactory(err.to_string()))?;
-        let discoverer = Arc::new(McpToolUniverseDiscoverer::new(
+            .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?;
+        let discoverer = std::sync::Arc::new(crate::McpToolUniverseDiscoverer::new(
             registry,
             self.secret_resolver.clone(),
         ));
         let mut universes = Vec::new();
         for binding in bindings {
-            let caller: Arc<dyn ToolUniverseCaller> =
+            let caller: std::sync::Arc<dyn crate::ToolUniverseCaller> =
                 discoverer.caller_for(&binding.server_ref).await?;
-            universes.push(MountedToolUniverse { binding, caller });
+            universes.push(crate::MountedToolUniverse { binding, caller });
         }
-        let event_store: Arc<dyn RuntimeStore> = Arc::new(
-            SqliteSessionStore::open(session_store_path)
+        let event_store: std::sync::Arc<dyn crate::RuntimeStore> = std::sync::Arc::new(
+            crate::SqliteSessionStore::open(session_store_path)
                 .await
-                .map_err(|err| VerletError::History(err.to_string()))?,
+                .map_err(|err| crate::VerletError::History(err.to_string()))?,
         );
-        Ok(Some(ToolUniverseSearchSurface::new_with_runtime(
+        Ok(Some(crate::ToolUniverseSearchSurface::new_with_runtime(
             universes,
             event_store,
             discoverer,
@@ -2293,51 +2418,59 @@ impl CapsuleBindingRuntimeFactory {
 }
 
 fn bash_config_with_skill_files(
-    mut config: VirtualBashRuntimeConfig,
-    skill_files: &[VirtualFile],
-) -> VirtualBashRuntimeConfig {
+    mut config: crate::VirtualBashRuntimeConfig,
+    skill_files: &[crate::VirtualFile],
+) -> crate::VirtualBashRuntimeConfig {
     for file in skill_files {
         config = config.with_readonly_skill_file(file.path.clone(), file.content.clone());
     }
     config
 }
 
-fn provider_surface_for_runtime_config(config: &AgentLoopConfig) -> AgentManifestProviderSurface {
-    let supports_streaming = !matches!(config.api, ProviderApi::Other(_));
-    AgentManifestProviderSurface::single(config.provider.clone(), config.model.clone())
+fn provider_surface_for_runtime_config(
+    config: &crate::AgentLoopConfig,
+) -> crate::AgentManifestProviderSurface {
+    let supports_streaming = !matches!(config.api, crate::ProviderApi::Other(_));
+    crate::AgentManifestProviderSurface::single(config.provider.clone(), config.model.clone())
         .with_supports_streaming(supports_streaming)
 }
 
 pub(super) fn apply_manifest_runtime_metadata(
-    context: &ThreadContext,
-    config: &mut AgentLoopConfig,
-) -> VerletResult<()> {
+    context: &crate::ThreadContext,
+    config: &mut crate::AgentLoopConfig,
+) -> crate::VerletResult<()> {
     if let Some(thinking) = thread_metadata_thinking(&context.metadata)? {
         config.thinking = Some(thinking);
     }
-    if let Some(provider_id) = context.metadata.get(THREAD_AGENT_PROVIDER_ID_METADATA) {
+    if let Some(provider_id) = context
+        .metadata
+        .get(crate::adapters::app_server::THREAD_AGENT_PROVIDER_ID_METADATA)
+    {
         config.provider = provider_id.clone();
     }
-    if let Some(model_id) = context.metadata.get(THREAD_AGENT_MODEL_ID_METADATA) {
+    if let Some(model_id) = context
+        .metadata
+        .get(crate::adapters::app_server::THREAD_AGENT_MODEL_ID_METADATA)
+    {
         config.model = model_id.clone();
     }
     let tool_instruction = context
         .metadata
-        .get(THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA)
+        .get(crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA)
         .filter(|instruction| !instruction.trim().is_empty())
         .cloned()
         .or_else(|| legacy_manifest_tool_use_system_instruction(context));
     if let Some(instruction) = tool_instruction {
         if !config.system.iter().any(|block| block.text == instruction) {
-            config.system.push(SystemBlock::text(instruction));
+            config.system.push(crate::SystemBlock::text(instruction));
         }
     }
     if let Some(streaming) = context
         .metadata
-        .get(THREAD_AGENT_RUNTIME_STREAMING_METADATA)
+        .get(crate::adapters::app_server::THREAD_AGENT_RUNTIME_STREAMING_METADATA)
     {
         config.stream = streaming.parse::<bool>().map_err(|err| {
-            VerletError::RuntimeFactory(format!(
+            crate::VerletError::RuntimeFactory(format!(
                 "manifest runtime streaming metadata is invalid: {err}"
             ))
         })?;
@@ -2346,14 +2479,14 @@ pub(super) fn apply_manifest_runtime_metadata(
 }
 
 pub(super) fn manifest_compaction_policy(
-    context: &ThreadContext,
-) -> VerletResult<Option<crate::CompactionPolicy>> {
+    context: &crate::ThreadContext,
+) -> crate::VerletResult<Option<crate::CompactionPolicy>> {
     context
         .metadata
-        .get(THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA)
+        .get(crate::adapters::app_server::THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA)
         .map(|value| {
             let bytes = value.parse::<usize>().map_err(|err| {
-                VerletError::RuntimeFactory(format!(
+                crate::VerletError::RuntimeFactory(format!(
                     "manifest runtime compaction metadata is invalid: {err}"
                 ))
             })?;
@@ -2371,7 +2504,7 @@ pub(super) fn apply_manifest_operation_grants(
 
 pub(super) async fn operation_registry_capability_grants(
     registry: &crate::OperationRegistry,
-) -> BTreeSet<String> {
+) -> std::collections::BTreeSet<String> {
     registry
         .list()
         .await

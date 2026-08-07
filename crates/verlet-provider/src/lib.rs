@@ -1,18 +1,9 @@
 pub mod provider_transform;
 
-use async_trait::async_trait;
-use base64::Engine;
-use hmac::{Hmac, KeyInit, Mac};
-use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use thiserror::Error;
-use verlet_history::{
-    CacheControl, CanonicalContent, CanonicalMessage, CanonicalStopReason, CanonicalUsage,
-    ProviderApi, ThinkingMetadata, ThinkingProvider,
-};
+use base64::Engine as _;
+use hmac::KeyInit as _;
+use hmac::Mac as _;
+use sha2::Digest as _;
 
 /// Providers that accept Zhipu-style chat-completions `thinking` parameters.
 ///
@@ -23,39 +14,42 @@ use verlet_history::{
 const ZHIPU_CONVENTION_CHAT_PROVIDERS: &[&str] = &["openai_compatible", "zhipu", "glm"];
 const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
 const AWS_SIGV4_ALGORITHM: &str = "AWS4-HMAC-SHA256";
-type HmacSha256 = Hmac<Sha256>;
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
 pub type ProviderResult<T> = Result<T, ProviderError>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("adapter {adapter} cannot handle request api {api:?}")]
     ApiMismatch {
         adapter: &'static str,
-        api: ProviderApi,
+        api: verlet_history::ProviderApi,
     },
     #[error("wire payload decode failed: {0}")]
     Decode(String),
     #[error("provider HTTP request failed: {0}")]
     Http(String),
     #[error("provider HTTP status {status}: {body}")]
-    HttpStatus { status: StatusCode, body: String },
+    HttpStatus {
+        status: reqwest::StatusCode,
+        body: String,
+    },
     #[error("provider request cancelled")]
     Cancelled,
     #[error("provider {provider} ({api:?}) does not support {capability}: {detail}")]
     UnsupportedCapability {
         provider: String,
-        api: ProviderApi,
+        api: verlet_history::ProviderApi,
         capability: &'static str,
         detail: String,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SystemBlock {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
+    pub cache_control: Option<verlet_history::CacheControl>,
 }
 
 impl SystemBlock {
@@ -69,25 +63,25 @@ impl SystemBlock {
     pub fn cached(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            cache_control: Some(CacheControl::ephemeral()),
+            cache_control: Some(verlet_history::CacheControl::ephemeral()),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    pub input_schema: Value,
+    pub input_schema: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
+    pub cache_control: Option<verlet_history::CacheControl>,
 }
 
 impl ToolDefinition {
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
-        input_schema: Value,
+        input_schema: serde_json::Value,
     ) -> Self {
         Self {
             name: name.into(),
@@ -98,7 +92,7 @@ impl ToolDefinition {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
     Effort { effort: ThinkingEffort },
@@ -106,7 +100,7 @@ pub enum ThinkingConfig {
     Disabled,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingEffort {
     Low,
@@ -134,15 +128,15 @@ impl ThinkingEffort {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderRequest {
-    pub api: ProviderApi,
+    pub api: verlet_history::ProviderApi,
     pub provider: String,
     pub model: String,
     #[serde(default)]
     pub system: Vec<SystemBlock>,
     #[serde(default)]
-    pub messages: Vec<CanonicalMessage>,
+    pub messages: Vec<verlet_history::CanonicalMessage>,
     #[serde(default)]
     pub tools: Vec<ToolDefinition>,
     pub max_tokens: u32,
@@ -153,7 +147,11 @@ pub struct ProviderRequest {
 }
 
 impl ProviderRequest {
-    pub fn new(api: ProviderApi, provider: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        api: verlet_history::ProviderApi,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             api,
             provider: provider.into(),
@@ -168,14 +166,14 @@ impl ProviderRequest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderResponse {
-    pub content: Vec<CanonicalContent>,
-    pub usage: CanonicalUsage,
-    pub stop_reason: CanonicalStopReason,
+    pub content: Vec<verlet_history::CanonicalContent>,
+    pub usage: verlet_history::CanonicalUsage,
+    pub stop_reason: verlet_history::CanonicalStopReason,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderStreamEvent {
     TextDelta {
@@ -190,13 +188,13 @@ pub enum ProviderStreamEvent {
         arguments_delta: String,
     },
     Content {
-        content: CanonicalContent,
+        content: verlet_history::CanonicalContent,
     },
     Usage {
-        usage: CanonicalUsage,
+        usage: verlet_history::CanonicalUsage,
     },
     Done {
-        stop_reason: CanonicalStopReason,
+        stop_reason: verlet_history::CanonicalStopReason,
     },
     Error {
         message: String,
@@ -209,7 +207,9 @@ pub enum ProviderRequestMode {
     Stream,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderAbiProjection {
     LlmTool,
@@ -217,7 +217,7 @@ pub enum ProviderAbiProjection {
     ImageInput,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderToolResultConstraints {
     pub supports_error_flag: bool,
     pub requires_known_tool_call_id: bool,
@@ -242,7 +242,7 @@ impl ProviderToolResultConstraints {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderContextPolicy {
     pub max_messages: Option<usize>,
     pub max_text_bytes: Option<usize>,
@@ -267,17 +267,17 @@ impl Default for ProviderContextPolicy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderContextCompilation {
-    pub messages: Vec<CanonicalMessage>,
+    pub messages: Vec<verlet_history::CanonicalMessage>,
     pub dropped_messages: usize,
     pub truncated_text_bytes: usize,
     pub retained_text_bytes: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCapabilityRecord {
-    pub api: ProviderApi,
+    pub api: verlet_history::ProviderApi,
     pub provider_family: String,
     pub supports_tools: bool,
     pub supports_streaming: bool,
@@ -289,14 +289,14 @@ pub struct ProviderCapabilityRecord {
     pub max_output_tokens: Option<u32>,
     pub context_policy: ProviderContextPolicy,
     pub tool_result_constraints: ProviderToolResultConstraints,
-    pub supported_abi_projections: BTreeSet<ProviderAbiProjection>,
+    pub supported_abi_projections: std::collections::BTreeSet<ProviderAbiProjection>,
 }
 
 impl ProviderCapabilityRecord {
-    pub fn for_api(api: ProviderApi) -> Self {
+    pub fn for_api(api: verlet_history::ProviderApi) -> Self {
         match api {
-            ProviderApi::OpenAIResponses => Self {
-                api: ProviderApi::OpenAIResponses,
+            verlet_history::ProviderApi::OpenAIResponses => Self {
+                api: verlet_history::ProviderApi::OpenAIResponses,
                 provider_family: "openai_responses".to_string(),
                 supports_tools: true,
                 supports_streaming: true,
@@ -308,14 +308,14 @@ impl ProviderCapabilityRecord {
                 max_output_tokens: None,
                 context_policy: ProviderContextPolicy::unbounded(),
                 tool_result_constraints: ProviderToolResultConstraints::open_tool_results(),
-                supported_abi_projections: BTreeSet::from([
+                supported_abi_projections: std::collections::BTreeSet::from([
                     ProviderAbiProjection::Text,
                     ProviderAbiProjection::ImageInput,
                     ProviderAbiProjection::LlmTool,
                 ]),
             },
-            ProviderApi::OpenAIChatCompletions => Self {
-                api: ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions => Self {
+                api: verlet_history::ProviderApi::OpenAIChatCompletions,
                 provider_family: "openai_chat_completions".to_string(),
                 supports_tools: true,
                 supports_streaming: true,
@@ -327,13 +327,13 @@ impl ProviderCapabilityRecord {
                 max_output_tokens: None,
                 context_policy: ProviderContextPolicy::unbounded(),
                 tool_result_constraints: ProviderToolResultConstraints::open_tool_results(),
-                supported_abi_projections: BTreeSet::from([
+                supported_abi_projections: std::collections::BTreeSet::from([
                     ProviderAbiProjection::Text,
                     ProviderAbiProjection::LlmTool,
                 ]),
             },
-            ProviderApi::AnthropicMessages => Self {
-                api: ProviderApi::AnthropicMessages,
+            verlet_history::ProviderApi::AnthropicMessages => Self {
+                api: verlet_history::ProviderApi::AnthropicMessages,
                 provider_family: "anthropic_messages".to_string(),
                 supports_tools: true,
                 supports_streaming: true,
@@ -345,13 +345,15 @@ impl ProviderCapabilityRecord {
                 max_output_tokens: None,
                 context_policy: ProviderContextPolicy::unbounded(),
                 tool_result_constraints: ProviderToolResultConstraints::open_tool_results(),
-                supported_abi_projections: BTreeSet::from([
+                supported_abi_projections: std::collections::BTreeSet::from([
                     ProviderAbiProjection::Text,
                     ProviderAbiProjection::ImageInput,
                     ProviderAbiProjection::LlmTool,
                 ]),
             },
-            ProviderApi::Other(provider_family) => Self::local_offline(provider_family, "local"),
+            verlet_history::ProviderApi::Other(provider_family) => {
+                Self::local_offline(provider_family, "local")
+            }
         }
     }
 
@@ -359,7 +361,7 @@ impl ProviderCapabilityRecord {
         let provider_family = provider_family.into();
         let _model = model.into();
         Self {
-            api: ProviderApi::Other(provider_family.clone()),
+            api: verlet_history::ProviderApi::Other(provider_family.clone()),
             provider_family,
             supports_tools: false,
             supports_streaming: false,
@@ -371,7 +373,9 @@ impl ProviderCapabilityRecord {
             max_output_tokens: Some(4096),
             context_policy: ProviderContextPolicy::unbounded(),
             tool_result_constraints: ProviderToolResultConstraints::unsupported(),
-            supported_abi_projections: BTreeSet::from([ProviderAbiProjection::Text]),
+            supported_abi_projections: std::collections::BTreeSet::from([
+                ProviderAbiProjection::Text,
+            ]),
         }
     }
 
@@ -416,7 +420,7 @@ impl ProviderCapabilityRecord {
         }
         if let Some(max_content_bytes) = self.tool_result_constraints.max_content_bytes {
             for message in &request.messages {
-                if let CanonicalMessage::ToolResult { content, .. } = message {
+                if let verlet_history::CanonicalMessage::ToolResult { content, .. } = message {
                     let bytes = content_text_bytes(content);
                     if bytes > max_content_bytes {
                         return Err(self.unsupported(
@@ -443,7 +447,7 @@ impl ProviderCapabilityRecord {
 }
 
 pub fn compile_provider_context(
-    messages: Vec<CanonicalMessage>,
+    messages: Vec<verlet_history::CanonicalMessage>,
     policy: &ProviderContextPolicy,
 ) -> ProviderContextCompilation {
     let original_len = messages.len();
@@ -469,20 +473,20 @@ pub fn compile_provider_context(
 }
 
 fn recent_messages_preserving_tool_result_issuers(
-    messages: Vec<CanonicalMessage>,
+    messages: Vec<verlet_history::CanonicalMessage>,
     max_messages: usize,
-) -> Vec<CanonicalMessage> {
+) -> Vec<verlet_history::CanonicalMessage> {
     if messages.len() <= max_messages {
         return messages;
     }
 
     let cutoff = messages.len().saturating_sub(max_messages);
-    let mut included = (cutoff..messages.len()).collect::<BTreeSet<_>>();
-    let mut issuer_by_call_id = HashMap::<&str, usize>::new();
+    let mut included = (cutoff..messages.len()).collect::<std::collections::BTreeSet<_>>();
+    let mut issuer_by_call_id = std::collections::HashMap::<&str, usize>::new();
     for (index, message) in messages.iter().enumerate() {
-        if let CanonicalMessage::Assistant { content, .. } = message {
+        if let verlet_history::CanonicalMessage::Assistant { content, .. } = message {
             for block in content {
-                if let CanonicalContent::ToolCall { id, .. } = block {
+                if let verlet_history::CanonicalContent::ToolCall { id, .. } = block {
                     issuer_by_call_id.insert(id.as_str(), index);
                 }
             }
@@ -490,7 +494,7 @@ fn recent_messages_preserving_tool_result_issuers(
     }
 
     for message in &messages[cutoff..] {
-        if let CanonicalMessage::ToolResult { tool_call_id, .. } = message
+        if let verlet_history::CanonicalMessage::ToolResult { tool_call_id, .. } = message
             && let Some(&issuer) = issuer_by_call_id.get(tool_call_id.as_str())
         {
             included.insert(issuer);
@@ -526,12 +530,13 @@ fn request_uses_cache_control(request: &ProviderRequest) -> bool {
         || request.messages.iter().any(message_uses_cache_control)
 }
 
-fn message_uses_cache_control(message: &CanonicalMessage) -> bool {
+fn message_uses_cache_control(message: &verlet_history::CanonicalMessage) -> bool {
     match message {
-        CanonicalMessage::User { content, .. } | CanonicalMessage::Assistant { content, .. } => {
+        verlet_history::CanonicalMessage::User { content, .. }
+        | verlet_history::CanonicalMessage::Assistant { content, .. } => {
             content.iter().any(content_uses_cache_control)
         }
-        CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             content,
             cache_control,
             ..
@@ -539,10 +544,10 @@ fn message_uses_cache_control(message: &CanonicalMessage) -> bool {
     }
 }
 
-fn content_uses_cache_control(content: &CanonicalContent) -> bool {
+fn content_uses_cache_control(content: &verlet_history::CanonicalContent) -> bool {
     matches!(
         content,
-        CanonicalContent::Text {
+        verlet_history::CanonicalContent::Text {
             cache_control: Some(_),
             ..
         }
@@ -551,46 +556,50 @@ fn content_uses_cache_control(content: &CanonicalContent) -> bool {
 
 fn request_uses_images(request: &ProviderRequest) -> bool {
     request.messages.iter().any(|message| match message {
-        CanonicalMessage::User { content, .. } | CanonicalMessage::Assistant { content, .. } => {
-            content
-                .iter()
-                .any(|content| matches!(content, CanonicalContent::Image { .. }))
-        }
-        CanonicalMessage::ToolResult { content, .. } => content
+        verlet_history::CanonicalMessage::User { content, .. }
+        | verlet_history::CanonicalMessage::Assistant { content, .. } => content
             .iter()
-            .any(|content| matches!(content, CanonicalContent::Image { .. })),
+            .any(|content| matches!(content, verlet_history::CanonicalContent::Image { .. })),
+        verlet_history::CanonicalMessage::ToolResult { content, .. } => content
+            .iter()
+            .any(|content| matches!(content, verlet_history::CanonicalContent::Image { .. })),
     })
 }
 
-fn messages_text_bytes(messages: &[CanonicalMessage]) -> usize {
+fn messages_text_bytes(messages: &[verlet_history::CanonicalMessage]) -> usize {
     messages
         .iter()
         .map(|message| match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => content_text_bytes(content),
+            verlet_history::CanonicalMessage::User { content, .. }
+            | verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => {
+                content_text_bytes(content)
+            }
         })
         .sum()
 }
 
-fn content_text_bytes(content: &[CanonicalContent]) -> usize {
+fn content_text_bytes(content: &[verlet_history::CanonicalContent]) -> usize {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(text.len()),
-            CanonicalContent::Thinking { text, .. } => Some(text.len()),
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.len()),
+            verlet_history::CanonicalContent::Thinking { text, .. } => Some(text.len()),
             _ => None,
         })
         .sum()
 }
 
-fn truncate_messages_to_recent_text_bytes(messages: &mut [CanonicalMessage], max_bytes: usize) {
+fn truncate_messages_to_recent_text_bytes(
+    messages: &mut [verlet_history::CanonicalMessage],
+    max_bytes: usize,
+) {
     let mut remaining = max_bytes;
     for message in messages.iter_mut().rev() {
         match message {
-            CanonicalMessage::User { content, .. }
-            | CanonicalMessage::Assistant { content, .. }
-            | CanonicalMessage::ToolResult { content, .. } => {
+            verlet_history::CanonicalMessage::User { content, .. }
+            | verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => {
                 truncate_content_to_recent_text_bytes(content, &mut remaining);
             }
         }
@@ -598,21 +607,22 @@ fn truncate_messages_to_recent_text_bytes(messages: &mut [CanonicalMessage], max
 }
 
 fn truncate_content_to_recent_text_bytes(
-    content: &mut Vec<CanonicalContent>,
+    content: &mut Vec<verlet_history::CanonicalContent>,
     remaining: &mut usize,
 ) {
     for block in content.iter_mut().rev() {
         match block {
-            CanonicalContent::Text { text, .. } | CanonicalContent::Thinking { text, .. } => {
+            verlet_history::CanonicalContent::Text { text, .. }
+            | verlet_history::CanonicalContent::Thinking { text, .. } => {
                 truncate_string_to_recent_bytes(text, remaining);
             }
-            CanonicalContent::Image { .. } | CanonicalContent::ToolCall { .. } => {}
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => {}
         }
     }
     content.retain(|block| match block {
-        CanonicalContent::Text { text, .. } | CanonicalContent::Thinking { text, .. } => {
-            !text.is_empty()
-        }
+        verlet_history::CanonicalContent::Text { text, .. }
+        | verlet_history::CanonicalContent::Thinking { text, .. } => !text.is_empty(),
         _ => true,
     });
 }
@@ -638,16 +648,19 @@ fn truncate_string_to_recent_bytes(text: &mut String, remaining: &mut usize) {
 }
 
 pub trait ProviderWireAdapter: Send + Sync {
-    fn api(&self) -> ProviderApi;
+    fn api(&self) -> verlet_history::ProviderApi;
     fn capabilities(&self) -> ProviderCapabilityRecord {
         ProviderCapabilityRecord::for_api(self.api())
     }
-    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<Value>;
-    fn build_stream_request_body(&self, request: &ProviderRequest) -> ProviderResult<Value> {
+    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<serde_json::Value>;
+    fn build_stream_request_body(
+        &self,
+        request: &ProviderRequest,
+    ) -> ProviderResult<serde_json::Value> {
         self.capabilities()
             .validate_request(request, ProviderRequestMode::Stream)?;
         let mut body = self.build_request_body(request)?;
-        body["stream"] = json!(true);
+        body["stream"] = serde_json::json!(true);
         Ok(body)
     }
     fn stream_endpoint_url(&self, endpoint_url: &str) -> String {
@@ -656,7 +669,7 @@ pub trait ProviderWireAdapter: Send + Sync {
     fn stream_request_headers(&self) -> Vec<(&'static str, &'static str)> {
         vec![("accept", "text/event-stream")]
     }
-    fn decode_response_body(&self, body: &Value) -> ProviderResult<ProviderResponse>;
+    fn decode_response_body(&self, body: &serde_json::Value) -> ProviderResult<ProviderResponse>;
     fn decode_stream_events(&self, _sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>> {
         Err(ProviderError::Decode(format!(
             "adapter {:?} does not support streaming decode",
@@ -671,7 +684,7 @@ pub trait ProviderWireAdapter: Send + Sync {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ProviderClient: Send + Sync {
     fn capabilities(&self) -> Option<ProviderCapabilityRecord> {
         None
@@ -700,7 +713,7 @@ pub trait ProviderClient: Send + Sync {
             .into_iter()
             .map(|content| ProviderStreamEvent::Content { content })
             .collect::<Vec<_>>();
-        if response.usage != CanonicalUsage::default() {
+        if response.usage != verlet_history::CanonicalUsage::default() {
             events.push(ProviderStreamEvent::Usage {
                 usage: response.usage,
             });
@@ -730,7 +743,7 @@ pub struct ProviderHttpClient {
     adapter: std::sync::Arc<dyn ProviderWireAdapter>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderEndpoint {
     pub url: String,
     pub auth: ProviderAuth,
@@ -738,7 +751,7 @@ pub struct ProviderEndpoint {
     pub headers: Vec<(String, String)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderAuth {
     Bearer {
@@ -870,7 +883,7 @@ impl ProviderHttpClient {
     }
 }
 
-fn provider_json_body(body: &Value) -> ProviderResult<Vec<u8>> {
+fn provider_json_body(body: &serde_json::Value) -> ProviderResult<Vec<u8>> {
     serde_json::to_vec(body)
         .map_err(|err| ProviderError::Decode(format!("failed to encode provider JSON: {err}")))
 }
@@ -937,7 +950,7 @@ fn aws_sigv4_headers(request: AwsSigV4Request<'_>) -> ProviderResult<Vec<(String
     let host = url_host_header(&url)?;
     let amz_date = request.now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = request.now.format("%Y%m%d").to_string();
-    let payload_hash = hex::encode(Sha256::digest(request.body));
+    let payload_hash = hex::encode(sha2::Sha256::digest(request.body));
 
     let mut canonical_header_values = vec![
         ("content-type".to_string(), request.content_type.to_string()),
@@ -980,7 +993,7 @@ fn aws_sigv4_headers(request: AwsSigV4Request<'_>) -> ProviderResult<Vec<(String
     );
     let string_to_sign = format!(
         "{AWS_SIGV4_ALGORITHM}\n{amz_date}\n{credential_scope}\n{}",
-        hex::encode(Sha256::digest(canonical_request.as_bytes()))
+        hex::encode(sha2::Sha256::digest(canonical_request.as_bytes()))
     );
     let signing_key = aws_sigv4_signing_key(
         request.secret_access_key,
@@ -1088,7 +1101,7 @@ fn aws_uri_encode(value: &str) -> String {
     encoded
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ProviderClient for ProviderHttpClient {
     fn capabilities(&self) -> Option<ProviderCapabilityRecord> {
         Some(self.adapter.capabilities())
@@ -1212,7 +1225,7 @@ impl LocalOfflineProviderClient {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ProviderClient for LocalOfflineProviderClient {
     fn capabilities(&self) -> Option<ProviderCapabilityRecord> {
         Some(self.capabilities.clone())
@@ -1228,7 +1241,7 @@ impl ProviderClient for LocalOfflineProviderClient {
             .iter()
             .rev()
             .find_map(|message| match message {
-                CanonicalMessage::User { content, .. } => {
+                verlet_history::CanonicalMessage::User { content, .. } => {
                     let text = text_from_content(content, "\n");
                     (!text.is_empty()).then_some(text)
                 }
@@ -1236,14 +1249,16 @@ impl ProviderClient for LocalOfflineProviderClient {
             })
             .unwrap_or_default();
         Ok(ProviderResponse {
-            content: vec![CanonicalContent::text(format!("local:{last_user_text}"))],
-            usage: CanonicalUsage {
+            content: vec![verlet_history::CanonicalContent::text(format!(
+                "local:{last_user_text}"
+            ))],
+            usage: verlet_history::CanonicalUsage {
                 input_tokens: compilation.retained_text_bytes as u64,
                 output_tokens: last_user_text.len() as u64,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
-            stop_reason: CanonicalStopReason::EndTurn,
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -1316,19 +1331,19 @@ impl OpenAIChatCompletionsAdapter {
 }
 
 impl ProviderWireAdapter for OpenAIResponsesAdapter {
-    fn api(&self) -> ProviderApi {
-        ProviderApi::OpenAIResponses
+    fn api(&self) -> verlet_history::ProviderApi {
+        verlet_history::ProviderApi::OpenAIResponses
     }
 
-    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<Value> {
+    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<serde_json::Value> {
         self.capabilities()
             .validate_request(request, ProviderRequestMode::Complete)?;
         ensure_api(
             "openai_responses",
             &request.api,
-            ProviderApi::OpenAIResponses,
+            verlet_history::ProviderApi::OpenAIResponses,
         )?;
-        let mut body = json!({
+        let mut body = serde_json::json!({
             "model": request.model,
             "store": false,
             "stream": false,
@@ -1336,10 +1351,10 @@ impl ProviderWireAdapter for OpenAIResponsesAdapter {
             "max_output_tokens": request.max_tokens,
         });
         if let Some(instructions) = joined_system(&request.system) {
-            body["instructions"] = json!(instructions);
+            body["instructions"] = serde_json::json!(instructions);
         }
         if let Some(temperature) = request.temperature {
-            body["temperature"] = json!(temperature);
+            body["temperature"] = serde_json::json!(temperature);
         }
         if let Some(reasoning) = openai_reasoning(
             &request.provider,
@@ -1349,43 +1364,43 @@ impl ProviderWireAdapter for OpenAIResponsesAdapter {
             body["reasoning"] = reasoning;
         }
         if self.include_encrypted_reasoning {
-            body["include"] = json!(["reasoning.encrypted_content"]);
+            body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
         }
         let tools = build_openai_responses_tools(&request.tools);
         if !tools.is_empty() {
-            body["tools"] = Value::Array(tools);
-            body["tool_choice"] = json!("auto");
-            body["parallel_tool_calls"] = json!(true);
+            body["tools"] = serde_json::Value::Array(tools);
+            body["tool_choice"] = serde_json::json!("auto");
+            body["parallel_tool_calls"] = serde_json::json!(true);
         }
         Ok(body)
     }
 
-    fn decode_response_body(&self, body: &Value) -> ProviderResult<ProviderResponse> {
+    fn decode_response_body(&self, body: &serde_json::Value) -> ProviderResult<ProviderResponse> {
         let mut content = Vec::new();
-        if let Some(output) = body.get("output").and_then(Value::as_array) {
+        if let Some(output) = body.get("output").and_then(serde_json::Value::as_array) {
             for (output_index, item) in output.iter().enumerate() {
                 decode_openai_responses_output_item(item, output_index, &mut content)?;
             }
         }
         if content.is_empty() {
-            if let Some(text) = body.get("output_text").and_then(Value::as_str) {
+            if let Some(text) = body.get("output_text").and_then(serde_json::Value::as_str) {
                 if !text.is_empty() {
-                    content.push(CanonicalContent::text(text));
+                    content.push(verlet_history::CanonicalContent::text(text));
                 }
             }
         }
         let has_tool_use = content
             .iter()
-            .any(|content| matches!(content, CanonicalContent::ToolCall { .. }));
+            .any(|content| matches!(content, verlet_history::CanonicalContent::ToolCall { .. }));
         Ok(ProviderResponse {
             content,
             usage: openai_responses_usage(body.get("usage")),
             stop_reason: if has_tool_use {
-                CanonicalStopReason::ToolUse
-            } else if body.get("status").and_then(Value::as_str) == Some("incomplete") {
-                CanonicalStopReason::MaxTokens
+                verlet_history::CanonicalStopReason::ToolUse
+            } else if body.get("status").and_then(serde_json::Value::as_str) == Some("incomplete") {
+                verlet_history::CanonicalStopReason::MaxTokens
             } else {
-                CanonicalStopReason::EndTurn
+                verlet_history::CanonicalStopReason::EndTurn
             },
         })
     }
@@ -1396,26 +1411,26 @@ impl ProviderWireAdapter for OpenAIResponsesAdapter {
 }
 
 impl ProviderWireAdapter for OpenAIChatCompletionsAdapter {
-    fn api(&self) -> ProviderApi {
-        ProviderApi::OpenAIChatCompletions
+    fn api(&self) -> verlet_history::ProviderApi {
+        verlet_history::ProviderApi::OpenAIChatCompletions
     }
 
-    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<Value> {
+    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<serde_json::Value> {
         self.capabilities()
             .validate_request(request, ProviderRequestMode::Complete)?;
         ensure_api(
             "openai_chat_completions",
             &request.api,
-            ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
         )?;
-        let mut body = json!({
+        let mut body = serde_json::json!({
             "model": request.model,
             "messages": build_chat_messages(&request.system, &request.messages),
             "max_tokens": request.max_tokens,
             "stream": false,
         });
         if let Some(temperature) = request.temperature {
-            body["temperature"] = json!(temperature);
+            body["temperature"] = serde_json::json!(temperature);
         }
         if let Some(thinking) = openai_chat_thinking(&request.provider, &request.thinking)? {
             for (key, value) in thinking {
@@ -1424,67 +1439,76 @@ impl ProviderWireAdapter for OpenAIChatCompletionsAdapter {
         }
         let tools = build_chat_tools(&request.tools);
         if !tools.is_empty() {
-            body["tools"] = Value::Array(tools);
-            body["tool_choice"] = json!("auto");
+            body["tools"] = serde_json::Value::Array(tools);
+            body["tool_choice"] = serde_json::json!("auto");
         }
         Ok(body)
     }
 
-    fn decode_response_body(&self, body: &Value) -> ProviderResult<ProviderResponse> {
+    fn decode_response_body(&self, body: &serde_json::Value) -> ProviderResult<ProviderResponse> {
         let choice = body
             .get("choices")
-            .and_then(Value::as_array)
+            .and_then(serde_json::Value::as_array)
             .and_then(|choices| choices.first())
             .ok_or_else(|| ProviderError::Decode("chat response had no choices".to_string()))?;
         let message = choice
             .get("message")
             .ok_or_else(|| ProviderError::Decode("chat choice had no message".to_string()))?;
         let mut content = Vec::new();
-        if let Some(text) = message.get("reasoning_content").and_then(Value::as_str) {
+        if let Some(text) = message
+            .get("reasoning_content")
+            .and_then(serde_json::Value::as_str)
+        {
             if !text.is_empty() {
-                content.push(CanonicalContent::Thinking {
+                content.push(verlet_history::CanonicalContent::Thinking {
                     text: text.to_string(),
-                    provider: ThinkingProvider::OpenAICompatible,
-                    metadata: ThinkingMetadata::None,
+                    provider: verlet_history::ThinkingProvider::OpenAICompatible,
+                    metadata: verlet_history::ThinkingMetadata::None,
                 });
             }
         }
-        if let Some(text) = message.get("content").and_then(Value::as_str) {
+        if let Some(text) = message.get("content").and_then(serde_json::Value::as_str) {
             if !text.is_empty() {
-                content.push(CanonicalContent::text(text));
+                content.push(verlet_history::CanonicalContent::text(text));
             }
         }
         for tool_call in message
             .get("tool_calls")
-            .and_then(Value::as_array)
+            .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
         {
             let id = tool_call
                 .get("id")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            let function = tool_call.get("function").unwrap_or(&Value::Null);
+            let function = tool_call
+                .get("function")
+                .unwrap_or(&serde_json::Value::Null);
             let name = function
                 .get("name")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             let arguments = function
                 .get("arguments")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .map(|raw| parse_tool_arguments(raw, "chat tool call arguments"))
                 .transpose()?
-                .unwrap_or_else(|| json!({}));
-            content.push(CanonicalContent::tool_call(id, name, arguments));
+                .unwrap_or_else(|| serde_json::json!({}));
+            content.push(verlet_history::CanonicalContent::tool_call(
+                id, name, arguments,
+            ));
         }
         let has_tool_use = content
             .iter()
-            .any(|content| matches!(content, CanonicalContent::ToolCall { .. }));
+            .any(|content| matches!(content, verlet_history::CanonicalContent::ToolCall { .. }));
         Ok(ProviderResponse {
             content,
             usage: chat_usage(body.get("usage")),
             stop_reason: chat_stop_reason(
-                choice.get("finish_reason").and_then(Value::as_str),
+                choice
+                    .get("finish_reason")
+                    .and_then(serde_json::Value::as_str),
                 has_tool_use,
             ),
         })
@@ -1496,17 +1520,17 @@ impl ProviderWireAdapter for OpenAIChatCompletionsAdapter {
 }
 
 impl ProviderWireAdapter for AnthropicMessagesAdapter {
-    fn api(&self) -> ProviderApi {
-        ProviderApi::AnthropicMessages
+    fn api(&self) -> verlet_history::ProviderApi {
+        verlet_history::ProviderApi::AnthropicMessages
     }
 
-    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<Value> {
+    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<serde_json::Value> {
         self.capabilities()
             .validate_request(request, ProviderRequestMode::Complete)?;
         ensure_api(
             "anthropic_messages",
             &request.api,
-            ProviderApi::AnthropicMessages,
+            verlet_history::ProviderApi::AnthropicMessages,
         )?;
         Ok(build_anthropic_messages_body(
             request,
@@ -1514,11 +1538,11 @@ impl ProviderWireAdapter for AnthropicMessagesAdapter {
         ))
     }
 
-    fn decode_response_body(&self, body: &Value) -> ProviderResult<ProviderResponse> {
+    fn decode_response_body(&self, body: &serde_json::Value) -> ProviderResult<ProviderResponse> {
         let mut content = Vec::new();
         for block in body
             .get("content")
-            .and_then(Value::as_array)
+            .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
         {
@@ -1529,7 +1553,9 @@ impl ProviderWireAdapter for AnthropicMessagesAdapter {
         Ok(ProviderResponse {
             content,
             usage: anthropic_usage(body.get("usage")),
-            stop_reason: anthropic_stop_reason(body.get("stop_reason").and_then(Value::as_str)),
+            stop_reason: anthropic_stop_reason(
+                body.get("stop_reason").and_then(serde_json::Value::as_str),
+            ),
         })
     }
 
@@ -1539,23 +1565,24 @@ impl ProviderWireAdapter for AnthropicMessagesAdapter {
 }
 
 impl ProviderWireAdapter for AnthropicBedrockMessagesAdapter {
-    fn api(&self) -> ProviderApi {
-        ProviderApi::AnthropicMessages
+    fn api(&self) -> verlet_history::ProviderApi {
+        verlet_history::ProviderApi::AnthropicMessages
     }
 
     fn capabilities(&self) -> ProviderCapabilityRecord {
-        let mut capabilities = ProviderCapabilityRecord::for_api(ProviderApi::AnthropicMessages);
+        let mut capabilities =
+            ProviderCapabilityRecord::for_api(verlet_history::ProviderApi::AnthropicMessages);
         capabilities.provider_family = "anthropic_bedrock_messages".to_string();
         capabilities
     }
 
-    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<Value> {
+    fn build_request_body(&self, request: &ProviderRequest) -> ProviderResult<serde_json::Value> {
         self.capabilities()
             .validate_request(request, ProviderRequestMode::Complete)?;
         ensure_api(
             "anthropic_bedrock_messages",
             &request.api,
-            ProviderApi::AnthropicMessages,
+            verlet_history::ProviderApi::AnthropicMessages,
         )?;
         Ok(build_anthropic_messages_body(
             request,
@@ -1563,13 +1590,16 @@ impl ProviderWireAdapter for AnthropicBedrockMessagesAdapter {
         ))
     }
 
-    fn build_stream_request_body(&self, request: &ProviderRequest) -> ProviderResult<Value> {
+    fn build_stream_request_body(
+        &self,
+        request: &ProviderRequest,
+    ) -> ProviderResult<serde_json::Value> {
         self.capabilities()
             .validate_request(request, ProviderRequestMode::Stream)?;
         ensure_api(
             "anthropic_bedrock_messages",
             &request.api,
-            ProviderApi::AnthropicMessages,
+            verlet_history::ProviderApi::AnthropicMessages,
         )?;
         Ok(build_anthropic_messages_body(
             request,
@@ -1585,7 +1615,7 @@ impl ProviderWireAdapter for AnthropicBedrockMessagesAdapter {
         vec![("x-amzn-bedrock-accept", "application/json")]
     }
 
-    fn decode_response_body(&self, body: &Value) -> ProviderResult<ProviderResponse> {
+    fn decode_response_body(&self, body: &serde_json::Value) -> ProviderResult<ProviderResponse> {
         AnthropicMessagesAdapter.decode_response_body(body)
     }
 
@@ -1607,28 +1637,28 @@ enum AnthropicRequestFlavor {
 fn build_anthropic_messages_body(
     request: &ProviderRequest,
     flavor: AnthropicRequestFlavor,
-) -> Value {
-    let mut body = json!({
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "max_tokens": request.max_tokens,
         "messages": build_anthropic_messages(&request.messages),
     });
     match flavor {
         AnthropicRequestFlavor::Native => {
-            body["model"] = json!(request.model);
+            body["model"] = serde_json::json!(request.model);
         }
         AnthropicRequestFlavor::Bedrock => {
-            body["anthropic_version"] = json!(BEDROCK_ANTHROPIC_VERSION);
+            body["anthropic_version"] = serde_json::json!(BEDROCK_ANTHROPIC_VERSION);
         }
     }
     if !request.system.is_empty() {
-        body["system"] = Value::Array(
+        body["system"] = serde_json::Value::Array(
             request
                 .system
                 .iter()
                 .map(|block| {
-                    let mut value = json!({"type": "text", "text": block.text});
+                    let mut value = serde_json::json!({"type": "text", "text": block.text});
                     if let Some(cache_control) = &block.cache_control {
-                        value["cache_control"] = json!(cache_control);
+                        value["cache_control"] = serde_json::json!(cache_control);
                     }
                     value
                 })
@@ -1636,18 +1666,18 @@ fn build_anthropic_messages_body(
         );
     }
     if !request.tools.is_empty() {
-        body["tools"] = Value::Array(
+        body["tools"] = serde_json::Value::Array(
             request
                 .tools
                 .iter()
                 .map(|tool| {
-                    let mut value = json!({
+                    let mut value = serde_json::json!({
                         "name": tool.name,
                         "description": tool.description,
                         "input_schema": tool.input_schema,
                     });
                     if let Some(cache_control) = &tool.cache_control {
-                        value["cache_control"] = json!(cache_control);
+                        value["cache_control"] = serde_json::json!(cache_control);
                     }
                     value
                 })
@@ -1660,15 +1690,15 @@ fn build_anthropic_messages_body(
         }
         body["thinking"] = thinking["thinking"].clone();
     } else if let Some(temperature) = request.temperature {
-        body["temperature"] = json!(temperature);
+        body["temperature"] = serde_json::json!(temperature);
     }
     body
 }
 
 fn ensure_api(
     adapter: &'static str,
-    actual: &ProviderApi,
-    expected: ProviderApi,
+    actual: &verlet_history::ProviderApi,
+    expected: verlet_history::ProviderApi,
 ) -> ProviderResult<()> {
     if *actual == expected {
         Ok(())
@@ -1689,26 +1719,26 @@ fn joined_system(system: &[SystemBlock]) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
-fn text_from_content(content: &[CanonicalContent], separator: &str) -> String {
+fn text_from_content(content: &[verlet_history::CanonicalContent], separator: &str) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join(separator)
 }
 
-fn text_from_tool_result_content(content: &[CanonicalContent]) -> String {
+fn text_from_tool_result_content(content: &[verlet_history::CanonicalContent]) -> String {
     text_from_content(content, "\n")
 }
 
-fn build_openai_responses_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+fn build_openai_responses_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
     tools
         .iter()
         .map(|tool| {
-            json!({
+            serde_json::json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
@@ -1719,81 +1749,86 @@ fn build_openai_responses_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn build_openai_responses_input(messages: &[CanonicalMessage]) -> Vec<Value> {
+fn build_openai_responses_input(
+    messages: &[verlet_history::CanonicalMessage],
+) -> Vec<serde_json::Value> {
     let mut input = Vec::new();
     for message in messages {
         match message {
-            CanonicalMessage::User { content, .. } => {
+            verlet_history::CanonicalMessage::User { content, .. } => {
                 let text = text_from_content(content, "\n");
                 if !text.is_empty() {
-                    input.push(json!({"role": "user", "content": text}));
+                    input.push(serde_json::json!({"role": "user", "content": text}));
                 }
                 for image in content.iter().filter_map(image_data_url) {
-                    input.push(json!({
+                    input.push(serde_json::json!({
                         "role": "user",
                         "content": [{"type": "input_image", "image_url": image}],
                     }));
                 }
             }
-            CanonicalMessage::Assistant { content, .. } => {
+            verlet_history::CanonicalMessage::Assistant { content, .. } => {
                 let mut text = String::new();
                 for block in content {
                     match block {
-                        CanonicalContent::Text { text: chunk, .. } => text.push_str(chunk),
-                        CanonicalContent::Thinking {
+                        verlet_history::CanonicalContent::Text { text: chunk, .. } => {
+                            text.push_str(chunk)
+                        }
+                        verlet_history::CanonicalContent::Thinking {
                             text: thinking,
-                            provider: ThinkingProvider::OpenAIResponses,
+                            provider: verlet_history::ThinkingProvider::OpenAIResponses,
                             metadata:
-                                ThinkingMetadata::OpenAIResponses {
+                                verlet_history::ThinkingMetadata::OpenAIResponses {
                                     item_id,
                                     encrypted_content,
                                     ..
                                 },
                         } => {
                             flush_openai_responses_text(&mut input, "assistant", &mut text);
-                            let mut item = json!({
+                            let mut item = serde_json::json!({
                                 "type": "reasoning",
                                 "summary": [{"type": "summary_text", "text": thinking}],
                             });
                             if let Some(item_id) = item_id {
-                                item["id"] = json!(item_id);
+                                item["id"] = serde_json::json!(item_id);
                             }
                             if let Some(encrypted_content) = encrypted_content {
-                                item["encrypted_content"] = json!(encrypted_content);
+                                item["encrypted_content"] = serde_json::json!(encrypted_content);
                             }
                             input.push(item);
                         }
-                        CanonicalContent::ToolCall {
+                        verlet_history::CanonicalContent::ToolCall {
                             id,
                             name,
                             arguments,
                         } => {
                             flush_openai_responses_text(&mut input, "assistant", &mut text);
                             let (call_id, item_id) = split_tool_call_id(id);
-                            let mut item = json!({
+                            let mut item = serde_json::json!({
                                 "type": "function_call",
                                 "call_id": call_id,
                                 "name": name,
                                 "arguments": arguments.to_string(),
                             });
                             if let Some(item_id) = item_id {
-                                item["id"] = json!(item_id);
+                                item["id"] = serde_json::json!(item_id);
                             }
                             input.push(item);
                         }
-                        CanonicalContent::Thinking { .. } | CanonicalContent::Image { .. } => {}
+                        verlet_history::CanonicalContent::Thinking { .. }
+                        | verlet_history::CanonicalContent::Image { .. } => {}
                     }
                 }
                 flush_openai_responses_text(&mut input, "assistant", &mut text);
             }
-            CanonicalMessage::ToolResult {
+            verlet_history::CanonicalMessage::ToolResult {
                 tool_call_id,
                 content,
                 is_error,
                 ..
             } => {
                 let output = text_from_tool_result_content(content);
-                input.push(json!({
+                input.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": split_tool_call_id(tool_call_id).0,
                     "output": if *is_error { format!("[error] {output}") } else { output },
@@ -1804,9 +1839,9 @@ fn build_openai_responses_input(messages: &[CanonicalMessage]) -> Vec<Value> {
     input
 }
 
-fn flush_openai_responses_text(input: &mut Vec<Value>, role: &str, text: &mut String) {
+fn flush_openai_responses_text(input: &mut Vec<serde_json::Value>, role: &str, text: &mut String) {
     if !text.is_empty() {
-        input.push(json!({"role": role, "content": std::mem::take(text)}));
+        input.push(serde_json::json!({"role": role, "content": std::mem::take(text)}));
     }
 }
 
@@ -1827,18 +1862,18 @@ fn openai_reasoning(
     provider: &str,
     thinking: &Option<ThinkingConfig>,
     summary: &OpenAIReasoningSummary,
-) -> ProviderResult<Option<Value>> {
+) -> ProviderResult<Option<serde_json::Value>> {
     match thinking {
         Some(ThinkingConfig::Disabled) | None => Ok(None),
         Some(ThinkingConfig::Budget { .. }) => Err(ProviderError::UnsupportedCapability {
             provider: provider.to_string(),
-            api: ProviderApi::OpenAIResponses,
+            api: verlet_history::ProviderApi::OpenAIResponses,
             capability: "thinking_budget",
             detail: "budget-based thinking does not map to OpenAI Responses reasoning; \
                      configure effort-based thinking for this provider"
                 .to_string(),
         }),
-        Some(ThinkingConfig::Effort { effort }) => Ok(Some(json!({
+        Some(ThinkingConfig::Effort { effort }) => Ok(Some(serde_json::json!({
             "effort": effort.as_openai_wire(),
             "summary": summary.as_wire(),
         }))),
@@ -1848,20 +1883,23 @@ fn openai_reasoning(
 fn openai_chat_thinking(
     provider: &str,
     thinking: &Option<ThinkingConfig>,
-) -> ProviderResult<Option<Vec<(&'static str, Value)>>> {
+) -> ProviderResult<Option<Vec<(&'static str, serde_json::Value)>>> {
     let zhipu_convention = ZHIPU_CONVENTION_CHAT_PROVIDERS.contains(&provider);
     match thinking {
         None => Ok(None),
         Some(ThinkingConfig::Disabled) => {
             if zhipu_convention {
-                Ok(Some(vec![("thinking", json!({"type": "disabled"}))]))
+                Ok(Some(vec![(
+                    "thinking",
+                    serde_json::json!({"type": "disabled"}),
+                )]))
             } else {
                 Ok(None)
             }
         }
         Some(ThinkingConfig::Budget { .. }) => Err(ProviderError::UnsupportedCapability {
             provider: provider.to_string(),
-            api: ProviderApi::OpenAIChatCompletions,
+            api: verlet_history::ProviderApi::OpenAIChatCompletions,
             capability: "thinking_budget",
             detail: "budget-based thinking does not map to OpenAI Chat Completions reasoning; \
                      configure effort-based thinking for this provider"
@@ -1869,16 +1907,19 @@ fn openai_chat_thinking(
         }),
         Some(ThinkingConfig::Effort { effort }) => match effort {
             ThinkingEffort::Low | ThinkingEffort::Medium | ThinkingEffort::High => {
-                let mut values = vec![("reasoning_effort", json!(effort.as_openai_wire()))];
+                let mut values = vec![(
+                    "reasoning_effort",
+                    serde_json::json!(effort.as_openai_wire()),
+                )];
                 if zhipu_convention {
-                    values.push(("thinking", json!({"type": "enabled"})));
+                    values.push(("thinking", serde_json::json!({"type": "enabled"})));
                 }
                 Ok(Some(values))
             }
             ThinkingEffort::XHigh | ThinkingEffort::Max | ThinkingEffort::Other(_) => {
                 Err(ProviderError::UnsupportedCapability {
                     provider: provider.to_string(),
-                    api: ProviderApi::OpenAIChatCompletions,
+                    api: verlet_history::ProviderApi::OpenAIChatCompletions,
                     capability: "thinking_effort",
                     detail: format!(
                         "OpenAI Chat Completions reasoning_effort supports low, medium, or high; got {}",
@@ -1891,25 +1932,25 @@ fn openai_chat_thinking(
 }
 
 fn decode_openai_responses_output_item(
-    item: &Value,
+    item: &serde_json::Value,
     output_index: usize,
-    content: &mut Vec<CanonicalContent>,
+    content: &mut Vec<verlet_history::CanonicalContent>,
 ) -> ProviderResult<()> {
-    match item.get("type").and_then(Value::as_str) {
+    match item.get("type").and_then(serde_json::Value::as_str) {
         Some("message") => {
             for part in item
                 .get("content")
-                .and_then(Value::as_array)
+                .and_then(serde_json::Value::as_array)
                 .into_iter()
                 .flatten()
             {
                 if let Some(text) = part
                     .get("text")
                     .or_else(|| part.get("refusal"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                 {
                     if !text.is_empty() {
-                        content.push(CanonicalContent::text(text));
+                        content.push(verlet_history::CanonicalContent::text(text));
                     }
                 }
             }
@@ -1917,40 +1958,46 @@ fn decode_openai_responses_output_item(
         Some("function_call") => {
             let call_id = item
                 .get("call_id")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            let item_id = item.get("id").and_then(Value::as_str);
-            let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+            let item_id = item.get("id").and_then(serde_json::Value::as_str);
+            let name = item
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
             let arguments = item
                 .get("arguments")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .map(|raw| parse_tool_arguments(raw, "OpenAI Responses function arguments"))
                 .transpose()?
-                .unwrap_or_else(|| json!({}));
-            content.push(CanonicalContent::tool_call(
+                .unwrap_or_else(|| serde_json::json!({}));
+            content.push(verlet_history::CanonicalContent::tool_call(
                 combined_tool_call_id(call_id, item_id),
                 name,
                 arguments,
             ));
         }
         Some("reasoning") => {
-            let item_id = item.get("id").and_then(Value::as_str).map(str::to_string);
+            let item_id = item
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             let encrypted_content = item
                 .get("encrypted_content")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
             for (summary_index, part) in item
                 .get("summary")
-                .and_then(Value::as_array)
+                .and_then(serde_json::Value::as_array)
                 .into_iter()
                 .flatten()
                 .enumerate()
             {
-                if let Some(text) = part.get("text").and_then(Value::as_str) {
-                    content.push(CanonicalContent::Thinking {
+                if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                    content.push(verlet_history::CanonicalContent::Thinking {
                         text: text.to_string(),
-                        provider: ThinkingProvider::OpenAIResponses,
-                        metadata: ThinkingMetadata::OpenAIResponses {
+                        provider: verlet_history::ThinkingProvider::OpenAIResponses,
+                        metadata: verlet_history::ThinkingMetadata::OpenAIResponses {
                             item_id: item_id.clone(),
                             output_index: Some(output_index),
                             summary_index,
@@ -1965,28 +2012,28 @@ fn decode_openai_responses_output_item(
     Ok(())
 }
 
-fn parse_tool_arguments(raw: &str, context: &str) -> ProviderResult<Value> {
+fn parse_tool_arguments(raw: &str, context: &str) -> ProviderResult<serde_json::Value> {
     serde_json::from_str(raw)
         .map_err(|err| ProviderError::Decode(format!("invalid {context}: {err}")))
 }
 
-fn openai_responses_usage(value: Option<&Value>) -> CanonicalUsage {
+fn openai_responses_usage(value: Option<&serde_json::Value>) -> verlet_history::CanonicalUsage {
     let Some(value) = value else {
-        return CanonicalUsage::default();
+        return verlet_history::CanonicalUsage::default();
     };
-    CanonicalUsage {
+    verlet_history::CanonicalUsage {
         input_tokens: value
             .get("input_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         output_tokens: value
             .get("output_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: value
             .pointer("/input_tokens_details/cached_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
     }
 }
@@ -2040,39 +2087,39 @@ fn decode_openai_responses_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEv
                 .any(|event| matches!(event, ProviderStreamEvent::Done { .. }))
             {
                 out.push(ProviderStreamEvent::Done {
-                    stop_reason: CanonicalStopReason::EndTurn,
+                    stop_reason: verlet_history::CanonicalStopReason::EndTurn,
                 });
             }
             continue;
         }
-        let value: Value = serde_json::from_str(&event.data)
+        let value: serde_json::Value = serde_json::from_str(&event.data)
             .map_err(|err| ProviderError::Decode(format!("invalid OpenAI SSE JSON: {err}")))?;
         let kind = event
             .event
             .as_deref()
-            .or_else(|| value.get("type").and_then(Value::as_str))
+            .or_else(|| value.get("type").and_then(serde_json::Value::as_str))
             .unwrap_or_default();
         match kind {
             "response.output_text.delta" => {
-                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
                     out.push(ProviderStreamEvent::TextDelta {
                         text: delta.to_string(),
                     });
                 }
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
                     out.push(ProviderStreamEvent::ThinkingDelta {
                         text: delta.to_string(),
                     });
                 }
             }
             "response.function_call_arguments.delta" => {
-                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                    let item_id = value.get("item_id").and_then(Value::as_str);
+                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
+                    let item_id = value.get("item_id").and_then(serde_json::Value::as_str);
                     let call_id = value
                         .get("call_id")
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         .or(item_id)
                         .unwrap_or_default();
                     out.push(ProviderStreamEvent::ToolCallDelta {
@@ -2095,7 +2142,7 @@ fn decode_openai_responses_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEv
             "response.completed" | "response.incomplete" => {
                 let response = value.get("response").unwrap_or(&value);
                 let decoded = OpenAIResponsesAdapter::default().decode_response_body(response)?;
-                if decoded.usage != CanonicalUsage::default() {
+                if decoded.usage != verlet_history::CanonicalUsage::default() {
                     out.push(ProviderStreamEvent::Usage {
                         usage: decoded.usage,
                     });
@@ -2108,7 +2155,7 @@ fn decode_openai_responses_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEv
                 message: value
                     .pointer("/response/error/message")
                     .or_else(|| value.pointer("/error/message"))
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("OpenAI Responses stream failed")
                     .to_string(),
             }),
@@ -2118,11 +2165,11 @@ fn decode_openai_responses_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEv
     Ok(out)
 }
 
-fn build_chat_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+fn build_chat_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
     tools
         .iter()
         .map(|tool| {
-            json!({
+            serde_json::json!({
                 "type": "function",
                 "function": {
                     "name": tool.name,
@@ -2134,30 +2181,35 @@ fn build_chat_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn build_chat_messages(system: &[SystemBlock], messages: &[CanonicalMessage]) -> Vec<Value> {
+fn build_chat_messages(
+    system: &[SystemBlock],
+    messages: &[verlet_history::CanonicalMessage],
+) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     if let Some(system) = joined_system(system) {
-        out.push(json!({"role": "system", "content": system}));
+        out.push(serde_json::json!({"role": "system", "content": system}));
     }
     for message in messages {
         match message {
-            CanonicalMessage::User { content, .. } => {
+            verlet_history::CanonicalMessage::User { content, .. } => {
                 let text = text_from_content(content, "\n");
                 if !text.is_empty() {
-                    out.push(json!({"role": "user", "content": text}));
+                    out.push(serde_json::json!({"role": "user", "content": text}));
                 }
             }
-            CanonicalMessage::Assistant { content, .. } => {
+            verlet_history::CanonicalMessage::Assistant { content, .. } => {
                 let mut text = String::new();
                 let mut tool_calls = Vec::new();
                 for block in content {
                     match block {
-                        CanonicalContent::Text { text: chunk, .. } => text.push_str(chunk),
-                        CanonicalContent::ToolCall {
+                        verlet_history::CanonicalContent::Text { text: chunk, .. } => {
+                            text.push_str(chunk)
+                        }
+                        verlet_history::CanonicalContent::ToolCall {
                             id,
                             name,
                             arguments,
-                        } => tool_calls.push(json!({
+                        } => tool_calls.push(serde_json::json!({
                             "id": id,
                             "type": "function",
                             "function": {
@@ -2167,28 +2219,29 @@ fn build_chat_messages(system: &[SystemBlock], messages: &[CanonicalMessage]) ->
                         })),
                         // Chat-completions reasoning_content is output-only provider state;
                         // provider docs exclude prior reasoning from later requests.
-                        CanonicalContent::Image { .. } | CanonicalContent::Thinking { .. } => {}
+                        verlet_history::CanonicalContent::Image { .. }
+                        | verlet_history::CanonicalContent::Thinking { .. } => {}
                     }
                 }
                 if !text.is_empty() || !tool_calls.is_empty() {
-                    let mut message = json!({"role": "assistant"});
+                    let mut message = serde_json::json!({"role": "assistant"});
                     if !text.is_empty() {
-                        message["content"] = json!(text);
+                        message["content"] = serde_json::json!(text);
                     }
                     if !tool_calls.is_empty() {
-                        message["tool_calls"] = Value::Array(tool_calls);
+                        message["tool_calls"] = serde_json::Value::Array(tool_calls);
                     }
                     out.push(message);
                 }
             }
-            CanonicalMessage::ToolResult {
+            verlet_history::CanonicalMessage::ToolResult {
                 tool_call_id,
                 content,
                 is_error,
                 ..
             } => {
                 let text = text_from_tool_result_content(content);
-                out.push(json!({
+                out.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
                     "content": if *is_error { format!("[error] {text}") } else { text },
@@ -2199,31 +2252,34 @@ fn build_chat_messages(system: &[SystemBlock], messages: &[CanonicalMessage]) ->
     out
 }
 
-fn chat_usage(value: Option<&Value>) -> CanonicalUsage {
+fn chat_usage(value: Option<&serde_json::Value>) -> verlet_history::CanonicalUsage {
     let Some(value) = value else {
-        return CanonicalUsage::default();
+        return verlet_history::CanonicalUsage::default();
     };
-    CanonicalUsage {
+    verlet_history::CanonicalUsage {
         input_tokens: value
             .get("prompt_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         output_tokens: value
             .get("completion_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
     }
 }
 
-fn chat_stop_reason(finish_reason: Option<&str>, has_tool_use: bool) -> CanonicalStopReason {
+fn chat_stop_reason(
+    finish_reason: Option<&str>,
+    has_tool_use: bool,
+) -> verlet_history::CanonicalStopReason {
     match finish_reason {
-        Some("tool_calls") | Some("function_call") => CanonicalStopReason::ToolUse,
-        Some("length") => CanonicalStopReason::MaxTokens,
-        Some("stop_sequence") => CanonicalStopReason::StopSequence,
-        _ if has_tool_use => CanonicalStopReason::ToolUse,
-        _ => CanonicalStopReason::EndTurn,
+        Some("tool_calls") | Some("function_call") => verlet_history::CanonicalStopReason::ToolUse,
+        Some("length") => verlet_history::CanonicalStopReason::MaxTokens,
+        Some("stop_sequence") => verlet_history::CanonicalStopReason::StopSequence,
+        _ if has_tool_use => verlet_history::CanonicalStopReason::ToolUse,
+        _ => verlet_history::CanonicalStopReason::EndTurn,
     }
 }
 
@@ -2237,28 +2293,28 @@ fn decode_openai_chat_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>>
                 .any(|event| matches!(event, ProviderStreamEvent::Done { .. }))
             {
                 out.push(ProviderStreamEvent::Done {
-                    stop_reason: CanonicalStopReason::EndTurn,
+                    stop_reason: verlet_history::CanonicalStopReason::EndTurn,
                 });
             }
             continue;
         }
-        let value: Value = serde_json::from_str(&event.data)
+        let value: serde_json::Value = serde_json::from_str(&event.data)
             .map_err(|err| ProviderError::Decode(format!("invalid chat SSE JSON: {err}")))?;
         if let Some(usage) = value.get("usage") {
             let usage = chat_usage(Some(usage));
-            if usage != CanonicalUsage::default() {
+            if usage != verlet_history::CanonicalUsage::default() {
                 out.push(ProviderStreamEvent::Usage { usage });
             }
         }
         for choice in value
             .get("choices")
-            .and_then(Value::as_array)
+            .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
         {
             if let Some(delta) = choice
                 .pointer("/delta/reasoning_content")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
             {
                 if !delta.is_empty() {
                     out.push(ProviderStreamEvent::ThinkingDelta {
@@ -2266,7 +2322,10 @@ fn decode_openai_chat_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>>
                     });
                 }
             }
-            if let Some(delta) = choice.pointer("/delta/content").and_then(Value::as_str) {
+            if let Some(delta) = choice
+                .pointer("/delta/content")
+                .and_then(serde_json::Value::as_str)
+            {
                 if !delta.is_empty() {
                     out.push(ProviderStreamEvent::TextDelta {
                         text: delta.to_string(),
@@ -2275,14 +2334,17 @@ fn decode_openai_chat_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>>
             }
             for tool_call in choice
                 .pointer("/delta/tool_calls")
-                .and_then(Value::as_array)
+                .and_then(serde_json::Value::as_array)
                 .into_iter()
                 .flatten()
             {
-                let index = tool_call.get("index").and_then(Value::as_u64).unwrap_or(0);
+                let index = tool_call
+                    .get("index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
                 let id = tool_call
                     .get("id")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .map(|id| {
                         tool_call_ids.insert(index, id.to_string());
                         id.to_string()
@@ -2291,11 +2353,11 @@ fn decode_openai_chat_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>>
                     .unwrap_or_else(|| format!("tool_call_index_{index}"));
                 let name = tool_call
                     .pointer("/function/name")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
                 let arguments_delta = tool_call
                     .pointer("/function/arguments")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_string();
                 if name.is_some() || !arguments_delta.is_empty() {
@@ -2306,7 +2368,10 @@ fn decode_openai_chat_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>>
                     });
                 }
             }
-            if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            if let Some(finish_reason) = choice
+                .get("finish_reason")
+                .and_then(serde_json::Value::as_str)
+            {
                 out.push(ProviderStreamEvent::Done {
                     stop_reason: chat_stop_reason(Some(finish_reason), false),
                 });
@@ -2316,58 +2381,60 @@ fn decode_openai_chat_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>>
     Ok(out)
 }
 
-fn build_anthropic_messages(messages: &[CanonicalMessage]) -> Vec<Value> {
+fn build_anthropic_messages(
+    messages: &[verlet_history::CanonicalMessage],
+) -> Vec<serde_json::Value> {
     messages
         .iter()
         .filter_map(|message| {
             let (role, content) = match message {
-                CanonicalMessage::User { content, .. } => (
+                verlet_history::CanonicalMessage::User { content, .. } => (
                     "user",
                     content.iter().filter_map(anthropic_content).collect(),
                 ),
-                CanonicalMessage::Assistant { content, .. } => (
+                verlet_history::CanonicalMessage::Assistant { content, .. } => (
                     "assistant",
                     content.iter().filter_map(anthropic_content).collect(),
                 ),
-                CanonicalMessage::ToolResult {
+                verlet_history::CanonicalMessage::ToolResult {
                     tool_call_id,
                     content,
                     is_error,
                     cache_control,
                     ..
                 } => {
-                    let mut block = json!({
+                    let mut block = serde_json::json!({
                         "type": "tool_result",
                         "tool_use_id": anthropic_tool_id(tool_call_id),
                         "content": text_from_tool_result_content(content),
                     });
                     if *is_error {
-                        block["is_error"] = json!(true);
+                        block["is_error"] = serde_json::json!(true);
                     }
                     if let Some(cache_control) = cache_control {
-                        block["cache_control"] = json!(cache_control);
+                        block["cache_control"] = serde_json::json!(cache_control);
                     }
                     ("user", vec![block])
                 }
             };
-            (!content.is_empty()).then(|| json!({"role": role, "content": content}))
+            (!content.is_empty()).then(|| serde_json::json!({"role": role, "content": content}))
         })
         .collect()
 }
 
-fn anthropic_content(content: &CanonicalContent) -> Option<Value> {
+fn anthropic_content(content: &verlet_history::CanonicalContent) -> Option<serde_json::Value> {
     match content {
-        CanonicalContent::Text {
+        verlet_history::CanonicalContent::Text {
             text,
             cache_control,
         } => {
-            let mut value = json!({"type": "text", "text": text});
+            let mut value = serde_json::json!({"type": "text", "text": text});
             if let Some(cache_control) = cache_control {
-                value["cache_control"] = json!(cache_control);
+                value["cache_control"] = serde_json::json!(cache_control);
             }
             Some(value)
         }
-        CanonicalContent::Image { data, mime_type } => Some(json!({
+        verlet_history::CanonicalContent::Image { data, mime_type } => Some(serde_json::json!({
             "type": "image",
             "source": {
                 "type": "base64",
@@ -2375,33 +2442,33 @@ fn anthropic_content(content: &CanonicalContent) -> Option<Value> {
                 "data": data,
             }
         })),
-        CanonicalContent::Thinking {
+        verlet_history::CanonicalContent::Thinking {
             text,
-            provider: ThinkingProvider::Anthropic,
-            metadata: ThinkingMetadata::Anthropic { signature },
+            provider: verlet_history::ThinkingProvider::Anthropic,
+            metadata: verlet_history::ThinkingMetadata::Anthropic { signature },
         } => {
-            let mut value = json!({"type": "thinking", "thinking": text});
+            let mut value = serde_json::json!({"type": "thinking", "thinking": text});
             if let Some(signature) = signature {
-                value["signature"] = json!(signature);
+                value["signature"] = serde_json::json!(signature);
             }
             Some(value)
         }
-        CanonicalContent::Thinking {
-            provider: ThinkingProvider::Anthropic,
-            metadata: ThinkingMetadata::AnthropicRedacted { data },
+        verlet_history::CanonicalContent::Thinking {
+            provider: verlet_history::ThinkingProvider::Anthropic,
+            metadata: verlet_history::ThinkingMetadata::AnthropicRedacted { data },
             ..
-        } => Some(json!({"type": "redacted_thinking", "data": data})),
-        CanonicalContent::ToolCall {
+        } => Some(serde_json::json!({"type": "redacted_thinking", "data": data})),
+        verlet_history::CanonicalContent::ToolCall {
             id,
             name,
             arguments,
-        } => Some(json!({
+        } => Some(serde_json::json!({
             "type": "tool_use",
             "id": anthropic_tool_id(id),
             "name": name,
             "input": arguments,
         })),
-        CanonicalContent::Thinking { .. } => None,
+        verlet_history::CanonicalContent::Thinking { .. } => None,
     }
 }
 
@@ -2433,104 +2500,110 @@ fn anthropic_tool_id(id: &str) -> String {
     format!("toolu_{hash:016x}")
 }
 
-fn anthropic_thinking(thinking: &Option<ThinkingConfig>) -> Option<Value> {
+fn anthropic_thinking(thinking: &Option<ThinkingConfig>) -> Option<serde_json::Value> {
     match thinking {
         Some(ThinkingConfig::Disabled) | None => None,
-        Some(ThinkingConfig::Budget { budget_tokens }) => Some(json!({
+        Some(ThinkingConfig::Budget { budget_tokens }) => Some(serde_json::json!({
             "thinking": {
                 "type": "enabled",
                 "budget_tokens": budget_tokens,
             }
         })),
         Some(ThinkingConfig::Effort { effort }) => {
-            let mut value = json!({
+            let mut value = serde_json::json!({
                 "thinking": {
                     "type": "adaptive",
                     "display": "summarized",
                 }
             });
-            value["output_config"] = json!({"effort": effort.as_anthropic_wire()});
+            value["output_config"] = serde_json::json!({"effort": effort.as_anthropic_wire()});
             Some(value)
         }
     }
 }
 
-fn decode_anthropic_content(block: &Value) -> Option<CanonicalContent> {
-    match block.get("type").and_then(Value::as_str) {
-        Some("text") => Some(CanonicalContent::text(
+fn decode_anthropic_content(block: &serde_json::Value) -> Option<verlet_history::CanonicalContent> {
+    match block.get("type").and_then(serde_json::Value::as_str) {
+        Some("text") => Some(verlet_history::CanonicalContent::text(
             block
                 .get("text")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default(),
         )),
-        Some("thinking") => Some(CanonicalContent::Thinking {
+        Some("thinking") => Some(verlet_history::CanonicalContent::Thinking {
             text: block
                 .get("thinking")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            provider: ThinkingProvider::Anthropic,
-            metadata: ThinkingMetadata::Anthropic {
+            provider: verlet_history::ThinkingProvider::Anthropic,
+            metadata: verlet_history::ThinkingMetadata::Anthropic {
                 signature: block
                     .get("signature")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
             },
         }),
-        Some("redacted_thinking") => Some(CanonicalContent::Thinking {
+        Some("redacted_thinking") => Some(verlet_history::CanonicalContent::Thinking {
             text: String::new(),
-            provider: ThinkingProvider::Anthropic,
-            metadata: ThinkingMetadata::AnthropicRedacted {
+            provider: verlet_history::ThinkingProvider::Anthropic,
+            metadata: verlet_history::ThinkingMetadata::AnthropicRedacted {
                 data: block
                     .get("data")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
             },
         }),
-        Some("tool_use") => Some(CanonicalContent::tool_call(
-            block.get("id").and_then(Value::as_str).unwrap_or_default(),
+        Some("tool_use") => Some(verlet_history::CanonicalContent::tool_call(
+            block
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
             block
                 .get("name")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default(),
-            block.get("input").cloned().unwrap_or_else(|| json!({})),
+            block
+                .get("input")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
         )),
         _ => None,
     }
 }
 
-fn anthropic_usage(value: Option<&Value>) -> CanonicalUsage {
+fn anthropic_usage(value: Option<&serde_json::Value>) -> verlet_history::CanonicalUsage {
     let Some(value) = value else {
-        return CanonicalUsage::default();
+        return verlet_history::CanonicalUsage::default();
     };
-    CanonicalUsage {
+    verlet_history::CanonicalUsage {
         input_tokens: value
             .get("input_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         output_tokens: value
             .get("output_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         cache_creation_input_tokens: value
             .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         cache_read_input_tokens: value
             .get("cache_read_input_tokens")
-            .and_then(Value::as_u64)
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
     }
 }
 
-fn anthropic_stop_reason(reason: Option<&str>) -> CanonicalStopReason {
+fn anthropic_stop_reason(reason: Option<&str>) -> verlet_history::CanonicalStopReason {
     match reason {
-        Some("tool_use") => CanonicalStopReason::ToolUse,
-        Some("max_tokens") => CanonicalStopReason::MaxTokens,
-        Some("stop_sequence") => CanonicalStopReason::StopSequence,
-        Some("pause_turn") => CanonicalStopReason::PauseTurn,
-        _ => CanonicalStopReason::EndTurn,
+        Some("tool_use") => verlet_history::CanonicalStopReason::ToolUse,
+        Some("max_tokens") => verlet_history::CanonicalStopReason::MaxTokens,
+        Some("stop_sequence") => verlet_history::CanonicalStopReason::StopSequence,
+        Some("pause_turn") => verlet_history::CanonicalStopReason::PauseTurn,
+        _ => verlet_history::CanonicalStopReason::EndTurn,
     }
 }
 
@@ -2540,32 +2613,38 @@ fn decode_anthropic_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>> {
     let mut tool_blocks = std::collections::BTreeMap::<u64, (String, Option<String>)>::new();
 
     for event in parse_sse(sse) {
-        let value: Value = serde_json::from_str(&event.data)
+        let value: serde_json::Value = serde_json::from_str(&event.data)
             .map_err(|err| ProviderError::Decode(format!("invalid Anthropic SSE JSON: {err}")))?;
         let kind = event
             .event
             .as_deref()
-            .or_else(|| value.get("type").and_then(Value::as_str))
+            .or_else(|| value.get("type").and_then(serde_json::Value::as_str))
             .unwrap_or_default();
         match kind {
             "message_start" => {
                 let usage = anthropic_usage(value.pointer("/message/usage"));
-                if usage != CanonicalUsage::default() {
+                if usage != verlet_history::CanonicalUsage::default() {
                     out.push(ProviderStreamEvent::Usage { usage });
                 }
             }
             "content_block_start" => {
-                if value.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use")
+                if value
+                    .pointer("/content_block/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("tool_use")
                 {
-                    let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    let index = value
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
                     let id = value
                         .pointer("/content_block/id")
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                         .to_string();
                     let name = value
                         .pointer("/content_block/name")
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         .map(str::to_string);
                     tool_blocks.insert(index, (id.clone(), name.clone()));
                     out.push(ProviderStreamEvent::ToolCallDelta {
@@ -2575,29 +2654,42 @@ fn decode_anthropic_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>> {
                     });
                 }
             }
-            "content_block_delta" => match value.pointer("/delta/type").and_then(Value::as_str) {
+            "content_block_delta" => match value
+                .pointer("/delta/type")
+                .and_then(serde_json::Value::as_str)
+            {
                 Some("text_delta") => {
-                    if let Some(text) = value.pointer("/delta/text").and_then(Value::as_str) {
+                    if let Some(text) = value
+                        .pointer("/delta/text")
+                        .and_then(serde_json::Value::as_str)
+                    {
                         out.push(ProviderStreamEvent::TextDelta {
                             text: text.to_string(),
                         });
                     }
                 }
                 Some("thinking_delta") => {
-                    if let Some(text) = value.pointer("/delta/thinking").and_then(Value::as_str) {
+                    if let Some(text) = value
+                        .pointer("/delta/thinking")
+                        .and_then(serde_json::Value::as_str)
+                    {
                         out.push(ProviderStreamEvent::ThinkingDelta {
                             text: text.to_string(),
                         });
                     }
                 }
                 Some("input_json_delta") => {
-                    let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    let index = value
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
                     let (id, name) = tool_blocks
                         .get(&index)
                         .cloned()
                         .unwrap_or_else(|| (format!("toolu_index_{index}"), None));
-                    if let Some(partial_json) =
-                        value.pointer("/delta/partial_json").and_then(Value::as_str)
+                    if let Some(partial_json) = value
+                        .pointer("/delta/partial_json")
+                        .and_then(serde_json::Value::as_str)
                     {
                         out.push(ProviderStreamEvent::ToolCallDelta {
                             id,
@@ -2610,20 +2702,23 @@ fn decode_anthropic_sse(sse: &str) -> ProviderResult<Vec<ProviderStreamEvent>> {
             },
             "message_delta" => {
                 pending_stop_reason = Some(anthropic_stop_reason(
-                    value.pointer("/delta/stop_reason").and_then(Value::as_str),
+                    value
+                        .pointer("/delta/stop_reason")
+                        .and_then(serde_json::Value::as_str),
                 ));
                 let usage = anthropic_usage(value.get("usage"));
-                if usage != CanonicalUsage::default() {
+                if usage != verlet_history::CanonicalUsage::default() {
                     out.push(ProviderStreamEvent::Usage { usage });
                 }
             }
             "message_stop" => out.push(ProviderStreamEvent::Done {
-                stop_reason: pending_stop_reason.unwrap_or(CanonicalStopReason::EndTurn),
+                stop_reason: pending_stop_reason
+                    .unwrap_or(verlet_history::CanonicalStopReason::EndTurn),
             }),
             "error" => out.push(ProviderStreamEvent::Error {
                 message: value
                     .pointer("/error/message")
-                    .and_then(Value::as_str)
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("Anthropic stream failed")
                     .to_string(),
             }),
@@ -2643,7 +2738,7 @@ fn bedrock_response_stream_endpoint_url(endpoint_url: &str) -> String {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AwsEventStreamFrame {
-    headers: BTreeMap<String, AwsEventStreamHeaderValue>,
+    headers: std::collections::BTreeMap<String, AwsEventStreamHeaderValue>,
     payload: Vec<u8>,
 }
 
@@ -2761,8 +2856,8 @@ fn decode_aws_eventstream_frames(body: &[u8]) -> ProviderResult<Vec<AwsEventStre
 
 fn decode_aws_eventstream_headers(
     mut bytes: &[u8],
-) -> ProviderResult<BTreeMap<String, AwsEventStreamHeaderValue>> {
-    let mut headers = BTreeMap::new();
+) -> ProviderResult<std::collections::BTreeMap<String, AwsEventStreamHeaderValue>> {
+    let mut headers = std::collections::BTreeMap::new();
     while !bytes.is_empty() {
         let name_length = take_u8(&mut bytes)? as usize;
         if name_length == 0 {
@@ -2822,13 +2917,13 @@ fn decode_bedrock_anthropic_eventstream(body: &[u8]) -> ProviderResult<Vec<Provi
             .headers
             .get(":event-type")
             .and_then(AwsEventStreamHeaderValue::as_str);
-        let payload: Value = serde_json::from_slice(&frame.payload).map_err(|err| {
+        let payload: serde_json::Value = serde_json::from_slice(&frame.payload).map_err(|err| {
             ProviderError::Decode(format!("invalid Bedrock eventstream payload JSON: {err}"))
         })?;
         if let Some(bytes) = payload
             .pointer("/chunk/bytes")
             .or_else(|| payload.get("bytes"))
-            .and_then(Value::as_str)
+            .and_then(serde_json::Value::as_str)
         {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(bytes)
@@ -2855,7 +2950,7 @@ fn decode_bedrock_anthropic_eventstream(body: &[u8]) -> ProviderResult<Vec<Provi
                     payload
                         .get("message")
                         .or_else(|| payload.get("Message"))
-                        .and_then(Value::as_str)
+                        .and_then(serde_json::Value::as_str)
                         .unwrap_or("Bedrock response stream failed")
                 ),
             });
@@ -2871,12 +2966,12 @@ fn append_anthropic_sse_event(sse: &mut String, event_json: &[u8]) -> ProviderRe
             "Bedrock Anthropic chunk payload was not UTF-8: {err}"
         ))
     })?;
-    let event: Value = serde_json::from_str(event_text).map_err(|err| {
+    let event: serde_json::Value = serde_json::from_str(event_text).map_err(|err| {
         ProviderError::Decode(format!("invalid Bedrock Anthropic chunk JSON: {err}"))
     })?;
     let kind = event
         .get("type")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("message");
     sse.push_str("event: ");
     sse.push_str(kind);
@@ -2899,7 +2994,7 @@ fn flush_anthropic_sse(
     Ok(())
 }
 
-fn bedrock_stream_error_message(payload: &Value) -> Option<String> {
+fn bedrock_stream_error_message(payload: &serde_json::Value) -> Option<String> {
     for key in [
         "modelStreamErrorException",
         "modelTimeoutException",
@@ -2915,7 +3010,7 @@ fn bedrock_stream_error_message(payload: &Value) -> Option<String> {
             let message = error
                 .get("message")
                 .or_else(|| error.get("originalMessage"))
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("Bedrock response stream failed");
             return Some(format!("{key}: {message}"));
         }
@@ -2964,9 +3059,9 @@ fn take_array<const N: usize>(bytes: &mut &[u8]) -> ProviderResult<[u8; N]> {
     })
 }
 
-fn image_data_url(content: &CanonicalContent) -> Option<String> {
+fn image_data_url(content: &verlet_history::CanonicalContent) -> Option<String> {
     match content {
-        CanonicalContent::Image { data, mime_type } => {
+        verlet_history::CanonicalContent::Image { data, mime_type } => {
             Some(format!("data:{mime_type};base64,{data}"))
         }
         _ => None,

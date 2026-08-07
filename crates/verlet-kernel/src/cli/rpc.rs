@@ -1,8 +1,6 @@
 //! The `rpc` subcommand family.
 
-use super::*;
-
-pub(super) async fn run_rpc(args: Vec<OsString>) -> VerletResult<()> {
+pub(super) async fn run_rpc(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -12,12 +10,12 @@ pub(super) async fn run_rpc(args: Vec<OsString>) -> VerletResult<()> {
         return Ok(());
     }
     let options = parse_rpc_args(args)?;
-    let mut config = VerletAppServerConfig::local(
+    let mut config = crate::VerletAppServerConfig::local(
         options.listen.clone(),
         options
             .cwd
             .unwrap_or(std::env::current_dir().map_err(|err| {
-                usage_error(format!("failed to read current working directory: {err}"))
+                crate::cli::usage_error(format!("failed to read current working directory: {err}"))
             })?),
     );
     if let Some(runtime_home) = options.runtime_home {
@@ -27,14 +25,14 @@ pub(super) async fn run_rpc(args: Vec<OsString>) -> VerletResult<()> {
         config.state_home = state_home;
     }
     let state_home = config.state_home.clone();
-    let server = VerletAppServer::new_local(config).await?;
+    let server = crate::VerletAppServer::new_local(config).await?;
     eprintln!("verlet rpc listening on {}", options.listen.display());
     eprintln!("verlet rpc state home: {}", state_home.display());
     match &options.listen {
-        AppServerListenAddr::WebSocket(_) => eprintln!(
+        crate::AppServerListenAddr::WebSocket(_) => eprintln!(
             "Before starting this server, mint a bearer token with `verlet identity` against this state home; WebSocket clients pass that token in VERLET_APP_SERVER_TOKEN."
         ),
-        AppServerListenAddr::Unix(_) => {
+        crate::AppServerListenAddr::Unix(_) => {
             eprintln!("Same-uid Unix socket peers need no token.");
         }
     }
@@ -43,13 +41,13 @@ pub(super) async fn run_rpc(args: Vec<OsString>) -> VerletResult<()> {
 
 #[derive(Debug)]
 pub(super) struct RpcArgs {
-    listen: AppServerListenAddr,
-    runtime_home: Option<PathBuf>,
-    state_home: Option<PathBuf>,
-    cwd: Option<PathBuf>,
+    listen: crate::AppServerListenAddr,
+    runtime_home: Option<std::path::PathBuf>,
+    state_home: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
 }
 
-pub(super) fn parse_rpc_args(args: Vec<OsString>) -> VerletResult<RpcArgs> {
+pub(super) fn parse_rpc_args(args: Vec<std::ffi::OsString>) -> crate::VerletResult<RpcArgs> {
     let mut listen = None;
     let mut runtime_home = None;
     let mut state_home = None;
@@ -58,31 +56,34 @@ pub(super) fn parse_rpc_args(args: Vec<OsString>) -> VerletResult<RpcArgs> {
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--listen" => {
-                let value = required_string_value(&mut iter, "--listen")?;
-                listen = Some(AppServerListenAddr::parse(&value)?);
+                let value = crate::cli::tool::required_string_value(&mut iter, "--listen")?;
+                listen = Some(crate::AppServerListenAddr::parse(&value)?);
             }
             "--runtime-home" => {
-                runtime_home = Some(PathBuf::from(required_string_value(
-                    &mut iter,
-                    "--runtime-home",
-                )?));
+                runtime_home = Some(std::path::PathBuf::from(
+                    crate::cli::tool::required_string_value(&mut iter, "--runtime-home")?,
+                ));
             }
             "--state-home" => {
-                state_home = Some(PathBuf::from(required_string_value(
-                    &mut iter,
-                    "--state-home",
-                )?));
+                state_home = Some(std::path::PathBuf::from(
+                    crate::cli::tool::required_string_value(&mut iter, "--state-home")?,
+                ));
             }
             "--cwd" => {
-                cwd = Some(PathBuf::from(required_string_value(&mut iter, "--cwd")?));
+                cwd = Some(std::path::PathBuf::from(
+                    crate::cli::tool::required_string_value(&mut iter, "--cwd")?,
+                ));
             }
             other => {
-                return Err(usage_error(format!("unknown rpc argument {other:?}")));
+                return Err(crate::cli::usage_error(format!(
+                    "unknown rpc argument {other:?}"
+                )));
             }
         }
     }
-    let listen = listen
-        .ok_or_else(|| usage_error("rpc requires --listen unix://PATH or ws://HOST:PORT[/rpc]"))?;
+    let listen = listen.ok_or_else(|| {
+        crate::cli::usage_error("rpc requires --listen unix://PATH or ws://HOST:PORT[/rpc]")
+    })?;
     Ok(RpcArgs {
         listen,
         runtime_home,

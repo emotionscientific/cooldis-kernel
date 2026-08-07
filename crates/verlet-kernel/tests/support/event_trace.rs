@@ -1,24 +1,17 @@
-use super::kernel_test::{
-    CanonicalContent, CanonicalMessage, RuntimeEventKind, SessionEntry, SessionEntryKind,
-    ThreadEvent, ThreadSignal,
-};
-use tokio::sync::broadcast;
-use tokio::time::{Duration, timeout};
-
-const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+const EVENT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 
 #[derive(Debug, Default)]
 pub struct EventTrace {
-    pub runtime_events: Vec<RuntimeEventKind>,
-    pub mirrors: Vec<SessionEntry>,
+    pub runtime_events: Vec<verlet::RuntimeEventKind>,
+    pub mirrors: Vec<verlet::SessionEntry>,
     pub outputs: Vec<String>,
     pub failures: Vec<String>,
     pub cancellations: Vec<String>,
-    pub signals: Vec<ThreadSignal>,
+    pub signals: Vec<verlet::ThreadSignal>,
 }
 
 impl EventTrace {
-    pub fn runtime_events(&self) -> &[RuntimeEventKind] {
+    pub fn runtime_events(&self) -> &[verlet::RuntimeEventKind] {
         &self.runtime_events
     }
 
@@ -26,7 +19,7 @@ impl EventTrace {
         self.mirrors
             .iter()
             .filter_map(|entry| match &entry.kind {
-                SessionEntryKind::Message { message } => Some(text_from_message(message)),
+                verlet::SessionEntryKind::Message { message } => Some(text_from_message(message)),
                 _ => None,
             })
             .collect()
@@ -34,12 +27,12 @@ impl EventTrace {
 }
 
 pub async fn collect_until_output(
-    events: &mut broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
     expected: &str,
 ) -> EventTrace {
     collect_until(events, |event, trace| match event {
-        ThreadEvent::Output { text, .. } => (text == expected).then_some(()),
-        ThreadEvent::Failed { message, .. } => {
+        verlet::ThreadEvent::Output { text, .. } => (text == expected).then_some(()),
+        verlet::ThreadEvent::Failed { message, .. } => {
             trace.failures.push(message.clone());
             panic!("thread failed before output {expected:?}: {message}; trace: {trace:#?}");
         }
@@ -49,11 +42,11 @@ pub async fn collect_until_output(
 }
 
 pub async fn collect_until_failed(
-    events: &mut broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
     expected_fragment: &str,
 ) -> EventTrace {
     collect_until(events, |event, trace| match event {
-        ThreadEvent::Failed { message, .. } => {
+        verlet::ThreadEvent::Failed { message, .. } => {
             assert!(
                 message.contains(expected_fragment),
                 "failure {message:?} did not contain {expected_fragment:?}; trace: {trace:#?}"
@@ -66,15 +59,15 @@ pub async fn collect_until_failed(
 }
 
 pub async fn collect_until_cancelled(
-    events: &mut broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
     expected_reason: &str,
 ) -> EventTrace {
     collect_until(events, |event, trace| match event {
-        ThreadEvent::Cancelled { reason, .. } => {
+        verlet::ThreadEvent::Cancelled { reason, .. } => {
             assert_eq!(reason, expected_reason, "trace: {trace:#?}");
             Some(())
         }
-        ThreadEvent::Failed { message, .. } => {
+        verlet::ThreadEvent::Failed { message, .. } => {
             trace.failures.push(message.clone());
             panic!("thread failed before cancellation {expected_reason:?}: {message}");
         }
@@ -84,15 +77,17 @@ pub async fn collect_until_cancelled(
 }
 
 pub async fn collect_until_compaction(
-    events: &mut broadcast::Receiver<ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
     expected_summary: &str,
 ) -> EventTrace {
     collect_until(events, |event, _trace| match event {
-        ThreadEvent::Runtime { event, .. } => match &event.kind {
-            RuntimeEventKind::Compaction { summary, .. } if summary == expected_summary => Some(()),
+        verlet::ThreadEvent::Runtime { event, .. } => match &event.kind {
+            verlet::RuntimeEventKind::Compaction { summary, .. } if summary == expected_summary => {
+                Some(())
+            }
             _ => None,
         },
-        ThreadEvent::Failed { message, .. } => {
+        verlet::ThreadEvent::Failed { message, .. } => {
             panic!("thread failed before compaction {expected_summary:?}: {message}");
         }
         _ => None,
@@ -101,22 +96,26 @@ pub async fn collect_until_compaction(
 }
 
 async fn collect_until(
-    events: &mut broadcast::Receiver<ThreadEvent>,
-    mut done: impl FnMut(&ThreadEvent, &mut EventTrace) -> Option<()>,
+    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
+    mut done: impl FnMut(&verlet::ThreadEvent, &mut EventTrace) -> Option<()>,
 ) -> EventTrace {
     let mut trace = EventTrace::default();
     loop {
-        let event = timeout(EVENT_TIMEOUT, events.recv())
+        let event = tokio::time::timeout(EVENT_TIMEOUT, events.recv())
             .await
             .unwrap_or_else(|_| panic!("event timed out; trace: {trace:#?}"))
             .expect("event channel closed");
         match &event {
-            ThreadEvent::Runtime { event, .. } => trace.runtime_events.push(event.kind.clone()),
-            ThreadEvent::CanonicalMirror { entry, .. } => trace.mirrors.push(entry.clone()),
-            ThreadEvent::Output { text, .. } => trace.outputs.push(text.clone()),
-            ThreadEvent::Failed { message, .. } => trace.failures.push(message.clone()),
-            ThreadEvent::Cancelled { reason, .. } => trace.cancellations.push(reason.clone()),
-            ThreadEvent::Signal { signal, .. } => trace.signals.push(signal.clone()),
+            verlet::ThreadEvent::Runtime { event, .. } => {
+                trace.runtime_events.push(event.kind.clone())
+            }
+            verlet::ThreadEvent::CanonicalMirror { entry, .. } => trace.mirrors.push(entry.clone()),
+            verlet::ThreadEvent::Output { text, .. } => trace.outputs.push(text.clone()),
+            verlet::ThreadEvent::Failed { message, .. } => trace.failures.push(message.clone()),
+            verlet::ThreadEvent::Cancelled { reason, .. } => {
+                trace.cancellations.push(reason.clone())
+            }
+            verlet::ThreadEvent::Signal { signal, .. } => trace.signals.push(signal.clone()),
             _ => {}
         }
         if done(&event, &mut trace).is_some() {
@@ -126,9 +125,9 @@ async fn collect_until(
 }
 
 pub fn find_event_index(
-    events: &[RuntimeEventKind],
+    events: &[verlet::RuntimeEventKind],
     label: &str,
-    predicate: impl Fn(&RuntimeEventKind) -> bool,
+    predicate: impl Fn(&verlet::RuntimeEventKind) -> bool,
 ) -> usize {
     events
         .iter()
@@ -137,11 +136,11 @@ pub fn find_event_index(
 }
 
 pub fn assert_event_order(
-    events: &[RuntimeEventKind],
+    events: &[verlet::RuntimeEventKind],
     first_label: &str,
-    first: impl Fn(&RuntimeEventKind) -> bool,
+    first: impl Fn(&verlet::RuntimeEventKind) -> bool,
     second_label: &str,
-    second: impl Fn(&RuntimeEventKind) -> bool,
+    second: impl Fn(&verlet::RuntimeEventKind) -> bool,
 ) {
     let first = find_event_index(events, first_label, first);
     let second = find_event_index(events, second_label, second);
@@ -151,19 +150,19 @@ pub fn assert_event_order(
     );
 }
 
-pub fn text_from_message(message: &CanonicalMessage) -> String {
+pub fn text_from_message(message: &verlet::CanonicalMessage) -> String {
     match message {
-        CanonicalMessage::User { content, .. }
-        | CanonicalMessage::Assistant { content, .. }
-        | CanonicalMessage::ToolResult { content, .. } => text_from_content(content),
+        verlet::CanonicalMessage::User { content, .. }
+        | verlet::CanonicalMessage::Assistant { content, .. }
+        | verlet::CanonicalMessage::ToolResult { content, .. } => text_from_content(content),
     }
 }
 
-pub fn text_from_content(content: &[CanonicalContent]) -> String {
+pub fn text_from_content(content: &[verlet::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet::CanonicalContent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
