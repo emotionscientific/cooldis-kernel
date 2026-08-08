@@ -1538,9 +1538,9 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
                 &template.id,
                 &function_ref,
                 grant,
-                &template.trigger_kinds[0].to_string(),
+                template.trigger_kinds[0].as_ref(),
                 source_stream,
-                &template.source.kinds[0].to_string(),
+                template.source.kinds[0].as_ref(),
                 &template.sink.stream,
                 &serde_json::to_string(
                     &template
@@ -1614,9 +1614,9 @@ async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_b
                     operation.active_artifact_hash
                 ),
                 "",
-                &template.trigger_kinds[0].to_string(),
+                template.trigger_kinds[0].as_ref(),
                 &template.source.stream,
-                &template.source.kinds[0].to_string(),
+                template.source.kinds[0].as_ref(),
                 &template.sink.stream,
                 &serde_json::to_string(
                     &template

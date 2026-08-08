@@ -24,19 +24,11 @@ pub struct ActiveMandate {
     pub payload: crate::kernel::control_decision::MandateStartedPayload,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::AsRefStr, strum::Display)]
+#[strum(serialize_all = "snake_case")]
 pub enum MandateRevokeStatus {
     Revoked,
     AlreadyRevoked,
-}
-
-impl MandateRevokeStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Revoked => "revoked",
-            Self::AlreadyRevoked => "already_revoked",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

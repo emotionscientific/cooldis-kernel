@@ -194,12 +194,12 @@ pub(crate) fn assert_admission_precedes_turn_records<'a>(
 ) -> &'a verlet_history::EventRecord {
     let admission = control_events
         .iter()
-        .find(|event| event.kind.as_str() == "admission.decided")
+        .find(|event| event.kind == verlet_history::EventKind::AdmissionDecided)
         .expect("control stream missing admission.decided");
     let turn_events = thread_events
         .iter()
         .filter(|event| {
-            event.kind.as_str() == "session.entry.appended"
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event
                     .payload
                     .get("runtime_kind")

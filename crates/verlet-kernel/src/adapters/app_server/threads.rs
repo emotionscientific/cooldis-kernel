@@ -47,7 +47,8 @@ pub(super) struct AppServerTurnState {
     pub(super) completion_scheduled: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::AsRefStr, strum::Display)]
+#[strum(serialize_all = "camelCase")]
 pub(super) enum AppServerTurnStatus {
     InProgress,
     Completed,
@@ -808,14 +809,11 @@ pub(super) fn require_local_binding_surface(
         .map(|placement| placement.target.clone())
         .unwrap_or(crate::kernel::control_decision::PlacementTarget::Local);
     if target != crate::kernel::control_decision::PlacementTarget::Local {
+        let target: &str = target.as_ref();
         return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
             format!(
-                "{surface} does not execute placement target {}; remote placement is supported by thread/spawn",
-                match target {
-                    crate::kernel::control_decision::PlacementTarget::Local => "local",
-                    crate::kernel::control_decision::PlacementTarget::Remote => "remote",
-                    crate::kernel::control_decision::PlacementTarget::Sandbox => "sandbox",
-                }
+                "{surface} does not execute placement target {target}; \
+             remote placement is supported by thread/spawn"
             ),
         ));
     }
@@ -1022,11 +1020,12 @@ pub(super) fn turn_json(turn: &AppServerTurnState) -> serde_json::Value {
     let duration_ms = turn
         .completed_at_ms
         .map(|completed| completed.saturating_sub(turn.started_at_ms));
+    let status: &str = turn.status.as_ref();
     serde_json::json!({
         "id": turn.id,
         "items": turn.items,
         "itemsView": "full",
-        "status": turn_status_string(turn.status),
+        "status": status,
         "error": turn.error,
         "startedAt": turn.started_at_ms / 1000,
         "completedAt": completed_at,
@@ -1050,15 +1049,6 @@ pub(super) fn thread_status_json(
         verlet_runtime_contracts::ThreadStatus::Failed => {
             serde_json::json!({ "type": "systemError" })
         }
-    }
-}
-
-pub(super) fn turn_status_string(status: AppServerTurnStatus) -> &'static str {
-    match status {
-        AppServerTurnStatus::InProgress => "inProgress",
-        AppServerTurnStatus::Completed => "completed",
-        AppServerTurnStatus::Interrupted => "interrupted",
-        AppServerTurnStatus::Failed => "failed",
     }
 }
 
@@ -1164,17 +1154,13 @@ pub(super) fn app_server_thinking_value(
     thinking: &verlet_provider::ThinkingConfig,
 ) -> serde_json::Value {
     match thinking {
-        verlet_provider::ThinkingConfig::Effort { effort } => serde_json::json!({
-            "type": "effort",
-            "effort": match effort {
-                verlet_provider::ThinkingEffort::Low => "low",
-                verlet_provider::ThinkingEffort::Medium => "medium",
-                verlet_provider::ThinkingEffort::High => "high",
-                verlet_provider::ThinkingEffort::XHigh => "xhigh",
-                verlet_provider::ThinkingEffort::Max => "max",
-                verlet_provider::ThinkingEffort::Other(value) => value.as_str(),
-            },
-        }),
+        verlet_provider::ThinkingConfig::Effort { effort } => {
+            let effort: &str = effort.as_ref();
+            serde_json::json!({
+                "type": "effort",
+                "effort": effort,
+            })
+        }
         verlet_provider::ThinkingConfig::Budget { budget_tokens } => serde_json::json!({
             "type": "budget",
             "budgetTokens": budget_tokens,

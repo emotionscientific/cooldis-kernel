@@ -94,7 +94,7 @@ pub(super) async fn agent_plan(
                 })?;
                 let status = plan
                     .verification_status_for_ref(&resolved_ref.declared)
-                    .map(|status| format!(" [{}]", status.as_str()))
+                    .map(|status| format!(" [{status}]"))
                     .unwrap_or_default();
                 println!(
                     "resolved_ref: {} -> {} ({}){}",
@@ -110,7 +110,7 @@ pub(super) async fn agent_plan(
             verlet_agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline => {
                 let status = plan
                     .verification_status_for_ref(&resolved_ref.declared)
-                    .map(|status| format!(" [{}]", status.as_str()))
+                    .map(|status| format!(" [{status}]"))
                     .unwrap_or_default();
                 println!(
                     "unresolved-offline_ref: {}{}",
@@ -623,10 +623,7 @@ pub(super) async fn agent_diff(
     }
     println!(
         "manifest {name} {}:{} -> {}:{}",
-        from.version,
-        from.form.as_str(),
-        to.version,
-        to.form.as_str()
+        from.version, from.form, to.version, to.form
     );
     for change in changes {
         match change.kind {
@@ -800,19 +797,11 @@ pub(super) struct AgentVersionsArgs {
     help: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::Display)]
+#[strum(serialize_all = "snake_case")]
 pub(super) enum AgentManifestForm {
     Authored,
     Resolved,
-}
-
-impl AgentManifestForm {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Authored => "authored",
-            Self::Resolved => "resolved",
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1334,6 +1323,8 @@ pub(super) fn render_agent_coupling_templates_template(
 # the published function_ref that implements the edge.\n"
     );
     for template in crate::agent::coupling_templates::coupling_template_catalog_v1().templates {
+        let maturity: &str = template.maturity.as_ref();
+        let role: &str = template.role.as_ref();
         out.push_str(&format!(
             "\n[[templates]]\n\
 id = {:?}\n\
@@ -1344,8 +1335,8 @@ must_have = {}\n\
 channel_decision_required = {}\n\
 summary = {:?}\n",
             template.id,
-            coupling_template_maturity_toml_label(template.maturity),
-            coupling_template_role_toml_label(template.role),
+            maturity,
+            role,
             template.runtime_executable,
             template.must_have,
             template.channel_decision_required,
@@ -1353,29 +1344,6 @@ summary = {:?}\n",
         ));
     }
     Ok(out)
-}
-
-pub(super) fn coupling_template_maturity_toml_label(
-    maturity: crate::agent::coupling_templates::CouplingTemplateMaturity,
-) -> &'static str {
-    match maturity {
-        crate::agent::coupling_templates::CouplingTemplateMaturity::KernelBacked => "kernel_backed",
-        crate::agent::coupling_templates::CouplingTemplateMaturity::InterfaceOnly => {
-            "interface_only"
-        }
-        crate::agent::coupling_templates::CouplingTemplateMaturity::ReferenceOnly => {
-            "reference_only"
-        }
-    }
-}
-
-pub(super) fn coupling_template_role_toml_label(
-    role: crate::agent::manifest_bind::CouplingRole,
-) -> &'static str {
-    match role {
-        crate::agent::manifest_bind::CouplingRole::Projection => "projection",
-        crate::agent::manifest_bind::CouplingRole::Controller => "controller",
-    }
 }
 
 pub(super) fn render_agent_operation_slot_template(

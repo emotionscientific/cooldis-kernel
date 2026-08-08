@@ -733,10 +733,7 @@ impl verlet_process::execution::ExternalCommandExecutor for RecordingExternalExe
                 ))
             }
             verlet_process::execution::ExternalCommandInvocation::Script(_) => {
-                let prefix = match request.executor {
-                    verlet_process::execution::ExternalExecutorKind::HostBash => "host",
-                    verlet_process::execution::ExternalExecutorKind::RemoteLinux => "remote",
-                };
+                let prefix: &str = request.executor.as_ref();
                 Ok(verlet_process::execution::ExternalCommandResult::new(
                     verlet_process::execution::VirtualCommandOutput {
                         stdout: format!("{prefix} stdout\n"),

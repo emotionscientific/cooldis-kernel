@@ -55,8 +55,21 @@ impl std::fmt::Display for PrincipalId {
 /// its later arrival is additive, but [`PrincipalKind::is_declarable`] is
 /// false for it and declaration must be rejected. End users reach agents
 /// through adapters; the envelope records them as adapter testimony.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum PrincipalKind {
     /// Full host authority plus interactive use: whoever operates the daemon.
     Operator,
@@ -226,8 +239,19 @@ pub struct ResolvedPrincipal {
 }
 
 /// The boundary surface a session or rejection was witnessed on.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum BoundarySurface {
     UnixSocket,
     Websocket,
@@ -467,6 +491,7 @@ impl SqliteIdentityAuthority {
                     "identity bootstrap refused because an active operator already exists",
                 ));
             }
+            let operator_kind: &str = PrincipalKind::Operator.as_ref();
             transaction
                 .execute(
                     "INSERT INTO cooldis_identity_principals (
@@ -476,7 +501,7 @@ impl SqliteIdentityAuthority {
                     verlet_sqlite::params![
                         IDENTITY_PRINCIPAL_SCHEMA_V1,
                         principal_id.as_str(),
-                        principal_kind_text(PrincipalKind::Operator),
+                        operator_kind,
                         display.as_str(),
                         principal_id.as_str(),
                         now_ms,
@@ -662,6 +687,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                 return Err(authority_error(message));
             }
             let now_ms = clock.now().timestamp_millis();
+            let declared_kind: &str = kind.as_ref();
             transaction
                 .execute(
                     "INSERT INTO cooldis_identity_principals (
@@ -671,7 +697,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                     verlet_sqlite::params![
                         IDENTITY_PRINCIPAL_SCHEMA_V1,
                         principal_id.as_str(),
-                        principal_kind_text(kind),
+                        declared_kind,
                         display.as_str(),
                         declared_by.as_str(),
                         now_ms,
@@ -841,6 +867,8 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         let connection = database.connect().await.map_err(storage_error)?;
         let digest = identity_token_digest(token);
         let now_ms = self.clock.now().timestamp_millis();
+        let operator_kind: &str = PrincipalKind::Operator.as_ref();
+        let adapter_kind: &str = PrincipalKind::Adapter.as_ref();
         let mut rows = connection
             .query(
                 "SELECT credential.credential_id, principal.principal_id, principal.kind
@@ -853,23 +881,27 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                    AND principal.revoked_at_ms IS NULL
                    AND principal.kind IN (?3, ?4)
                  LIMIT 1",
-                verlet_sqlite::params![
-                    digest,
-                    now_ms,
-                    principal_kind_text(PrincipalKind::Operator),
-                    principal_kind_text(PrincipalKind::Adapter),
-                ],
+                verlet_sqlite::params![digest, now_ms, operator_kind, adapter_kind],
             )
             .await
             .map_err(storage_error)?;
         let principal = match rows.next().await.map_err(storage_error)? {
-            Some(row) => Some(ResolvedPrincipal {
-                auth: AuthenticationPath::Credential {
-                    credential_id: row.get(0).map_err(storage_error)?,
-                },
-                principal_id: PrincipalId::new(row.get::<String>(1).map_err(storage_error)?),
-                kind: parse_principal_kind(&row.get::<String>(2).map_err(storage_error)?)?,
-            }),
+            Some(row) => {
+                let principal_id: String = row.get(1).map_err(storage_error)?;
+                let raw_kind: String = row.get(2).map_err(storage_error)?;
+                let kind: PrincipalKind = raw_kind.parse().map_err(|_| {
+                    authority_error(format!(
+                        "unknown persisted identity principal kind {raw_kind:?}"
+                    ))
+                })?;
+                Some(ResolvedPrincipal {
+                    auth: AuthenticationPath::Credential {
+                        credential_id: row.get(0).map_err(storage_error)?,
+                    },
+                    principal_id: PrincipalId::new(principal_id),
+                    kind,
+                })
+            }
             None => None,
         };
         Ok(principal)
@@ -884,6 +916,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         };
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
+        let operator_kind: &str = PrincipalKind::Operator.as_ref();
         let mut rows = connection
             .query(
                 "SELECT kind
@@ -892,19 +925,22 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                    AND kind = ?2
                    AND revoked_at_ms IS NULL
                  LIMIT 1",
-                verlet_sqlite::params![
-                    principal_id.as_str(),
-                    principal_kind_text(PrincipalKind::Operator)
-                ],
+                verlet_sqlite::params![principal_id.as_str(), operator_kind],
             )
             .await
             .map_err(storage_error)?;
         let Some(row) = rows.next().await.map_err(storage_error)? else {
             return Ok(None);
         };
+        let raw_kind: String = row.get(0).map_err(storage_error)?;
+        let kind: PrincipalKind = raw_kind.parse().map_err(|_| {
+            authority_error(format!(
+                "unknown persisted identity principal kind {raw_kind:?}"
+            ))
+        })?;
         Ok(Some(ResolvedPrincipal {
             principal_id: principal_id.clone(),
-            kind: parse_principal_kind(&row.get::<String>(0).map_err(storage_error)?)?,
+            kind,
             auth: AuthenticationPath::PeerUid { uid },
         }))
     }
@@ -979,6 +1015,8 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                 .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(storage_error)?;
+            let session_kind: &str = session.kind.as_ref();
+            let session_surface: &str = session.surface.as_ref();
             transaction
                 .execute(
                     "INSERT INTO cooldis_identity_sessions (
@@ -989,8 +1027,8 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                         session.schema,
                         session.session_id,
                         session.principal_id.as_str(),
-                        principal_kind_text(session.kind),
-                        boundary_surface_text(session.surface),
+                        session_kind,
+                        session_surface,
                         session.credential_ref,
                         session.opened_at_ms,
                         session.closed_at_ms,
@@ -1073,6 +1111,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                 .principal_id
                 .as_ref()
                 .map(|principal_id| principal_id.as_str().to_string());
+            let rejection_surface: &str = rejection.surface.as_ref();
             transaction
                 .execute(
                     "INSERT INTO cooldis_identity_auth_rejections (
@@ -1080,7 +1119,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
                      ) VALUES (?1, ?2, ?3, ?4, ?5)",
                     verlet_sqlite::params![
                         rejection.schema,
-                        boundary_surface_text(rejection.surface),
+                        rejection_surface,
                         reason_json,
                         principal_id,
                         rejection.rejected_at_ms,
@@ -1158,13 +1197,14 @@ impl IdentityAuthority for SqliteIdentityAuthority {
 async fn active_operator_exists(
     connection: &verlet_sqlite::Connection,
 ) -> crate::kernel::runtime_host::VerletResult<bool> {
+    let operator_kind: &str = PrincipalKind::Operator.as_ref();
     let mut rows = connection
         .query(
             "SELECT 1
              FROM cooldis_identity_principals
              WHERE kind = ?1 AND revoked_at_ms IS NULL
              LIMIT 1",
-            verlet_sqlite::params![principal_kind_text(PrincipalKind::Operator)],
+            verlet_sqlite::params![operator_kind],
         )
         .await
         .map_err(storage_error)?;
@@ -1224,12 +1264,20 @@ async fn principal_status(
 fn principal_from_row(
     row: &verlet_sqlite::Row,
 ) -> crate::kernel::runtime_host::VerletResult<PrincipalRecordV1> {
+    let principal_id: String = row.get(1).map_err(storage_error)?;
+    let raw_kind: String = row.get(2).map_err(storage_error)?;
+    let kind: PrincipalKind = raw_kind.parse().map_err(|_| {
+        authority_error(format!(
+            "unknown persisted identity principal kind {raw_kind:?}"
+        ))
+    })?;
+    let declared_by: String = row.get(4).map_err(storage_error)?;
     Ok(PrincipalRecordV1 {
         schema: row.get(0).map_err(storage_error)?,
-        principal_id: PrincipalId::new(row.get::<String>(1).map_err(storage_error)?),
-        kind: parse_principal_kind(&row.get::<String>(2).map_err(storage_error)?)?,
+        principal_id: PrincipalId::new(principal_id),
+        kind,
         display: row.get(3).map_err(storage_error)?,
-        declared_by: PrincipalId::new(row.get::<String>(4).map_err(storage_error)?),
+        declared_by: PrincipalId::new(declared_by),
         declared_at_ms: row.get(5).map_err(storage_error)?,
         revoked_at_ms: row.get(6).map_err(storage_error)?,
     })
@@ -1248,33 +1296,6 @@ fn credential_from_row(
         expires_at_ms: row.get(6).map_err(storage_error)?,
         revoked_at_ms: row.get(7).map_err(storage_error)?,
     })
-}
-
-fn principal_kind_text(kind: PrincipalKind) -> &'static str {
-    match kind {
-        PrincipalKind::Operator => "operator",
-        PrincipalKind::Adapter => "adapter",
-        PrincipalKind::Member => "member",
-    }
-}
-
-fn parse_principal_kind(value: &str) -> crate::kernel::runtime_host::VerletResult<PrincipalKind> {
-    match value {
-        "operator" => Ok(PrincipalKind::Operator),
-        "adapter" => Ok(PrincipalKind::Adapter),
-        "member" => Ok(PrincipalKind::Member),
-        other => Err(authority_error(format!(
-            "unknown persisted identity principal kind {other:?}"
-        ))),
-    }
-}
-
-fn boundary_surface_text(surface: BoundarySurface) -> &'static str {
-    match surface {
-        BoundarySurface::UnixSocket => "unix_socket",
-        BoundarySurface::Websocket => "websocket",
-        BoundarySurface::Console => "console",
-    }
 }
 
 fn mint_identity_secret() -> crate::kernel::runtime_host::VerletResult<String> {

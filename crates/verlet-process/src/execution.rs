@@ -29,9 +29,11 @@ impl VirtualCommandOutput {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::AsRefStr, strum::Display)]
 pub enum ExternalExecutorKind {
+    #[strum(serialize = "host")]
     HostBash,
+    #[strum(serialize = "remote")]
     RemoteLinux,
 }
 
@@ -631,6 +633,18 @@ fn append_replacement(output: &mut String, max_output_bytes: usize) -> bool {
 mod tests {
     use crate::execution::ExternalCommandExecutor as _;
     use tokio::io::AsyncWriteExt as _;
+
+    #[test]
+    fn executor_kind_strings_stay_abbreviated() {
+        assert_eq!(
+            crate::execution::ExternalExecutorKind::HostBash.as_ref(),
+            "host"
+        );
+        assert_eq!(
+            crate::execution::ExternalExecutorKind::RemoteLinux.as_ref(),
+            "remote"
+        );
+    }
 
     #[tokio::test]
     async fn capped_reader_drains_but_never_retains_more_than_its_limit() {

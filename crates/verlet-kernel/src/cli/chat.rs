@@ -210,27 +210,17 @@ struct ChatSessionInfo {
     models: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
 enum ChatLineRole {
+    #[strum(serialize = "you")]
     User,
     Assistant,
     System,
     Error,
     Thinking,
+    #[strum(serialize = "event")]
     Lifecycle,
-}
-
-impl ChatLineRole {
-    fn label(self) -> &'static str {
-        match self {
-            ChatLineRole::User => "you",
-            ChatLineRole::Assistant => "assistant",
-            ChatLineRole::System => "system",
-            ChatLineRole::Error => "error",
-            ChatLineRole::Thinking => "thinking",
-            ChatLineRole::Lifecycle => "event",
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -1050,7 +1040,7 @@ fn history_lines(state: &ChatTuiState) -> Vec<ratatui::text::Line<'static>> {
     let mut lines = Vec::new();
     for entry in &state.history {
         let style = role_style(entry.role, state.no_color);
-        let label = entry.role.label();
+        let label: &str = entry.role.as_ref();
         let mut text_lines = entry.text.lines();
         if let Some(first) = text_lines.next() {
             lines.push(ratatui::text::Line::from(vec![

@@ -970,11 +970,12 @@ fn process_snapshot_json(
     stdout: String,
     stderr: String,
 ) -> serde_json::Value {
+    let status: &str = snapshot.status.as_ref();
     serde_json::json!({
         "process_id": snapshot.process_id.map(|process_id| process_id.to_string()),
         "backend": snapshot.backend,
         "label": snapshot.label,
-        "status": snapshot.status.as_str(),
+        "status": status,
         "exit_code": snapshot.exit_code,
         "stdout": stdout,
         "stderr": stderr,

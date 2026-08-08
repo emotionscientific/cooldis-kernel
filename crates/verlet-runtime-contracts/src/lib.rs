@@ -362,8 +362,20 @@ impl TurnBudget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ThreadLifecycleStatus {
     Starting,
     Idle,
@@ -373,8 +385,20 @@ pub enum ThreadLifecycleStatus {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ThreadSignalKind {
     InterruptCancel,
     Shutdown,
@@ -519,36 +543,40 @@ pub struct RuntimeUsage {
     pub cache_read_input_tokens: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum RuntimeModelRequestMode {
     Complete,
     Stream,
 }
 
-impl RuntimeModelRequestMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Complete => "complete",
-            Self::Stream => "stream",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum RuntimeModelRequestPurpose {
     Turn,
     Compaction,
-}
-
-impl RuntimeModelRequestPurpose {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Turn => "turn",
-            Self::Compaction => "compaction",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -595,23 +623,26 @@ pub enum ThreadInteractionKind {
     ControlRequested,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum TurnSubmissionMode {
     #[default]
     Queue,
     Steer,
     Interrupt,
-}
-
-impl TurnSubmissionMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Queue => "queue",
-            Self::Steer => "steer",
-            Self::Interrupt => "interrupt",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -670,6 +701,58 @@ mod tests {
             json["controller_thread_id"],
             "018f9fe0-35a7-7a80-8f65-12e7e0b20b52"
         );
+    }
+
+    /// These strings are persisted in the metadata store and on the wire, so a
+    /// variant rename must not silently change them.
+    #[test]
+    fn enum_strings_match_persisted_values() {
+        assert_eq!(crate::ThreadLifecycleStatus::Starting.as_ref(), "starting");
+        assert_eq!(crate::ThreadLifecycleStatus::Idle.as_ref(), "idle");
+        assert_eq!(crate::ThreadLifecycleStatus::Running.as_ref(), "running");
+        assert_eq!(
+            crate::ThreadLifecycleStatus::Cancelling.as_ref(),
+            "cancelling"
+        );
+        assert_eq!(crate::ThreadLifecycleStatus::Stopped.as_ref(), "stopped");
+        assert_eq!(crate::ThreadLifecycleStatus::Failed.as_ref(), "failed");
+
+        assert_eq!(
+            crate::ThreadSignalKind::InterruptCancel.as_ref(),
+            "interrupt_cancel"
+        );
+        assert_eq!(crate::ThreadSignalKind::Shutdown.as_ref(), "shutdown");
+        assert_eq!(crate::ThreadSignalKind::UserQueue.as_ref(), "user_queue");
+        assert_eq!(crate::ThreadSignalKind::UserSteer.as_ref(), "user_steer");
+        assert_eq!(
+            crate::ThreadSignalKind::UserInterrupt.as_ref(),
+            "user_interrupt"
+        );
+        assert_eq!(
+            crate::ThreadSignalKind::CheckpointRequested.as_ref(),
+            "checkpoint_requested"
+        );
+        assert_eq!(
+            crate::ThreadSignalKind::CheckpointCreated.as_ref(),
+            "checkpoint_created"
+        );
+        assert_eq!(crate::ThreadSignalKind::Failed.as_ref(), "failed");
+
+        assert_eq!(
+            crate::RuntimeModelRequestMode::Complete.as_ref(),
+            "complete"
+        );
+        assert_eq!(crate::RuntimeModelRequestMode::Stream.as_ref(), "stream");
+
+        assert_eq!(crate::RuntimeModelRequestPurpose::Turn.as_ref(), "turn");
+        assert_eq!(
+            crate::RuntimeModelRequestPurpose::Compaction.as_ref(),
+            "compaction"
+        );
+
+        assert_eq!(crate::TurnSubmissionMode::Queue.as_ref(), "queue");
+        assert_eq!(crate::TurnSubmissionMode::Steer.as_ref(), "steer");
+        assert_eq!(crate::TurnSubmissionMode::Interrupt.as_ref(), "interrupt");
     }
 
     #[test]

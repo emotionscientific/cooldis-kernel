@@ -12,3 +12,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 uuid = { workspace = true, features = ["serde", "v7"] }
+strum.workspace = true

@@ -1367,15 +1367,16 @@ pub(super) async fn manifest_receipt_event_ids(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
 ) -> crate::kernel::runtime_host::VerletResult<(String, String)> {
+    let compile_kind = verlet_history::EventKind::ManifestCompileCompleted;
+    let bind_kind = verlet_history::EventKind::ManifestBindCompleted;
+    let compile_kind_name: &str = compile_kind.as_ref();
+    let bind_kind_name: &str = bind_kind.as_ref();
     let response = app
         .local_json_rpc_request(
             "thread/events/list",
             serde_json::json!({
                 "threadId": thread_id,
-                "kinds": [
-                    verlet_history::EventKind::ManifestCompileCompleted.as_str(),
-                    verlet_history::EventKind::ManifestBindCompleted.as_str(),
-                ],
+                "kinds": [compile_kind_name, bind_kind_name],
             }),
         )
         .await
@@ -1385,13 +1386,13 @@ pub(super) async fn manifest_receipt_event_ids(
         .ok_or_else(|| crate::cli::usage_error("thread/events/list response missing data array"))?;
     let compile = events
         .iter()
-        .find(|event| event["kind"] == verlet_history::EventKind::ManifestCompileCompleted.as_str())
+        .find(|event| event["kind"] == compile_kind_name)
         .ok_or_else(|| {
             crate::cli::usage_error("manifest.compile.completed receipt event was not found")
         })?;
     let bind = events
         .iter()
-        .find(|event| event["kind"] == verlet_history::EventKind::ManifestBindCompleted.as_str())
+        .find(|event| event["kind"] == bind_kind_name)
         .ok_or_else(|| {
             crate::cli::usage_error("manifest.bind.completed receipt event was not found")
         })?;

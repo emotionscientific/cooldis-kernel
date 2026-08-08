@@ -688,7 +688,7 @@ fn invoke_supervisor_spawn(
         );
         object.insert(
             "trigger_kind".to_string(),
-            serde_json::json!(request.trigger_event.kind.as_str()),
+            serde_json::json!(request.trigger_event.kind.to_string()),
         );
         object.insert(
             "reason".to_string(),
@@ -843,7 +843,7 @@ fn invoke_context_truncate(
         "source_id": request.trigger_event.stream_id.as_str(),
         "template_id": STD_CONTEXT_TRUNCATE_TEMPLATE_ID,
         "trigger_event_id": request.trigger_event.id.to_string(),
-        "trigger_kind": request.trigger_event.kind.as_str(),
+        "trigger_kind": request.trigger_event.kind.to_string(),
         "retain_tail_events": retain_tail_events,
         "reason": reason,
         "read_plan": {
@@ -921,7 +921,7 @@ fn invoke_context_summarize(
         },
         "template_id": STD_CONTEXT_SUMMARIZE_TEMPLATE_ID,
         "trigger_event_id": request.trigger_event.id.to_string(),
-        "trigger_kind": request.trigger_event.kind.as_str(),
+        "trigger_kind": request.trigger_event.kind.to_string(),
         "snapshot_id": request.activation.snapshot_id,
         "reason": reason,
     });
@@ -934,7 +934,7 @@ fn invoke_context_summarize(
         "summary_event_id": summary_event_id.to_string(),
         "template_id": STD_CONTEXT_SUMMARIZE_TEMPLATE_ID,
         "trigger_event_id": request.trigger_event.id.to_string(),
-        "trigger_kind": request.trigger_event.kind.as_str(),
+        "trigger_kind": request.trigger_event.kind.to_string(),
         "read_plan": {
             "schema": verlet_history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": read_plan_name,
@@ -1005,7 +1005,7 @@ fn invoke_memory_extract(
         "template_id": STD_MEMORY_EXTRACT_TEMPLATE_ID,
         "memory_kind": memory_kind,
         "source_event_id": request.trigger_event.id.to_string(),
-        "source_kind": request.trigger_event.kind.as_str(),
+        "source_kind": request.trigger_event.kind.to_string(),
         "snapshot_id": request.activation.snapshot_id,
     });
 
@@ -1110,7 +1110,7 @@ fn invoke_memory_recall(
         "source_id": source_stream,
         "template_id": STD_MEMORY_RECALL_TEMPLATE_ID,
         "trigger_event_id": request.trigger_event.id.to_string(),
-        "trigger_kind": request.trigger_event.kind.as_str(),
+        "trigger_kind": request.trigger_event.kind.to_string(),
         "snapshot_id": request.activation.snapshot_id,
         "selected_event_ids": selected_event_ids,
         "read_plan": {
@@ -1213,7 +1213,7 @@ fn invoke_prompt_steer_continuation(
         );
         object.insert(
             "trigger_kind".to_string(),
-            serde_json::json!(request.trigger_event.kind.as_str()),
+            serde_json::json!(request.trigger_event.kind.to_string()),
         );
         object.insert(
             "reason".to_string(),
@@ -1267,7 +1267,7 @@ fn invoke_prompt_steer_read_plan(
         "checkpoint_event_id": checkpoint_event_id.to_string(),
         "template_id": STD_PROMPT_STEER_TEMPLATE_ID,
         "trigger_event_id": request.trigger_event.id.to_string(),
-        "trigger_kind": request.trigger_event.kind.as_str(),
+        "trigger_kind": request.trigger_event.kind.to_string(),
         "snapshot_id": request.activation.snapshot_id,
         "reason": config
             .reason
@@ -1352,7 +1352,7 @@ fn invoke_prompt_dynamic_instructions(
         "template_id": STD_PROMPT_DYNAMIC_INSTRUCTIONS_TEMPLATE_ID,
         "instruction_name": instruction_name,
         "source_event_id": request.trigger_event.id.to_string(),
-        "source_kind": request.trigger_event.kind.as_str(),
+        "source_kind": request.trigger_event.kind.to_string(),
         "snapshot_id": request.activation.snapshot_id,
     });
     let read_plan_payload = serde_json::json!({
@@ -1364,7 +1364,7 @@ fn invoke_prompt_dynamic_instructions(
         "instruction_event_id": instruction_event_id.to_string(),
         "template_id": STD_PROMPT_DYNAMIC_INSTRUCTIONS_TEMPLATE_ID,
         "trigger_event_id": request.trigger_event.id.to_string(),
-        "trigger_kind": request.trigger_event.kind.as_str(),
+        "trigger_kind": request.trigger_event.kind.to_string(),
         "read_plan": {
             "schema": verlet_history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": read_plan_name,
@@ -1462,7 +1462,7 @@ fn invoke_failure_deadletter(
         "snapshot_id": request.activation.snapshot_id,
         "deadletter_id": format!("deadletter:{}", request.trigger_event.id),
         "source_event_id": request.trigger_event.id.to_string(),
-        "source_kind": request.trigger_event.kind.as_str(),
+        "source_kind": request.trigger_event.kind.to_string(),
         "source_stream_id": request.trigger_event.stream_id.as_str(),
         "source_sequence": request.trigger_event.sequence.get(),
         "reason": reason,
@@ -1995,7 +1995,7 @@ fn invoke_supervisor_child_completion(
                 ),
                 (
                     "trigger_kind".to_string(),
-                    serde_json::json!(request.trigger_event.kind.as_str()),
+                    serde_json::json!(request.trigger_event.kind.to_string()),
                 ),
                 (
                     "reason".to_string(),
@@ -2074,7 +2074,7 @@ fn invoke_supervisor_child_completion(
                 );
                 object.insert(
                     "trigger_kind".to_string(),
-                    serde_json::json!(request.trigger_event.kind.as_str()),
+                    serde_json::json!(request.trigger_event.kind.to_string()),
                 );
                 object.insert(
                     "reason".to_string(),

@@ -737,8 +737,19 @@ pub struct CouplingRunReceipt {
     pub budget_spent: CouplingBudgetSpent,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum CouplingRunStatus {
     Completed,
     Failed,

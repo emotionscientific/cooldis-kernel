@@ -865,7 +865,8 @@ pub(super) async fn tool_source_add(
     let registry = open_mcp_source_registry(options.state_home).await?;
     let record = registry.upsert_source_async(config).await?;
     println!("stored tool source {}", record.name);
-    println!("transport {}", record.transport.as_str());
+    let transport: &str = record.transport.as_ref();
+    println!("transport {transport}");
     println!("url {}", record.url);
     if let Some(secret) = record.bearer_secret {
         println!("bearer_secret {secret}");
@@ -936,10 +937,11 @@ pub(super) async fn tool_source_list(
         return Ok(());
     }
     for record in records {
+        let transport: &str = record.transport.as_ref();
         println!(
             "{} {} tools={}",
             record.name,
-            record.transport.as_str(),
+            transport,
             record.discovered_tools.len()
         );
     }
@@ -974,7 +976,8 @@ pub(super) async fn tool_source_show(
         return Ok(());
     }
     println!("name {}", record.name);
-    println!("transport {}", record.transport.as_str());
+    let transport: &str = record.transport.as_ref();
+    println!("transport {transport}");
     println!("url {}", record.url);
     if let Some(secret) = record.bearer_secret {
         println!("bearer_secret {secret}");
@@ -1406,9 +1409,13 @@ pub(super) fn parse_tool_source_add_args(
             "--help" | "-h" => help = true,
             "--kind" => {
                 let value = required_string_value(&mut iter, "--kind")?;
-                kind = Some(crate::adapters::mcp_client::McpRemoteTransport::from_str(
-                    &value,
-                )?);
+                let transport: crate::adapters::mcp_client::McpRemoteTransport =
+                    value.parse().map_err(|_| {
+                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                            "unsupported remote MCP transport {value:?}"
+                        ))
+                    })?;
+                kind = Some(transport);
             }
             "--url" => url = Some(required_string_value(&mut iter, "--url")?),
             "--bearer-secret" => {

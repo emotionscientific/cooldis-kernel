@@ -1,13 +1,13 @@
 //! The lib-side mount of the shared test-support tree.
 //!
 //! `src/lib.rs` mounts this file as `crate::support` under `#[cfg(test)]`, the
-//! same module path every integration-test binary mounts `mod.rs` at. One
+//! same module path every integration-test binary mounts `test_mount.rs` at. One
 //! absolute path in both compilations is what lets the support files spell
 //! every path out in full instead of reaching through relative parent paths.
 //!
 //! The `scenario_*` seams are the deliberate difference between the two
 //! mounts: here they are the real implementations, which can reach
-//! crate-private kernel APIs; `mod.rs` supplies panicking stubs plus a
+//! crate-private kernel APIs; `test_mount.rs` supplies panicking stubs plus a
 //! `scenario_unit_harness()` that returns `false`, so integration binaries skip
 //! the scenario bodies that need those seams.
 

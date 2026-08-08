@@ -484,12 +484,9 @@ pub(super) fn event_record_from_export_value(
         .map_err(|err| {
             crate::cli::usage_error(format!("export stream record is invalid: {err}"))
         })?;
-    let kind = envelope
-        .kind
-        .parse::<verlet_history::EventKind>()
-        .map_err(|err| {
-            crate::cli::usage_error(format!("export stream record kind is invalid: {err}"))
-        })?;
+    let kind = verlet_history::EventKind::try_from(envelope.kind).map_err(|err| {
+        crate::cli::usage_error(format!("export stream record kind is invalid: {err}"))
+    })?;
     Ok(verlet_history::EventRecord {
         id: envelope.event_id,
         stream_id: envelope.stream_id,
@@ -805,7 +802,7 @@ impl CouplingReplayReport {
 #[serde(rename_all = "camelCase")]
 pub(super) struct CouplingReplayRunReport {
     coupling_id: String,
-    status: &'static str,
+    status: String,
     scheduler_status: crate::kernel::coupling_scheduler::CouplingRunStatus,
     blocked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -825,9 +822,9 @@ impl CouplingReplayRunReport {
         Self {
             coupling_id: run.coupling_id,
             status: if blocked {
-                "blocked"
+                "blocked".to_string()
             } else {
-                coupling_run_status_name(run.status)
+                run.status.to_string()
             },
             scheduler_status: run.status,
             blocked,
@@ -865,16 +862,6 @@ pub(super) fn replay_run_is_blocked(
             .reason
             .as_deref()
             .is_some_and(|reason| reason.starts_with("budget:"))
-}
-
-pub(super) fn coupling_run_status_name(
-    status: crate::kernel::coupling_scheduler::CouplingRunStatus,
-) -> &'static str {
-    match status {
-        crate::kernel::coupling_scheduler::CouplingRunStatus::Completed => "completed",
-        crate::kernel::coupling_scheduler::CouplingRunStatus::Failed => "failed",
-        crate::kernel::coupling_scheduler::CouplingRunStatus::Skipped => "skipped",
-    }
 }
 
 pub(super) fn parse_coupling_init_args(

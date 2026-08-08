@@ -48,7 +48,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Status: MITIGATED
 - Severity: High
 - Threat: A process that reaches the daemon Unix socket or loopback WebSocket could invoke process, filesystem, provider-auth, approval, mandate, and binding methods without an application identity, and a guessable console token or loose socket permissions would widen that reach.
-- Affected surface: `crates/verlet-kernel/src/adapters/app_server/mod.rs`, `crates/verlet-kernel/src/adapters/app_server/connection.rs`
+- Affected surface: `crates/verlet-kernel/src/adapters/app_server.rs`, `crates/verlet-kernel/src/adapters/app_server/connection.rs`
 - Mitigation: Existing: every RPC WebSocket connection resolves a principal before any method dispatch (bearer token on both transports, exact console subprotocol carrier, same-uid peer mapping in local mode only); failed authentication returns a uniform 401, opens no session, and is witnessed; the socket file is chmod 0o600; the console credential is minted from a 256-bit CSPRNG secret per construction, only its digest is persisted, and at most one is active per state home; every dispatched method is authorized by authority class at the dispatcher with unknown methods failing closed to Host.
 - Deterministic guard: `crates/verlet-kernel/tests/boundary_auth.rs` pins accepted/rejected/expired/revoked tokens, unauthenticated 401s on both transports, socket mode, adapter/operator authorization splits, and the console credential lifecycle; `unix_peer_mapping_rejects_a_uid_other_than_the_daemon_euid` and the exhaustive classification test in `crates/verlet-kernel/src/adapters/app_server/tests.rs` pin mismatched peer rejection and fail on any unclassified dispatch arm.
 
@@ -75,7 +75,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Status: MITIGATED
 - Severity: High
 - Threat: Mapping a same-uid Unix peer to the operator principal is a convenience for the host user, but a daemon-spawned process reconnecting through the socket runs as the same uid; if peer mapping applied in a managed deployment, an agent workload could re-enter the control plane as the operator.
-- Affected surface: `crates/verlet-kernel/src/adapters/app_server/mod.rs`, `crates/verlet-kernel/src/daemon/identity.rs`
+- Affected surface: `crates/verlet-kernel/src/adapters/app_server.rs`, `crates/verlet-kernel/src/daemon/identity.rs`
 - Mitigation: Existing: peer mapping applies in `local` mode only and compares the peer uid against the daemon's effective uid; `managed` mode never maps a peer and requires a credential on every connection, witnessing the refusal.
 - Deterministic guard: `crates/verlet-kernel/tests/boundary_auth.rs` pins same-uid mapping in local mode and the managed-mode refusal with a `PeerMappingDisabled` witness; `unix_peer_mapping_rejects_a_uid_other_than_the_daemon_euid` in `crates/verlet-kernel/src/adapters/app_server/tests.rs` pins the mismatched-uid refusal and witness.
 
@@ -169,7 +169,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Status: OPEN
 - Severity: High
 - Threat: The foreground daemon serve loop does not install SIGINT or SIGTERM handling that calls supervisor shutdown. Service-manager termination can therefore skip ordered thread shutdown, cancellation grace, process-group cleanup, and final lifecycle receipts.
-- Affected surface: `crates/verlet-kernel/src/cli/daemon.rs`, `crates/verlet-kernel/src/adapters/app_server/mod.rs`, `crates/verlet-kernel/src/kernel/supervisor.rs`
+- Affected surface: `crates/verlet-kernel/src/cli/daemon.rs`, `crates/verlet-kernel/src/adapters/app_server.rs`, `crates/verlet-kernel/src/kernel/supervisor.rs`
 - Mitigation: Required: wire operating-system termination to stop accepting ingress, drain or cancel active work through the supervisor, bound the grace period, and then force cleanup.
 - Deterministic guard: None. Required: process smoke tests that send SIGTERM during active turns and commands, then verify terminal receipts and no surviving descendants.
 
@@ -303,7 +303,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Status: OPEN
 - Severity: Medium
 - Threat: Each accepted app-server connection creates detached tasks and an unbounded outbound channel, while a single WebSocket message may be 128 MiB. A local attacker or compromised client can consume memory and task capacity faster than the runtime drains it.
-- Affected surface: `crates/verlet-kernel/src/adapters/app_server/mod.rs`, `crates/verlet-kernel/src/adapters/app_server/subscriptions.rs`
+- Affected surface: `crates/verlet-kernel/src/adapters/app_server.rs`, `crates/verlet-kernel/src/adapters/app_server/subscriptions.rs`
 - Mitigation: Existing: the pre-authentication handshake is bounded (10-second per-stage deadline, 8 KiB header cap), so unauthenticated peers cannot hold accept-path resources indefinitely. Required: cap concurrent connections, use bounded outbound queues with explicit slow-consumer behavior, reduce or budget message size, and add request deadlines.
 - Deterministic guard: `pre_upgrade_reads_and_upgrade_are_bounded_when_no_data_arrives` and `oversized_pre_upgrade_headers_fail_closed_with_one_witness` in `crates/verlet-kernel/src/adapters/app_server/tests.rs` pin the handshake deadline and header cap. Required: overload tests for connection count, message size, stalled writers, and subscription fanout.
 

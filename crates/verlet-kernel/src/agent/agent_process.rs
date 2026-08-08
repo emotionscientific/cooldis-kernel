@@ -294,9 +294,10 @@ impl KernelScheduleOperationProvider {
                     .control
                     .revoke_mandate(&self.caller, target_thread_id, mandate_event_id)
                     .await?;
+                let status: &str = receipt.status.as_ref();
                 serde_json::json!({
                     "operation": "cooldis.mandate_revoke",
-                    "status": receipt.status.as_str(),
+                    "status": status,
                     "thread_id": target_thread_id.to_string(),
                     "mandate_event_id": mandate_event_id.to_string(),
                     "revoked_event_id": receipt.revoke_event.id.to_string(),
@@ -1128,9 +1129,10 @@ fn process_snapshot_output_json(
     operation: &str,
     snapshot: &verlet_process::live::AsyncProcessSnapshot,
 ) -> serde_json::Value {
+    let status: &str = snapshot.status.as_ref();
     let mut value = serde_json::json!({
         "operation": operation,
-        "status": snapshot.status.as_str(),
+        "status": status,
         "backend": &snapshot.backend,
         "label": snapshot.label,
         "stdout": String::from_utf8_lossy(&snapshot.stdout).into_owned(),

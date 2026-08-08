@@ -6,30 +6,27 @@ const DEFAULT_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const DEFAULT_REMOTE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REMOTE_MAX_OUTPUT_BYTES: u64 = 1_048_576;
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum McpRemoteTransport {
+    #[strum(
+        to_string = "streamable_http",
+        serialize = "mcp-http",
+        serialize = "http"
+    )]
     StreamableHttp,
+    #[strum(to_string = "http_sse", serialize = "mcp-sse", serialize = "sse")]
     HttpSse,
-}
-
-impl McpRemoteTransport {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::StreamableHttp => "streamable_http",
-            Self::HttpSse => "http_sse",
-        }
-    }
-
-    pub fn from_str(value: &str) -> crate::kernel::runtime_host::VerletResult<Self> {
-        match value {
-            "streamable_http" | "mcp-http" | "http" => Ok(Self::StreamableHttp),
-            "http_sse" | "mcp-sse" | "sse" => Ok(Self::HttpSse),
-            other => Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                format!("unsupported remote MCP transport {other:?}"),
-            )),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -178,10 +175,11 @@ impl McpRemoteSourceRecord {
     }
 
     pub fn redacted_json(&self) -> serde_json::Value {
+        let transport: &str = self.transport.as_ref();
         serde_json::json!({
             "schema_version": self.schema_version,
             "name": self.name,
-            "transport": self.transport.as_str(),
+            "transport": transport,
             "url": self.url,
             "auth": self.bearer_secret.as_ref().map(|name| serde_json::json!({
                 "type": "bearer_secret",
@@ -1266,6 +1264,7 @@ async fn sqlite_put_mcp_source(
             "failed to encode remote MCP source record: {err}"
         ))
     })?;
+    let transport: &str = record.transport.as_ref();
     connection
         .execute(
             r#"
@@ -1285,7 +1284,7 @@ async fn sqlite_put_mcp_source(
             "#,
             verlet_sqlite::params![
                 record.name.as_str(),
-                record.transport.as_str(),
+                transport,
                 record.url.as_str(),
                 record_json,
                 record.updated_at_ms

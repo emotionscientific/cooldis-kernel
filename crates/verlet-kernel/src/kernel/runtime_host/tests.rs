@@ -5657,7 +5657,7 @@ impl TsAgentThreadFixture {
             session_id: record.coordinates.session_id.clone(),
             thread_id: record.coordinates.thread_id.to_string(),
             parent_thread_id: record.parent_thread_id.map(|id| id.to_string()),
-            status: lifecycle_status_to_ts(record.status).to_string(),
+            status: record.status.as_ref().to_string(),
             latest_signal_id: record.latest_signal_id.map(|id| id.to_string()),
             latest_checkpoint_id: record.latest_checkpoint_id.map(|id| id.to_string()),
             metadata: record.metadata.clone(),
@@ -5671,13 +5671,14 @@ impl TsAgentThreadFixture {
             session_id: self.session_id,
             thread_id: verlet_runtime_contracts::ThreadId::parse_str(&self.thread_id).unwrap(),
         };
+        let status: verlet_runtime_contracts::ThreadLifecycleStatus = self.status.parse().unwrap();
         verlet_runtime_contracts::ThreadLifecycleRecord {
             coordinates,
             parent_thread_id: self
                 .parent_thread_id
                 .map(|id| verlet_runtime_contracts::ThreadId::parse_str(&id).unwrap()),
             topology: verlet_runtime_contracts::ThreadTopology::root(),
-            status: lifecycle_status_from_ts(&self.status),
+            status,
             latest_signal_id: self.latest_signal_id.map(|id| {
                 verlet_runtime_contracts::ThreadSignalId::from_uuid(
                     uuid::Uuid::parse_str(&id).unwrap(),
@@ -5714,12 +5715,13 @@ impl TsAgentThreadSignalFixture {
             user_id: signal.coordinates.user_id.clone(),
             session_id: signal.coordinates.session_id.clone(),
             thread_id: signal.coordinates.thread_id.to_string(),
-            kind: signal_kind_to_ts(signal.kind).to_string(),
+            kind: signal.kind.as_ref().to_string(),
             metadata: signal.metadata.clone(),
         }
     }
 
     fn into_signal(self) -> verlet_runtime_contracts::ThreadSignal {
+        let kind: verlet_runtime_contracts::ThreadSignalKind = self.kind.parse().unwrap();
         verlet_runtime_contracts::ThreadSignal {
             id: verlet_runtime_contracts::ThreadSignalId::from_uuid(
                 uuid::Uuid::parse_str(&self.signal_id).unwrap(),
@@ -5730,7 +5732,7 @@ impl TsAgentThreadSignalFixture {
                 session_id: self.session_id,
                 thread_id: verlet_runtime_contracts::ThreadId::parse_str(&self.thread_id).unwrap(),
             },
-            kind: signal_kind_from_ts(&self.kind),
+            kind,
             metadata: self.metadata,
             created_at_ms: 0,
         }
@@ -5872,54 +5874,4 @@ fn ts_style_signal_and_checkpoint_fixtures_round_trip_without_product_fields() {
     );
     assert_eq!(checkpoint_roundtrip.label, checkpoint.label);
     assert_eq!(checkpoint_roundtrip.metadata, checkpoint.metadata);
-}
-
-fn lifecycle_status_to_ts(status: verlet_runtime_contracts::ThreadLifecycleStatus) -> &'static str {
-    match status {
-        verlet_runtime_contracts::ThreadLifecycleStatus::Starting => "starting",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Idle => "idle",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Running => "running",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Cancelling => "cancelling",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Stopped => "stopped",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Failed => "failed",
-    }
-}
-
-fn lifecycle_status_from_ts(status: &str) -> verlet_runtime_contracts::ThreadLifecycleStatus {
-    match status {
-        "starting" => verlet_runtime_contracts::ThreadLifecycleStatus::Starting,
-        "idle" => verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
-        "running" => verlet_runtime_contracts::ThreadLifecycleStatus::Running,
-        "cancelling" => verlet_runtime_contracts::ThreadLifecycleStatus::Cancelling,
-        "stopped" => verlet_runtime_contracts::ThreadLifecycleStatus::Stopped,
-        "failed" => verlet_runtime_contracts::ThreadLifecycleStatus::Failed,
-        other => panic!("unknown ts status: {other}"),
-    }
-}
-
-fn signal_kind_to_ts(kind: verlet_runtime_contracts::ThreadSignalKind) -> &'static str {
-    match kind {
-        verlet_runtime_contracts::ThreadSignalKind::InterruptCancel => "interrupt_cancel",
-        verlet_runtime_contracts::ThreadSignalKind::Shutdown => "shutdown",
-        verlet_runtime_contracts::ThreadSignalKind::UserQueue => "user_queue",
-        verlet_runtime_contracts::ThreadSignalKind::UserSteer => "user_steer",
-        verlet_runtime_contracts::ThreadSignalKind::UserInterrupt => "user_interrupt",
-        verlet_runtime_contracts::ThreadSignalKind::CheckpointRequested => "checkpoint_requested",
-        verlet_runtime_contracts::ThreadSignalKind::CheckpointCreated => "checkpoint_created",
-        verlet_runtime_contracts::ThreadSignalKind::Failed => "failed",
-    }
-}
-
-fn signal_kind_from_ts(kind: &str) -> verlet_runtime_contracts::ThreadSignalKind {
-    match kind {
-        "interrupt_cancel" => verlet_runtime_contracts::ThreadSignalKind::InterruptCancel,
-        "shutdown" => verlet_runtime_contracts::ThreadSignalKind::Shutdown,
-        "user_queue" => verlet_runtime_contracts::ThreadSignalKind::UserQueue,
-        "user_steer" => verlet_runtime_contracts::ThreadSignalKind::UserSteer,
-        "user_interrupt" => verlet_runtime_contracts::ThreadSignalKind::UserInterrupt,
-        "checkpoint_requested" => verlet_runtime_contracts::ThreadSignalKind::CheckpointRequested,
-        "checkpoint_created" => verlet_runtime_contracts::ThreadSignalKind::CheckpointCreated,
-        "failed" => verlet_runtime_contracts::ThreadSignalKind::Failed,
-        other => panic!("unknown ts signal kind: {other}"),
-    }
 }

@@ -1,3 +1,4 @@
+#[path = "support/test_mount.rs"]
 mod support;
 
 use verlet::kernel::coupling_scheduler::CouplingExecutor as _;
@@ -242,31 +243,29 @@ fn ingress_outcome_protocol_contract_matches_fixture() {
     };
     let claim_value = serde_json::to_value(&claim).unwrap();
     let settle_value = serde_json::to_value(&settle).unwrap();
+    let claim_kind = verlet_history::EventKind::IoIngressClaimed;
+    let settle_kind = verlet_history::EventKind::IoIngressSettled;
+    let claim_kind_name: &str = claim_kind.as_ref();
+    let settle_kind_name: &str = settle_kind.as_ref();
     let registry = verlet_history::stream_schema_registry_v1();
     registry
-        .validate(
-            verlet_history::EventKind::IoIngressClaimed.payload_schema_id(),
-            &claim_value,
-        )
+        .validate(&claim_kind.payload_schema_id(), &claim_value)
         .unwrap();
     registry
-        .validate(
-            verlet_history::EventKind::IoIngressSettled.payload_schema_id(),
-            &settle_value,
-        )
+        .validate(&settle_kind.payload_schema_id(), &settle_value)
         .unwrap();
 
     crate::support::assert_json_fixture(
         "contracts/ingress_outcome_protocol_v1.json",
         serde_json::json!({
             "claim": {
-                "kind": verlet_history::EventKind::IoIngressClaimed.as_str(),
-                "payload_schema": verlet_history::EventKind::IoIngressClaimed.payload_schema_id(),
+                "kind": claim_kind_name,
+                "payload_schema": claim_kind.payload_schema_id(),
                 "payload": claim_value,
             },
             "settle": {
-                "kind": verlet_history::EventKind::IoIngressSettled.as_str(),
-                "payload_schema": verlet_history::EventKind::IoIngressSettled.payload_schema_id(),
+                "kind": settle_kind_name,
+                "payload_schema": settle_kind.payload_schema_id(),
                 "payload": settle_value,
             }
         }),
@@ -651,6 +650,8 @@ fn debug_thread_export_v1_contract_matches_fixture() {
         object.insert("atMs".to_string(), serde_json::json!(record.created_at_ms));
     }
     let bind_cursor = serde_json::to_value(bind.cursor_v1()).unwrap();
+    let bind_kind_name: &str = bind.kind.as_ref();
+    let bind_origin_name: &str = bind.origin.as_ref();
     let bundle = serde_json::json!({
         "schema": verlet_history::DEBUG_THREAD_EXPORT_SCHEMA_V1,
         "threadId": coordinates.thread_id.to_string(),
@@ -696,8 +697,8 @@ fn debug_thread_export_v1_contract_matches_fixture() {
             "eventId": bind.id.to_string(),
             "streamId": stream_id.as_str(),
             "sequence": bind.sequence.get(),
-            "kind": bind.kind.as_str(),
-            "origin": bind.origin.as_str(),
+            "kind": bind_kind_name,
+            "origin": bind_origin_name,
             "payloadSchema": bind.kind.payload_schema_id(),
             "createdAtMs": bind.created_at_ms
         }]
@@ -724,7 +725,7 @@ fn coupling_template_catalog_v1_contract_matches_fixture() {
 
     for template in &catalog.templates {
         maturity
-            .entry(coupling_template_maturity_label(template.maturity).to_string())
+            .entry(template.maturity.to_string())
             .or_default()
             .push(template.id.clone());
         if template.runtime_executable {
@@ -2073,22 +2074,6 @@ fn abi_and_process_contracts_match_fixture() {
     );
 }
 
-fn coupling_template_maturity_label(
-    maturity: verlet::agent::coupling_templates::CouplingTemplateMaturity,
-) -> &'static str {
-    match maturity {
-        verlet::agent::coupling_templates::CouplingTemplateMaturity::KernelBacked => {
-            "kernel_backed"
-        }
-        verlet::agent::coupling_templates::CouplingTemplateMaturity::InterfaceOnly => {
-            "interface_only"
-        }
-        verlet::agent::coupling_templates::CouplingTemplateMaturity::ReferenceOnly => {
-            "reference_only"
-        }
-    }
-}
-
 fn std_queue_task_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
     verlet::agent::manifest_bind::BoundCoupling {
         id: verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID.to_string(),
@@ -2955,9 +2940,10 @@ fn discharges_json(
     discharges
         .iter()
         .map(|discharge| {
+            let kind: &str = discharge.kind.as_ref();
             let mut value = serde_json::json!({
                 "stream": discharge.stream,
-                "kind": discharge.kind.as_str(),
+                "kind": kind,
                 "payload": discharge.payload,
             });
             if let Some(event_id) = discharge.event_id

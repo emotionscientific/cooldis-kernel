@@ -710,22 +710,12 @@ impl VerletTelegramRouteConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
 pub enum VerletDaemonServiceTarget {
+    #[strum(serialize = "launchd", serialize = "macos", serialize = "darwin")]
     Launchd,
+    #[strum(serialize = "systemd", serialize = "linux")]
     Systemd,
-}
-
-impl VerletDaemonServiceTarget {
-    pub fn parse(value: &str) -> crate::kernel::runtime_host::VerletResult<Self> {
-        match value {
-            "launchd" | "macos" | "darwin" => Ok(Self::Launchd),
-            "systemd" | "linux" => Ok(Self::Systemd),
-            other => Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                format!("unknown daemon service target {other:?}; expected launchd or systemd"),
-            )),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

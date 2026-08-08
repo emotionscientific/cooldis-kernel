@@ -794,12 +794,15 @@ fn default_skill_discovery_path() -> String {
     PartialOrd,
     serde::Serialize,
     serde::Deserialize,
+    strum::IntoStaticStr,
 )]
 pub enum AgentManifestWorkspaceMode {
     #[default]
     #[serde(rename = "ro")]
+    #[strum(serialize = "ro")]
     ReadOnly,
     #[serde(rename = "rw")]
+    #[strum(serialize = "rw")]
     ReadWrite,
 }
 
@@ -1114,7 +1117,10 @@ pub struct AgentManifestRuntimeOverridePolicy {
     pub allow: Vec<AgentManifestRuntimeOverrideKey>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum AgentManifestRuntimeOverrideKey {
     #[serde(rename = "default_cwd")]
     DefaultCwd,
@@ -1127,6 +1133,7 @@ pub enum AgentManifestRuntimeOverrideKey {
     #[serde(rename = "max_tool_rounds")]
     MaxToolRounds,
     #[serde(rename = "compaction.auto_at_text_bytes")]
+    #[strum(serialize = "compaction.auto_at_text_bytes")]
     CompactionAutoAtTextBytes,
 }
 

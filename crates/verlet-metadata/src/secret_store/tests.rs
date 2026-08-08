@@ -1,5 +1,20 @@
 use crate::secret_store::SecretResolver as _;
 
+/// These strings are the `source_kind` column of stored secret records, so a
+/// variant rename must not silently change them.
+#[test]
+fn source_kind_strings_match_persisted_values() {
+    assert_eq!(crate::secret_store::SecretSourceKind::Env.as_ref(), "env");
+    assert_eq!(
+        crate::secret_store::SecretSourceKind::Stdin.as_ref(),
+        "stdin"
+    );
+    assert_eq!(
+        crate::secret_store::SecretSourceKind::Local.as_ref(),
+        "local"
+    );
+}
+
 #[tokio::test]
 async fn sqlite_secret_store_persists_and_redacts_status() {
     let store = crate::secret_store::SqliteSecretStore::in_memory()

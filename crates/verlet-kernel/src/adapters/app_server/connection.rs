@@ -677,8 +677,11 @@ pub(super) struct CommandExecParams {
     pub(super) thread_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, strum::AsRefStr, strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub(super) enum ApprovalResolveDecision {
     Approved,
     Denied,
@@ -687,13 +690,6 @@ pub(super) enum ApprovalResolveDecision {
 impl ApprovalResolveDecision {
     fn approved(self) -> bool {
         matches!(self, Self::Approved)
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Approved => "approved",
-            Self::Denied => "denied",
-        }
     }
 }
 
@@ -1812,12 +1808,19 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: McpSourceUpsertParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let transport = params
+        let requested_transport = params
             .transport
             .or(params.kind)
             .ok_or_else(|| jsonrpc_error(-32602, "mcpSource/upsert requires transport"))?;
-        let transport = crate::adapters::mcp_client::McpRemoteTransport::from_str(&transport)
-            .map_err(mcp_source_param_error)?;
+        // `strum::ParseError` carries no detail beyond "no such variant"; the
+        // offending string is the only useful context, so it is what we keep.
+        let parsed: Result<crate::adapters::mcp_client::McpRemoteTransport, strum::ParseError> =
+            requested_transport.parse();
+        let transport = parsed.map_err(|_| {
+            mcp_source_param_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("unsupported remote MCP transport {requested_transport:?}"),
+            ))
+        })?;
         let mut config = crate::adapters::mcp_client::McpRemoteServerConfig::new(
             params.name,
             transport,
@@ -2460,7 +2463,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 .kinds
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>();
-            events.retain(|event| kinds.contains(event.kind.as_str()));
+            events.retain(|event| kinds.contains(event.kind.as_ref()));
         }
 
         let limit = params.limit.unwrap_or(100).clamp(1, 500);
@@ -2817,8 +2820,9 @@ impl crate::adapters::app_server::VerletAppServer {
         )
         .await
         .map_err(mandate_jsonrpc_error)?;
+        let status: &str = receipt.status.as_ref();
         Ok(serde_json::json!({
-            "status": receipt.status.as_str(),
+            "status": status,
             "mandateEventId": mandate_event_id.to_string(),
             "revokedEventId": receipt.revoke_event.id.to_string(),
             "streamId": receipt.revoke_event.stream_id.as_str(),
@@ -2898,7 +2902,7 @@ impl crate::adapters::app_server::VerletAppServer {
             receipts.extend(
                 events
                     .iter()
-                    .filter(|event| event.origin.as_str() == "discharged")
+                    .filter(|event| event.origin == verlet_history::EventOrigin::Discharged)
                     .map(debug_export_receipt_json),
             );
             let last_exported_sequence = events.last().map(|event| event.sequence.get());
@@ -5301,9 +5305,10 @@ pub(super) fn command_visible_output_cap(params: &CommandExecParams) -> usize {
 pub(super) fn command_process_snapshot_json(
     snapshot: &verlet_process::live::AsyncProcessSnapshot,
 ) -> serde_json::Value {
+    let status: &str = snapshot.status.as_ref();
     serde_json::json!({
         "processId": snapshot.process_id.map(|id| id.to_string()),
-        "status": snapshot.status.as_str(),
+        "status": status,
         "exitCode": snapshot.exit_code,
         "stdout": String::from_utf8_lossy(&snapshot.stdout).into_owned(),
         "stderr": String::from_utf8_lossy(&snapshot.stderr).into_owned(),
@@ -6213,9 +6218,10 @@ pub(super) fn thread_event_record_json(
 pub(super) fn coupling_binding_json(
     binding: &crate::agent::manifest_bind::AgentManifestCouplingBinding,
 ) -> serde_json::Value {
+    let role: &str = binding.role.as_ref();
     serde_json::json!({
         "id": binding.id.clone(),
-        "role": coupling_role_json(binding.role),
+        "role": role,
         "triggerKind": binding.trigger_kind.clone(),
         "triggerMatch": binding.trigger_match.clone(),
         "sourceStreams": binding.source_streams.clone(),
@@ -6232,13 +6238,6 @@ pub(super) fn coupling_binding_json(
         },
         "configHash": binding.config_hash.clone(),
     })
-}
-
-pub(super) fn coupling_role_json(role: crate::agent::manifest_bind::CouplingRole) -> &'static str {
-    match role {
-        crate::agent::manifest_bind::CouplingRole::Projection => "projection",
-        crate::agent::manifest_bind::CouplingRole::Controller => "controller",
-    }
 }
 
 pub(super) fn existing_approval_resolution<'a>(
@@ -6280,10 +6279,11 @@ pub(super) fn approval_resolution_json(
     record: &verlet_history::EventRecord,
     payload: &crate::kernel::control_decision::ApprovalResolvedPayload,
 ) -> serde_json::Value {
+    let decision: &str = decision.as_ref();
     serde_json::json!({
         "status": status,
         "approvalId": payload.subject.approval_id.clone(),
-        "decision": decision.as_str(),
+        "decision": decision,
         "approved": payload.approved,
         "reason": payload.reason.clone(),
         "snapshotId": payload.snapshot_id.clone(),
@@ -6333,7 +6333,7 @@ pub(super) fn pending_tool_approval_json(
     serde_json::json!({
         "approvalId": suspension.approval_id.clone(),
         "status": "pending",
-        "kind": verlet_history::EventKind::ToolCallSuspended.as_str(),
+        "kind": verlet_history::EventKind::ToolCallSuspended.as_ref(),
         "eventId": suspension.suspended_event_id.to_string(),
         "suspendedEventId": suspension.suspended_event_id.to_string(),
         "requestEventId": suspension.request_event_id.map(|id| id.to_string()),
@@ -6348,7 +6348,7 @@ pub(super) fn pending_tool_waiting_json(
     suspension: &crate::kernel::control_decision::PendingToolCallSuspension,
 ) -> serde_json::Value {
     serde_json::json!({
-        "kind": verlet_history::EventKind::ToolCallSuspended.as_str(),
+        "kind": verlet_history::EventKind::ToolCallSuspended.as_ref(),
         "eventId": suspension.suspended_event_id.to_string(),
         "suspendedEventId": suspension.suspended_event_id.to_string(),
         "requestEventId": suspension.request_event_id.map(|id| id.to_string()),
@@ -6373,7 +6373,7 @@ pub(super) fn turn_waiting_json(record: &verlet_history::EventRecord) -> serde_j
         .map(|id| id.to_string())
         .collect::<Vec<_>>();
     serde_json::json!({
-        "kind": verlet_history::EventKind::TurnWaiting.as_str(),
+        "kind": verlet_history::EventKind::TurnWaiting.as_ref(),
         "eventId": record.id.to_string(),
         "streamId": record.stream_id.as_str(),
         "sequence": record.sequence.get(),
@@ -6395,12 +6395,14 @@ pub(super) fn debug_export_ack_classes() -> Vec<&'static str> {
 }
 
 pub(super) fn debug_export_receipt_json(record: &verlet_history::EventRecord) -> serde_json::Value {
+    let kind: &str = record.kind.as_ref();
+    let origin: &str = record.origin.as_ref();
     serde_json::json!({
         "eventId": record.id.to_string(),
         "streamId": record.stream_id.as_str(),
         "sequence": record.sequence.get(),
-        "kind": record.kind.as_str(),
-        "origin": record.origin.as_str(),
+        "kind": kind,
+        "origin": origin,
         "payloadSchema": record.kind.payload_schema_id(),
         "createdAtMs": record.created_at_ms,
     })

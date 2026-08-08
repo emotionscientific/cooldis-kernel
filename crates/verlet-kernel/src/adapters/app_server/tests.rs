@@ -439,7 +439,7 @@ fn event_by_kind(
     events
         .iter()
         .find(|event| event.kind == kind)
-        .unwrap_or_else(|| panic!("expected {} event", kind.as_str()))
+        .unwrap_or_else(|| panic!("expected {kind} event"))
 }
 
 #[test]

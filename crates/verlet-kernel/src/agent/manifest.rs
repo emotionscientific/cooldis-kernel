@@ -535,21 +535,23 @@ pub struct AgentManifestRefVerification {
     pub status: AgentManifestRefVerificationStatus,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    strum::AsRefStr,
+    strum::Display,
+)]
+#[strum(serialize_all = "kebab-case")]
 pub enum AgentManifestRefVerificationStatus {
     #[serde(rename = "verified")]
     Verified,
     #[serde(rename = "unverified-offline")]
     UnverifiedOffline,
-}
-
-impl AgentManifestRefVerificationStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Verified => "verified",
-            Self::UnverifiedOffline => "unverified-offline",
-        }
-    }
 }
 
 impl AgentPublishPlan {

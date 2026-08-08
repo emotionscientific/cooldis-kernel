@@ -7407,16 +7407,10 @@ fn egress_dedupe_key(
 
 fn egress_kind_name(kind: &verlet_io_core::EgressKind) -> String {
     match kind {
-        verlet_io_core::EgressKind::AssistantDelta { .. } => "assistant_delta".to_string(),
-        verlet_io_core::EgressKind::AssistantMessage { .. } => "assistant_message".to_string(),
-        verlet_io_core::EgressKind::Status { .. } => "status".to_string(),
-        verlet_io_core::EgressKind::ToolStarted { .. } => "tool_started".to_string(),
-        verlet_io_core::EgressKind::ToolCompleted { .. } => "tool_completed".to_string(),
-        verlet_io_core::EgressKind::Error { .. } => "error".to_string(),
         verlet_io_core::EgressKind::PlatformAction { action, .. } => {
             format!("platform_action:{action}")
         }
-        verlet_io_core::EgressKind::Silence { .. } => "silence".to_string(),
+        other => other.as_ref().to_string(),
     }
 }
 

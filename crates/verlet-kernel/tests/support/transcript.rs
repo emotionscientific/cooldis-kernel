@@ -1,4 +1,5 @@
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
 enum TypedTranscriptItem {
     Event {
         label: String,
@@ -48,10 +49,13 @@ impl TypedTranscript {
             items: self
                 .items
                 .iter()
-                .map(|item| NormalizedTranscriptItem {
-                    kind: item.kind().to_string(),
-                    label: item.label().to_string(),
-                    value: aliases.normalize(item.value(), None),
+                .map(|item| {
+                    let kind: &str = item.as_ref();
+                    NormalizedTranscriptItem {
+                        kind: kind.to_string(),
+                        label: item.label().to_string(),
+                        value: aliases.normalize(item.value(), None),
+                    }
                 })
                 .collect(),
         }
@@ -59,13 +63,6 @@ impl TypedTranscript {
 }
 
 impl TypedTranscriptItem {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Event { .. } => "event",
-            Self::Receipt { .. } => "receipt",
-        }
-    }
-
     fn label(&self) -> &str {
         match self {
             Self::Event { label, .. } | Self::Receipt { label, .. } => label,

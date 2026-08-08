@@ -250,25 +250,14 @@ pub struct AsyncProcessSnapshot {
     pub events: Vec<crate::process::VerletProcessEvent>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::AsRefStr, strum::Display)]
+#[strum(serialize_all = "snake_case")]
 pub enum ProcessSnapshotStatus {
     Running,
     Completed,
     Failed,
     TimedOut,
     Cancelled,
-}
-
-impl ProcessSnapshotStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::TimedOut => "timed_out",
-            Self::Cancelled => "cancelled",
-        }
-    }
 }
 
 impl AsyncExecutionManager {
@@ -1021,5 +1010,34 @@ fn cap_snapshot_bytes(mut bytes: Vec<u8>, max_output_bytes: usize) -> (Vec<u8>, 
 impl From<crate::VerletProcessError> for std::io::Error {
     fn from(err: crate::VerletProcessError) -> Self {
         std::io::Error::other(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// These strings reach process receipts and app-server JSON, so a variant
+    /// rename must not silently change them.
+    #[test]
+    fn snapshot_status_strings_match_persisted_values() {
+        assert_eq!(
+            crate::live::ProcessSnapshotStatus::Running.as_ref(),
+            "running"
+        );
+        assert_eq!(
+            crate::live::ProcessSnapshotStatus::Completed.as_ref(),
+            "completed"
+        );
+        assert_eq!(
+            crate::live::ProcessSnapshotStatus::Failed.as_ref(),
+            "failed"
+        );
+        assert_eq!(
+            crate::live::ProcessSnapshotStatus::TimedOut.as_ref(),
+            "timed_out"
+        );
+        assert_eq!(
+            crate::live::ProcessSnapshotStatus::Cancelled.as_ref(),
+            "cancelled"
+        );
     }
 }
