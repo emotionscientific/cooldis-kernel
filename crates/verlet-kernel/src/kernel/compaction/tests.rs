@@ -1,9 +1,9 @@
 #[test]
 fn render_compaction_summary_is_stable_and_idempotent() {
-    let rendered = crate::kernel::compaction::render_compaction_summary("old facts");
+    let rendered = verlet_history::render_compaction_summary("old facts");
     assert_eq!(rendered, "Compacted conversation summary:\nold facts");
     assert_eq!(
-        crate::kernel::compaction::render_compaction_summary(&rendered),
+        verlet_history::render_compaction_summary(&rendered),
         rendered
     );
 }
@@ -11,7 +11,7 @@ fn render_compaction_summary_is_stable_and_idempotent() {
 #[test]
 fn deterministic_summary_keeps_recent_text() {
     let messages = (0..10)
-        .map(|index| crate::CanonicalMessage::user_text(format!("message {index}")))
+        .map(|index| verlet_history::CanonicalMessage::user_text(format!("message {index}")))
         .collect::<Vec<_>>();
 
     let summary = crate::kernel::compaction::deterministic_compaction_summary(&messages);

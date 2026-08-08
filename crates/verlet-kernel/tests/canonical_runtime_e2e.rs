@@ -1,6 +1,6 @@
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
-use verlet::SessionStore as _;
+use verlet_history::SessionStore as _;
 
 #[tokio::test]
 async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
@@ -24,12 +24,16 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
         }),
     ])
     .await;
-    let mut coordinates = verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let mut coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
 
     {
         let host = openai_host(&server, &db_path).await;
         let thread = host
-            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
+            .start_thread(
+                coordinates.clone(),
+                verlet_runtime_contracts::ThreadTopology::root(),
+            )
             .await
             .unwrap();
         coordinates = thread.context().coordinates.clone();
@@ -45,7 +49,10 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
     {
         let host = openai_host(&server, &db_path).await;
         let thread = host
-            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
+            .start_thread(
+                coordinates.clone(),
+                verlet_runtime_contracts::ThreadTopology::root(),
+            )
             .await
             .unwrap();
         let mut events = thread.subscribe_events();
@@ -65,12 +72,9 @@ async fn openai_runtime_replays_persisted_sqlite_history_after_restart() {
                 "second reply"
             ]
         );
-        assert!(
-            context
-                .entries
-                .iter()
-                .all(|entry| { matches!(entry.kind, verlet::SessionEntryKind::Message { .. }) })
-        );
+        assert!(context.entries.iter().all(|entry| {
+            matches!(entry.kind, verlet_history::SessionEntryKind::Message { .. })
+        }));
         host.shutdown_thread(coordinates.thread_id).await.unwrap();
     }
 
@@ -116,8 +120,8 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
     let host = anthropic_host(&server, &db_path).await;
     let thread = host
         .start_thread(
-            verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            verlet::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -128,7 +132,7 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
     let assistant = next_assistant_message(&mut events).await;
 
     match assistant {
-        verlet::CanonicalMessage::Assistant {
+        verlet_history::CanonicalMessage::Assistant {
             provider,
             api,
             model,
@@ -137,12 +141,12 @@ async fn anthropic_runtime_stores_tool_use_as_canonical_tool_call() {
             ..
         } => {
             assert_eq!(provider, "anthropic");
-            assert_eq!(api, verlet::ProviderApi::AnthropicMessages);
+            assert_eq!(api, verlet_history::ProviderApi::AnthropicMessages);
             assert_eq!(model, "claude-e2e");
-            assert_eq!(stop_reason, verlet::CanonicalStopReason::ToolUse);
+            assert_eq!(stop_reason, verlet_history::CanonicalStopReason::ToolUse);
             assert!(matches!(
                 content.first(),
-                Some(verlet::CanonicalContent::ToolCall { id, name, arguments })
+                Some(verlet_history::CanonicalContent::ToolCall { id, name, arguments })
                     if id == "toolu_123"
                         && name == "bash"
                         && arguments["command"] == "pwd"
@@ -198,12 +202,16 @@ async fn chat_completions_runtime_replays_same_canonical_sqlite_history() {
         }),
     ])
     .await;
-    let mut coordinates = verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let mut coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
 
     {
         let host = chat_host(&server, &db_path).await;
         let thread = host
-            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
+            .start_thread(
+                coordinates.clone(),
+                verlet_runtime_contracts::ThreadTopology::root(),
+            )
             .await
             .unwrap();
         coordinates = thread.context().coordinates.clone();
@@ -219,7 +227,10 @@ async fn chat_completions_runtime_replays_same_canonical_sqlite_history() {
     {
         let host = chat_host(&server, &db_path).await;
         let thread = host
-            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
+            .start_thread(
+                coordinates.clone(),
+                verlet_runtime_contracts::ThreadTopology::root(),
+            )
             .await
             .unwrap();
         let mut events = thread.subscribe_events();
@@ -276,11 +287,11 @@ async fn supervisor_resume_and_fork_from_checkpoint_after_restart_keep_branches_
     let checkpoint = {
         let supervisor = openai_supervisor(&server, &db_path, &runtime_root).await;
         let thread = supervisor
-            .start_thread(verlet::ThreadStartRequest {
+            .start_thread(verlet::kernel::supervisor::ThreadStartRequest {
                 tenant_id: "tenant_a".to_string(),
                 user_id: "user_1".to_string(),
                 session_id: "session_1".to_string(),
-                topology: verlet::ThreadTopology::root(),
+                topology: verlet_runtime_contracts::ThreadTopology::root(),
                 metadata: Default::default(),
             })
             .await
@@ -406,14 +417,17 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
         "usage": {"input_tokens": 9, "output_tokens": 2}
     })])
     .await;
-    let coordinates = verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
-    let store = verlet::SqliteSessionStore::open(&db_path).await.unwrap();
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&db_path)
+        .await
+        .unwrap();
     store
         .append(
             &coordinates,
             None,
-            verlet::SessionEntryKind::Message {
-                message: verlet::CanonicalMessage::user_text("spawn worker"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("spawn worker"),
             },
         )
         .await
@@ -422,17 +436,17 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
         .append(
             &coordinates,
             None,
-            verlet::SessionEntryKind::Message {
-                message: verlet::CanonicalMessage::assistant(
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::assistant(
                     "openai",
-                    verlet::ProviderApi::OpenAIResponses,
+                    verlet_history::ProviderApi::OpenAIResponses,
                     "gpt-e2e",
-                    vec![verlet::CanonicalContent::tool_call(
+                    vec![verlet_history::CanonicalContent::tool_call(
                         "call_1|fc_1",
                         "verlet_spawn_subagent",
                         serde_json::json!({"task_name": "worker", "message": "echo historical child"}),
                     )],
-                    verlet::CanonicalStopReason::ToolUse,
+                    verlet_history::CanonicalStopReason::ToolUse,
                 ),
             },
         )
@@ -442,8 +456,8 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
         .append(
             &coordinates,
             None,
-            verlet::SessionEntryKind::Message {
-                message: verlet::CanonicalMessage::tool_result(
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::tool_result(
                     "call_1|fc_1",
                     "verlet_spawn_subagent",
                     r#"{"operation":"cooldis.spawn_subagent","thread_id":"historical-child"}"#,
@@ -456,7 +470,10 @@ async fn anthropic_runtime_replays_openai_tool_history_from_sqlite() {
 
     let host = anthropic_host(&server, &db_path).await;
     let thread = host
-        .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
+        .start_thread(
+            coordinates.clone(),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut events = thread.subscribe_events();
@@ -500,8 +517,8 @@ async fn openai_responses_http_sse_runtime_stores_canonical_stream_without_raw_p
     let host = openai_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
-            verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            verlet::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -516,12 +533,12 @@ async fn openai_responses_http_sse_runtime_stores_canonical_stream_without_raw_p
     .unwrap();
     let (assistant, runtime_events) = next_assistant_with_runtime_events(&mut events).await;
     assert!(runtime_events.iter().any(|event| {
-        matches!(event, verlet::RuntimeEventKind::TextDelta { text } if text == "streamed")
+        matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta { text } if text == "streamed")
     }));
     assert!(runtime_events.iter().any(|event| {
         matches!(
             event,
-            verlet::RuntimeEventKind::ToolCallStarted { call_id, name, .. }
+            verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted { call_id, name, .. }
                 if call_id == "call_1|fc_1" && name == "bash"
         )
     }));
@@ -546,8 +563,8 @@ async fn chat_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
     let host = chat_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
-            verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            verlet::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -562,7 +579,7 @@ async fn chat_http_sse_runtime_stores_canonical_stream_without_raw_payloads() {
     .unwrap();
     let (assistant, runtime_events) = next_assistant_with_runtime_events(&mut events).await;
     assert!(runtime_events.iter().any(|event| {
-        matches!(event, verlet::RuntimeEventKind::TextDelta { text } if text == "chat-streamed")
+        matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta { text } if text == "chat-streamed")
     }));
     assert_streamed_tool_assistant(assistant, "call_1");
     assert_raw_stream_payloads_not_stored(&db_path).await;
@@ -585,8 +602,8 @@ async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads
     let host = anthropic_streaming_host(&server, &db_path).await;
     let thread = host
         .start_thread(
-            verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-            verlet::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -601,7 +618,7 @@ async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads
     .unwrap();
     let (assistant, runtime_events) = next_assistant_with_runtime_events(&mut events).await;
     assert!(runtime_events.iter().any(|event| {
-        matches!(event, verlet::RuntimeEventKind::TextDelta { text } if text == "anthropic-streamed")
+        matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta { text } if text == "anthropic-streamed")
     }));
     assert_streamed_tool_assistant(assistant, "toolu_1");
     assert_raw_stream_payloads_not_stored(&db_path).await;
@@ -619,22 +636,33 @@ async fn anthropic_http_sse_runtime_stores_canonical_stream_without_raw_payloads
     remove_sqlite_files(&db_path);
 }
 
-async fn openai_host(server: &MockHttpServer, db_path: &std::path::Path) -> verlet::RuntimeHost {
+async fn openai_host(
+    server: &MockHttpServer,
+    db_path: &std::path::Path,
+) -> verlet::kernel::runtime_host::RuntimeHost {
     let factory = openai_factory(server, false);
-    verlet::RuntimeHost::with_session_store(
+    verlet::kernel::runtime_host::RuntimeHost::with_session_store(
         factory,
-        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(
+            verlet_history_sqlite::SqliteSessionStore::open(db_path)
+                .await
+                .unwrap(),
+        ),
     )
 }
 
 async fn openai_streaming_host(
     server: &MockHttpServer,
     db_path: &std::path::Path,
-) -> verlet::RuntimeHost {
+) -> verlet::kernel::runtime_host::RuntimeHost {
     let factory = openai_factory(server, true);
-    verlet::RuntimeHost::with_session_store(
+    verlet::kernel::runtime_host::RuntimeHost::with_session_store(
         factory,
-        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(
+            verlet_history_sqlite::SqliteSessionStore::open(db_path)
+                .await
+                .unwrap(),
+        ),
     )
 }
 
@@ -642,14 +670,20 @@ async fn openai_supervisor(
     server: &MockHttpServer,
     db_path: &std::path::Path,
     runtime_root: &std::path::Path,
-) -> verlet::VerletSupervisor {
-    let supervisor = verlet::VerletSupervisor::new();
+) -> verlet::kernel::supervisor::VerletSupervisor {
+    let supervisor = verlet::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(verlet::TenantRegistration {
-            context: verlet::TenantRuntimeContext::local("tenant_a", runtime_root, runtime_root)
-                .with_session_store(std::sync::Arc::new(
-                    verlet::SqliteSessionStore::open(db_path).await.unwrap(),
-                )),
+        .register_tenant(verlet::kernel::supervisor::TenantRegistration {
+            context: verlet::kernel::supervisor::TenantRuntimeContext::local(
+                "tenant_a",
+                runtime_root,
+                runtime_root,
+            )
+            .with_session_store(std::sync::Arc::new(
+                verlet_history_sqlite::SqliteSessionStore::open(db_path)
+                    .await
+                    .unwrap(),
+            )),
             runtime_factory: openai_factory(server, false),
         })
         .await
@@ -660,17 +694,17 @@ async fn openai_supervisor(
 fn openai_factory(
     server: &MockHttpServer,
     stream: bool,
-) -> std::sync::Arc<verlet::AgentLoopFactory> {
-    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
-        std::sync::Arc::new(verlet::OpenAIResponsesAdapter {
+) -> std::sync::Arc<verlet::adapters::agent_loop::AgentLoopFactory> {
+    let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet_provider::OpenAIResponsesAdapter {
             include_encrypted_reasoning: false,
-            reasoning_summary: verlet::OpenAIReasoningSummary::Auto,
+            reasoning_summary: verlet_provider::OpenAIReasoningSummary::Auto,
         });
     let client = std::sync::Arc::new(
-        verlet::ProviderHttpClient::new(
-            verlet::ProviderEndpoint {
+        verlet_provider::ProviderHttpClient::new(
+            verlet_provider::ProviderEndpoint {
                 url: format!("{}/v1/responses", server.base_url()),
-                auth: verlet::ProviderAuth::Bearer {
+                auth: verlet_provider::ProviderAuth::Bearer {
                     token: "e2e-key".to_string(),
                 },
                 headers: Vec::new(),
@@ -679,40 +713,59 @@ fn openai_factory(
         )
         .unwrap(),
     );
-    let mut config =
-        verlet::AgentLoopConfig::new(verlet::ProviderApi::OpenAIResponses, "openai", "gpt-e2e");
+    let mut config = verlet::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-e2e",
+    );
     config.max_tokens = 64;
     config.stream = stream;
-    std::sync::Arc::new(verlet::AgentLoopFactory::new(config, client))
+    std::sync::Arc::new(verlet::adapters::agent_loop::AgentLoopFactory::new(
+        config, client,
+    ))
 }
 
-async fn chat_host(server: &MockHttpServer, db_path: &std::path::Path) -> verlet::RuntimeHost {
+async fn chat_host(
+    server: &MockHttpServer,
+    db_path: &std::path::Path,
+) -> verlet::kernel::runtime_host::RuntimeHost {
     let factory = chat_factory(server, false);
-    verlet::RuntimeHost::with_session_store(
+    verlet::kernel::runtime_host::RuntimeHost::with_session_store(
         factory,
-        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(
+            verlet_history_sqlite::SqliteSessionStore::open(db_path)
+                .await
+                .unwrap(),
+        ),
     )
 }
 
 async fn chat_streaming_host(
     server: &MockHttpServer,
     db_path: &std::path::Path,
-) -> verlet::RuntimeHost {
+) -> verlet::kernel::runtime_host::RuntimeHost {
     let factory = chat_factory(server, true);
-    verlet::RuntimeHost::with_session_store(
+    verlet::kernel::runtime_host::RuntimeHost::with_session_store(
         factory,
-        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(
+            verlet_history_sqlite::SqliteSessionStore::open(db_path)
+                .await
+                .unwrap(),
+        ),
     )
 }
 
-fn chat_factory(server: &MockHttpServer, stream: bool) -> std::sync::Arc<verlet::AgentLoopFactory> {
-    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
-        std::sync::Arc::new(verlet::OpenAIChatCompletionsAdapter);
+fn chat_factory(
+    server: &MockHttpServer,
+    stream: bool,
+) -> std::sync::Arc<verlet::adapters::agent_loop::AgentLoopFactory> {
+    let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet_provider::OpenAIChatCompletionsAdapter);
     let client = std::sync::Arc::new(
-        verlet::ProviderHttpClient::new(
-            verlet::ProviderEndpoint {
+        verlet_provider::ProviderHttpClient::new(
+            verlet_provider::ProviderEndpoint {
                 url: format!("{}/v1/chat/completions", server.base_url()),
-                auth: verlet::ProviderAuth::Bearer {
+                auth: verlet_provider::ProviderAuth::Bearer {
                     token: "chat-key".to_string(),
                 },
                 headers: Vec::new(),
@@ -721,46 +774,59 @@ fn chat_factory(server: &MockHttpServer, stream: bool) -> std::sync::Arc<verlet:
         )
         .unwrap(),
     );
-    let mut config = verlet::AgentLoopConfig::new(
-        verlet::ProviderApi::OpenAIChatCompletions,
+    let mut config = verlet::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
         "openai-compatible",
         "chat-e2e",
     );
     config.max_tokens = 64;
     config.stream = stream;
-    std::sync::Arc::new(verlet::AgentLoopFactory::new(config, client))
+    std::sync::Arc::new(verlet::adapters::agent_loop::AgentLoopFactory::new(
+        config, client,
+    ))
 }
 
-async fn anthropic_host(server: &MockHttpServer, db_path: &std::path::Path) -> verlet::RuntimeHost {
+async fn anthropic_host(
+    server: &MockHttpServer,
+    db_path: &std::path::Path,
+) -> verlet::kernel::runtime_host::RuntimeHost {
     let factory = anthropic_factory(server, false);
-    verlet::RuntimeHost::with_session_store(
+    verlet::kernel::runtime_host::RuntimeHost::with_session_store(
         factory,
-        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(
+            verlet_history_sqlite::SqliteSessionStore::open(db_path)
+                .await
+                .unwrap(),
+        ),
     )
 }
 
 async fn anthropic_streaming_host(
     server: &MockHttpServer,
     db_path: &std::path::Path,
-) -> verlet::RuntimeHost {
+) -> verlet::kernel::runtime_host::RuntimeHost {
     let factory = anthropic_factory(server, true);
-    verlet::RuntimeHost::with_session_store(
+    verlet::kernel::runtime_host::RuntimeHost::with_session_store(
         factory,
-        std::sync::Arc::new(verlet::SqliteSessionStore::open(db_path).await.unwrap()),
+        std::sync::Arc::new(
+            verlet_history_sqlite::SqliteSessionStore::open(db_path)
+                .await
+                .unwrap(),
+        ),
     )
 }
 
 fn anthropic_factory(
     server: &MockHttpServer,
     stream: bool,
-) -> std::sync::Arc<verlet::AgentLoopFactory> {
-    let adapter: std::sync::Arc<dyn verlet::ProviderWireAdapter> =
-        std::sync::Arc::new(verlet::AnthropicMessagesAdapter);
+) -> std::sync::Arc<verlet::adapters::agent_loop::AgentLoopFactory> {
+    let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+        std::sync::Arc::new(verlet_provider::AnthropicMessagesAdapter);
     let client = std::sync::Arc::new(
-        verlet::ProviderHttpClient::new(
-            verlet::ProviderEndpoint {
+        verlet_provider::ProviderHttpClient::new(
+            verlet_provider::ProviderEndpoint {
                 url: format!("{}/anthropic/v1/messages", server.base_url()),
-                auth: verlet::ProviderAuth::AnthropicApiKey {
+                auth: verlet_provider::ProviderAuth::AnthropicApiKey {
                     key: "anthropic-key".to_string(),
                 },
                 headers: vec![("anthropic-version".to_string(), "2023-06-01".to_string())],
@@ -769,58 +835,80 @@ fn anthropic_factory(
         )
         .unwrap(),
     );
-    let mut config = verlet::AgentLoopConfig::new(
-        verlet::ProviderApi::AnthropicMessages,
+    let mut config = verlet::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::AnthropicMessages,
         "anthropic",
         "claude-e2e",
     );
     config.max_tokens = 64;
     config.stream = stream;
-    std::sync::Arc::new(verlet::AgentLoopFactory::new(config, client))
+    std::sync::Arc::new(verlet::adapters::agent_loop::AgentLoopFactory::new(
+        config, client,
+    ))
 }
 
-async fn next_output(events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>) -> String {
+async fn next_output(
+    events: &mut tokio::sync::broadcast::Receiver<
+        verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
+) -> String {
     loop {
         let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            verlet::ThreadEvent::Output { text, .. } => return text,
-            verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Output { text, .. } => {
+                return text;
+            }
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed { message, .. } => {
+                panic!("thread failed: {message}")
+            }
             _ => {}
         }
     }
 }
 
 async fn next_assistant_message(
-    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
-) -> verlet::CanonicalMessage {
+    events: &mut tokio::sync::broadcast::Receiver<
+        verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
+) -> verlet_history::CanonicalMessage {
     loop {
         let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            verlet::ThreadEvent::CanonicalMirror { entry, .. } => {
-                if let verlet::SessionEntryKind::Message {
-                    message: verlet::CanonicalMessage::Assistant { .. },
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror {
+                entry,
+                ..
+            } => {
+                if let verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::Assistant { .. },
                 } = entry.kind
                 {
-                    if let verlet::SessionEntryKind::Message { message } = entry.kind {
+                    if let verlet_history::SessionEntryKind::Message { message } = entry.kind {
                         return message;
                     }
                 }
             }
-            verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed { message, .. } => {
+                panic!("thread failed: {message}")
+            }
             _ => {}
         }
     }
 }
 
 async fn next_assistant_with_runtime_events(
-    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
-) -> (verlet::CanonicalMessage, Vec<verlet::RuntimeEventKind>) {
+    events: &mut tokio::sync::broadcast::Receiver<
+        verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
+) -> (
+    verlet_history::CanonicalMessage,
+    Vec<verlet::kernel::runtime_host::runtime_events::RuntimeEventKind>,
+) {
     let mut runtime_events = Vec::new();
     loop {
         let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
@@ -828,39 +916,49 @@ async fn next_assistant_with_runtime_events(
             .expect("event timed out")
             .expect("event channel closed");
         match event {
-            verlet::ThreadEvent::Runtime { event, .. } => runtime_events.push(event.kind),
-            verlet::ThreadEvent::CanonicalMirror { entry, .. } => {
-                if let verlet::SessionEntryKind::Message { message } = entry.kind
-                    && matches!(message, verlet::CanonicalMessage::Assistant { .. })
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. } => {
+                runtime_events.push(event.kind)
+            }
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror {
+                entry,
+                ..
+            } => {
+                if let verlet_history::SessionEntryKind::Message { message } = entry.kind
+                    && matches!(message, verlet_history::CanonicalMessage::Assistant { .. })
                 {
                     return (message, runtime_events);
                 }
             }
-            verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed { message, .. } => {
+                panic!("thread failed: {message}")
+            }
             _ => {}
         }
     }
 }
 
-fn assert_streamed_tool_assistant(assistant: verlet::CanonicalMessage, expected_tool_id: &str) {
+fn assert_streamed_tool_assistant(
+    assistant: verlet_history::CanonicalMessage,
+    expected_tool_id: &str,
+) {
     match assistant {
-        verlet::CanonicalMessage::Assistant {
+        verlet_history::CanonicalMessage::Assistant {
             content,
             usage,
             stop_reason,
             ..
         } => {
-            assert_eq!(stop_reason, verlet::CanonicalStopReason::ToolUse);
+            assert_eq!(stop_reason, verlet_history::CanonicalStopReason::ToolUse);
             assert_eq!(usage.input_tokens, 5);
             assert_eq!(usage.output_tokens, 6);
             assert!(matches!(
                 &content[0],
-                verlet::CanonicalContent::Text { text, .. }
+                verlet_history::CanonicalContent::Text { text, .. }
                     if text.ends_with("streamed") || text == "chat-streamed"
             ));
             assert!(content.iter().any(|content| matches!(
                 content,
-                verlet::CanonicalContent::ToolCall { id, name, arguments }
+                verlet_history::CanonicalContent::ToolCall { id, name, arguments }
                     if id == expected_tool_id && name == "bash" && arguments["command"] == "pwd"
             )));
         }
@@ -883,16 +981,16 @@ async fn assert_raw_stream_payloads_not_stored(db_path: &std::path::Path) {
     }));
 }
 
-fn text_messages(messages: &[verlet::CanonicalMessage]) -> Vec<&str> {
+fn text_messages(messages: &[verlet_history::CanonicalMessage]) -> Vec<&str> {
     messages
         .iter()
         .map(|message| match message {
-            verlet::CanonicalMessage::User { content, .. }
-            | verlet::CanonicalMessage::Assistant { content, .. }
-            | verlet::CanonicalMessage::ToolResult { content, .. } => content
+            verlet_history::CanonicalMessage::User { content, .. }
+            | verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .find_map(|content| match content {
-                    verlet::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                    verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .unwrap_or(""),

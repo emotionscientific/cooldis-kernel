@@ -13,7 +13,7 @@
 //! after each pull before folding the new revision — otherwise the tail
 //! reads a stale tail forever while records sit committed behind it.
 
-use crate::EventStore as _;
+use verlet_history::EventStore as _;
 
 /// Durable tail position over one child stream.
 ///
@@ -23,15 +23,15 @@ use crate::EventStore as _;
 /// or diverged stream fails loudly instead of silently re-folding.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteStreamTailCursor {
-    pub stream_id: crate::EventStreamId,
+    pub stream_id: verlet_history::EventStreamId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<crate::StreamCursorV1>,
+    pub cursor: Option<verlet_history::StreamCursorV1>,
 }
 
 /// One page of newly visible records plus the advanced cursor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteStreamTailPage {
-    pub records: Vec<crate::EventRecord>,
+    pub records: Vec<verlet_history::EventRecord>,
     pub next: RemoteStreamTailCursor,
 }
 
@@ -49,7 +49,7 @@ pub trait RemoteStreamTail: Send + Sync {
     async fn poll(
         &self,
         position: &RemoteStreamTailCursor,
-    ) -> crate::VerletResult<RemoteStreamTailPage>;
+    ) -> crate::kernel::runtime_host::VerletResult<RemoteStreamTailPage>;
 }
 
 /// Parent-local SQLite tail.
@@ -60,11 +60,11 @@ pub trait RemoteStreamTail: Send + Sync {
 /// snapshot.
 #[derive(Clone)]
 pub struct SqliteRemoteStreamTail {
-    store: crate::SqliteSessionStore,
+    store: verlet_history_sqlite::SqliteSessionStore,
 }
 
 impl SqliteRemoteStreamTail {
-    pub fn new(store: crate::SqliteSessionStore) -> Self {
+    pub fn new(store: verlet_history_sqlite::SqliteSessionStore) -> Self {
         Self { store }
     }
 }
@@ -81,7 +81,7 @@ impl RemoteStreamTail for SqliteRemoteStreamTail {
     async fn poll(
         &self,
         position: &RemoteStreamTailCursor,
-    ) -> crate::VerletResult<RemoteStreamTailPage> {
+    ) -> crate::kernel::runtime_host::VerletResult<RemoteStreamTailPage> {
         let records = match position.cursor.as_ref() {
             Some(cursor) => {
                 self.store
@@ -90,7 +90,7 @@ impl RemoteStreamTail for SqliteRemoteStreamTail {
             }
             None => self.store.read_events(&position.stream_id, None).await,
         }
-        .map_err(|error| crate::VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::kernel::runtime_host::VerletError::History(error.to_string()))?;
         let next = records
             .last()
             .map(|record| RemoteStreamTailCursor {

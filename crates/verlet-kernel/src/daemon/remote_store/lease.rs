@@ -72,7 +72,7 @@ impl StreamPrefixScope {
     }
 
     /// Whether `stream_id` falls inside this scope.
-    pub fn authorizes(&self, stream_id: &crate::EventStreamId) -> bool {
+    pub fn authorizes(&self, stream_id: &verlet_history::EventStreamId) -> bool {
         if self.0.is_empty() {
             return false;
         }
@@ -109,7 +109,7 @@ pub struct StreamLeaseGrantV1 {
     pub scope: StreamPrefixScope,
     /// Dispatch identity of the propagator this lease was granted to; ties
     /// the lease to the spawn/placement flow that carried it.
-    pub holder_dispatch_id: verlet_runtime_contracts::DispatchId,
+    pub holder_dispatch_id: verlet_runtime_contracts::handle::DispatchId,
     #[serde(default, skip_serializing_if = "StreamLeaseLineage::is_empty")]
     pub lineage: StreamLeaseLineage,
     pub granted_at_ms: i64,
@@ -151,13 +151,15 @@ impl LeaseFenceDecision {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LeaseFencedAppendOutcome {
     /// The presented lease remained current through the append commit.
-    Appended { ack: crate::StreamAppendAckV1 },
+    Appended {
+        ack: verlet_history::StreamAppendAckV1,
+    },
     /// The lease did not authorize the append.
     LeaseRejected { fence: LeaseFenceDecision },
     /// The lease was current, but the durable stream tail did not match the
     /// caller's expected next sequence.
     SequenceFenceConflict {
-        actual_next_sequence: crate::EventSequence,
+        actual_next_sequence: verlet_history::EventSequence,
     },
 }
 
@@ -187,9 +189,9 @@ pub trait StreamLeaseAuthority: Send + Sync {
     async fn grant_lease(
         &self,
         scope: &StreamPrefixScope,
-        holder_dispatch_id: &verlet_runtime_contracts::DispatchId,
+        holder_dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
         lineage: StreamLeaseLineage,
-    ) -> crate::VerletResult<StreamLeaseGrantV1>;
+    ) -> crate::kernel::runtime_host::VerletResult<StreamLeaseGrantV1>;
 
     /// Extend the renewal deadline of a lease that is still the latest grant
     /// for its scope — including one whose deadline has already passed.
@@ -203,11 +205,14 @@ pub trait StreamLeaseAuthority: Send + Sync {
     async fn renew_lease(
         &self,
         lease_id: &StreamLeaseId,
-    ) -> crate::VerletResult<StreamLeaseGrantV1>;
+    ) -> crate::kernel::runtime_host::VerletResult<StreamLeaseGrantV1>;
 
     /// Voluntarily end a lease (clean child shutdown). Releasing an
     /// already-superseded lease is a no-op, not an error.
-    async fn release_lease(&self, lease_id: &StreamLeaseId) -> crate::VerletResult<()>;
+    async fn release_lease(
+        &self,
+        lease_id: &StreamLeaseId,
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 
     /// Read-only fence diagnosis: is `presented` the live write authority
     /// for `stream_id`? The presented grant's own durable scope must
@@ -219,9 +224,9 @@ pub trait StreamLeaseAuthority: Send + Sync {
     /// [`Self::append_if_current`] instead.
     async fn check_fence(
         &self,
-        stream_id: &crate::EventStreamId,
+        stream_id: &verlet_history::EventStreamId,
         presented: &StreamLeaseId,
-    ) -> crate::VerletResult<LeaseFenceDecision>;
+    ) -> crate::kernel::runtime_host::VerletResult<LeaseFenceDecision>;
 
     /// Atomically check the lease, check the expected tail, and append the
     /// records. Grant, renewal, release, and supersession serialize with the
@@ -229,11 +234,11 @@ pub trait StreamLeaseAuthority: Send + Sync {
     /// grant commits.
     async fn append_if_current(
         &self,
-        stream_id: &crate::EventStreamId,
+        stream_id: &verlet_history::EventStreamId,
         presented: &StreamLeaseId,
-        expected_next_sequence: crate::EventSequence,
-        records: Vec<crate::NewEventRecord>,
-    ) -> crate::VerletResult<LeaseFencedAppendOutcome>;
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> crate::kernel::runtime_host::VerletResult<LeaseFencedAppendOutcome>;
 }
 
 /// A scoped write credential as durably recorded.
@@ -268,16 +273,22 @@ pub trait SyncCredentialAuthority: Send + Sync {
     async fn mint_credential(
         &self,
         grant: &StreamLeaseGrantV1,
-    ) -> crate::VerletResult<(StreamWriteCredentialV1, String)>;
+    ) -> crate::kernel::runtime_host::VerletResult<(StreamWriteCredentialV1, String)>;
 
     /// Resolve a presented bearer token. `Ok(None)` is the fail-closed
     /// answer for unknown or revoked tokens — the endpoint witnesses the
     /// rejection; only transport/store failures are `Err`.
-    async fn verify_token(&self, token: &str) -> crate::VerletResult<Option<VerifiedPushIdentity>>;
+    async fn verify_token(
+        &self,
+        token: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<VerifiedPushIdentity>>;
 
     /// Revoke a credential (lease release or supersession retires the
     /// credentials minted for it).
-    async fn revoke_credential(&self, credential_id: &str) -> crate::VerletResult<()>;
+    async fn revoke_credential(
+        &self,
+        credential_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 }
 
 /// SQLite-backed durable authority for stream leases and their scoped write
@@ -291,8 +302,8 @@ pub trait SyncCredentialAuthority: Send + Sync {
 /// are always re-derived from durable rows.
 #[derive(Clone)]
 pub struct SqliteStreamLeaseAuthority {
-    store: crate::SqliteSessionStore,
-    clock: std::sync::Arc<dyn crate::DaemonClock>,
+    store: verlet_history_sqlite::SqliteSessionStore,
+    clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
     lease_ttl_ms: i64,
 }
 
@@ -308,12 +319,12 @@ impl SqliteStreamLeaseAuthority {
     /// Initialize the daemon-owned authority tables in `store`.
     ///
     /// `clock` is the sole source of grant, renewal, release, revocation, and
-    /// expiry time. Tests inject it; production passes [`crate::SystemDaemonClock`].
+    /// expiry time. Tests inject it; production passes [`crate::daemon::clock_route::SystemDaemonClock`].
     pub async fn new(
-        store: crate::SqliteSessionStore,
+        store: verlet_history_sqlite::SqliteSessionStore,
         config: crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig,
-        clock: std::sync::Arc<dyn crate::DaemonClock>,
-    ) -> crate::VerletResult<Self> {
+        clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         config.validate()?;
         let lease_ttl_ms = i64::from(config.lease_ttl_secs)
             .checked_mul(1_000)
@@ -327,7 +338,7 @@ impl SqliteStreamLeaseAuthority {
         Ok(authority)
     }
 
-    async fn init_schema(&self) -> crate::VerletResult<()> {
+    async fn init_schema(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         cancellation_safe(async move {
             let database = store.sqlite_database();
@@ -381,7 +392,7 @@ struct DurableLease {
     lease_id: StreamLeaseId,
     scope: StreamPrefixScope,
     scope_generation: i64,
-    holder_dispatch_id: verlet_runtime_contracts::DispatchId,
+    holder_dispatch_id: verlet_runtime_contracts::handle::DispatchId,
     predecessor_lease_id: Option<StreamLeaseId>,
     granted_at_ms: i64,
     expires_at_ms: i64,
@@ -409,9 +420,9 @@ impl StreamLeaseAuthority for SqliteStreamLeaseAuthority {
     async fn grant_lease(
         &self,
         scope: &StreamPrefixScope,
-        holder_dispatch_id: &verlet_runtime_contracts::DispatchId,
+        holder_dispatch_id: &verlet_runtime_contracts::handle::DispatchId,
         lineage: StreamLeaseLineage,
-    ) -> crate::VerletResult<StreamLeaseGrantV1> {
+    ) -> crate::kernel::runtime_host::VerletResult<StreamLeaseGrantV1> {
         if scope.as_str().is_empty() {
             return Err(authority_error("cannot grant an empty stream scope"));
         }
@@ -500,7 +511,7 @@ impl StreamLeaseAuthority for SqliteStreamLeaseAuthority {
     async fn renew_lease(
         &self,
         lease_id: &StreamLeaseId,
-    ) -> crate::VerletResult<StreamLeaseGrantV1> {
+    ) -> crate::kernel::runtime_host::VerletResult<StreamLeaseGrantV1> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let lease_ttl_ms = self.lease_ttl_ms;
@@ -543,7 +554,10 @@ impl StreamLeaseAuthority for SqliteStreamLeaseAuthority {
         .await
     }
 
-    async fn release_lease(&self, lease_id: &StreamLeaseId) -> crate::VerletResult<()> {
+    async fn release_lease(
+        &self,
+        lease_id: &StreamLeaseId,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let lease_id = lease_id.clone();
@@ -580,9 +594,9 @@ impl StreamLeaseAuthority for SqliteStreamLeaseAuthority {
 
     async fn check_fence(
         &self,
-        stream_id: &crate::EventStreamId,
+        stream_id: &verlet_history::EventStreamId,
         presented: &StreamLeaseId,
-    ) -> crate::VerletResult<LeaseFenceDecision> {
+    ) -> crate::kernel::runtime_host::VerletResult<LeaseFenceDecision> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let stream_id = stream_id.clone();
@@ -604,11 +618,11 @@ impl StreamLeaseAuthority for SqliteStreamLeaseAuthority {
 
     async fn append_if_current(
         &self,
-        stream_id: &crate::EventStreamId,
+        stream_id: &verlet_history::EventStreamId,
         presented: &StreamLeaseId,
-        expected_next_sequence: crate::EventSequence,
-        records: Vec<crate::NewEventRecord>,
-    ) -> crate::VerletResult<LeaseFencedAppendOutcome> {
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> crate::kernel::runtime_host::VerletResult<LeaseFencedAppendOutcome> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let stream_id = stream_id.clone();
@@ -637,32 +651,38 @@ impl StreamLeaseAuthority for SqliteStreamLeaseAuthority {
                 .await;
             let appended = match append {
                 Ok(appended) => appended,
-                Err(crate::HistoryError::AppendFenceConflict {
+                Err(verlet_history::HistoryError::AppendFenceConflict {
                     actual_next_sequence,
                     ..
                 }) => {
                     transaction.commit().await.map_err(storage_error)?;
                     return Ok(LeaseFencedAppendOutcome::SequenceFenceConflict {
-                        actual_next_sequence: crate::EventSequence::new(actual_next_sequence),
+                        actual_next_sequence: verlet_history::EventSequence::new(
+                            actual_next_sequence,
+                        ),
                     });
                 }
                 Err(error) => {
                     transaction.rollback().await.map_err(storage_error)?;
-                    return Err(crate::VerletError::History(error.to_string()));
+                    return Err(crate::kernel::runtime_host::VerletError::History(
+                        error.to_string(),
+                    ));
                 }
             };
-            let ack = match crate::StreamAppendAckV1::from_appended(
+            let ack = match verlet_history::StreamAppendAckV1::from_appended(
                 stream_id,
                 &appended,
                 vec![
-                    crate::StreamAckClass::StreamCommitted,
-                    crate::StreamAckClass::QueryProjected,
+                    verlet_history::StreamAckClass::StreamCommitted,
+                    verlet_history::StreamAckClass::QueryProjected,
                 ],
             ) {
                 Ok(ack) => ack,
                 Err(error) => {
                     transaction.rollback().await.map_err(storage_error)?;
-                    return Err(crate::VerletError::History(error.to_string()));
+                    return Err(crate::kernel::runtime_host::VerletError::History(
+                        error.to_string(),
+                    ));
                 }
             };
             transaction.commit().await.map_err(storage_error)?;
@@ -677,7 +697,7 @@ impl SyncCredentialAuthority for SqliteStreamLeaseAuthority {
     async fn mint_credential(
         &self,
         grant: &StreamLeaseGrantV1,
-    ) -> crate::VerletResult<(StreamWriteCredentialV1, String)> {
+    ) -> crate::kernel::runtime_host::VerletResult<(StreamWriteCredentialV1, String)> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let grant = grant.clone();
@@ -740,7 +760,10 @@ impl SyncCredentialAuthority for SqliteStreamLeaseAuthority {
         .await
     }
 
-    async fn verify_token(&self, token: &str) -> crate::VerletResult<Option<VerifiedPushIdentity>> {
+    async fn verify_token(
+        &self,
+        token: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<VerifiedPushIdentity>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let digest = token_digest(token);
@@ -778,7 +801,10 @@ impl SyncCredentialAuthority for SqliteStreamLeaseAuthority {
         Ok(identity)
     }
 
-    async fn revoke_credential(&self, credential_id: &str) -> crate::VerletResult<()> {
+    async fn revoke_credential(
+        &self,
+        credential_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let credential_id = credential_id.to_string();
@@ -808,10 +834,10 @@ impl SyncCredentialAuthority for SqliteStreamLeaseAuthority {
 
 async fn fence_decision(
     connection: &verlet_sqlite::Connection,
-    stream_id: &crate::EventStreamId,
+    stream_id: &verlet_history::EventStreamId,
     presented: &StreamLeaseId,
     now_ms: i64,
-) -> crate::VerletResult<LeaseFenceDecision> {
+) -> crate::kernel::runtime_host::VerletResult<LeaseFenceDecision> {
     let Some(lease) = lease_by_id(connection, presented).await? else {
         return Ok(LeaseFenceDecision::Unknown);
     };
@@ -840,7 +866,7 @@ async fn fence_decision(
 async fn lease_by_id(
     connection: &verlet_sqlite::Connection,
     lease_id: &StreamLeaseId,
-) -> crate::VerletResult<Option<DurableLease>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<DurableLease>> {
     let mut rows = connection
         .query(
             "SELECT lease_id, scope, scope_generation, holder_dispatch_id,
@@ -863,7 +889,7 @@ async fn lease_by_id(
 async fn latest_lease_for_scope(
     connection: &verlet_sqlite::Connection,
     scope: &StreamPrefixScope,
-) -> crate::VerletResult<Option<DurableLease>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<DurableLease>> {
     let mut rows = connection
         .query(
             "SELECT lease_id, scope, scope_generation, holder_dispatch_id,
@@ -886,7 +912,7 @@ async fn latest_lease_for_scope(
 
 async fn latest_unreleased_leases(
     connection: &verlet_sqlite::Connection,
-) -> crate::VerletResult<Vec<DurableLease>> {
+) -> crate::kernel::runtime_host::VerletResult<Vec<DurableLease>> {
     let mut rows = connection
         .query(
             "SELECT lease.lease_id, lease.scope, lease.scope_generation,
@@ -911,12 +937,14 @@ async fn latest_unreleased_leases(
     Ok(leases)
 }
 
-fn durable_lease_from_row(row: &verlet_sqlite::Row) -> crate::VerletResult<DurableLease> {
+fn durable_lease_from_row(
+    row: &verlet_sqlite::Row,
+) -> crate::kernel::runtime_host::VerletResult<DurableLease> {
     Ok(DurableLease {
         lease_id: StreamLeaseId::new(row.get::<String>(0).map_err(storage_error)?),
         scope: StreamPrefixScope::new(row.get::<String>(1).map_err(storage_error)?),
         scope_generation: row.get(2).map_err(storage_error)?,
-        holder_dispatch_id: verlet_runtime_contracts::DispatchId::new(
+        holder_dispatch_id: verlet_runtime_contracts::handle::DispatchId::new(
             row.get::<String>(3).map_err(storage_error)?,
         ),
         predecessor_lease_id: row
@@ -933,7 +961,7 @@ async fn revoke_lease_credentials(
     connection: &verlet_sqlite::Connection,
     lease_id: &StreamLeaseId,
     revoked_at_ms: i64,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     connection
         .execute(
             "UPDATE cooldis_stream_write_credentials
@@ -964,28 +992,32 @@ fn token_digest(token: &str) -> String {
     format!("sha256:{:x}", sha2::Sha256::digest(token.as_bytes()))
 }
 
-fn lease_expiry(now_ms: i64, lease_ttl_ms: i64) -> crate::VerletResult<i64> {
+fn lease_expiry(now_ms: i64, lease_ttl_ms: i64) -> crate::kernel::runtime_host::VerletResult<i64> {
     now_ms
         .checked_add(lease_ttl_ms)
         .ok_or_else(|| authority_error("lease expiry timestamp overflow"))
 }
 
-fn authority_error(message: impl Into<String>) -> crate::VerletError {
-    crate::VerletError::History(message.into())
+fn authority_error(message: impl Into<String>) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(message.into())
 }
 
-fn storage_error(error: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::History(error.to_string())
+fn storage_error(error: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(error.to_string())
 }
 
 async fn cancellation_safe<T>(
-    future: impl std::future::Future<Output = crate::VerletResult<T>> + Send + 'static,
-) -> crate::VerletResult<T>
+    future: impl std::future::Future<Output = crate::kernel::runtime_host::VerletResult<T>>
+    + Send
+    + 'static,
+) -> crate::kernel::runtime_host::VerletResult<T>
 where
     T: Send + 'static,
 {
     tokio::spawn(future).await.map_err(|error| {
-        crate::VerletError::History(format!("sqlite authority transaction task failed: {error}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "sqlite authority transaction task failed: {error}"
+        ))
     })?
 }
 
@@ -997,7 +1029,7 @@ mod tests {
         now_ms: i64,
     }
 
-    impl crate::DaemonClock for FixedClock {
+    impl crate::daemon::clock_route::DaemonClock for FixedClock {
         fn now(&self) -> chrono::DateTime<chrono::Utc> {
             chrono::DateTime::from_timestamp_millis(self.now_ms)
                 .expect("test timestamp should be representable")
@@ -1007,17 +1039,17 @@ mod tests {
     #[test]
     fn prefix_scope_authorizes_only_its_prefix() {
         let scope = crate::daemon::remote_store::lease::StreamPrefixScope::new("thread:child-7");
-        assert!(scope.authorizes(&crate::EventStreamId::new("thread:child-7")));
-        assert!(scope.authorizes(&crate::EventStreamId::new("thread:child-7:trace")));
-        assert!(!scope.authorizes(&crate::EventStreamId::new("thread:child-70")));
-        assert!(!scope.authorizes(&crate::EventStreamId::new("thread:child-8")));
-        assert!(!scope.authorizes(&crate::EventStreamId::new("daemon:control")));
+        assert!(scope.authorizes(&verlet_history::EventStreamId::new("thread:child-7")));
+        assert!(scope.authorizes(&verlet_history::EventStreamId::new("thread:child-7:trace")));
+        assert!(!scope.authorizes(&verlet_history::EventStreamId::new("thread:child-70")));
+        assert!(!scope.authorizes(&verlet_history::EventStreamId::new("thread:child-8")));
+        assert!(!scope.authorizes(&verlet_history::EventStreamId::new("daemon:control")));
     }
 
     #[test]
     fn empty_prefix_scope_authorizes_nothing() {
         let scope = crate::daemon::remote_store::lease::StreamPrefixScope::new("");
-        assert!(!scope.authorizes(&crate::EventStreamId::new("thread:child-7")));
+        assert!(!scope.authorizes(&verlet_history::EventStreamId::new("thread:child-7")));
     }
 
     #[test]
@@ -1087,7 +1119,9 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_authority_uses_the_injected_clock_for_durable_grants() {
-        let store = crate::SqliteSessionStore::in_memory().await.unwrap();
+        let store = verlet_history_sqlite::SqliteSessionStore::in_memory()
+            .await
+            .unwrap();
         let authority = crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
             store,
             crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
@@ -1102,7 +1136,7 @@ mod tests {
         let grant = authority
             .grant_lease(
                 &scope,
-                &verlet_runtime_contracts::DispatchId::new("dispatch-unit"),
+                &verlet_runtime_contracts::handle::DispatchId::new("dispatch-unit"),
                 crate::daemon::remote_store::lease::StreamLeaseLineage::default(),
             )
             .await
@@ -1112,7 +1146,10 @@ mod tests {
         assert_eq!(grant.expires_at_ms, 17_000);
         assert_eq!(
             authority
-                .check_fence(&crate::EventStreamId::new(scope.as_str()), &grant.lease_id)
+                .check_fence(
+                    &verlet_history::EventStreamId::new(scope.as_str()),
+                    &grant.lease_id
+                )
                 .await
                 .unwrap(),
             crate::daemon::remote_store::lease::LeaseFenceDecision::Current

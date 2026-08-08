@@ -1,25 +1,25 @@
 #[path = "support/test_mount.rs"]
 mod support;
 
-use verlet::CouplingExecutor as _;
-use verlet::ProviderWireAdapter as _;
+use verlet::kernel::coupling_scheduler::CouplingExecutor as _;
+use verlet_provider::ProviderWireAdapter as _;
 
 #[test]
 fn runtime_event_kind_contract_matches_fixture() {
     let child_thread_id = thread_id(2);
     let checkpoint_id = checkpoint_id(1);
     let cases = vec![
-        verlet::RuntimeEventKind::ThreadStarted {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ThreadStarted {
             parent_thread_id: None,
-            topology: verlet::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: std::collections::BTreeMap::from([(
                 "cooldis.agent.manifest_hash".to_string(),
                 "sha256:manifest".to_string(),
             )]),
         },
-        verlet::RuntimeEventKind::ThreadInteraction {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ThreadInteraction {
             interaction_id: runtime_event_id(1),
-            kind: verlet::ThreadInteractionKind::PromptSubmitted,
+            kind: verlet_runtime_contracts::ThreadInteractionKind::PromptSubmitted,
             source_thread_id: thread_id(1),
             target_thread_id: child_thread_id,
             source_turn_id: None,
@@ -30,43 +30,43 @@ fn runtime_event_kind_contract_matches_fixture() {
                 "cooldis.submit_to_thread".to_string(),
             )]),
         },
-        verlet::RuntimeEventKind::TextDelta {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta {
             text: "hello".to_string(),
         },
-        verlet::RuntimeEventKind::ToolCallStarted {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
             call_id: "call_1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command":"pwd"}),
         },
-        verlet::RuntimeEventKind::ToolCallResult {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
             call_id: "call_1".to_string(),
             output: "ok".to_string(),
             success: true,
             duration_ms: Some(17),
         },
-        verlet::RuntimeEventKind::ToolLog {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolLog {
             call_id: "call_1".to_string(),
             tool_name: "bash".to_string(),
-            level: verlet::RuntimeToolLogLevel::Info,
+            level: verlet_runtime_contracts::RuntimeToolLogLevel::Info,
             message: "tool completed".to_string(),
             metadata: std::collections::BTreeMap::from([(
                 "duration_ms".to_string(),
                 "17".to_string(),
             )]),
         },
-        verlet::RuntimeEventKind::HookStarted {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::HookStarted {
             hook_id: "pre-echo".to_string(),
-            event_name: verlet::HookEventName::PreToolUse,
+            event_name: verlet::agent::hooks::HookEventName::PreToolUse,
             matcher: Some("echo_search".to_string()),
         },
-        verlet::RuntimeEventKind::HookCompleted {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::HookCompleted {
             hook_id: "pre-echo".to_string(),
-            event_name: verlet::HookEventName::PreToolUse,
-            status: verlet::HookRunStatus::Completed,
+            event_name: verlet::agent::hooks::HookEventName::PreToolUse,
+            status: verlet::agent::hooks::HookRunStatus::Completed,
             duration_ms: 12,
             message: None,
         },
-        verlet::RuntimeEventKind::ApprovalRequested {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ApprovalRequested {
             approval_id: "approval_1".to_string(),
             action: "write_file".to_string(),
             metadata: std::collections::BTreeMap::from([(
@@ -74,19 +74,19 @@ fn runtime_event_kind_contract_matches_fixture() {
                 "/workspace/a".to_string(),
             )]),
         },
-        verlet::RuntimeEventKind::ApprovalResolved {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ApprovalResolved {
             approval_id: "approval_1".to_string(),
-            decision: verlet::RuntimeApprovalDecision::Approved,
+            decision: verlet_runtime_contracts::RuntimeApprovalDecision::Approved,
             reason: None,
         },
-        verlet::RuntimeEventKind::PermissionDecision {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::PermissionDecision {
             call_id: "call_1".to_string(),
             tool_name: "bash".to_string(),
-            decision: verlet::RuntimePermissionDecision::Deny,
+            decision: verlet_runtime_contracts::RuntimePermissionDecision::Deny,
             reason: Some("policy denied".to_string()),
         },
-        verlet::RuntimeEventKind::ContextCompiled {
-            diagnostics: verlet::AgentContextCompilationDiagnostics {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ContextCompiled {
+            diagnostics: verlet::kernel::context_compiler::AgentContextCompilationDiagnostics {
                 input_entry_count: 2,
                 output_message_count: 1,
                 system_block_count: 1,
@@ -100,52 +100,52 @@ fn runtime_event_kind_contract_matches_fixture() {
             provider_truncated_text_bytes: 2,
             provider_retained_text_bytes: 9,
         },
-        verlet::RuntimeEventKind::ModelRequestStarted {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestStarted {
             request_id: "req_1".to_string(),
             turn_id: "turn-1".to_string(),
             provider: "openai".to_string(),
             api: "openai_responses".to_string(),
             model: "gpt-test".to_string(),
-            mode: verlet::RuntimeModelRequestMode::Complete,
-            purpose: verlet::RuntimeModelRequestPurpose::Turn,
+            mode: verlet_runtime_contracts::RuntimeModelRequestMode::Complete,
+            purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose::Turn,
             system_block_count: 1,
             message_count: 2,
             tool_count: 3,
             max_tokens: 128,
         },
-        verlet::RuntimeEventKind::ModelRequestCompleted {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestCompleted {
             request_id: "req_1".to_string(),
             turn_id: "turn-1".to_string(),
             provider: "openai".to_string(),
             api: "openai_responses".to_string(),
             model: "gpt-test".to_string(),
-            mode: verlet::RuntimeModelRequestMode::Complete,
-            purpose: verlet::RuntimeModelRequestPurpose::Turn,
+            mode: verlet_runtime_contracts::RuntimeModelRequestMode::Complete,
+            purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose::Turn,
             duration_ms: 25,
-            usage: verlet::RuntimeUsage {
+            usage: verlet_runtime_contracts::RuntimeUsage {
                 input_tokens: 1,
                 output_tokens: 2,
                 cache_creation_input_tokens: 3,
                 cache_read_input_tokens: 4,
             },
-            stop_reason: verlet::CanonicalStopReason::EndTurn,
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         },
-        verlet::RuntimeEventKind::ModelRequestRetryScheduled {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestRetryScheduled {
             request_id: "req_1".to_string(),
             next_request_id: "req_1_retry".to_string(),
             turn_id: "turn-1".to_string(),
             provider: "openai".to_string(),
             api: "openai_responses".to_string(),
             model: "gpt-test".to_string(),
-            mode: verlet::RuntimeModelRequestMode::Complete,
-            purpose: verlet::RuntimeModelRequestPurpose::Turn,
+            mode: verlet_runtime_contracts::RuntimeModelRequestMode::Complete,
+            purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose::Turn,
             attempt: 1,
             next_attempt: 2,
             delay_ms: 50,
-            error_class: verlet::RuntimeModelRequestErrorClass::RateLimited,
+            error_class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::RateLimited,
             error: "rate limited".to_string(),
         },
-        verlet::RuntimeEventKind::ModelRequestFallbackSelected {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestFallbackSelected {
             request_id: "req_1".to_string(),
             turn_id: "turn-1".to_string(),
             from_provider: "openai".to_string(),
@@ -154,63 +154,63 @@ fn runtime_event_kind_contract_matches_fixture() {
             to_provider: "fallback".to_string(),
             to_api: "openai_responses".to_string(),
             to_model: "gpt-fallback".to_string(),
-            mode: verlet::RuntimeModelRequestMode::Complete,
-            purpose: verlet::RuntimeModelRequestPurpose::Turn,
-            error_class: verlet::RuntimeModelRequestErrorClass::Retryable,
+            mode: verlet_runtime_contracts::RuntimeModelRequestMode::Complete,
+            purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose::Turn,
+            error_class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable,
             error: "provider down".to_string(),
         },
-        verlet::RuntimeEventKind::ModelRequestFailed {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestFailed {
             request_id: "req_2".to_string(),
             turn_id: "turn-1".to_string(),
             provider: "openai".to_string(),
             api: "openai_responses".to_string(),
             model: "gpt-test".to_string(),
-            mode: verlet::RuntimeModelRequestMode::Stream,
-            purpose: verlet::RuntimeModelRequestPurpose::Compaction,
+            mode: verlet_runtime_contracts::RuntimeModelRequestMode::Stream,
+            purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose::Compaction,
             duration_ms: 3,
-            error_class: verlet::RuntimeModelRequestErrorClass::Retryable,
+            error_class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable,
             error: "network".to_string(),
         },
-        verlet::RuntimeEventKind::Terminal {
-            state: verlet::RuntimeTerminalState::Completed,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+            state: verlet_runtime_contracts::RuntimeTerminalState::Completed,
         },
-        verlet::RuntimeEventKind::Timeout {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Timeout {
             operation: "turn".to_string(),
             timeout_ms: 100,
         },
-        verlet::RuntimeEventKind::PolicyRejected {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::PolicyRejected {
             code: "max_pending_inputs".to_string(),
             message: "full".to_string(),
         },
-        verlet::RuntimeEventKind::Recovery {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
             action: "abort_runtime".to_string(),
             reason: "timeout".to_string(),
         },
-        verlet::RuntimeEventKind::Usage {
-            usage: verlet::RuntimeUsage {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Usage {
+            usage: verlet_runtime_contracts::RuntimeUsage {
                 input_tokens: 1,
                 output_tokens: 2,
                 cache_creation_input_tokens: 3,
                 cache_read_input_tokens: 4,
             },
         },
-        verlet::RuntimeEventKind::SubthreadStarted { child_thread_id },
-        verlet::RuntimeEventKind::SubthreadFinished {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::SubthreadStarted { child_thread_id },
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::SubthreadFinished {
             child_thread_id,
-            status: verlet::ThreadLifecycleStatus::Stopped,
+            status: verlet_runtime_contracts::ThreadLifecycleStatus::Stopped,
         },
-        verlet::RuntimeEventKind::Checkpoint {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Checkpoint {
             checkpoint_id,
             label: Some("label".to_string()),
         },
-        verlet::RuntimeEventKind::Compaction {
-            trigger: verlet::CompactionTrigger::Manual,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Compaction {
+            trigger: verlet::kernel::compaction::CompactionTrigger::Manual,
             summary: "summary".to_string(),
         },
-        verlet::RuntimeEventKind::Cancelled {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Cancelled {
             reason: "stop".to_string(),
         },
-        verlet::RuntimeEventKind::Failed {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Failed {
             code: "runtime_execution".to_string(),
             message: "boom".to_string(),
         },
@@ -225,29 +225,29 @@ fn ingress_outcome_protocol_contract_matches_fixture() {
     let admission_event_id = event_record_id(41);
     let claim_event_id = event_record_id(42);
     let evidence_event_id = event_record_id(43);
-    let claim = verlet::IoIngressClaimedPayload {
+    let claim = verlet_history::IoIngressClaimedPayload {
         ingress_envelope_ids: vec!["ingress-1".to_string()],
         ingress_witness_event_ids: vec![witness_event_id],
         admission_event_id,
-        intent: verlet::IngressOutcomeIntent::Turn {
+        intent: verlet_history::IngressOutcomeIntent::Turn {
             turn_id: "turn-1".to_string(),
             submission_mode: "queue".to_string(),
             input_digest: "sha256:input".to_string(),
         },
     };
-    let settle = verlet::IoIngressSettledPayload {
+    let settle = verlet_history::IoIngressSettledPayload {
         claim_event_id,
         ingress_envelope_ids: vec!["ingress-1".to_string()],
         evidence_event_id: Some(evidence_event_id),
-        settled_by: verlet::IngressSettledBy::Recovery,
+        settled_by: verlet_history::IngressSettledBy::Recovery,
     };
     let claim_value = serde_json::to_value(&claim).unwrap();
     let settle_value = serde_json::to_value(&settle).unwrap();
-    let claim_kind = verlet::EventKind::IoIngressClaimed;
-    let settle_kind = verlet::EventKind::IoIngressSettled;
+    let claim_kind = verlet_history::EventKind::IoIngressClaimed;
+    let settle_kind = verlet_history::EventKind::IoIngressSettled;
     let claim_kind_name: &str = claim_kind.as_ref();
     let settle_kind_name: &str = settle_kind.as_ref();
-    let registry = verlet::stream_schema_registry_v1();
+    let registry = verlet_history::stream_schema_registry_v1();
     registry
         .validate(&claim_kind.payload_schema_id(), &claim_value)
         .unwrap();
@@ -275,41 +275,41 @@ fn ingress_outcome_protocol_contract_matches_fixture() {
 #[test]
 fn stream_schema_v1_contract_matches_fixture() {
     let coordinates = coordinates();
-    let stream_id = verlet::EventStreamId::for_thread(&coordinates);
-    let source_range = verlet::ObservationSourceRange {
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let source_range = verlet_history::ObservationSourceRange {
         stream_id: stream_id.clone(),
-        from_sequence: verlet::EventSequence::new(1),
-        to_sequence: verlet::EventSequence::new(3),
+        from_sequence: verlet_history::EventSequence::new(1),
+        to_sequence: verlet_history::EventSequence::new(3),
     };
-    let retained_tail_range = verlet::ObservationSourceRange {
+    let retained_tail_range = verlet_history::ObservationSourceRange {
         stream_id: stream_id.clone(),
-        from_sequence: verlet::EventSequence::new(4),
-        to_sequence: verlet::EventSequence::new(6),
+        from_sequence: verlet_history::EventSequence::new(4),
+        to_sequence: verlet_history::EventSequence::new(6),
     };
-    let full_compile_range = verlet::ObservationSourceRange {
+    let full_compile_range = verlet_history::ObservationSourceRange {
         stream_id: stream_id.clone(),
-        from_sequence: verlet::EventSequence::new(1),
-        to_sequence: verlet::EventSequence::new(6),
+        from_sequence: verlet_history::EventSequence::new(1),
+        to_sequence: verlet_history::EventSequence::new(6),
     };
     let summary_event_id = event_record_id(2);
     let summary_text =
         "Keep the user intent and the published operation result; drop provider scaffolding.";
 
-    let compile = verlet::EventRecord {
+    let compile = verlet_history::EventRecord {
         id: event_record_id(1),
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(4),
+        sequence: verlet_history::EventSequence::new(4),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_000,
-        kind: verlet::EventKind::ContextCompileCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ContextCompileCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![stream_id.clone()],
             source_range: Some(source_range.clone()),
             source_ranges: vec![source_range.clone()],
             discharged_by: Some("projection:context-compiler".to_string()),
             function: Some("naive_assembly/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
             "schema": "cooldis.event.context.compile.completed/1",
@@ -333,21 +333,21 @@ fn stream_schema_v1_contract_matches_fixture() {
             }
         }),
     };
-    let summary = verlet::EventRecord {
+    let summary = verlet_history::EventRecord {
         id: summary_event_id,
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(5),
+        sequence: verlet_history::EventSequence::new(5),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_100,
-        kind: verlet::EventKind::ContextSummaryCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ContextSummaryCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![stream_id.clone()],
             source_range: Some(source_range.clone()),
             source_ranges: vec![source_range.clone()],
             discharged_by: Some("projection:context-summarizer".to_string()),
             function: Some("context_summary/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
             "schema": "cooldis.event.context.summary.completed/1",
@@ -363,22 +363,22 @@ fn stream_schema_v1_contract_matches_fixture() {
             }
         }),
     };
-    let read_plan_set = verlet::EventRecord {
+    let read_plan_set = verlet_history::EventRecord {
         id: event_record_id(3),
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(6),
+        sequence: verlet_history::EventSequence::new(6),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_200,
-        kind: verlet::EventKind::ContextReadPlanSet,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ContextReadPlanSet,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![stream_id.clone()],
             source_event_ids: vec![summary_event_id],
             source_range: Some(source_range.clone()),
             source_ranges: vec![source_range.clone()],
             discharged_by: Some("controller:context-budget".to_string()),
             function: Some("context_read_plan/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
             "schema": "cooldis.event.context.read_plan.set/1",
@@ -407,22 +407,22 @@ fn stream_schema_v1_contract_matches_fixture() {
             }
         }),
     };
-    let compile_after_policy = verlet::EventRecord {
+    let compile_after_policy = verlet_history::EventRecord {
         id: event_record_id(4),
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(7),
+        sequence: verlet_history::EventSequence::new(7),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_300,
-        kind: verlet::EventKind::ContextCompileCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ContextCompileCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![stream_id.clone()],
             source_event_ids: vec![summary_event_id],
             source_range: Some(full_compile_range),
             source_ranges: vec![source_range.clone(), retained_tail_range],
             discharged_by: Some("projection:context-compiler".to_string()),
             function: Some("read_plan_assembly/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
             "schema": "cooldis.event.context.compile.completed/1",
@@ -473,31 +473,31 @@ fn stream_schema_v1_contract_matches_fixture() {
             }
         }),
     };
-    let branch_selection = verlet::EventRecord {
+    let branch_selection = verlet_history::EventRecord {
         id: event_record_id(5),
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(8),
+        sequence: verlet_history::EventSequence::new(8),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_400,
-        kind: verlet::EventKind::ThreadBranchSelected,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance::default(),
-        payload: serde_json::to_value(verlet::kernel::history::ThreadBranchSelectedPayload {
+        kind: verlet_history::EventKind::ThreadBranchSelected,
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance::default(),
+        payload: serde_json::to_value(verlet_history::ThreadBranchSelectedPayload {
             thread_id: coordinates.thread_id,
             selected_entry_id: Some(session_entry_id(2)),
             prior_entry_id: Some(session_entry_id(3)),
         })
         .unwrap(),
     };
-    let reload_degraded = verlet::EventRecord {
+    let reload_degraded = verlet_history::EventRecord {
         id: event_record_id(6),
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(9),
+        sequence: verlet_history::EventSequence::new(9),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_500,
-        kind: verlet::EventKind::ThreadReloadDegraded,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance::default(),
+        kind: verlet_history::EventKind::ThreadReloadDegraded,
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance::default(),
         payload: serde_json::json!({
             "thread_id": coordinates.thread_id.to_string(),
             "missing": ["topology", "parent_thread_id", "metadata"],
@@ -513,37 +513,37 @@ fn stream_schema_v1_contract_matches_fixture() {
         branch_selection.clone(),
         reload_degraded,
     ];
-    let schema_registry = verlet::stream_schema_registry_v1();
+    let schema_registry = verlet_history::stream_schema_registry_v1();
     for record in &records {
         record.validate_stream_record_v1().unwrap();
-        verlet::validate_context_payload_schema_v1(record.kind, &record.payload).unwrap();
+        verlet_history::validate_context_payload_schema_v1(record.kind, &record.payload).unwrap();
         schema_registry
             .validate(
-                verlet::STREAM_RECORD_SCHEMA_V1,
+                verlet_history::STREAM_RECORD_SCHEMA_V1,
                 &serde_json::to_value(record.to_stream_record_v1()).unwrap(),
             )
             .unwrap();
     }
     let cursors = records
         .iter()
-        .map(verlet::EventRecord::cursor_v1)
+        .map(verlet_history::EventRecord::cursor_v1)
         .collect::<Vec<_>>();
     for cursor in &cursors {
         cursor.validate_stream_cursor_v1().unwrap();
         schema_registry
             .validate(
-                verlet::STREAM_CURSOR_SCHEMA_V1,
+                verlet_history::STREAM_CURSOR_SCHEMA_V1,
                 &serde_json::to_value(cursor).unwrap(),
             )
             .unwrap();
     }
     let append_acks = vec![
-        verlet::StreamAppendAckV1::from_appended(
+        verlet_history::StreamAppendAckV1::from_appended(
             stream_id.clone(),
             &records,
             vec![
-                verlet::StreamAckClass::LocalCommitted,
-                verlet::StreamAckClass::QueryProjected,
+                verlet_history::StreamAckClass::LocalCommitted,
+                verlet_history::StreamAckClass::QueryProjected,
             ],
         )
         .unwrap(),
@@ -551,30 +551,30 @@ fn stream_schema_v1_contract_matches_fixture() {
     for ack in &append_acks {
         schema_registry
             .validate(
-                verlet::STREAM_APPEND_ACK_SCHEMA_V1,
+                verlet_history::STREAM_APPEND_ACK_SCHEMA_V1,
                 &serde_json::to_value(ack).unwrap(),
             )
             .unwrap();
     }
-    let backend_capabilities = vec![verlet::StreamBackendCapabilitiesV1::sqlite_local(
+    let backend_capabilities = vec![verlet_history::StreamBackendCapabilitiesV1::sqlite_local(
         "/tmp/verlet/session_history.sqlite3",
     )];
     for capabilities in &backend_capabilities {
         schema_registry
             .validate(
-                verlet::STREAM_BACKEND_CAPABILITIES_SCHEMA_V1,
+                verlet_history::STREAM_BACKEND_CAPABILITIES_SCHEMA_V1,
                 &serde_json::to_value(capabilities).unwrap(),
             )
             .unwrap();
     }
     let routing = records
         .iter()
-        .map(verlet::EventRecord::route_decision_v1)
+        .map(verlet_history::EventRecord::route_decision_v1)
         .collect::<Vec<_>>();
     for decision in &routing {
         schema_registry
             .validate(
-                verlet::STREAM_ROUTING_DECISION_SCHEMA_V1,
+                verlet_history::STREAM_ROUTING_DECISION_SCHEMA_V1,
                 &serde_json::to_value(decision).unwrap(),
             )
             .unwrap();
@@ -589,7 +589,7 @@ fn stream_schema_v1_contract_matches_fixture() {
             "cursors": cursors,
             "records": records
                 .iter()
-                .map(verlet::EventRecord::to_stream_record_v1)
+                .map(verlet_history::EventRecord::to_stream_record_v1)
                 .collect::<Vec<_>>(),
             "routing": routing
         }),
@@ -599,40 +599,40 @@ fn stream_schema_v1_contract_matches_fixture() {
 #[test]
 fn debug_thread_export_v1_contract_matches_fixture() {
     let coordinates = coordinates();
-    let stream_id = verlet::EventStreamId::for_thread(&coordinates);
-    let submitted = verlet::EventRecord {
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let submitted = verlet_history::EventRecord {
         id: event_record_id(20),
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(1),
+        sequence: verlet_history::EventSequence::new(1),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_020,
-        kind: verlet::EventKind::TurnSubmitted,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance::default(),
+        kind: verlet_history::EventKind::TurnSubmitted,
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance::default(),
         payload: serde_json::json!({
-            "schema": verlet::EventKind::TurnSubmitted.payload_schema_id(),
+            "schema": verlet_history::EventKind::TurnSubmitted.payload_schema_id(),
             "turn_id": "turn-1",
             "input_text": "export evidence"
         }),
     };
-    let bind = verlet::EventRecord {
+    let bind = verlet_history::EventRecord {
         id: event_record_id(21),
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(2),
+        sequence: verlet_history::EventSequence::new(2),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_021,
-        kind: verlet::EventKind::ManifestBindCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ManifestBindCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![stream_id.clone()],
             source_event_ids: vec![submitted.id],
             discharged_by: Some("manifest:bind".to_string()),
             function: Some("manifest_bind/v1".to_string()),
             config_hash: Some("sha256:manifest-bind-config".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::ManifestBindCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::ManifestBindCompleted.payload_schema_id(),
             "agent_ref": "agent://export-fixture@0.1.0",
             "manifest_hash": "sha256:manifest"
         }),
@@ -653,7 +653,7 @@ fn debug_thread_export_v1_contract_matches_fixture() {
     let bind_kind_name: &str = bind.kind.as_ref();
     let bind_origin_name: &str = bind.origin.as_ref();
     let bundle = serde_json::json!({
-        "schema": verlet::DEBUG_THREAD_EXPORT_SCHEMA_V1,
+        "schema": verlet_history::DEBUG_THREAD_EXPORT_SCHEMA_V1,
         "threadId": coordinates.thread_id.to_string(),
         "generatedAtMs": 1_771_718_499_999i64,
         "backend": {
@@ -704,15 +704,15 @@ fn debug_thread_export_v1_contract_matches_fixture() {
         }]
     });
 
-    verlet::stream_schema_registry_v1()
-        .validate(verlet::DEBUG_THREAD_EXPORT_SCHEMA_V1, &bundle)
+    verlet_history::stream_schema_registry_v1()
+        .validate(verlet_history::DEBUG_THREAD_EXPORT_SCHEMA_V1, &bundle)
         .unwrap();
     crate::support::assert_json_fixture("contracts/debug_thread_export_v1.json", bundle);
 }
 
 #[test]
 fn coupling_template_catalog_v1_contract_matches_fixture() {
-    let catalog = verlet::coupling_template_catalog_v1();
+    let catalog = verlet::agent::coupling_templates::coupling_template_catalog_v1();
     let ids = catalog
         .templates
         .iter()
@@ -755,28 +755,28 @@ fn coupling_template_catalog_v1_contract_matches_fixture() {
 #[tokio::test]
 async fn stdlib_queue_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let control_stream_id =
-        verlet::EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let submitted = verlet::EventRecord {
+        verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let submitted = verlet_history::EventRecord {
         id: event_record_id(30),
         stream_id: thread_stream_id.clone(),
-        sequence: verlet::EventSequence::new(1),
+        sequence: verlet_history::EventSequence::new(1),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_030,
-        kind: verlet::EventKind::TurnSubmitted,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance::default(),
+        kind: verlet_history::EventKind::TurnSubmitted,
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance::default(),
         payload: serde_json::json!({
             "turn_id": "turn-1",
             "entry_id": "entry-1",
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let task_coupling = std_queue_task_bound_coupling();
     let task_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: submitted.id,
                 trigger_event_id: submitted.id,
                 trigger_stream_id: submitted.stream_id.to_string(),
@@ -793,10 +793,10 @@ async fn stdlib_queue_coupling_receipts_match_fixture() {
         .await
         .unwrap();
 
-    let task_run = verlet::CouplingRunReceipt {
-        coupling_id: verlet::STD_QUEUE_TASK_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        status: verlet::CouplingRunStatus::Completed,
+    let task_run = verlet::kernel::coupling_scheduler::CouplingRunReceipt {
+        coupling_id: verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        status: verlet::kernel::coupling_scheduler::CouplingRunStatus::Completed,
         reason: None,
         root_event_id: submitted.id,
         trigger_event_id: submitted.id,
@@ -809,33 +809,36 @@ async fn stdlib_queue_coupling_receipts_match_fixture() {
         discharged_event_ids: vec![event_record_id(31)],
         function_ref: task_coupling.function_ref.clone(),
         config_hash: task_coupling.config_hash.clone(),
-        budget_spent: verlet::CouplingBudgetSpent {
+        budget_spent: verlet::kernel::coupling_scheduler::CouplingBudgetSpent {
             discharge_events: 1,
         },
     };
-    let task_run_event = verlet::EventRecord {
+    let task_run_event = verlet_history::EventRecord {
         id: event_record_id(32),
         stream_id: control_stream_id.clone(),
-        sequence: verlet::EventSequence::new(1),
+        sequence: verlet_history::EventSequence::new(1),
         coordinates,
         created_at_ms: 1_771_718_400_032,
-        kind: verlet::EventKind::CouplingRunCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::CouplingRunCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             source_event_ids: vec![submitted.id],
-            discharged_by: Some(format!("coupling:{}", verlet::STD_QUEUE_TASK_TEMPLATE_ID)),
+            discharged_by: Some(format!(
+                "coupling:{}",
+                verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID
+            )),
             function: Some(task_coupling.function_ref.clone()),
             config_hash: Some(task_coupling.config_hash.clone()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::to_value(task_run).unwrap(),
     };
 
     let callback_coupling = std_queue_completion_callback_bound_coupling();
     let callback_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: submitted.id,
                 trigger_event_id: task_run_event.id,
                 trigger_stream_id: task_run_event.stream_id.to_string(),
@@ -864,28 +867,28 @@ async fn stdlib_queue_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_context_spill_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
-    let compile = verlet::EventRecord {
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let compile = verlet_history::EventRecord {
         id: event_record_id(40),
         stream_id: thread_stream_id.clone(),
-        sequence: verlet::EventSequence::new(5),
+        sequence: verlet_history::EventSequence::new(5),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_040,
-        kind: verlet::EventKind::ContextCompileCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ContextCompileCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
-            source_ranges: vec![verlet::ObservationSourceRange {
+            source_ranges: vec![verlet_history::ObservationSourceRange {
                 stream_id: thread_stream_id.clone(),
-                from_sequence: verlet::EventSequence::new(1),
-                to_sequence: verlet::EventSequence::new(4),
+                from_sequence: verlet_history::EventSequence::new(1),
+                to_sequence: verlet_history::EventSequence::new(4),
             }],
             discharged_by: Some("projection:context-compiler".to_string()),
             function: Some("fixture_compile/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::ContextCompileCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::ContextCompileCompleted.payload_schema_id(),
             "strategy": "fixture",
             "output_hash": "sha256:compile-output",
             "retained_text_bytes": 2000,
@@ -906,11 +909,11 @@ async fn stdlib_context_spill_coupling_receipts_match_fixture() {
             }
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let spill_coupling = std_context_spill_bound_coupling();
     let spill_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: compile.id,
                 trigger_event_id: compile.id,
                 trigger_stream_id: compile.stream_id.to_string(),
@@ -928,7 +931,8 @@ async fn stdlib_context_spill_coupling_receipts_match_fixture() {
         .unwrap();
 
     for discharge in &spill_result.discharges {
-        verlet::validate_context_payload_schema_v1(discharge.kind, &discharge.payload).unwrap();
+        verlet_history::validate_context_payload_schema_v1(discharge.kind, &discharge.payload)
+            .unwrap();
     }
     crate::support::assert_json_fixture(
         "contracts/stdlib_context_spill_coupling.json",
@@ -941,28 +945,28 @@ async fn stdlib_context_spill_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_context_truncate_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
-    let compile = verlet::EventRecord {
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let compile = verlet_history::EventRecord {
         id: event_record_id(42),
         stream_id: thread_stream_id.clone(),
-        sequence: verlet::EventSequence::new(10),
+        sequence: verlet_history::EventSequence::new(10),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_042,
-        kind: verlet::EventKind::ContextCompileCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ContextCompileCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
-            source_ranges: vec![verlet::ObservationSourceRange {
+            source_ranges: vec![verlet_history::ObservationSourceRange {
                 stream_id: thread_stream_id.clone(),
-                from_sequence: verlet::EventSequence::new(1),
-                to_sequence: verlet::EventSequence::new(10),
+                from_sequence: verlet_history::EventSequence::new(1),
+                to_sequence: verlet_history::EventSequence::new(10),
             }],
             discharged_by: Some("projection:context-compiler".to_string()),
             function: Some("fixture_compile/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::ContextCompileCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::ContextCompileCompleted.payload_schema_id(),
             "strategy": "fixture",
             "output_hash": "sha256:compile-output-tail",
             "retained_text_bytes": 1200,
@@ -983,11 +987,11 @@ async fn stdlib_context_truncate_coupling_receipts_match_fixture() {
             }
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let truncate_coupling = std_context_truncate_bound_coupling();
     let truncate_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: compile.id,
                 trigger_event_id: compile.id,
                 trigger_stream_id: compile.stream_id.to_string(),
@@ -1005,7 +1009,8 @@ async fn stdlib_context_truncate_coupling_receipts_match_fixture() {
         .unwrap();
 
     for discharge in &truncate_result.discharges {
-        verlet::validate_context_payload_schema_v1(discharge.kind, &discharge.payload).unwrap();
+        verlet_history::validate_context_payload_schema_v1(discharge.kind, &discharge.payload)
+            .unwrap();
     }
     crate::support::assert_json_fixture(
         "contracts/stdlib_context_truncate_coupling.json",
@@ -1018,32 +1023,32 @@ async fn stdlib_context_truncate_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_context_summarize_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
-    let completed = verlet::EventRecord {
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let completed = verlet_history::EventRecord {
         id: event_record_id(43),
         stream_id: thread_stream_id.clone(),
-        sequence: verlet::EventSequence::new(11),
+        sequence: verlet_history::EventSequence::new(11),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_043,
-        kind: verlet::EventKind::TurnCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::TurnCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             discharged_by: Some("runtime:provider-loop".to_string()),
             function: Some("turn_completion/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::TurnCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::TurnCompleted.payload_schema_id(),
             "turn_id": "turn-1",
             "output_text": "The user wants SQLite first, S2 later, and explicit segment maps."
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let summarize_coupling = std_context_summarize_bound_coupling();
     let summarize_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: completed.id,
                 trigger_event_id: completed.id,
                 trigger_stream_id: completed.stream_id.to_string(),
@@ -1061,7 +1066,8 @@ async fn stdlib_context_summarize_coupling_receipts_match_fixture() {
         .unwrap();
 
     for discharge in &summarize_result.discharges {
-        verlet::validate_context_payload_schema_v1(discharge.kind, &discharge.payload).unwrap();
+        verlet_history::validate_context_payload_schema_v1(discharge.kind, &discharge.payload)
+            .unwrap();
     }
     crate::support::assert_json_fixture(
         "contracts/stdlib_context_summarize_coupling.json",
@@ -1074,32 +1080,32 @@ async fn stdlib_context_summarize_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_memory_extract_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
-    let completed = verlet::EventRecord {
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let completed = verlet_history::EventRecord {
         id: event_record_id(45),
         stream_id: thread_stream_id.clone(),
-        sequence: verlet::EventSequence::new(6),
+        sequence: verlet_history::EventSequence::new(6),
         coordinates,
         created_at_ms: 1_771_718_400_045,
-        kind: verlet::EventKind::TurnCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::TurnCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             discharged_by: Some("runtime:provider-loop".to_string()),
             function: Some("turn_completion/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::TurnCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::TurnCompleted.payload_schema_id(),
             "turn_id": "turn-1",
             "output_text": "User prefers SQLite first, then S2 as stream backend."
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let memory_coupling = std_memory_extract_bound_coupling();
     let memory_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: event_record_id(44),
                 trigger_event_id: completed.id,
                 trigger_stream_id: completed.stream_id.to_string(),
@@ -1117,7 +1123,8 @@ async fn stdlib_memory_extract_coupling_receipts_match_fixture() {
         .unwrap();
 
     for discharge in &memory_result.discharges {
-        verlet::validate_context_payload_schema_v1(discharge.kind, &discharge.payload).unwrap();
+        verlet_history::validate_context_payload_schema_v1(discharge.kind, &discharge.payload)
+            .unwrap();
     }
     crate::support::assert_json_fixture(
         "contracts/stdlib_memory_extract_coupling.json",
@@ -1130,33 +1137,33 @@ async fn stdlib_memory_extract_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_memory_recall_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let memory_stream_id =
-        verlet::EventStreamId::new(format!("derived:memory:{}", coordinates.thread_id));
-    let memory = verlet::EventRecord {
+        verlet_history::EventStreamId::new(format!("derived:memory:{}", coordinates.thread_id));
+    let memory = verlet_history::EventRecord {
         id: event_record_id(46),
         stream_id: memory_stream_id.clone(),
-        sequence: verlet::EventSequence::new(2),
+        sequence: verlet_history::EventSequence::new(2),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_046,
-        kind: verlet::EventKind::ContextSummaryCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ContextSummaryCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             source_event_ids: vec![event_record_id(45)],
             discharged_by: Some(format!(
                 "coupling:{}",
-                verlet::STD_MEMORY_EXTRACT_TEMPLATE_ID
+                verlet::kernel::stdlib_couplings::STD_MEMORY_EXTRACT_TEMPLATE_ID
             )),
             function: Some(format!(
                 "op://std-memory-extract/run@sha256:{}",
                 "f".repeat(64)
             )),
             config_hash: Some("sha256:memory-extract".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::ContextSummaryCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::ContextSummaryCompleted.payload_schema_id(),
             "role": "summary_checkpoint",
             "text": "User prefers SQLite first, then S2 as stream backend.",
             "covered_ranges": [{
@@ -1167,30 +1174,30 @@ async fn stdlib_memory_recall_coupling_receipts_match_fixture() {
             "content": {
                 "sha256": "sha256:5ab05010794bf58b10e96d872372f426357516f95dd71a7e5c1098fc18251517"
             },
-            "template_id": verlet::STD_MEMORY_EXTRACT_TEMPLATE_ID,
+            "template_id": verlet::kernel::stdlib_couplings::STD_MEMORY_EXTRACT_TEMPLATE_ID,
             "memory_kind": "observation"
         }),
     };
-    let submitted = verlet::EventRecord {
+    let submitted = verlet_history::EventRecord {
         id: event_record_id(47),
         stream_id: thread_stream_id,
-        sequence: verlet::EventSequence::new(7),
+        sequence: verlet_history::EventSequence::new(7),
         coordinates,
         created_at_ms: 1_771_718_400_047,
-        kind: verlet::EventKind::TurnSubmitted,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance::default(),
+        kind: verlet_history::EventKind::TurnSubmitted,
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance::default(),
         payload: serde_json::json!({
-            "schema": verlet::EventKind::TurnSubmitted.payload_schema_id(),
+            "schema": verlet_history::EventKind::TurnSubmitted.payload_schema_id(),
             "turn_id": "turn-2",
             "input_text": "What should we use for V1 stream storage?"
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let recall_coupling = std_memory_recall_bound_coupling();
     let recall_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: submitted.id,
                 trigger_event_id: submitted.id,
                 trigger_stream_id: submitted.stream_id.to_string(),
@@ -1208,7 +1215,8 @@ async fn stdlib_memory_recall_coupling_receipts_match_fixture() {
         .unwrap();
 
     for discharge in &recall_result.discharges {
-        verlet::validate_context_payload_schema_v1(discharge.kind, &discharge.payload).unwrap();
+        verlet_history::validate_context_payload_schema_v1(discharge.kind, &discharge.payload)
+            .unwrap();
     }
     crate::support::assert_json_fixture(
         "contracts/stdlib_memory_recall_coupling.json",
@@ -1221,32 +1229,32 @@ async fn stdlib_memory_recall_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_prompt_dynamic_instructions_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
-    let manifest_bind = verlet::EventRecord {
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let manifest_bind = verlet_history::EventRecord {
         id: event_record_id(70),
         stream_id: thread_stream_id.clone(),
-        sequence: verlet::EventSequence::new(8),
+        sequence: verlet_history::EventSequence::new(8),
         coordinates,
         created_at_ms: 1_771_718_400_070,
-        kind: verlet::EventKind::ManifestBindCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::ManifestBindCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             discharged_by: Some("manifest:bind".to_string()),
             function: Some("manifest_bind/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::ManifestBindCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::ManifestBindCompleted.payload_schema_id(),
             "agent_ref": "agent://release-verifier@0.1.0",
             "manifest_hash": "sha256:manifest"
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let instruction_coupling = std_prompt_dynamic_instructions_bound_coupling();
     let instruction_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: manifest_bind.id,
                 trigger_event_id: manifest_bind.id,
                 trigger_stream_id: manifest_bind.stream_id.to_string(),
@@ -1264,7 +1272,8 @@ async fn stdlib_prompt_dynamic_instructions_receipts_match_fixture() {
         .unwrap();
 
     for discharge in &instruction_result.discharges {
-        verlet::validate_context_payload_schema_v1(discharge.kind, &discharge.payload).unwrap();
+        verlet_history::validate_context_payload_schema_v1(discharge.kind, &discharge.payload)
+            .unwrap();
     }
     crate::support::assert_json_fixture(
         "contracts/stdlib_prompt_dynamic_instructions_coupling.json",
@@ -1277,49 +1286,49 @@ async fn stdlib_prompt_dynamic_instructions_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_prompt_steer_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let control_stream_id =
-        verlet::EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let completed = verlet::EventRecord {
+        verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let completed = verlet_history::EventRecord {
         id: event_record_id(72),
         stream_id: thread_stream_id.clone(),
-        sequence: verlet::EventSequence::new(9),
+        sequence: verlet_history::EventSequence::new(9),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_072,
-        kind: verlet::EventKind::TurnCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::TurnCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             discharged_by: Some("runtime:provider-loop".to_string()),
             function: Some("turn_completion/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::TurnCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::TurnCompleted.payload_schema_id(),
             "turn_id": "turn-1",
             "output_text": "Need one more clarification turn."
         }),
     };
-    let approval = verlet::EventRecord {
+    let approval = verlet_history::EventRecord {
         id: event_record_id(73),
         stream_id: control_stream_id.clone(),
-        sequence: verlet::EventSequence::new(2),
+        sequence: verlet_history::EventSequence::new(2),
         coordinates,
         created_at_ms: 1_771_718_400_073,
-        kind: verlet::EventKind::ApprovalResolved,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance::default(),
+        kind: verlet_history::EventKind::ApprovalResolved,
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance::default(),
         payload: serde_json::json!({
-            "schema": verlet::EventKind::ApprovalResolved.payload_schema_id(),
+            "schema": verlet_history::EventKind::ApprovalResolved.payload_schema_id(),
             "approval_id": "approval-instructions",
             "decision": "approved"
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let continuation_coupling = std_prompt_steer_continuation_bound_coupling();
     let continuation_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: completed.id,
                 trigger_event_id: completed.id,
                 trigger_stream_id: completed.stream_id.to_string(),
@@ -1337,8 +1346,8 @@ async fn stdlib_prompt_steer_coupling_receipts_match_fixture() {
         .unwrap();
     let read_plan_coupling = std_prompt_steer_read_plan_bound_coupling();
     let read_plan_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: event_record_id(72),
                 trigger_event_id: approval.id,
                 trigger_stream_id: approval.stream_id.to_string(),
@@ -1360,8 +1369,9 @@ async fn stdlib_prompt_steer_coupling_receipts_match_fixture() {
         .iter()
         .chain(read_plan_result.discharges.iter())
     {
-        if discharge.kind == verlet::EventKind::ContextReadPlanSet {
-            verlet::validate_context_payload_schema_v1(discharge.kind, &discharge.payload).unwrap();
+        if discharge.kind == verlet_history::EventKind::ContextReadPlanSet {
+            verlet_history::validate_context_payload_schema_v1(discharge.kind, &discharge.payload)
+                .unwrap();
         }
     }
     crate::support::assert_json_fixture(
@@ -1377,24 +1387,27 @@ async fn stdlib_prompt_steer_coupling_receipts_match_fixture() {
 async fn stdlib_failure_deadletter_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
     let control_stream_id =
-        verlet::EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let failed = verlet::EventRecord {
+        verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let failed = verlet_history::EventRecord {
         id: event_record_id(50),
         stream_id: control_stream_id.clone(),
-        sequence: verlet::EventSequence::new(3),
+        sequence: verlet_history::EventSequence::new(3),
         coordinates,
         created_at_ms: 1_771_718_400_050,
-        kind: verlet::EventKind::CouplingRunFailed,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
-            source_streams: vec![verlet::EventStreamId::new("thread:fixture-thread")],
-            discharged_by: Some(format!("coupling:{}", verlet::STD_QUEUE_TASK_TEMPLATE_ID)),
+        kind: verlet_history::EventKind::CouplingRunFailed,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
+            source_streams: vec![verlet_history::EventStreamId::new("thread:fixture-thread")],
+            discharged_by: Some(format!(
+                "coupling:{}",
+                verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID
+            )),
             function: Some(format!("op://std-queue-task/run@sha256:{}", "a".repeat(64))),
             config_hash: Some("sha256:queue-task".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "coupling_id": verlet::STD_QUEUE_TASK_TEMPLATE_ID,
+            "coupling_id": verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID,
             "status": "failed",
             "reason": "remote service unavailable",
             "root_event_id": event_record_id(48).to_string(),
@@ -1411,11 +1424,11 @@ async fn stdlib_failure_deadletter_coupling_receipts_match_fixture() {
             "budget_spent": {"discharge_events": 0}
         }),
     };
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let deadletter_coupling = std_failure_deadletter_bound_coupling();
     let deadletter_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: event_record_id(48),
                 trigger_event_id: failed.id,
                 trigger_stream_id: failed.stream_id.to_string(),
@@ -1444,7 +1457,7 @@ async fn stdlib_failure_deadletter_coupling_receipts_match_fixture() {
 async fn stdlib_retry_with_budget_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
     let control_stream_id =
-        verlet::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
     let retryable = failed_coupling_run_event(
         coordinates.clone(),
         control_stream_id.clone(),
@@ -1467,11 +1480,11 @@ async fn stdlib_retry_with_budget_coupling_receipts_match_fixture() {
             "reason": "provider network hiccup"
         }),
     );
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let retry_coupling = std_retry_with_budget_bound_coupling();
     let retry_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: event_record_id(58),
                 trigger_event_id: retryable.id,
                 trigger_stream_id: retryable.stream_id.to_string(),
@@ -1488,8 +1501,8 @@ async fn stdlib_retry_with_budget_coupling_receipts_match_fixture() {
         .await
         .unwrap();
     let exhausted_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: event_record_id(58),
                 trigger_event_id: exhausted.id,
                 trigger_stream_id: exhausted.stream_id.to_string(),
@@ -1519,7 +1532,7 @@ async fn stdlib_retry_with_budget_coupling_receipts_match_fixture() {
 async fn stdlib_schedule_cron_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
     let control_stream_id =
-        verlet::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
     let accepted_mandate = schedule_mandate_started_event(
         coordinates.clone(),
         control_stream_id.clone(),
@@ -1550,11 +1563,11 @@ async fn stdlib_schedule_cron_coupling_receipts_match_fixture() {
         2,
         "2026-01-01T00:02:00.000Z",
     );
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let schedule_coupling = std_schedule_cron_bound_coupling();
     let schedule_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: accepted.id,
                 trigger_event_id: accepted.id,
                 trigger_stream_id: accepted.stream_id.to_string(),
@@ -1571,8 +1584,8 @@ async fn stdlib_schedule_cron_coupling_receipts_match_fixture() {
         .await
         .unwrap();
     let exhausted_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: exhausted.id,
                 trigger_event_id: exhausted.id,
                 trigger_stream_id: exhausted.stream_id.to_string(),
@@ -1601,25 +1614,25 @@ async fn stdlib_schedule_cron_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_supervisor_child_completion_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let control_stream_id =
-        verlet::EventStreamId::new(format!("control:{}", coordinates.thread_id));
-    let child_completed = verlet::EventRecord {
+        verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+    let child_completed = verlet_history::EventRecord {
         id: event_record_id(100),
         stream_id: thread_stream_id.clone(),
-        sequence: verlet::EventSequence::new(12),
+        sequence: verlet_history::EventSequence::new(12),
         coordinates: coordinates.clone(),
         created_at_ms: 1_771_718_400_100,
-        kind: verlet::EventKind::TurnCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::TurnCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             discharged_by: Some("runtime:child-thread".to_string()),
             function: Some("child_turn_completion/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::TurnCompleted.payload_schema_id(),
+            "schema": verlet_history::EventKind::TurnCompleted.payload_schema_id(),
             "turn_id": "child-turn-1",
             "parent_thread_id": coordinates.thread_id.to_string(),
             "child_thread_id": thread_id(2).to_string(),
@@ -1627,40 +1640,41 @@ async fn stdlib_supervisor_child_completion_coupling_receipts_match_fixture() {
             "output_text": "child finished release evidence collection"
         }),
     };
-    let mut spawn_receipt_payload = serde_json::to_value(verlet::CouplingRunReceipt {
-        coupling_id: "std::supervisor.spawn".to_string(),
-        role: verlet::CouplingRole::Controller,
-        status: verlet::CouplingRunStatus::Completed,
-        reason: None,
-        root_event_id: event_record_id(98),
-        trigger_event_id: event_record_id(99),
-        trigger_stream_id: thread_stream_id.to_string(),
-        trigger_sequence: 11,
-        snapshot_id: "snapshot-a".to_string(),
-        depth: 0,
-        source_cut: coupling_source_cut(&thread_stream_id, 11),
-        source_event_ids: vec![event_record_id(99)],
-        discharged_event_ids: vec![event_record_id(100)],
-        function_ref: format!("op://std-supervisor-spawn/run@sha256:{}", "i".repeat(64)),
-        config_hash: "sha256:supervisor-spawn".to_string(),
-        budget_spent: verlet::CouplingBudgetSpent {
-            discharge_events: 1,
-        },
-    })
-    .unwrap();
+    let mut spawn_receipt_payload =
+        serde_json::to_value(verlet::kernel::coupling_scheduler::CouplingRunReceipt {
+            coupling_id: "std::supervisor.spawn".to_string(),
+            role: verlet::agent::manifest_bind::CouplingRole::Controller,
+            status: verlet::kernel::coupling_scheduler::CouplingRunStatus::Completed,
+            reason: None,
+            root_event_id: event_record_id(98),
+            trigger_event_id: event_record_id(99),
+            trigger_stream_id: thread_stream_id.to_string(),
+            trigger_sequence: 11,
+            snapshot_id: "snapshot-a".to_string(),
+            depth: 0,
+            source_cut: coupling_source_cut(&thread_stream_id, 11),
+            source_event_ids: vec![event_record_id(99)],
+            discharged_event_ids: vec![event_record_id(100)],
+            function_ref: format!("op://std-supervisor-spawn/run@sha256:{}", "i".repeat(64)),
+            config_hash: "sha256:supervisor-spawn".to_string(),
+            budget_spent: verlet::kernel::coupling_scheduler::CouplingBudgetSpent {
+                discharge_events: 1,
+            },
+        })
+        .unwrap();
     spawn_receipt_payload["parent_thread_id"] =
         serde_json::json!(coordinates.thread_id.to_string());
     spawn_receipt_payload["child_thread_id"] = serde_json::json!(thread_id(2).to_string());
     spawn_receipt_payload["child_turn_id"] = serde_json::json!("child-turn-1");
-    let spawn_completed = verlet::EventRecord {
+    let spawn_completed = verlet_history::EventRecord {
         id: event_record_id(101),
         stream_id: control_stream_id.clone(),
-        sequence: verlet::EventSequence::new(13),
+        sequence: verlet_history::EventSequence::new(13),
         coordinates,
         created_at_ms: 1_771_718_400_101,
-        kind: verlet::EventKind::CouplingRunCompleted,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::CouplingRunCompleted,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![thread_stream_id.clone()],
             discharged_by: Some("coupling:std::supervisor.spawn".to_string()),
             function: Some(format!(
@@ -1668,19 +1682,19 @@ async fn stdlib_supervisor_child_completion_coupling_receipts_match_fixture() {
                 "i".repeat(64)
             )),
             config_hash: Some("sha256:supervisor-spawn".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: spawn_receipt_payload,
     };
 
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let loop_coupling = std_supervisor_child_completion_bound_coupling(serde_json::json!({
         "on_completed": "complete_loop",
         "reason": "child work joined back to supervisor"
     }));
     let loop_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: child_completed.id,
                 trigger_event_id: child_completed.id,
                 trigger_stream_id: child_completed.stream_id.to_string(),
@@ -1706,8 +1720,8 @@ async fn stdlib_supervisor_child_completion_coupling_receipts_match_fixture() {
         "reason": "child completion should resume the supervisor"
     }));
     let continue_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: event_record_id(98),
                 trigger_event_id: spawn_completed.id,
                 trigger_stream_id: spawn_completed.stream_id.to_string(),
@@ -1736,7 +1750,7 @@ async fn stdlib_supervisor_child_completion_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_permission_tool_gate_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let allow_request = tool_call_requested_event(
         coordinates.clone(),
         thread_stream_id.clone(),
@@ -1751,7 +1765,7 @@ async fn stdlib_permission_tool_gate_coupling_receipts_match_fixture() {
         10,
         "call-wait",
     );
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let allow_coupling = std_permission_tool_gate_bound_coupling(serde_json::json!({
         "decision": "allow",
         "reason": "allowed by V1 tool gate fixture",
@@ -1762,8 +1776,8 @@ async fn stdlib_permission_tool_gate_coupling_receipts_match_fixture() {
         "reason": "operator approval required",
     }));
     let allow_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: allow_request.id,
                 trigger_event_id: allow_request.id,
                 trigger_stream_id: allow_request.stream_id.to_string(),
@@ -1780,8 +1794,8 @@ async fn stdlib_permission_tool_gate_coupling_receipts_match_fixture() {
         .await
         .unwrap();
     let wait_result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: wait_request.id,
                 trigger_event_id: wait_request.id,
                 trigger_stream_id: wait_request.stream_id.to_string(),
@@ -1810,7 +1824,7 @@ async fn stdlib_permission_tool_gate_coupling_receipts_match_fixture() {
 #[tokio::test]
 async fn stdlib_permission_approval_gate_coupling_receipts_match_fixture() {
     let coordinates = coordinates();
-    let thread_stream_id = verlet::EventStreamId::for_thread(&coordinates);
+    let thread_stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let request = tool_call_requested_event(
         coordinates,
         thread_stream_id.clone(),
@@ -1818,15 +1832,15 @@ async fn stdlib_permission_approval_gate_coupling_receipts_match_fixture() {
         11,
         "call-approval",
     );
-    let executor = verlet::StdlibCouplingExecutor;
+    let executor = verlet::kernel::stdlib_couplings::StdlibCouplingExecutor;
     let coupling = std_permission_approval_gate_bound_coupling(serde_json::json!({
         "approval_id": "approval-shell-call",
         "reason": "operator approval required",
         "resume_token": "resume-shell-call"
     }));
     let result = executor
-        .invoke(verlet::CouplingInvocation {
-            activation: verlet::CouplingActivation {
+        .invoke(verlet::kernel::coupling_scheduler::CouplingInvocation {
+            activation: verlet::kernel::coupling_scheduler::CouplingActivation {
                 root_event_id: request.id,
                 trigger_event_id: request.id,
                 trigger_stream_id: request.stream_id.to_string(),
@@ -1855,13 +1869,13 @@ async fn stdlib_permission_approval_gate_coupling_receipts_match_fixture() {
 fn hook_contracts_match_fixture() {
     let snapshot = turn_snapshot();
     let value = serde_json::json!({
-        "pre_tool_request": verlet::HookRequest::PreToolUse(verlet::PreToolUseHookRequest {
+        "pre_tool_request": verlet::agent::hooks::HookRequest::PreToolUse(verlet::agent::hooks::PreToolUseHookRequest {
             turn_context: snapshot.clone(),
             call_id: "call_1".to_string(),
             tool_name: "echo_search".to_string(),
             arguments: serde_json::json!({"input":"original"}),
         }),
-        "post_tool_request": verlet::HookRequest::PostToolUse(verlet::PostToolUseHookRequest {
+        "post_tool_request": verlet::agent::hooks::HookRequest::PostToolUse(verlet::agent::hooks::PostToolUseHookRequest {
             turn_context: snapshot,
             call_id: "call_1".to_string(),
             tool_name: "echo_search".to_string(),
@@ -1869,18 +1883,18 @@ fn hook_contracts_match_fixture() {
             output: "echo:rewritten".to_string(),
             success: true,
         }),
-        "handler_output": verlet::HookHandlerOutput {
+        "handler_output": verlet::agent::hooks::HookHandlerOutput {
             updated_input: Some(serde_json::json!({"input":"rewritten"})),
             additional_context: Some("hook context".to_string()),
             feedback: Some("feedback context".to_string()),
             replacement_output: Some("replacement".to_string()),
-            ..verlet::HookHandlerOutput::default()
+            ..verlet::agent::hooks::HookHandlerOutput::default()
         },
-        "run_record": verlet::HookRunRecord {
+        "run_record": verlet::agent::hooks::HookRunRecord {
             hook_id: "pre-echo".to_string(),
-            event_name: verlet::HookEventName::PreToolUse,
+            event_name: verlet::agent::hooks::HookEventName::PreToolUse,
             matcher: Some("echo_search".to_string()),
-            status: verlet::HookRunStatus::Completed,
+            status: verlet::agent::hooks::HookRunStatus::Completed,
             started_at_ms: 10,
             completed_at_ms: 22,
             duration_ms: 12,
@@ -1893,17 +1907,17 @@ fn hook_contracts_match_fixture() {
 #[test]
 fn thread_lifecycle_contracts_match_fixture() {
     let coordinates = coordinates();
-    let signal = verlet::ThreadSignal {
+    let signal = verlet_runtime_contracts::ThreadSignal {
         id: signal_id(1),
         coordinates: coordinates.clone(),
-        kind: verlet::ThreadSignalKind::UserSteer,
+        kind: verlet_runtime_contracts::ThreadSignalKind::UserSteer,
         metadata: std::collections::BTreeMap::from([("turn_id".to_string(), "turn-2".to_string())]),
         created_at_ms: 100,
     };
-    let checkpoint = verlet::ThreadCheckpoint {
+    let checkpoint = verlet::kernel::runtime_host::runtime_api::ThreadCheckpoint {
         id: checkpoint_id(1),
         coordinates: coordinates.clone(),
-        lineage: verlet::ThreadCheckpointLineage::Root,
+        lineage: verlet::kernel::runtime_host::runtime_api::ThreadCheckpointLineage::Root,
         parent_checkpoint_id: None,
         active_entry_id: Some(session_entry_id(1)),
         label: Some("after-tool".to_string()),
@@ -1913,11 +1927,11 @@ fn thread_lifecycle_contracts_match_fixture() {
         )]),
         created_at_ms: 200,
     };
-    let lifecycle = verlet::ThreadLifecycleRecord {
+    let lifecycle = verlet_runtime_contracts::ThreadLifecycleRecord {
         coordinates: coordinates.clone(),
         parent_thread_id: Some(thread_id(9)),
-        topology: verlet::ThreadTopology::spawned_from(thread_id(9)),
-        status: verlet::ThreadLifecycleStatus::Idle,
+        topology: verlet_runtime_contracts::ThreadTopology::spawned_from(thread_id(9)),
+        status: verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
         latest_signal_id: Some(signal_id(1)),
         latest_checkpoint_id: Some(checkpoint_id(1)),
         created_at_ms: 1,
@@ -1927,14 +1941,14 @@ fn thread_lifecycle_contracts_match_fixture() {
             "/tmp/tenant".to_string(),
         )]),
     };
-    let receipt = verlet::AgentProcessSubmitReceipt {
+    let receipt = verlet::kernel::runtime_host::kernel_control::AgentProcessSubmitReceipt {
         operation: "submit_to_thread".to_string(),
         caller_thread_id: thread_id(9),
         target_thread_id: thread_id(1),
         interaction_id: runtime_event_id(2),
-        status: verlet::ThreadStatus::Running,
+        status: verlet_runtime_contracts::ThreadStatus::Running,
         turn_id: "turn-2".to_string(),
-        dispatch_id: verlet_runtime_contracts::DispatchId::new("submit-dispatch-2"),
+        dispatch_id: verlet_runtime_contracts::handle::DispatchId::new("submit-dispatch-2"),
     };
     crate::support::assert_json_fixture(
         "contracts/thread_lifecycle.json",
@@ -1949,21 +1963,21 @@ fn thread_lifecycle_contracts_match_fixture() {
 
 #[test]
 fn provider_wire_request_contracts_match_fixture() {
-    let openai_responses = verlet::OpenAIResponsesAdapter::default()
+    let openai_responses = verlet_provider::OpenAIResponsesAdapter::default()
         .build_request_body(&provider_request(
-            verlet::ProviderApi::OpenAIResponses,
+            verlet_history::ProviderApi::OpenAIResponses,
             "gpt-fixture",
         ))
         .unwrap();
-    let openai_chat = verlet::OpenAIChatCompletionsAdapter
+    let openai_chat = verlet_provider::OpenAIChatCompletionsAdapter
         .build_request_body(&provider_request(
-            verlet::ProviderApi::OpenAIChatCompletions,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
             "gpt-chat-fixture",
         ))
         .unwrap();
-    let anthropic = verlet::AnthropicMessagesAdapter
+    let anthropic = verlet_provider::AnthropicMessagesAdapter
         .build_request_body(&provider_request(
-            verlet::ProviderApi::AnthropicMessages,
+            verlet_history::ProviderApi::AnthropicMessages,
             "claude-fixture",
         ))
         .unwrap();
@@ -1981,19 +1995,19 @@ fn provider_wire_request_contracts_match_fixture() {
 #[test]
 fn abi_and_process_contracts_match_fixture() {
     let operation_id = operation_id(1);
-    let manifest = verlet::WasmOperationManifest {
+    let manifest = verlet_abi::WasmOperationManifest {
         abi: "cooldis_0.1".to_string(),
-        operations: vec![verlet::WasmOperationDefinition {
+        operations: vec![verlet_abi::WasmOperationDefinition {
             id: 7,
             name: "search".to_string(),
-            input: verlet::WasmOperationValueKind::Json,
-            output: verlet::WasmOperationValueKind::Json,
-            events: verlet::WasmOperationEventKind::Jsonl,
-            mode: verlet::WasmOperationMode::Sync,
+            input: verlet_abi::WasmOperationValueKind::Json,
+            output: verlet_abi::WasmOperationValueKind::Json,
+            events: verlet_abi::WasmOperationEventKind::Jsonl,
+            mode: verlet_abi::WasmOperationMode::Sync,
             required_capabilities: vec!["net:https://api.example.test".to_string()],
         }],
     };
-    let operation = verlet::RegisteredOperation {
+    let operation = verlet_operations::RegisteredOperation {
         name: "search".to_string(),
         manifest: manifest.clone(),
         capability_grants: std::collections::BTreeSet::from([
@@ -2004,78 +2018,81 @@ fn abi_and_process_contracts_match_fixture() {
             serde_json::json!("contracts"),
         )]),
     };
-    let output = verlet::VerletProcessOutput {
+    let output = verlet_process::process::VerletProcessOutput {
         stdout: b"{\"ok\":true}\n".to_vec(),
         stderr: b"{\"level\":\"info\"}\n".to_vec(),
-        terminal: Some(verlet::VerletProcessTerminalState::Completed {
-            status: verlet::VerletProcessExitStatus::success(),
-        }),
+        terminal: Some(
+            verlet_process::process::VerletProcessTerminalState::Completed {
+                status: verlet_process::process::VerletProcessExitStatus::success(),
+            },
+        ),
         stdout_truncated: false,
         stderr_truncated: false,
-        artifacts: vec![verlet::VerletProcessArtifact {
+        artifacts: vec![verlet_process::process::VerletProcessArtifact {
             artifact_id: "artifact_1".to_string(),
             path: Some(std::path::PathBuf::from("/workspace/out.json")),
             mime_type: Some("application/json".to_string()),
         }],
-        file_deltas: vec![verlet::VerletProcessFileDelta {
-            kind: verlet::FileDeltaKind::Write,
+        file_deltas: vec![verlet_process::process::VerletProcessFileDelta {
+            kind: verlet_process::bridge::FileDeltaKind::Write,
             path: std::path::PathBuf::from("/workspace/out.json"),
             target: None,
         }],
     };
     let operation_events = vec![
-        verlet::OperationEvent::Started { operation_id },
-        verlet::OperationEvent::Log {
+        verlet_process::bridge::OperationEvent::Started { operation_id },
+        verlet_process::bridge::OperationEvent::Log {
             operation_id,
-            level: verlet::OperationLogLevel::Info,
+            level: verlet_process::bridge::OperationLogLevel::Info,
             message: "operation ready".to_string(),
         },
-        verlet::OperationEvent::FileDelta {
+        verlet_process::bridge::OperationEvent::FileDelta {
             operation_id,
-            kind: verlet::FileDeltaKind::Write,
+            kind: verlet_process::bridge::FileDeltaKind::Write,
             path: std::path::PathBuf::from("/workspace/out.json"),
             target: None,
         },
-        verlet::OperationEvent::Completed {
+        verlet_process::bridge::OperationEvent::Completed {
             operation_id,
-            status: verlet::OperationExitStatus::exited(0),
+            status: verlet_process::bridge::OperationExitStatus::exited(0),
         },
     ];
-    let mut unix_exec = verlet::UnixExecPayload::new("verlet run search search", "/workspace");
-    unix_exec = unix_exec.with_mode(verlet::UnixExecutionMode::VirtualOnly);
+    let mut unix_exec =
+        verlet_process::bridge::UnixExecPayload::new("verlet run search search", "/workspace");
+    unix_exec = unix_exec.with_mode(verlet_process::bridge::UnixExecutionMode::VirtualOnly);
 
     crate::support::assert_json_fixture(
         "contracts/abi_process.json",
         serde_json::json!({
-            "bridge_backend_kind": verlet::BridgeBackendKind::InProcess,
+            "bridge_backend_kind": verlet_process::bridge::BridgeBackendKind::InProcess,
             "manifest": manifest,
             "operation_events": operation_events,
-            "projection": verlet::OperationProjectionSet::from_registered(&operation),
+            "projection": verlet_operations::OperationProjectionSet::from_registered(&operation),
             "process_output": output,
             "unix_exec_payload": unix_exec,
         }),
     );
 }
 
-fn std_queue_task_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_QUEUE_TASK_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::TurnSubmitted,
+fn std_queue_task_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::TurnSubmitted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![verlet::EventKind::TurnSubmitted],
+            kinds: vec![verlet_history::EventKind::TurnSubmitted],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
-            kinds: vec![verlet::EventKind::TurnWaiting],
+            kinds: vec![verlet_history::EventKind::TurnWaiting],
         },
         function_ref: format!("op://std-queue-task/run@sha256:{}", "a".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-queue-task".to_string(),
             artifact_hash: "a".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2084,7 +2101,7 @@ fn std_queue_task_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:thread".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2093,31 +2110,31 @@ fn std_queue_task_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_queue_completion_callback_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_QUEUE_COMPLETION_CALLBACK_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::CouplingRunCompleted,
+fn std_queue_completion_callback_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_QUEUE_COMPLETION_CALLBACK_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::CouplingRunCompleted,
         trigger_match: std::collections::BTreeMap::from([(
             "coupling_id".to_string(),
-            serde_json::json!(verlet::STD_QUEUE_TASK_TEMPLATE_ID),
+            serde_json::json!(verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID),
         )]),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "control".to_string(),
-            kinds: vec![verlet::EventKind::CouplingRunCompleted],
+            kinds: vec![verlet_history::EventKind::CouplingRunCompleted],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
-            kinds: vec![verlet::EventKind::LoopCompleted],
+            kinds: vec![verlet_history::EventKind::LoopCompleted],
         },
         function_ref: format!(
             "op://std-queue-completion-callback/run@sha256:{}",
             "b".repeat(64)
         ),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-queue-completion-callback".to_string(),
             artifact_hash: "b".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2126,40 +2143,40 @@ fn std_queue_completion_callback_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:control".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
         config: serde_json::json!({
-            "watch_coupling_id": verlet::STD_QUEUE_TASK_TEMPLATE_ID,
+            "watch_coupling_id": verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID,
             "on_completed": "complete_loop",
         }),
         config_hash: "sha256:queue-callback".to_string(),
     }
 }
 
-fn std_context_spill_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_CONTEXT_SPILL_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Projection,
-        trigger_kind: verlet::EventKind::ContextCompileCompleted,
+fn std_context_spill_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_CONTEXT_SPILL_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Projection,
+        trigger_kind: verlet_history::EventKind::ContextCompileCompleted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![verlet::EventKind::ContextCompileCompleted],
+            kinds: vec![verlet_history::EventKind::ContextCompileCompleted],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "derived:context".to_string(),
             kinds: vec![
-                verlet::EventKind::ContextSummaryCompleted,
-                verlet::EventKind::ContextReadPlanSet,
+                verlet_history::EventKind::ContextSummaryCompleted,
+                verlet_history::EventKind::ContextReadPlanSet,
             ],
         },
         function_ref: format!("op://std-context-spill/run@sha256:{}", "c".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-context-spill".to_string(),
             artifact_hash: "c".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2168,7 +2185,7 @@ fn std_context_spill_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:thread".to_string(),
             "stream.write:derived:context".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(2),
         },
@@ -2180,25 +2197,25 @@ fn std_context_spill_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_context_truncate_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_CONTEXT_TRUNCATE_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::ContextCompileCompleted,
+fn std_context_truncate_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_CONTEXT_TRUNCATE_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::ContextCompileCompleted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![verlet::EventKind::ContextCompileCompleted],
+            kinds: vec![verlet_history::EventKind::ContextCompileCompleted],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
-            kinds: vec![verlet::EventKind::ContextReadPlanSet],
+            kinds: vec![verlet_history::EventKind::ContextReadPlanSet],
         },
         function_ref: format!("op://std-context-truncate/run@sha256:{}", "d".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-context-truncate".to_string(),
             artifact_hash: "d".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2207,7 +2224,7 @@ fn std_context_truncate_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:thread".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2219,31 +2236,31 @@ fn std_context_truncate_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_context_summarize_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_CONTEXT_SUMMARIZE_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Projection,
-        trigger_kind: verlet::EventKind::TurnCompleted,
+fn std_context_summarize_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_CONTEXT_SUMMARIZE_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Projection,
+        trigger_kind: verlet_history::EventKind::TurnCompleted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
             kinds: vec![
-                verlet::EventKind::SessionEntryAppended,
-                verlet::EventKind::TurnCompleted,
+                verlet_history::EventKind::SessionEntryAppended,
+                verlet_history::EventKind::TurnCompleted,
             ],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "derived:context".to_string(),
             kinds: vec![
-                verlet::EventKind::ContextSummaryCompleted,
-                verlet::EventKind::ContextReadPlanSet,
+                verlet_history::EventKind::ContextSummaryCompleted,
+                verlet_history::EventKind::ContextReadPlanSet,
             ],
         },
         function_ref: format!("op://std-context-summarize/run@sha256:{}", "e".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-context-summarize".to_string(),
             artifact_hash: "e".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2252,7 +2269,7 @@ fn std_context_summarize_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:thread".to_string(),
             "stream.write:derived:context".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(2),
         },
@@ -2263,28 +2280,28 @@ fn std_context_summarize_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_memory_extract_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_MEMORY_EXTRACT_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Projection,
-        trigger_kind: verlet::EventKind::TurnCompleted,
+fn std_memory_extract_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_MEMORY_EXTRACT_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Projection,
+        trigger_kind: verlet_history::EventKind::TurnCompleted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
             kinds: vec![
-                verlet::EventKind::TurnCompleted,
-                verlet::EventKind::ToolCallCompleted,
+                verlet_history::EventKind::TurnCompleted,
+                verlet_history::EventKind::ToolCallCompleted,
             ],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "derived:memory".to_string(),
-            kinds: vec![verlet::EventKind::ContextSummaryCompleted],
+            kinds: vec![verlet_history::EventKind::ContextSummaryCompleted],
         },
         function_ref: format!("op://std-memory-extract/run@sha256:{}", "f".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-memory-extract".to_string(),
             artifact_hash: "f".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2293,7 +2310,7 @@ fn std_memory_extract_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:thread".to_string(),
             "stream.write:derived:memory".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2302,25 +2319,25 @@ fn std_memory_extract_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_memory_recall_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_MEMORY_RECALL_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Projection,
-        trigger_kind: verlet::EventKind::TurnSubmitted,
+fn std_memory_recall_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_MEMORY_RECALL_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Projection,
+        trigger_kind: verlet_history::EventKind::TurnSubmitted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "derived:memory".to_string(),
-            kinds: vec![verlet::EventKind::ContextSummaryCompleted],
+            kinds: vec![verlet_history::EventKind::ContextSummaryCompleted],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "derived:context".to_string(),
-            kinds: vec![verlet::EventKind::ContextReadPlanSet],
+            kinds: vec![verlet_history::EventKind::ContextReadPlanSet],
         },
         function_ref: format!("op://std-memory-recall/run@sha256:{}", "g".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-memory-recall".to_string(),
             artifact_hash: "g".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2329,7 +2346,7 @@ fn std_memory_recall_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:derived:memory".to_string(),
             "stream.write:derived:context".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2338,25 +2355,25 @@ fn std_memory_recall_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_prompt_steer_continuation_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_PROMPT_STEER_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::TurnCompleted,
+fn std_prompt_steer_continuation_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_PROMPT_STEER_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::TurnCompleted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![verlet::EventKind::TurnCompleted],
+            kinds: vec![verlet_history::EventKind::TurnCompleted],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
-            kinds: vec![verlet::EventKind::TurnContinueRequested],
+            kinds: vec![verlet_history::EventKind::TurnContinueRequested],
         },
         function_ref: format!("op://std-prompt-steer/run@sha256:{}", "h".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-prompt-steer".to_string(),
             artifact_hash: "h".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2365,7 +2382,7 @@ fn std_prompt_steer_continuation_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:thread".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2380,25 +2397,25 @@ fn std_prompt_steer_continuation_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_prompt_steer_read_plan_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_PROMPT_STEER_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::ApprovalResolved,
+fn std_prompt_steer_read_plan_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_PROMPT_STEER_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::ApprovalResolved,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "control".to_string(),
-            kinds: vec![verlet::EventKind::ApprovalResolved],
+            kinds: vec![verlet_history::EventKind::ApprovalResolved],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
-            kinds: vec![verlet::EventKind::ContextReadPlanSet],
+            kinds: vec![verlet_history::EventKind::ContextReadPlanSet],
         },
         function_ref: format!("op://std-prompt-steer/run@sha256:{}", "h".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-prompt-steer".to_string(),
             artifact_hash: "h".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2407,7 +2424,7 @@ fn std_prompt_steer_read_plan_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:control".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2422,34 +2439,35 @@ fn std_prompt_steer_read_plan_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_prompt_dynamic_instructions_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_PROMPT_DYNAMIC_INSTRUCTIONS_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Projection,
-        trigger_kind: verlet::EventKind::ManifestBindCompleted,
+fn std_prompt_dynamic_instructions_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_PROMPT_DYNAMIC_INSTRUCTIONS_TEMPLATE_ID
+            .to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Projection,
+        trigger_kind: verlet_history::EventKind::ManifestBindCompleted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
             kinds: vec![
-                verlet::EventKind::ManifestBindCompleted,
-                verlet::EventKind::ContextCompileCompleted,
+                verlet_history::EventKind::ManifestBindCompleted,
+                verlet_history::EventKind::ContextCompileCompleted,
             ],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "derived:context".to_string(),
             kinds: vec![
-                verlet::EventKind::ContextSummaryCompleted,
-                verlet::EventKind::ContextReadPlanSet,
+                verlet_history::EventKind::ContextSummaryCompleted,
+                verlet_history::EventKind::ContextReadPlanSet,
             ],
         },
         function_ref: format!(
             "op://std-prompt-dynamic-instructions/run@sha256:{}",
             "h".repeat(64)
         ),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-prompt-dynamic-instructions".to_string(),
             artifact_hash: "h".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2458,7 +2476,7 @@ fn std_prompt_dynamic_instructions_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:thread".to_string(),
             "stream.write:derived:context".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(2),
         },
@@ -2471,31 +2489,33 @@ fn std_prompt_dynamic_instructions_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_permission_tool_gate_bound_coupling(config: serde_json::Value) -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_PERMISSION_TOOL_GATE_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::ToolCallRequested,
+fn std_permission_tool_gate_bound_coupling(
+    config: serde_json::Value,
+) -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_PERMISSION_TOOL_GATE_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::ToolCallRequested,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![verlet::EventKind::ToolCallRequested],
+            kinds: vec![verlet_history::EventKind::ToolCallRequested],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
             kinds: vec![
-                verlet::EventKind::ToolCallDecision,
-                verlet::EventKind::ToolCallSuspended,
+                verlet_history::EventKind::ToolCallDecision,
+                verlet_history::EventKind::ToolCallSuspended,
             ],
         },
         function_ref: format!(
             "op://std-permission-tool-gate/run@sha256:{}",
             "p".repeat(64)
         ),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-permission-tool-gate".to_string(),
             artifact_hash: "p".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2504,7 +2524,7 @@ fn std_permission_tool_gate_bound_coupling(config: serde_json::Value) -> verlet:
             "stream.read:thread".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2513,31 +2533,33 @@ fn std_permission_tool_gate_bound_coupling(config: serde_json::Value) -> verlet:
     }
 }
 
-fn std_permission_approval_gate_bound_coupling(config: serde_json::Value) -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_PERMISSION_APPROVAL_GATE_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::ToolCallRequested,
+fn std_permission_approval_gate_bound_coupling(
+    config: serde_json::Value,
+) -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_PERMISSION_APPROVAL_GATE_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::ToolCallRequested,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![verlet::EventKind::ToolCallRequested],
+            kinds: vec![verlet_history::EventKind::ToolCallRequested],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
             kinds: vec![
-                verlet::EventKind::ApprovalRequested,
-                verlet::EventKind::ToolCallSuspended,
+                verlet_history::EventKind::ApprovalRequested,
+                verlet_history::EventKind::ToolCallSuspended,
             ],
         },
         function_ref: format!(
             "op://std-permission-approval-gate/run@sha256:{}",
             "a".repeat(64)
         ),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-permission-approval-gate".to_string(),
             artifact_hash: "a".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2546,7 +2568,7 @@ fn std_permission_approval_gate_bound_coupling(config: serde_json::Value) -> ver
             "stream.read:thread".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(2),
         },
@@ -2555,31 +2577,31 @@ fn std_permission_approval_gate_bound_coupling(config: serde_json::Value) -> ver
     }
 }
 
-fn std_failure_deadletter_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_FAILURE_DEADLETTER_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Projection,
-        trigger_kind: verlet::EventKind::CouplingRunFailed,
+fn std_failure_deadletter_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_FAILURE_DEADLETTER_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Projection,
+        trigger_kind: verlet_history::EventKind::CouplingRunFailed,
         trigger_match: std::collections::BTreeMap::from([(
             "status".to_string(),
             serde_json::json!("failed"),
         )]),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "control".to_string(),
             kinds: vec![
-                verlet::EventKind::CouplingRunFailed,
-                verlet::EventKind::LoopBlocked,
+                verlet_history::EventKind::CouplingRunFailed,
+                verlet_history::EventKind::LoopBlocked,
             ],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "derived:deadletter".to_string(),
-            kinds: vec![verlet::EventKind::CouplingRunFailed],
+            kinds: vec![verlet_history::EventKind::CouplingRunFailed],
         },
         function_ref: format!("op://std-failure-deadletter/run@sha256:{}", "d".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-failure-deadletter".to_string(),
             artifact_hash: "d".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2588,7 +2610,7 @@ fn std_failure_deadletter_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:control".to_string(),
             "stream.write:derived:deadletter".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2599,31 +2621,31 @@ fn std_failure_deadletter_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_retry_with_budget_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_RETRY_WITH_BUDGET_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::CouplingRunFailed,
+fn std_retry_with_budget_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_RETRY_WITH_BUDGET_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::CouplingRunFailed,
         trigger_match: std::collections::BTreeMap::from([(
             "status".to_string(),
             serde_json::json!("failed"),
         )]),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "control".to_string(),
-            kinds: vec![verlet::EventKind::CouplingRunFailed],
+            kinds: vec![verlet_history::EventKind::CouplingRunFailed],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
             kinds: vec![
-                verlet::EventKind::TurnContinueRequested,
-                verlet::EventKind::LoopBudgetExhausted,
+                verlet_history::EventKind::TurnContinueRequested,
+                verlet_history::EventKind::LoopBudgetExhausted,
             ],
         },
         function_ref: format!("op://std-retry-with-budget/run@sha256:{}", "e".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-retry-with-budget".to_string(),
             artifact_hash: "e".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2632,7 +2654,7 @@ fn std_retry_with_budget_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:control".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2648,32 +2670,32 @@ fn std_retry_with_budget_bound_coupling() -> verlet::BoundCoupling {
     }
 }
 
-fn std_schedule_cron_bound_coupling() -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_SCHEDULE_CRON_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::TimerFired,
+fn std_schedule_cron_bound_coupling() -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_SCHEDULE_CRON_TEMPLATE_ID.to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::TimerFired,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "control".to_string(),
             kinds: vec![
-                verlet::EventKind::MandateStarted,
-                verlet::EventKind::MandateRevoked,
-                verlet::EventKind::TimerFired,
+                verlet_history::EventKind::MandateStarted,
+                verlet_history::EventKind::MandateRevoked,
+                verlet_history::EventKind::TimerFired,
             ],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
             kinds: vec![
-                verlet::EventKind::TurnContinueRequested,
-                verlet::EventKind::LoopBudgetExhausted,
+                verlet_history::EventKind::TurnContinueRequested,
+                verlet_history::EventKind::LoopBudgetExhausted,
             ],
         },
         function_ref: format!("op://std-schedule-cron/run@sha256:{}", "s".repeat(64)),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-schedule-cron".to_string(),
             artifact_hash: "s".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2682,7 +2704,7 @@ fn std_schedule_cron_bound_coupling() -> verlet::BoundCoupling {
             "stream.read:control".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2700,34 +2722,35 @@ fn std_schedule_cron_bound_coupling() -> verlet::BoundCoupling {
 
 fn std_supervisor_child_completion_bound_coupling(
     config: serde_json::Value,
-) -> verlet::BoundCoupling {
-    verlet::BoundCoupling {
-        id: verlet::STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID.to_string(),
-        role: verlet::CouplingRole::Controller,
-        trigger_kind: verlet::EventKind::TurnCompleted,
+) -> verlet::agent::manifest_bind::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
+        id: verlet::kernel::stdlib_couplings::STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID
+            .to_string(),
+        role: verlet::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: verlet_history::EventKind::TurnCompleted,
         trigger_match: std::collections::BTreeMap::new(),
-        trigger_quota: verlet::AgentManifestCouplingQuota::default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
             kinds: vec![
-                verlet::EventKind::TurnCompleted,
-                verlet::EventKind::CouplingRunCompleted,
+                verlet_history::EventKind::TurnCompleted,
+                verlet_history::EventKind::CouplingRunCompleted,
             ],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "control".to_string(),
             kinds: vec![
-                verlet::EventKind::TurnContinueRequested,
-                verlet::EventKind::LoopCompleted,
+                verlet_history::EventKind::TurnContinueRequested,
+                verlet_history::EventKind::LoopCompleted,
             ],
         },
         function_ref: format!(
             "op://std-supervisor-child-completion/run@sha256:{}",
             "j".repeat(64)
         ),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "std-supervisor-child-completion".to_string(),
             artifact_hash: "j".repeat(64),
             operation_name: Some("run".to_string()),
@@ -2736,7 +2759,7 @@ fn std_supervisor_child_completion_bound_coupling(
             "stream.read:thread".to_string(),
             "stream.write:control".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },
@@ -2746,14 +2769,14 @@ fn std_supervisor_child_completion_bound_coupling(
 }
 
 fn failed_coupling_run_event(
-    coordinates: verlet::ThreadCoordinates,
-    stream_id: verlet::EventStreamId,
-    id: verlet::EventRecordId,
+    coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    stream_id: verlet_history::EventStreamId,
+    id: verlet_history::EventRecordId,
     sequence: i64,
     fields: serde_json::Value,
-) -> verlet::EventRecord {
+) -> verlet_history::EventRecord {
     let mut payload = serde_json::json!({
-        "coupling_id": verlet::STD_QUEUE_TASK_TEMPLATE_ID,
+        "coupling_id": verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID,
         "status": "failed",
         "root_event_id": event_record_id(58).to_string(),
         "trigger_event_id": event_record_id(59).to_string(),
@@ -2773,48 +2796,51 @@ fn failed_coupling_run_event(
     {
         object.extend(fields.clone());
     }
-    verlet::EventRecord {
+    verlet_history::EventRecord {
         id,
         stream_id,
-        sequence: verlet::EventSequence::new(sequence),
+        sequence: verlet_history::EventSequence::new(sequence),
         coordinates,
         created_at_ms: 1_771_718_400_060 + sequence,
-        kind: verlet::EventKind::CouplingRunFailed,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
-            source_streams: vec![verlet::EventStreamId::new("thread:fixture-thread")],
-            discharged_by: Some(format!("coupling:{}", verlet::STD_QUEUE_TASK_TEMPLATE_ID)),
+        kind: verlet_history::EventKind::CouplingRunFailed,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
+            source_streams: vec![verlet_history::EventStreamId::new("thread:fixture-thread")],
+            discharged_by: Some(format!(
+                "coupling:{}",
+                verlet::kernel::stdlib_couplings::STD_QUEUE_TASK_TEMPLATE_ID
+            )),
             function: Some(format!("op://std-queue-task/run@sha256:{}", "a".repeat(64))),
             config_hash: Some("sha256:queue-task".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload,
     }
 }
 
 fn tool_call_requested_event(
-    coordinates: verlet::ThreadCoordinates,
-    stream_id: verlet::EventStreamId,
-    id: verlet::EventRecordId,
+    coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    stream_id: verlet_history::EventStreamId,
+    id: verlet_history::EventRecordId,
     sequence: i64,
     call_id: &str,
-) -> verlet::EventRecord {
-    verlet::EventRecord {
+) -> verlet_history::EventRecord {
+    verlet_history::EventRecord {
         id,
         stream_id,
-        sequence: verlet::EventSequence::new(sequence),
+        sequence: verlet_history::EventSequence::new(sequence),
         coordinates,
         created_at_ms: 1_771_718_400_090 + sequence,
-        kind: verlet::EventKind::ToolCallRequested,
-        origin: verlet::EventOrigin::Discharged,
-        provenance: verlet::EventProvenance {
-            source_streams: vec![verlet::EventStreamId::new("thread:fixture-thread")],
+        kind: verlet_history::EventKind::ToolCallRequested,
+        origin: verlet_history::EventOrigin::Discharged,
+        provenance: verlet_history::EventProvenance {
+            source_streams: vec![verlet_history::EventStreamId::new("thread:fixture-thread")],
             discharged_by: Some("runtime:provider-loop".to_string()),
             function: Some("provider_tool_request/v1".to_string()),
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
-            "schema": verlet::EventKind::ToolCallRequested.payload_schema_id(),
+            "schema": verlet_history::EventKind::ToolCallRequested.payload_schema_id(),
             "subject": {
                 "turn_id": "turn-1",
                 "call_id": call_id,
@@ -2829,23 +2855,23 @@ fn tool_call_requested_event(
 }
 
 fn schedule_mandate_started_event(
-    coordinates: verlet::ThreadCoordinates,
-    stream_id: verlet::EventStreamId,
-    id: verlet::EventRecordId,
+    coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    stream_id: verlet_history::EventStreamId,
+    id: verlet_history::EventRecordId,
     sequence: i64,
-) -> verlet::EventRecord {
+) -> verlet_history::EventRecord {
     let thread_id = coordinates.thread_id.to_string();
-    verlet::EventRecord {
+    verlet_history::EventRecord {
         id,
         stream_id,
-        sequence: verlet::EventSequence::new(sequence),
+        sequence: verlet_history::EventSequence::new(sequence),
         coordinates,
         created_at_ms: 1_771_718_400_080 + sequence,
-        kind: verlet::EventKind::MandateStarted,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance::default(),
+        kind: verlet_history::EventKind::MandateStarted,
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance::default(),
         payload: serde_json::json!({
-            "schema": verlet::EventKind::MandateStarted.payload_schema_id(),
+            "schema": verlet_history::EventKind::MandateStarted.payload_schema_id(),
             "subject": {
                 "thread_id": thread_id.clone(),
                 "loop_id": "loop-nightly"
@@ -2866,26 +2892,26 @@ fn schedule_mandate_started_event(
 }
 
 fn timer_fired_event(
-    coordinates: verlet::ThreadCoordinates,
-    stream_id: verlet::EventStreamId,
-    id: verlet::EventRecordId,
+    coordinates: verlet_runtime_contracts::ThreadCoordinates,
+    stream_id: verlet_history::EventStreamId,
+    id: verlet_history::EventRecordId,
     sequence: i64,
-    mandate_event_id: verlet::EventRecordId,
+    mandate_event_id: verlet_history::EventRecordId,
     occurrence_index: u64,
     scheduled_for: &str,
-) -> verlet::EventRecord {
-    verlet::EventRecord {
+) -> verlet_history::EventRecord {
+    verlet_history::EventRecord {
         id,
         stream_id: stream_id.clone(),
-        sequence: verlet::EventSequence::new(sequence),
+        sequence: verlet_history::EventSequence::new(sequence),
         coordinates,
         created_at_ms: 1_771_718_400_080 + sequence,
-        kind: verlet::EventKind::TimerFired,
-        origin: verlet::EventOrigin::Witnessed,
-        provenance: verlet::EventProvenance {
+        kind: verlet_history::EventKind::TimerFired,
+        origin: verlet_history::EventOrigin::Witnessed,
+        provenance: verlet_history::EventProvenance {
             source_streams: vec![stream_id],
             source_event_ids: vec![mandate_event_id],
-            ..verlet::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         },
         payload: serde_json::json!({
             "mandate_event_id": mandate_event_id.to_string(),
@@ -2897,18 +2923,20 @@ fn timer_fired_event(
 }
 
 fn coupling_source_cut(
-    stream_id: &verlet::EventStreamId,
+    stream_id: &verlet_history::EventStreamId,
     max_sequence: i64,
-) -> verlet::CouplingSourceCut {
-    verlet::CouplingSourceCut {
-        entries: vec![verlet::CouplingSourceCutEntry {
+) -> verlet::kernel::coupling_scheduler::CouplingSourceCut {
+    verlet::kernel::coupling_scheduler::CouplingSourceCut {
+        entries: vec![verlet::kernel::coupling_scheduler::CouplingSourceCutEntry {
             stream_id: stream_id.to_string(),
             max_sequence,
         }],
     }
 }
 
-fn discharges_json(discharges: &[verlet::CouplingDischarge]) -> Vec<serde_json::Value> {
+fn discharges_json(
+    discharges: &[verlet::kernel::coupling_scheduler::CouplingDischarge],
+) -> Vec<serde_json::Value> {
     discharges
         .iter()
         .map(|discharge| {
@@ -2931,31 +2959,34 @@ fn discharges_json(discharges: &[verlet::CouplingDischarge]) -> Vec<serde_json::
         .collect()
 }
 
-fn provider_request(api: verlet::ProviderApi, model: &str) -> verlet::ProviderRequest {
-    verlet::ProviderRequest {
+fn provider_request(
+    api: verlet_history::ProviderApi,
+    model: &str,
+) -> verlet_provider::ProviderRequest {
+    verlet_provider::ProviderRequest {
         api,
         provider: "fixture-provider".to_string(),
         model: model.to_string(),
-        system: vec![verlet::SystemBlock::text("Be precise.")],
+        system: vec![verlet_provider::SystemBlock::text("Be precise.")],
         messages: vec![
-            verlet::CanonicalMessage::user_text("hello"),
-            verlet::CanonicalMessage::assistant(
+            verlet_history::CanonicalMessage::user_text("hello"),
+            verlet_history::CanonicalMessage::assistant(
                 "fixture-provider",
-                verlet::ProviderApi::Other("fixture".to_string()),
+                verlet_history::ProviderApi::Other("fixture".to_string()),
                 model,
                 vec![
-                    verlet::CanonicalContent::text("thinking done"),
-                    verlet::CanonicalContent::tool_call(
+                    verlet_history::CanonicalContent::text("thinking done"),
+                    verlet_history::CanonicalContent::tool_call(
                         "call_1|fc_1",
                         "search",
                         serde_json::json!({"query":"verlet"}),
                     ),
                 ],
-                verlet::CanonicalStopReason::ToolUse,
+                verlet_history::CanonicalStopReason::ToolUse,
             ),
-            verlet::CanonicalMessage::tool_result("call_1|fc_1", "search", "result", false),
+            verlet_history::CanonicalMessage::tool_result("call_1|fc_1", "search", "result", false),
         ],
-        tools: vec![verlet::ToolDefinition::new(
+        tools: vec![verlet_provider::ToolDefinition::new(
             "search",
             "Search docs.",
             serde_json::json!({
@@ -2971,13 +3002,13 @@ fn provider_request(api: verlet::ProviderApi, model: &str) -> verlet::ProviderRe
     }
 }
 
-fn turn_snapshot() -> verlet::TurnContextSnapshot {
-    verlet::TurnContextSnapshot {
+fn turn_snapshot() -> verlet::kernel::runtime_host::turn::TurnContextSnapshot {
+    verlet::kernel::runtime_host::turn::TurnContextSnapshot {
         turn_id: "turn-1".to_string(),
         trace_id: "trace-1".to_string(),
         coordinates: coordinates(),
         parent_thread_id: Some(thread_id(9)),
-        topology: verlet::ThreadTopology::spawned_from(thread_id(9)),
+        topology: verlet_runtime_contracts::ThreadTopology::spawned_from(thread_id(9)),
         cwd: Some(std::path::PathBuf::from("/workspace")),
         workspace_roots: vec![std::path::PathBuf::from("/workspace")],
         model: Some("gpt-test".to_string()),
@@ -2997,7 +3028,7 @@ fn turn_snapshot() -> verlet::TurnContextSnapshot {
             "1".to_string(),
         )]),
         model_visible_context: vec!["extra context".to_string()],
-        budget: verlet::TurnBudget {
+        budget: verlet_runtime_contracts::TurnBudget {
             max_tool_rounds: Some(4),
             max_output_tokens: Some(128),
             max_context_text_bytes: Some(2048),
@@ -3006,8 +3037,8 @@ fn turn_snapshot() -> verlet::TurnContextSnapshot {
     }
 }
 
-fn coordinates() -> verlet::ThreadCoordinates {
-    verlet::ThreadCoordinates {
+fn coordinates() -> verlet_runtime_contracts::ThreadCoordinates {
+    verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: "tenant_a".to_string(),
         user_id: "user_1".to_string(),
         session_id: "session_1".to_string(),
@@ -3015,32 +3046,33 @@ fn coordinates() -> verlet::ThreadCoordinates {
     }
 }
 
-fn thread_id(n: u128) -> verlet::ThreadId {
-    verlet::ThreadId::parse_str(&format!("018f0000-0000-7000-8000-{n:012x}")).unwrap()
+fn thread_id(n: u128) -> verlet_runtime_contracts::ThreadId {
+    verlet_runtime_contracts::ThreadId::parse_str(&format!("018f0000-0000-7000-8000-{n:012x}"))
+        .unwrap()
 }
 
-fn checkpoint_id(n: u128) -> verlet::ThreadCheckpointId {
-    verlet::ThreadCheckpointId::from_uuid(uuid(n))
+fn checkpoint_id(n: u128) -> verlet_runtime_contracts::ThreadCheckpointId {
+    verlet_runtime_contracts::ThreadCheckpointId::from_uuid(uuid(n))
 }
 
-fn signal_id(n: u128) -> verlet::ThreadSignalId {
-    verlet::ThreadSignalId::from_uuid(uuid(n))
+fn signal_id(n: u128) -> verlet_runtime_contracts::ThreadSignalId {
+    verlet_runtime_contracts::ThreadSignalId::from_uuid(uuid(n))
 }
 
-fn runtime_event_id(n: u128) -> verlet::RuntimeEventId {
-    verlet::RuntimeEventId::from_uuid(uuid(n))
+fn runtime_event_id(n: u128) -> verlet_runtime_contracts::RuntimeEventId {
+    verlet_runtime_contracts::RuntimeEventId::from_uuid(uuid(n))
 }
 
-fn event_record_id(n: u128) -> verlet::EventRecordId {
-    verlet::EventRecordId::from_uuid(uuid(n))
+fn event_record_id(n: u128) -> verlet_history::EventRecordId {
+    verlet_history::EventRecordId::from_uuid(uuid(n))
 }
 
-fn session_entry_id(n: u128) -> verlet::SessionEntryId {
-    verlet::SessionEntryId::from_uuid(uuid(n))
+fn session_entry_id(n: u128) -> verlet_history::SessionEntryId {
+    verlet_history::SessionEntryId::from_uuid(uuid(n))
 }
 
-fn operation_id(n: u128) -> verlet::OperationId {
-    verlet::OperationId::from_uuid(uuid(n))
+fn operation_id(n: u128) -> verlet_process::bridge::OperationId {
+    verlet_process::bridge::OperationId::from_uuid(uuid(n))
 }
 
 fn uuid(n: u128) -> uuid::Uuid {

@@ -73,14 +73,14 @@ impl LocalAgentRegistry {
     pub fn plan_manifest_path(
         &self,
         path: impl AsRef<std::path::Path>,
-    ) -> crate::VerletResult<AgentPublishPlan> {
+    ) -> crate::kernel::runtime_host::VerletResult<AgentPublishPlan> {
         AgentPublishPlan::from_path_with_blob_registry(path.as_ref(), &self.blob_registry_root)
     }
 
     pub fn publish_manifest_path(
         &self,
         path: impl AsRef<std::path::Path>,
-    ) -> crate::VerletResult<PublishedAgentRecord> {
+    ) -> crate::kernel::runtime_host::VerletResult<PublishedAgentRecord> {
         self.publish_manifest_path_with_operation_registry(path, default_operations_registry_root())
     }
 
@@ -88,7 +88,7 @@ impl LocalAgentRegistry {
         &self,
         path: impl AsRef<std::path::Path>,
         operation_registry_root: impl AsRef<std::path::Path>,
-    ) -> crate::VerletResult<PublishedAgentRecord> {
+    ) -> crate::kernel::runtime_host::VerletResult<PublishedAgentRecord> {
         let plan = self.plan_manifest_path(path)?;
         self.publish_plan_with_operation_registry(plan, operation_registry_root)
     }
@@ -96,7 +96,7 @@ impl LocalAgentRegistry {
     pub fn publish_plan(
         &self,
         plan: AgentPublishPlan,
-    ) -> crate::VerletResult<PublishedAgentRecord> {
+    ) -> crate::kernel::runtime_host::VerletResult<PublishedAgentRecord> {
         self.publish_plan_with_operation_registry(plan, default_operations_registry_root())
     }
 
@@ -104,7 +104,7 @@ impl LocalAgentRegistry {
         &self,
         mut plan: AgentPublishPlan,
         operation_registry_root: impl AsRef<std::path::Path>,
-    ) -> crate::VerletResult<PublishedAgentRecord> {
+    ) -> crate::kernel::runtime_host::VerletResult<PublishedAgentRecord> {
         plan.validate_resolved_refs_for_publish()?;
         plan.verify_operation_refs_for_publish(operation_registry_root.as_ref())?;
         let record = plan.into_record(now_ms());
@@ -117,34 +117,42 @@ impl LocalAgentRegistry {
         Ok(record)
     }
 
-    pub fn load_record(&self, name: &str) -> crate::VerletResult<PublishedAgentRecord> {
-        let name = crate::validate_record_name(name)?;
+    pub fn load_record(
+        &self,
+        name: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<PublishedAgentRecord> {
+        let name = verlet_operations::operation_store::validate_record_name(name)?;
         let path = self.record_path(&name)?;
         let bytes = std::fs::read(&path).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to read agent record {}: {err}",
                 path.display()
             ))
         })?;
         let record: PublishedAgentRecord = serde_json::from_slice(&bytes).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to decode agent record {}: {err}",
                 path.display()
             ))
         })?;
         record.validate()?;
         if record.name != name {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent record {} names {:?}, expected {:?}",
-                path.display(),
-                record.name,
-                name
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "agent record {} names {:?}, expected {:?}",
+                    path.display(),
+                    record.name,
+                    name
+                ),
+            ));
         }
         Ok(record)
     }
 
-    pub fn load_ref(&self, agent_ref: &str) -> crate::VerletResult<PublishedAgentRecord> {
+    pub fn load_ref(
+        &self,
+        agent_ref: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<PublishedAgentRecord> {
         self.load_ref_with_alias_receipt(agent_ref)
             .map(|(record, _alias)| record)
     }
@@ -154,11 +162,14 @@ impl LocalAgentRegistry {
     pub fn load_ref_with_alias_receipt(
         &self,
         agent_ref: &str,
-    ) -> crate::VerletResult<(PublishedAgentRecord, Option<AgentAliasResolutionReceipt>)> {
+    ) -> crate::kernel::runtime_host::VerletResult<(
+        PublishedAgentRecord,
+        Option<AgentAliasResolutionReceipt>,
+    )> {
         let parsed = AgentRecordRef::parse(agent_ref)?;
         match parsed.version {
             Some(version) => {
-                if crate::validate_record_name(&version).is_ok() {
+                if verlet_operations::operation_store::validate_record_name(&version).is_ok() {
                     let path = self.alias_record_path(&parsed.name, &version)?;
                     if path.exists() {
                         return self
@@ -177,50 +188,54 @@ impl LocalAgentRegistry {
         &self,
         name: &str,
         version: &str,
-    ) -> crate::VerletResult<PublishedAgentRecord> {
-        let name = crate::validate_record_name(name)?;
-        verlet_agent::validate_version(version)?;
+    ) -> crate::kernel::runtime_host::VerletResult<PublishedAgentRecord> {
+        let name = verlet_operations::operation_store::validate_record_name(name)?;
+        verlet_agent::manifest_schema::validate_version(version)?;
         let path = self.version_record_path(&name, version)?;
         let bytes = std::fs::read(&path).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to read agent version record {}: {err}",
                 path.display()
             ))
         })?;
         let record: PublishedAgentRecord = serde_json::from_slice(&bytes).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to decode agent version record {}: {err}",
                 path.display()
             ))
         })?;
         record.validate()?;
         if record.name != name || record.version != version {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent version record {} is {}@{}, expected {}@{}",
-                path.display(),
-                record.name,
-                record.version,
-                name,
-                version
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "agent version record {} is {}@{}, expected {}@{}",
+                    path.display(),
+                    record.name,
+                    record.version,
+                    name,
+                    version
+                ),
+            ));
         }
         Ok(record)
     }
 
-    pub fn list_records(&self) -> crate::VerletResult<Vec<PublishedAgentRecord>> {
+    pub fn list_records(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<PublishedAgentRecord>> {
         let records_dir = self.root.join("records");
         if !records_dir.exists() {
             return Ok(Vec::new());
         }
         let mut names = Vec::new();
         for entry in std::fs::read_dir(&records_dir).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to read agent records directory {}: {err}",
                 records_dir.display()
             ))
         })? {
             let entry = entry.map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to read agent record entry in {}: {err}",
                     records_dir.display()
                 ))
@@ -232,7 +247,9 @@ impl LocalAgentRegistry {
             let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            names.push(crate::validate_record_name(name)?);
+            names.push(verlet_operations::operation_store::validate_record_name(
+                name,
+            )?);
         }
         names.sort();
         names
@@ -244,21 +261,21 @@ impl LocalAgentRegistry {
     pub fn list_version_records(
         &self,
         name: &str,
-    ) -> crate::VerletResult<Vec<AgentVersionSummary>> {
-        let name = crate::validate_record_name(name)?;
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<AgentVersionSummary>> {
+        let name = verlet_operations::operation_store::validate_record_name(name)?;
         let versions_dir = self.root.join("versions").join(&name);
         if !versions_dir.exists() {
             return Ok(Vec::new());
         }
         let mut records = Vec::new();
         for entry in std::fs::read_dir(&versions_dir).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to read agent versions directory {}: {err}",
                 versions_dir.display()
             ))
         })? {
             let entry = entry.map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to read agent version entry in {}: {err}",
                     versions_dir.display()
                 ))
@@ -294,39 +311,50 @@ impl LocalAgentRegistry {
         &self,
         name: &str,
         alias: &str,
-    ) -> crate::VerletResult<(PublishedAgentRecord, AgentAliasResolutionReceipt)> {
-        let name = crate::validate_record_name(name)?;
-        let alias = crate::validate_record_name(alias)?;
+    ) -> crate::kernel::runtime_host::VerletResult<(
+        PublishedAgentRecord,
+        AgentAliasResolutionReceipt,
+    )> {
+        let name = verlet_operations::operation_store::validate_record_name(name)?;
+        let alias = verlet_operations::operation_store::validate_record_name(alias)?;
         let path = self.alias_record_path(&name, &alias)?;
         let bytes = std::fs::read(&path).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to read agent alias record {}: {err}",
                 path.display()
             ))
         })?;
         let alias_record: AgentAliasRecord = serde_json::from_slice(&bytes).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to decode agent alias record {}: {err}",
                 path.display()
             ))
         })?;
         alias_record.validate()?;
         if alias_record.name != name || alias_record.alias != alias {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent alias record {} is {}@{}, expected {}@{}",
-                path.display(),
-                alias_record.name,
-                alias_record.alias,
-                name,
-                alias
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "agent alias record {} is {}@{}, expected {}@{}",
+                    path.display(),
+                    alias_record.name,
+                    alias_record.alias,
+                    name,
+                    alias
+                ),
+            ));
         }
         let record = self.load_version_record(&name, &alias_record.version)?;
         if alias_record.manifest_hash != record.manifest_hash {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent alias {}@{} points to {} with manifest hash {}, but the version record has {}",
-                name, alias, alias_record.version, alias_record.manifest_hash, record.manifest_hash
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "agent alias {}@{} points to {} with manifest hash {}, but the version record has {}",
+                    name,
+                    alias,
+                    alias_record.version,
+                    alias_record.manifest_hash,
+                    record.manifest_hash
+                ),
+            ));
         }
         let receipt = AgentAliasResolutionReceipt {
             ref_uri: agent_ref_uri(record.namespace.as_deref(), &name, &alias),
@@ -342,9 +370,9 @@ impl LocalAgentRegistry {
         &self,
         name: &str,
         alias: &str,
-    ) -> crate::VerletResult<std::path::PathBuf> {
-        let name = crate::validate_record_name(name)?;
-        let alias = crate::validate_record_name(alias)?;
+    ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
+        let name = verlet_operations::operation_store::validate_record_name(name)?;
+        let alias = verlet_operations::operation_store::validate_record_name(alias)?;
         Ok(self
             .root
             .join("aliases")
@@ -352,8 +380,11 @@ impl LocalAgentRegistry {
             .join(format!("{alias}.json")))
     }
 
-    pub fn record_path(&self, name: &str) -> crate::VerletResult<std::path::PathBuf> {
-        let name = crate::validate_record_name(name)?;
+    pub fn record_path(
+        &self,
+        name: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
+        let name = verlet_operations::operation_store::validate_record_name(name)?;
         Ok(self.root.join("records").join(format!("{name}.json")))
     }
 
@@ -361,9 +392,9 @@ impl LocalAgentRegistry {
         &self,
         name: &str,
         version: &str,
-    ) -> crate::VerletResult<std::path::PathBuf> {
-        let name = crate::validate_record_name(name)?;
-        verlet_agent::validate_version(version)?;
+    ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
+        let name = verlet_operations::operation_store::validate_record_name(name)?;
+        verlet_agent::manifest_schema::validate_version(version)?;
         Ok(self
             .root
             .join("versions")
@@ -371,7 +402,10 @@ impl LocalAgentRegistry {
             .join(format!("{version}.json")))
     }
 
-    fn write_record_atomically(&self, record: &PublishedAgentRecord) -> crate::VerletResult<()> {
+    fn write_record_atomically(
+        &self,
+        record: &PublishedAgentRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let path = self.record_path(&record.name)?;
         write_json_atomically(&path, format!("agent record {:?}", record.name), record)
     }
@@ -379,15 +413,17 @@ impl LocalAgentRegistry {
     fn write_version_record_atomically(
         &self,
         record: &PublishedAgentRecord,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let path = self.version_record_path(&record.name, &record.version)?;
         if path.exists() {
             let existing = self.load_version_record(&record.name, &record.version)?;
             if existing.manifest_hash != record.manifest_hash {
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "agent {:?}@{} already exists with manifest hash {}, refusing to replace it with {}",
-                    record.name, record.version, existing.manifest_hash, record.manifest_hash
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "agent {:?}@{} already exists with manifest hash {}, refusing to replace it with {}",
+                        record.name, record.version, existing.manifest_hash, record.manifest_hash
+                    ),
+                ));
             }
             return Ok(());
         }
@@ -401,7 +437,7 @@ impl LocalAgentRegistry {
     fn write_latest_alias_atomically(
         &self,
         record: &PublishedAgentRecord,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let alias = AgentAliasRecord {
             schema_version: AGENT_RECORD_SCHEMA_VERSION,
             name: record.name.clone(),
@@ -413,7 +449,10 @@ impl LocalAgentRegistry {
         self.write_alias_record_atomically(&alias)
     }
 
-    fn write_alias_record_atomically(&self, alias: &AgentAliasRecord) -> crate::VerletResult<()> {
+    fn write_alias_record_atomically(
+        &self,
+        alias: &AgentAliasRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         alias.validate()?;
         self.ensure_alias_does_not_collide_with_version(&alias.name, &alias.alias)?;
         let path = self.alias_record_path(&alias.name, &alias.alias)?;
@@ -428,18 +467,18 @@ impl LocalAgentRegistry {
         &self,
         name: &str,
         version: &str,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if version == "latest" {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent {name:?} version must not be the reserved alias \"latest\""
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("agent {name:?} version must not be the reserved alias \"latest\""),
+            ));
         }
-        if crate::validate_record_name(version).is_ok() {
+        if verlet_operations::operation_store::validate_record_name(version).is_ok() {
             let alias_path = self.alias_record_path(name, version)?;
             if alias_path.exists() {
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "agent {name:?} version {version:?} collides with an existing alias"
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!("agent {name:?} version {version:?} collides with an existing alias"),
+                ));
             }
         }
         Ok(())
@@ -449,12 +488,12 @@ impl LocalAgentRegistry {
         &self,
         name: &str,
         alias: &str,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let version_path = self.version_record_path(name, alias)?;
         if version_path.exists() {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent alias {name}@{alias} collides with an existing version record"
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("agent alias {name}@{alias} collides with an existing version record"),
+            ));
         }
         Ok(())
     }
@@ -481,7 +520,7 @@ pub struct AgentPublishPlan {
     /// Content-addressed artifact refs compiled from the manifest source.
     /// Floating skill refs are resolved and witnessed only at bind.
     #[serde(default)]
-    pub resolved_refs: Vec<crate::agent::manifest_schema::AgentManifestResolvedRef>,
+    pub resolved_refs: Vec<verlet_agent::manifest_schema::AgentManifestResolvedRef>,
     /// Plan-only verification receipts for `op://` rows. Published records do
     /// not persist this; publish verification is a gate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -516,16 +555,16 @@ pub enum AgentManifestRefVerificationStatus {
 }
 
 impl AgentPublishPlan {
-    pub fn from_path(path: &std::path::Path) -> crate::VerletResult<Self> {
+    pub fn from_path(path: &std::path::Path) -> crate::kernel::runtime_host::VerletResult<Self> {
         Self::from_path_with_blob_registry(path, default_blob_registry_root())
     }
 
     pub fn from_path_with_blob_registry(
         path: &std::path::Path,
         blob_registry_root: impl AsRef<std::path::Path>,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let source = std::fs::read_to_string(path).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to read agent manifest {}: {err}",
                 path.display()
             ))
@@ -537,9 +576,9 @@ impl AgentPublishPlan {
         )
     }
 
-    pub fn from_source(source: &str) -> crate::VerletResult<Self> {
+    pub fn from_source(source: &str) -> crate::kernel::runtime_host::VerletResult<Self> {
         Self::from_source_with_manifest(source, |value| {
-            crate::agent::manifest_schema::AgentManifestSchema::from_toml_value(value)
+            verlet_agent::manifest_schema::AgentManifestSchema::from_toml_value(value)
                 .map_err(Into::into)
         })
     }
@@ -548,11 +587,11 @@ impl AgentPublishPlan {
         source: &str,
         manifest_dir: &std::path::Path,
         blob_registry_root: &std::path::Path,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let prompt_path = manifest_dir.join("prompts/system.md");
         Self::from_source_with_manifest(source, |value| {
             let mut manifest =
-                crate::agent::manifest_schema::AgentManifestSchema::from_toml_value_unvalidated(
+                verlet_agent::manifest_schema::AgentManifestSchema::from_toml_value_unvalidated(
                     value,
                 )?;
             let lowering = prevalidate_folder_first_system_prompt(&manifest, &prompt_path)?;
@@ -569,31 +608,38 @@ impl AgentPublishPlan {
         })
     }
 
-    fn from_source_with_manifest<F>(source: &str, manifest_fn: F) -> crate::VerletResult<Self>
+    fn from_source_with_manifest<F>(
+        source: &str,
+        manifest_fn: F,
+    ) -> crate::kernel::runtime_host::VerletResult<Self>
     where
         F: FnOnce(
             &toml::Value,
-        )
-            -> crate::VerletResult<crate::agent::manifest_schema::AgentManifestSchema>,
+        ) -> crate::kernel::runtime_host::VerletResult<
+            verlet_agent::manifest_schema::AgentManifestSchema,
+        >,
     {
         let source_hash = text_sha256(source.as_bytes());
         let value: toml::Value = toml::from_str(source).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!("invalid agent manifest: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "invalid agent manifest: {err}"
+            ))
         })?;
         let manifest = manifest_fn(&value)?;
-        let name = crate::validate_record_name(&manifest.identity.name)?;
+        let name =
+            verlet_operations::operation_store::validate_record_name(&manifest.identity.name)?;
         let namespace = manifest
             .identity
             .namespace
             .clone()
-            .map(|namespace| verlet_agent::validate_namespace(&namespace))
+            .map(|namespace| verlet_agent::manifest_schema::validate_namespace(&namespace))
             .transpose()?;
         let version = manifest
             .identity
             .version
             .clone()
             .unwrap_or_else(|| "0.1.0".to_string());
-        verlet_agent::validate_version(&version)?;
+        verlet_agent::manifest_schema::validate_version(&version)?;
         let tool_refs = parse_agent_tool_refs(&manifest.tools)?;
         let resolved_refs = compile_resolved_refs(&manifest)?;
         let resolved_manifest = canonical_json_from_schema(&manifest)?;
@@ -641,7 +687,7 @@ impl AgentPublishPlan {
     pub fn verify_operation_refs(
         &mut self,
         operation_registry_root: &std::path::Path,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let mut verifications = Vec::new();
         for tool_ref in &self.tool_refs {
             if !tool_ref.reference.starts_with("op://") {
@@ -665,28 +711,30 @@ impl AgentPublishPlan {
     pub fn verify_operation_refs_for_publish(
         &mut self,
         operation_registry_root: &std::path::Path,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if let Some(tool_ref) = self
             .tool_refs
             .iter()
             .find(|tool_ref| tool_ref.reference.starts_with("op://"))
             && !operation_registry_root.exists()
         {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "tool {:?} operation_ref {:?} requires an operations registry, but none was found at {}; seed it or pass --operations-registry-root <path>",
-                tool_ref.name,
-                tool_ref.reference,
-                operation_registry_root.display()
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "tool {:?} operation_ref {:?} requires an operations registry, but none was found at {}; seed it or pass --operations-registry-root <path>",
+                    tool_ref.name,
+                    tool_ref.reference,
+                    operation_registry_root.display()
+                ),
+            ));
         }
         self.verify_operation_refs(operation_registry_root)
     }
 
-    fn validate_resolved_refs_for_publish(&self) -> crate::VerletResult<()> {
+    fn validate_resolved_refs_for_publish(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         for resolved_ref in &self.resolved_refs {
             resolved_ref.validate()?;
             if resolved_ref.status
-                == crate::agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
+                == verlet_agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
             {
                 let hint = if resolved_ref.declared.starts_with("op://")
                     && !resolved_ref.declared.contains("@sha256:")
@@ -695,10 +743,12 @@ impl AgentPublishPlan {
                 } else {
                     ""
                 };
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "published agent record contains unresolved artifact ref {:?}{hint}",
-                    resolved_ref.declared,
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "published agent record contains unresolved artifact ref {:?}{hint}",
+                        resolved_ref.declared,
+                    ),
+                ));
             }
         }
         Ok(())
@@ -760,7 +810,7 @@ pub struct PublishedAgentRecord {
     pub resource_count: usize,
     /// Artifact refs resolved when the manifest was compiled.
     #[serde(default)]
-    pub resolved_refs: Vec<crate::agent::manifest_schema::AgentManifestResolvedRef>,
+    pub resolved_refs: Vec<verlet_agent::manifest_schema::AgentManifestResolvedRef>,
     pub ref_uri: String,
     pub resolved_manifest: serde_json::Value,
     pub published_at_ms: u64,
@@ -878,24 +928,28 @@ fn json_pointer_child(path: &str, segment: &str) -> String {
 }
 
 impl PublishedAgentRecord {
-    pub fn validate(&self) -> crate::VerletResult<()> {
+    pub fn validate(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         if self.schema_version != AGENT_RECORD_SCHEMA_VERSION {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "unsupported agent record schema_version {}",
-                self.schema_version
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "unsupported agent record schema_version {}",
+                    self.schema_version
+                ),
+            ));
         }
         if self.kind != AGENT_MANIFEST_KIND {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent record kind must be {AGENT_MANIFEST_KIND:?}, got {:?}",
-                self.kind
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "agent record kind must be {AGENT_MANIFEST_KIND:?}, got {:?}",
+                    self.kind
+                ),
+            ));
         }
-        crate::validate_record_name(&self.name)?;
+        verlet_operations::operation_store::validate_record_name(&self.name)?;
         if let Some(namespace) = &self.namespace {
-            verlet_agent::validate_namespace(namespace)?;
+            verlet_agent::manifest_schema::validate_namespace(namespace)?;
         }
-        verlet_agent::validate_version(&self.version)?;
+        verlet_agent::manifest_schema::validate_version(&self.version)?;
         validate_hash_label("source_hash", &self.source_hash)?;
         validate_hash_label("manifest_hash", &self.manifest_hash)?;
         for tool_ref in &self.tool_refs {
@@ -904,20 +958,24 @@ impl PublishedAgentRecord {
         for resolved_ref in &self.resolved_refs {
             resolved_ref.validate()?;
             if resolved_ref.status
-                == crate::agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
+                == verlet_agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline
             {
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "published agent record contains unresolved artifact ref {:?}",
-                    resolved_ref.declared
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "published agent record contains unresolved artifact ref {:?}",
+                        resolved_ref.declared
+                    ),
+                ));
             }
         }
         let expected_ref = agent_ref_uri(self.namespace.as_deref(), &self.name, &self.version);
         if self.ref_uri != expected_ref {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent record ref_uri {:?} does not match expected {:?}",
-                self.ref_uri, expected_ref
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "agent record ref_uri {:?} does not match expected {:?}",
+                    self.ref_uri, expected_ref
+                ),
+            ));
         }
         Ok(())
     }
@@ -935,36 +993,36 @@ pub struct AgentToolRef {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<crate::agent::manifest_schema::AgentManifestGrantExpiry>,
+    pub grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
 }
 
 impl AgentToolRef {
-    fn validate(&self) -> crate::VerletResult<()> {
-        crate::validate_record_name(&self.name)?;
+    fn validate(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        verlet_operations::operation_store::validate_record_name(&self.name)?;
         validate_label("tool type", &self.kind)?;
         validate_tool_ref(&self.reference)?;
         if let Some(operation) = &self.operation
             && operation.trim().is_empty()
         {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "agent tool ref {:?} has an empty operation surface",
-                self.name
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "agent tool ref {:?} has an empty operation surface",
+                    self.name
+                ),
+            ));
         }
         for grant in &self.grants {
             if grant.trim().is_empty() {
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "agent tool ref {:?} has an empty grant",
-                    self.name
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!("agent tool ref {:?} has an empty grant", self.name),
+                ));
             }
         }
         for expiry in &self.grant_expiries {
             if expiry.capability.trim().is_empty() || expiry.expires_at.trim().is_empty() {
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "agent tool ref {:?} has an invalid grant expiry",
-                    self.name
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!("agent tool ref {:?} has an invalid grant expiry", self.name),
+                ));
             }
         }
         Ok(())
@@ -996,29 +1054,33 @@ pub struct AgentAliasResolutionReceipt {
 }
 
 impl AgentAliasRecord {
-    fn validate(&self) -> crate::VerletResult<()> {
+    fn validate(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         if self.schema_version != AGENT_RECORD_SCHEMA_VERSION {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "unsupported agent alias schema_version {}",
-                self.schema_version
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "unsupported agent alias schema_version {}",
+                    self.schema_version
+                ),
+            ));
         }
-        crate::validate_record_name(&self.name)?;
-        crate::validate_record_name(&self.alias)?;
-        verlet_agent::validate_version(&self.version)?;
+        verlet_operations::operation_store::validate_record_name(&self.name)?;
+        verlet_operations::operation_store::validate_record_name(&self.alias)?;
+        verlet_agent::manifest_schema::validate_version(&self.version)?;
         validate_hash_label("manifest_hash", &self.manifest_hash)?;
         Ok(())
     }
 }
 
 pub fn agent_manifest_source_from_schema(
-    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
-) -> crate::VerletResult<String> {
+    manifest: &verlet_agent::manifest_schema::AgentManifestSchema,
+) -> crate::kernel::runtime_host::VerletResult<String> {
     let json = serde_json::to_value(manifest).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("failed to encode agent manifest schema: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to encode agent manifest schema: {err}"
+        ))
     })?;
     let object = json.as_object().ok_or_else(|| {
-        crate::VerletError::RuntimeFactory(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "agent manifest schema did not encode as an object".to_string(),
         )
     })?;
@@ -1041,7 +1103,9 @@ pub fn agent_manifest_source_from_schema(
     insert_manifest_toml_value(&mut root, "policies", object.get("policies"))?;
     insert_manifest_toml_value(&mut root, "runtime", object.get("runtime"))?;
     toml::to_string_pretty(&toml::Value::Table(root)).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("failed to encode agent manifest TOML: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to encode agent manifest TOML: {err}"
+        ))
     })
 }
 
@@ -1049,14 +1113,16 @@ fn insert_manifest_toml_value(
     root: &mut toml::map::Map<String, toml::Value>,
     key: &str,
     value: Option<&serde_json::Value>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if let Some(value) = value.map(json_to_toml_value).transpose()?.flatten() {
         root.insert(key.to_string(), value);
     }
     Ok(())
 }
 
-fn json_to_toml_value(value: &serde_json::Value) -> crate::VerletResult<Option<toml::Value>> {
+fn json_to_toml_value(
+    value: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<Option<toml::Value>> {
     match value {
         serde_json::Value::Null => Ok(None),
         serde_json::Value::Bool(value) => Ok(Some(toml::Value::Boolean(*value))),
@@ -1065,7 +1131,7 @@ fn json_to_toml_value(value: &serde_json::Value) -> crate::VerletResult<Option<t
                 Ok(Some(toml::Value::Integer(value)))
             } else if let Some(value) = number.as_u64() {
                 let value = i64::try_from(value).map_err(|_| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "agent manifest number {value} is too large for TOML integer"
                     ))
                 })?;
@@ -1073,9 +1139,9 @@ fn json_to_toml_value(value: &serde_json::Value) -> crate::VerletResult<Option<t
             } else if let Some(value) = number.as_f64() {
                 Ok(Some(toml::Value::Float(value)))
             } else {
-                Err(crate::VerletError::RuntimeFactory(format!(
-                    "agent manifest number {number} cannot be encoded as TOML"
-                )))
+                Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!("agent manifest number {number} cannot be encoded as TOML"),
+                ))
             }
         }
         serde_json::Value::String(value) => Ok(Some(toml::Value::String(value.clone()))),
@@ -1107,20 +1173,19 @@ pub struct AgentRecordRef {
 }
 
 impl AgentRecordRef {
-    pub fn parse(value: &str) -> crate::VerletResult<Self> {
+    pub fn parse(value: &str) -> crate::kernel::runtime_host::VerletResult<Self> {
         let trimmed = value.trim();
         let without_scheme = trimmed.strip_prefix("agent://").unwrap_or(trimmed);
-        let name_and_version = without_scheme
-            .rsplit('/')
-            .next()
-            .ok_or_else(|| crate::VerletError::RuntimeFactory("empty agent ref".to_string()))?;
+        let name_and_version = without_scheme.rsplit('/').next().ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory("empty agent ref".to_string())
+        })?;
         let (name, version) = match name_and_version.split_once('@') {
             Some((name, version)) => (name, Some(version.to_string())),
             None => (name_and_version, None),
         };
-        let name = crate::validate_record_name(name)?;
+        let name = verlet_operations::operation_store::validate_record_name(name)?;
         if let Some(version) = &version {
-            verlet_agent::validate_version(version)?;
+            verlet_agent::manifest_schema::validate_version(version)?;
         }
         Ok(Self { name, version })
     }
@@ -1134,12 +1199,12 @@ pub fn agent_ref_uri(namespace: Option<&str>, name: &str, version: &str) -> Stri
 }
 
 fn parse_agent_tool_refs(
-    tools: &[crate::agent::manifest_schema::AgentManifestTool],
-) -> crate::VerletResult<Vec<AgentToolRef>> {
+    tools: &[verlet_agent::manifest_schema::AgentManifestTool],
+) -> crate::kernel::runtime_host::VerletResult<Vec<AgentToolRef>> {
     let mut refs = Vec::new();
     for tool in tools {
         let tool_ref = match tool {
-            crate::agent::manifest_schema::AgentManifestTool::Bash(tool) => AgentToolRef {
+            verlet_agent::manifest_schema::AgentManifestTool::Bash(tool) => AgentToolRef {
                 name: tool.id.clone(),
                 kind: "bash_tool".to_string(),
                 reference: tool.operation_ref.clone(),
@@ -1155,7 +1220,7 @@ fn parse_agent_tool_refs(
                     .filter_map(|grant| grant.expiry().cloned())
                     .collect(),
             },
-            crate::agent::manifest_schema::AgentManifestTool::Direct(tool) => AgentToolRef {
+            verlet_agent::manifest_schema::AgentManifestTool::Direct(tool) => AgentToolRef {
                 name: tool.id.clone(),
                 kind: "direct_tool".to_string(),
                 reference: tool.operation_ref.clone(),
@@ -1171,7 +1236,7 @@ fn parse_agent_tool_refs(
                     .filter_map(|grant| grant.expiry().cloned())
                     .collect(),
             },
-            crate::agent::manifest_schema::AgentManifestTool::ProtocolImport(tool) => {
+            verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(tool) => {
                 AgentToolRef {
                     name: tool.id.clone(),
                     kind: "protocol_tool_import".to_string(),
@@ -1196,44 +1261,50 @@ fn parse_agent_tool_refs(
     Ok(refs)
 }
 
-fn validate_tool_ref(value: &str) -> crate::VerletResult<()> {
+fn validate_tool_ref(value: &str) -> crate::kernel::runtime_host::VerletResult<()> {
     if (value.starts_with("tool://") && value.len() > "tool://".len())
         || (value.starts_with("op://") && value.len() > "op://".len())
         || (value.starts_with("mcp://") && value.len() > "mcp://".len())
     {
         Ok(())
     } else {
-        Err(crate::VerletError::RuntimeFactory(format!(
-            "agent tool ref {value:?} must start with op://, mcp://, or legacy tool://"
-        )))
+        Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("agent tool ref {value:?} must start with op://, mcp://, or legacy tool://"),
+        ))
     }
 }
 
 fn compile_resolved_refs(
-    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
-) -> crate::VerletResult<Vec<crate::agent::manifest_schema::AgentManifestResolvedRef>> {
+    manifest: &verlet_agent::manifest_schema::AgentManifestSchema,
+) -> crate::kernel::runtime_host::VerletResult<
+    Vec<verlet_agent::manifest_schema::AgentManifestResolvedRef>,
+> {
     let mut refs = Vec::new();
     for tool in &manifest.tools {
         match tool {
-            crate::agent::manifest_schema::AgentManifestTool::Bash(tool) => {
+            verlet_agent::manifest_schema::AgentManifestTool::Bash(tool) => {
                 refs.push(resolve_artifact_ref(&tool.operation_ref))
             }
-            crate::agent::manifest_schema::AgentManifestTool::Direct(tool) => {
+            verlet_agent::manifest_schema::AgentManifestTool::Direct(tool) => {
                 refs.push(resolve_artifact_ref(&tool.operation_ref))
             }
-            crate::agent::manifest_schema::AgentManifestTool::ProtocolImport(_) => {}
+            verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(_) => {}
         }
     }
     for resource in &manifest.resources {
-        if resource.kind == crate::agent::manifest_schema::AgentManifestResourceKind::Skill {
-            match crate::DeclaredSkillPackageRef::parse(&resource.reference)? {
-                crate::DeclaredSkillPackageRef::Floating { .. } => continue,
-                crate::DeclaredSkillPackageRef::Pinned(reference) => {
-                    refs.push(crate::agent::manifest_schema::AgentManifestResolvedRef {
+        if resource.kind == verlet_agent::manifest_schema::AgentManifestResourceKind::Skill {
+            match verlet_operations::skill_package::DeclaredSkillPackageRef::parse(
+                &resource.reference,
+            )? {
+                verlet_operations::skill_package::DeclaredSkillPackageRef::Floating { .. } => {
+                    continue;
+                }
+                verlet_operations::skill_package::DeclaredSkillPackageRef::Pinned(reference) => {
+                    refs.push(verlet_agent::manifest_schema::AgentManifestResolvedRef {
                         declared: resource.reference.clone(),
                         resolved: Some(resource.reference.clone()),
                         content_hash: Some(format!("sha256:{}", reference.artifact_hash)),
-                        status: crate::agent::manifest_schema::AgentManifestRefStatus::Resolved,
+                        status: verlet_agent::manifest_schema::AgentManifestRefStatus::Resolved,
                     });
                     continue;
                 }
@@ -1251,9 +1322,9 @@ enum FolderFirstPromptLowering {
 }
 
 fn prevalidate_folder_first_system_prompt(
-    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
+    manifest: &verlet_agent::manifest_schema::AgentManifestSchema,
     prompt_path: &std::path::Path,
-) -> crate::VerletResult<FolderFirstPromptLowering> {
+) -> crate::kernel::runtime_host::VerletResult<FolderFirstPromptLowering> {
     let lowering = folder_first_system_prompt_lowering(manifest, prompt_path)?;
     match lowering {
         FolderFirstPromptLowering::Skip => manifest.validate()?,
@@ -1270,18 +1341,20 @@ fn prevalidate_folder_first_system_prompt(
 }
 
 fn folder_first_system_prompt_lowering(
-    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
+    manifest: &verlet_agent::manifest_schema::AgentManifestSchema,
     prompt_path: &std::path::Path,
-) -> crate::VerletResult<FolderFirstPromptLowering> {
+) -> crate::kernel::runtime_host::VerletResult<FolderFirstPromptLowering> {
     if !prompt_path.exists() {
         return Ok(FolderFirstPromptLowering::Skip);
     }
     match identity_static_source_input(manifest) {
         Some(Some(input)) => {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "folder-first prompt lowering found {}, but the identity static context source already declares input {input:?}; drop the input so prompts/system.md can lower to the identity resource, or move the file out of prompts/system.md to keep the explicit input",
-                prompt_path.display()
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "folder-first prompt lowering found {}, but the identity static context source already declares input {input:?}; drop the input so prompts/system.md can lower to the identity resource, or move the file out of prompts/system.md to keep the explicit input",
+                    prompt_path.display()
+                ),
+            ));
         }
         Some(None) => {}
         None => {
@@ -1293,41 +1366,43 @@ fn folder_first_system_prompt_lowering(
         .iter()
         .any(|resource| resource.name == FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE)
     {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "folder-first prompt lowering found {}, but the manifest already declares resource {:?}; remove or rename that resource so prompts/system.md can lower to the identity resource, or move the file out of prompts/system.md and point the identity static source at a declared resource explicitly",
-            prompt_path.display(),
-            FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "folder-first prompt lowering found {}, but the manifest already declares resource {:?}; remove or rename that resource so prompts/system.md can lower to the identity resource, or move the file out of prompts/system.md and point the identity static source at a declared resource explicitly",
+                prompt_path.display(),
+                FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE
+            ),
+        ));
     }
     Ok(FolderFirstPromptLowering::Lower)
 }
 
 fn lower_folder_first_system_prompt(
-    manifest: &mut crate::agent::manifest_schema::AgentManifestSchema,
+    manifest: &mut verlet_agent::manifest_schema::AgentManifestSchema,
     prompt_path: &std::path::Path,
     blob_registry_root: &std::path::Path,
     lowering: FolderFirstPromptLowering,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if lowering == FolderFirstPromptLowering::Skip {
         return Ok(());
     }
-    let blob = crate::LocalBlobRegistry::new(blob_registry_root)
+    let blob = verlet_operations::blob_store::LocalBlobRegistry::new(blob_registry_root)
         .publish_file(prompt_path, Some(FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE))?;
     inject_folder_first_system_prompt_resource(manifest, blob.ref_uri)
 }
 
 fn inject_folder_first_system_prompt_resource(
-    manifest: &mut crate::agent::manifest_schema::AgentManifestSchema,
+    manifest: &mut verlet_agent::manifest_schema::AgentManifestSchema,
     reference: String,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     manifest
         .resources
-        .push(crate::agent::manifest_schema::AgentManifestResource {
+        .push(verlet_agent::manifest_schema::AgentManifestResource {
             name: FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE.to_string(),
-            kind: crate::agent::manifest_schema::AgentManifestResourceKind::Blob,
+            kind: verlet_agent::manifest_schema::AgentManifestResourceKind::Blob,
             reference,
-            mount: crate::agent::manifest_schema::AgentManifestResourceMount::Context,
-            mode: crate::agent::manifest_schema::AgentManifestResourceMode::Read,
+            mount: verlet_agent::manifest_schema::AgentManifestResourceMount::Context,
+            mode: verlet_agent::manifest_schema::AgentManifestResourceMode::Read,
         });
     let mut context = manifest.effective_context_pipeline();
     resolve_identity_static_source(&mut context)?;
@@ -1336,7 +1411,7 @@ fn inject_folder_first_system_prompt_resource(
 }
 
 fn identity_static_source_input(
-    manifest: &crate::agent::manifest_schema::AgentManifestSchema,
+    manifest: &verlet_agent::manifest_schema::AgentManifestSchema,
 ) -> Option<Option<String>> {
     manifest
         .effective_context_pipeline()
@@ -1344,23 +1419,23 @@ fn identity_static_source_input(
         .into_iter()
         .find(|source| {
             source.id == "identity"
-                && source.assembler == crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
+                && source.assembler == verlet_agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
         })
         .map(|source| source.input)
 }
 
 fn resolve_identity_static_source(
-    context: &mut crate::agent::manifest_schema::AgentManifestContextPipeline,
-) -> crate::VerletResult<()> {
+    context: &mut verlet_agent::manifest_schema::AgentManifestContextPipeline,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let source = context
         .sources
         .iter_mut()
         .find(|source| {
             source.id == "identity"
-                && source.assembler == crate::agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
+                && source.assembler == verlet_agent::manifest_schema::KERNEL_ASSEMBLER_STATIC
         })
         .ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "default context pipeline did not contain an identity static source".to_string(),
             )
         })?;
@@ -1370,19 +1445,19 @@ fn resolve_identity_static_source(
 
 fn resolve_artifact_ref(
     reference: &str,
-) -> crate::agent::manifest_schema::AgentManifestResolvedRef {
+) -> verlet_agent::manifest_schema::AgentManifestResolvedRef {
     match content_hash_from_ref(reference) {
-        Some(content_hash) => crate::agent::manifest_schema::AgentManifestResolvedRef {
+        Some(content_hash) => verlet_agent::manifest_schema::AgentManifestResolvedRef {
             declared: reference.to_string(),
             resolved: Some(reference.to_string()),
             content_hash: Some(content_hash),
-            status: crate::agent::manifest_schema::AgentManifestRefStatus::Resolved,
+            status: verlet_agent::manifest_schema::AgentManifestRefStatus::Resolved,
         },
-        None => crate::agent::manifest_schema::AgentManifestResolvedRef {
+        None => verlet_agent::manifest_schema::AgentManifestResolvedRef {
             declared: reference.to_string(),
             resolved: None,
             content_hash: None,
-            status: crate::agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline,
+            status: verlet_agent::manifest_schema::AgentManifestRefStatus::UnresolvedOffline,
         },
     }
 }
@@ -1404,35 +1479,39 @@ fn content_hash_from_ref(reference: &str) -> Option<String> {
     Some(content_hash)
 }
 
-fn validate_label(label: &str, value: &str) -> crate::VerletResult<()> {
+fn validate_label(label: &str, value: &str) -> crate::kernel::runtime_host::VerletResult<()> {
     if value.is_empty()
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
     {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{label} {value:?} must use ASCII letters, numbers, '.', '_' or '-'"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("{label} {value:?} must use ASCII letters, numbers, '.', '_' or '-'"),
+        ));
     }
     Ok(())
 }
 
 fn canonical_json_from_schema(
-    value: &crate::agent::manifest_schema::AgentManifestSchema,
-) -> crate::VerletResult<serde_json::Value> {
+    value: &verlet_agent::manifest_schema::AgentManifestSchema,
+) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
     let json = serde_json::to_value(value).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("failed to canonicalize agent manifest: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to canonicalize agent manifest: {err}"
+        ))
     })?;
     Ok(sort_json(json))
 }
 
 pub(crate) fn canonical_json_from_authored_source(
     source: &str,
-) -> crate::VerletResult<serde_json::Value> {
+) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
     let value: toml::Value = toml::from_str(source).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("invalid agent manifest: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "invalid agent manifest: {err}"
+        ))
     })?;
-    let manifest = crate::agent::manifest_schema::AgentManifestSchema::from_toml_value(&value)?;
+    let manifest = verlet_agent::manifest_schema::AgentManifestSchema::from_toml_value(&value)?;
     canonical_json_from_schema(&manifest)
 }
 
@@ -1451,9 +1530,9 @@ fn sort_json(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn value_sha256(value: &serde_json::Value) -> crate::VerletResult<String> {
+fn value_sha256(value: &serde_json::Value) -> crate::kernel::runtime_host::VerletResult<String> {
     let bytes = serde_json::to_vec(value).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to encode resolved agent manifest: {err}"
         ))
     })?;
@@ -1467,14 +1546,14 @@ fn text_sha256(bytes: &[u8]) -> String {
     format!("sha256:{digest:x}")
 }
 
-fn validate_hash_label(label: &str, value: &str) -> crate::VerletResult<()> {
+fn validate_hash_label(label: &str, value: &str) -> crate::kernel::runtime_host::VerletResult<()> {
     let Some(hash) = value.strip_prefix("sha256:") else {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{label} must start with sha256:"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("{label} must start with sha256:"),
+        ));
     };
     validate_hex_hash(hash).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "{label} must be sha256:<64 lowercase hex>: {err}"
         ))
     })
@@ -1497,45 +1576,46 @@ fn write_json_atomically<T: serde::Serialize>(
     path: &std::path::Path,
     label: String,
     value: &T,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let Some(parent) = path.parent() else {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{label} path {} has no parent directory",
-            path.display()
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("{label} path {} has no parent directory", path.display()),
+        ));
     };
     std::fs::create_dir_all(parent).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to create {label} directory {}: {err}",
             parent.display()
         ))
     })?;
     let tmp_path = parent.join(format!(".verlet.tmp.{}", uuid::Uuid::now_v7()));
     let bytes = serde_json::to_vec_pretty(value).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("failed to encode {label}: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to encode {label}: {err}"
+        ))
     })?;
     {
         let mut file = std::fs::File::create(&tmp_path).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to create temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
         file.write_all(&bytes).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to write temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
         file.sync_all().map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to sync temp {label} {}: {err}",
                 tmp_path.display()
             ))
         })?;
     }
     std::fs::rename(&tmp_path, path).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to atomically install {label} {}: {err}",
             path.display()
         ))

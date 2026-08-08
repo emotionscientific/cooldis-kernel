@@ -43,7 +43,7 @@ pub enum AgentContextSource {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentContextDroppedEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry_id: Option<crate::SessionEntryId>,
+    pub entry_id: Option<verlet_history::SessionEntryId>,
     pub source: AgentContextSource,
     pub reason: String,
 }
@@ -63,41 +63,41 @@ pub struct AgentContextCompilationDiagnostics {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentContextCompileInput {
-    pub system: Vec<crate::SystemBlock>,
+    pub system: Vec<verlet_provider::SystemBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub static_system_sources: Vec<crate::AgentManifestStaticContextSegment>,
-    pub session_entries: Vec<crate::SessionEntry>,
+    pub static_system_sources: Vec<crate::agent::manifest_bind::AgentManifestStaticContextSegment>,
+    pub session_entries: Vec<verlet_history::SessionEntry>,
     /// Persisted turn-start or thread-anchor time for synthetics without one entry source.
     pub turn_anchor_timestamp_ms: i64,
-    pub turn_context: crate::TurnContextSnapshot,
+    pub turn_context: crate::kernel::runtime_host::turn::TurnContextSnapshot,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hook_contexts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environment_contexts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AgentContextAttachment>,
-    pub tools: Vec<crate::ToolDefinition>,
+    pub tools: Vec<verlet_provider::ToolDefinition>,
     #[serde(default)]
     pub policy: AgentContextCompilePolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompiledAgentContext {
-    pub system: Vec<crate::SystemBlock>,
-    pub messages: Vec<crate::CanonicalMessage>,
-    pub tools: Vec<crate::ToolDefinition>,
+    pub system: Vec<verlet_provider::SystemBlock>,
+    pub messages: Vec<verlet_history::CanonicalMessage>,
+    pub tools: Vec<verlet_provider::ToolDefinition>,
     pub diagnostics: AgentContextCompilationDiagnostics,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct TrackedMessage {
-    message: crate::CanonicalMessage,
+    message: verlet_history::CanonicalMessage,
     source: AgentContextSource,
-    entry_id: Option<crate::SessionEntryId>,
+    entry_id: Option<verlet_history::SessionEntryId>,
 }
 
 struct CompiledSystemBlocks {
-    blocks: Vec<crate::SystemBlock>,
+    blocks: Vec<verlet_provider::SystemBlock>,
     budgeted_text_bytes: usize,
     truncated_text_bytes: usize,
 }
@@ -128,7 +128,7 @@ impl AgentContextCompiler {
         for context in render_environment_contexts(&input.turn_context, &input.environment_contexts)
         {
             messages.push(TrackedMessage {
-                message: crate::CanonicalMessage::user_text_at(
+                message: verlet_history::CanonicalMessage::user_text_at(
                     context,
                     input.turn_anchor_timestamp_ms,
                 ),
@@ -139,19 +139,20 @@ impl AgentContextCompiler {
 
         for entry in &input.session_entries {
             match &entry.kind {
-                crate::SessionEntryKind::Message { message } => messages.push(TrackedMessage {
-                    message: message.clone(),
-                    source: AgentContextSource::History,
-                    entry_id: Some(entry.entry_id),
-                }),
-                crate::SessionEntryKind::CustomContextMessage { message } => {
+                verlet_history::SessionEntryKind::Message { message } => {
                     messages.push(TrackedMessage {
                         message: message.clone(),
-                        source: AgentContextSource::HookContext,
+                        source: AgentContextSource::History,
                         entry_id: Some(entry.entry_id),
                     })
                 }
-                crate::SessionEntryKind::Compaction { summary } => {
+                verlet_history::SessionEntryKind::CustomContextMessage { message } => messages
+                    .push(TrackedMessage {
+                        message: message.clone(),
+                        source: AgentContextSource::HookContext,
+                        entry_id: Some(entry.entry_id),
+                    }),
+                verlet_history::SessionEntryKind::Compaction { summary } => {
                     diagnostics
                         .dropped_entries
                         .extend(messages.iter().map(|message| AgentContextDroppedEntry {
@@ -161,14 +162,17 @@ impl AgentContextCompiler {
                         }));
                     messages.clear();
                     messages.push(TrackedMessage {
-                        message: crate::compaction_summary_message(summary, entry.created_at_ms),
+                        message: verlet_history::compaction_summary_message(
+                            summary,
+                            entry.created_at_ms,
+                        ),
                         source: AgentContextSource::CompactionSummary,
                         entry_id: Some(entry.entry_id),
                     });
                 }
-                crate::SessionEntryKind::ModelChange { .. }
-                | crate::SessionEntryKind::BranchSummary { .. }
-                | crate::SessionEntryKind::Runtime { .. } => {}
+                verlet_history::SessionEntryKind::ModelChange { .. }
+                | verlet_history::SessionEntryKind::BranchSummary { .. }
+                | verlet_history::SessionEntryKind::Runtime { .. } => {}
             }
         }
 
@@ -178,7 +182,7 @@ impl AgentContextCompiler {
             .filter(|context| !context.trim().is_empty())
         {
             messages.push(TrackedMessage {
-                message: crate::CanonicalMessage::user_text_at(
+                message: verlet_history::CanonicalMessage::user_text_at(
                     context,
                     input.turn_anchor_timestamp_ms,
                 ),
@@ -194,7 +198,7 @@ impl AgentContextCompiler {
             .filter(|context| !context.trim().is_empty())
         {
             messages.push(TrackedMessage {
-                message: crate::CanonicalMessage::user_text_at(
+                message: verlet_history::CanonicalMessage::user_text_at(
                     context.clone(),
                     input.turn_anchor_timestamp_ms,
                 ),
@@ -205,7 +209,7 @@ impl AgentContextCompiler {
 
         if let Some(attachment_context) = render_attachment_context(&input.attachments) {
             messages.push(TrackedMessage {
-                message: crate::CanonicalMessage::user_text_at(
+                message: verlet_history::CanonicalMessage::user_text_at(
                     attachment_context,
                     input.turn_anchor_timestamp_ms,
                 ),
@@ -233,8 +237,8 @@ impl AgentContextCompiler {
 }
 
 fn compile_system_blocks(
-    static_sources: Vec<crate::AgentManifestStaticContextSegment>,
-    mut configured: Vec<crate::SystemBlock>,
+    static_sources: Vec<crate::agent::manifest_bind::AgentManifestStaticContextSegment>,
+    mut configured: Vec<verlet_provider::SystemBlock>,
     max_text_bytes: Option<usize>,
 ) -> CompiledSystemBlocks {
     let mut remaining_budget = max_text_bytes;
@@ -268,7 +272,7 @@ fn compile_system_blocks(
             budgeted_text_bytes = budgeted_text_bytes.saturating_add(retained_len);
         }
         if !content.trim().is_empty() {
-            blocks.push(crate::SystemBlock::text(content));
+            blocks.push(verlet_provider::SystemBlock::text(content));
         }
     }
     blocks.append(&mut configured);
@@ -311,7 +315,7 @@ fn prefix_text_bytes(text: &str, max_bytes: usize) -> &str {
 }
 
 fn render_environment_contexts(
-    turn_context: &crate::TurnContextSnapshot,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContextSnapshot,
     explicit_contexts: &[String],
 ) -> Vec<String> {
     let mut contexts = explicit_contexts
@@ -326,7 +330,9 @@ fn render_environment_contexts(
     contexts
 }
 
-fn render_turn_environment_context(turn_context: &crate::TurnContextSnapshot) -> Option<String> {
+fn render_turn_environment_context(
+    turn_context: &crate::kernel::runtime_host::turn::TurnContextSnapshot,
+) -> Option<String> {
     let has_context = turn_context.cwd.is_some()
         || !turn_context.workspace_roots.is_empty()
         || !turn_context.environment.is_empty()
@@ -409,27 +415,28 @@ fn messages_text_bytes_for_tracked(messages: &[TrackedMessage]) -> usize {
         .sum()
 }
 
-fn messages_text_bytes(messages: &[crate::CanonicalMessage]) -> usize {
+fn messages_text_bytes(messages: &[verlet_history::CanonicalMessage]) -> usize {
     messages.iter().map(message_text_bytes).sum()
 }
 
-fn message_text_bytes(message: &crate::CanonicalMessage) -> usize {
+fn message_text_bytes(message: &verlet_history::CanonicalMessage) -> usize {
     match message {
-        crate::CanonicalMessage::User { content, .. }
-        | crate::CanonicalMessage::Assistant { content, .. }
-        | crate::CanonicalMessage::ToolResult { content, .. } => content_text_bytes(content),
+        verlet_history::CanonicalMessage::User { content, .. }
+        | verlet_history::CanonicalMessage::Assistant { content, .. }
+        | verlet_history::CanonicalMessage::ToolResult { content, .. } => {
+            content_text_bytes(content)
+        }
     }
 }
 
-fn content_text_bytes(content: &[crate::CanonicalContent]) -> usize {
+fn content_text_bytes(content: &[verlet_history::CanonicalContent]) -> usize {
     content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. }
-            | crate::CanonicalContent::Thinking { text, .. } => Some(text.len()),
-            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {
-                None
-            }
+            verlet_history::CanonicalContent::Text { text, .. }
+            | verlet_history::CanonicalContent::Thinking { text, .. } => Some(text.len()),
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => None,
         })
         .sum()
 }
@@ -438,9 +445,9 @@ fn truncate_messages_to_recent_text_bytes(messages: &mut [TrackedMessage], max_b
     let mut remaining = max_bytes;
     for message in messages.iter_mut().rev() {
         match &mut message.message {
-            crate::CanonicalMessage::User { content, .. }
-            | crate::CanonicalMessage::Assistant { content, .. }
-            | crate::CanonicalMessage::ToolResult { content, .. } => {
+            verlet_history::CanonicalMessage::User { content, .. }
+            | verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => {
                 truncate_content_to_recent_text_bytes(content, &mut remaining);
             }
         }
@@ -448,22 +455,24 @@ fn truncate_messages_to_recent_text_bytes(messages: &mut [TrackedMessage], max_b
 }
 
 fn truncate_content_to_recent_text_bytes(
-    content: &mut Vec<crate::CanonicalContent>,
+    content: &mut Vec<verlet_history::CanonicalContent>,
     remaining: &mut usize,
 ) {
     for block in content.iter_mut().rev() {
         match block {
-            crate::CanonicalContent::Text { text, .. }
-            | crate::CanonicalContent::Thinking { text, .. } => {
+            verlet_history::CanonicalContent::Text { text, .. }
+            | verlet_history::CanonicalContent::Thinking { text, .. } => {
                 truncate_string_to_recent_bytes(text, remaining);
             }
-            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {}
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => {}
         }
     }
     content.retain(|block| match block {
-        crate::CanonicalContent::Text { text, .. }
-        | crate::CanonicalContent::Thinking { text, .. } => !text.is_empty(),
-        crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => true,
+        verlet_history::CanonicalContent::Text { text, .. }
+        | verlet_history::CanonicalContent::Thinking { text, .. } => !text.is_empty(),
+        verlet_history::CanonicalContent::Image { .. }
+        | verlet_history::CanonicalContent::ToolCall { .. } => true,
     });
 }
 

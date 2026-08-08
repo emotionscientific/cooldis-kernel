@@ -36,13 +36,15 @@ pub(crate) mod transcript;
 
 pub(crate) async fn scenario_app_server(
     config: verlet::adapters::app_server::VerletAppServerConfig,
-    runtime_factory: std::sync::Arc<dyn verlet::AgentRuntimeFactory>,
+    runtime_factory: std::sync::Arc<
+        dyn verlet::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+    >,
     decorate: impl FnOnce(
-        std::sync::Arc<dyn verlet::RuntimeStore>,
-    ) -> std::sync::Arc<dyn verlet::RuntimeStore>
+        std::sync::Arc<dyn verlet_history::RuntimeStore>,
+    ) -> std::sync::Arc<dyn verlet_history::RuntimeStore>
     + Send
     + 'static,
-) -> verlet::VerletResult<verlet::adapters::app_server::VerletAppServer> {
+) -> verlet::kernel::runtime_host::VerletResult<verlet::adapters::app_server::VerletAppServer> {
     verlet::adapters::app_server::VerletAppServer::with_runtime_factory_and_session_store_decorator(
         config,
         runtime_factory,
@@ -57,9 +59,9 @@ pub(crate) fn scenario_unit_harness() -> bool {
 
 pub(crate) async fn scenario_fork_with_id(
     server: &verlet::adapters::app_server::VerletAppServer,
-    parent: &verlet::ThreadCoordinates,
-    child_thread_id: verlet::ThreadId,
-) -> verlet::VerletResult<verlet::ThreadCoordinates> {
+    parent: &verlet_runtime_contracts::ThreadCoordinates,
+    child_thread_id: verlet_runtime_contracts::ThreadId,
+) -> verlet::kernel::runtime_host::VerletResult<verlet_runtime_contracts::ThreadCoordinates> {
     let checkpoint = server
         .supervisor()
         .create_checkpoint_at(
@@ -77,13 +79,15 @@ pub(crate) async fn scenario_fork_with_id(
 }
 
 pub(crate) async fn scenario_project_spawn_snapshot(
-    host: verlet::RuntimeHost,
-    coordinates: verlet::ThreadCoordinates,
+    host: verlet::kernel::runtime_host::RuntimeHost,
+    coordinates: verlet_runtime_contracts::ThreadCoordinates,
     barrier: std::sync::Arc<tokio::sync::Barrier>,
-) -> verlet::VerletResult<verlet::kernel::thread_spawn_projector::ThreadSpawnProjectionReceipt> {
+) -> verlet::kernel::runtime_host::VerletResult<
+    verlet::kernel::thread_spawn_projector::ThreadSpawnProjectionReceipt,
+> {
     host.load_thread_with_topology_and_metadata(
         coordinates.clone(),
-        verlet::ThreadTopology::root(),
+        verlet_runtime_contracts::ThreadTopology::root(),
         std::collections::BTreeMap::new(),
     )
     .await?;

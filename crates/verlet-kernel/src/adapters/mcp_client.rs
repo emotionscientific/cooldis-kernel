@@ -1,4 +1,4 @@
-use crate::AgentKernelToolProvider as _;
+use crate::agent::agent_tool_router::AgentKernelToolProvider as _;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 
@@ -51,8 +51,8 @@ impl McpRemoteServerConfig {
         name: impl Into<String>,
         transport: McpRemoteTransport,
         url: impl Into<String>,
-    ) -> crate::VerletResult<Self> {
-        let name = crate::validate_record_name(&name.into())?;
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let name = verlet_operations::operation_store::validate_record_name(&name.into())?;
         let url = url.into();
         validate_remote_mcp_url(&url)?;
         Ok(Self {
@@ -70,14 +70,16 @@ impl McpRemoteServerConfig {
     pub fn with_bearer_secret(
         mut self,
         secret_name: impl Into<String>,
-    ) -> crate::VerletResult<Self> {
-        self.bearer_secret = Some(crate::validate_secret_name(&secret_name.into()).map_err(
-            |err| {
-                crate::VerletError::RuntimeFactory(format!(
-                    "invalid remote MCP bearer secret: {err}"
-                ))
-            },
-        )?);
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        self.bearer_secret = Some(
+            verlet_metadata::secret_store::validate_secret_name(&secret_name.into()).map_err(
+                |err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "invalid remote MCP bearer secret: {err}"
+                    ))
+                },
+            )?,
+        );
         Ok(self)
     }
 
@@ -131,7 +133,7 @@ pub struct McpRemoteSourceRecord {
     pub timeout_ms: u64,
     pub max_output_bytes: u64,
     #[serde(default)]
-    pub discovered_tools: Vec<crate::ToolDefinition>,
+    pub discovered_tools: Vec<verlet_provider::ToolDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovered_at_ms: Option<i64>,
     pub created_at_ms: i64,
@@ -205,17 +207,21 @@ pub struct SqliteMcpSourceRegistry {
 }
 
 impl SqliteMcpSourceRegistry {
-    pub fn open(path: impl AsRef<std::path::Path>) -> crate::VerletResult<Self> {
+    pub fn open(
+        path: impl AsRef<std::path::Path>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         verlet_sqlite::block_on(Self::open_async(path))
     }
 
-    pub async fn open_async(path: impl AsRef<std::path::Path>) -> crate::VerletResult<Self> {
+    pub async fn open_async(
+        path: impl AsRef<std::path::Path>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
             std::fs::create_dir_all(parent).map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to create MCP registry directory {}: {err}",
                     parent.display()
                 ))
@@ -227,46 +233,48 @@ impl SqliteMcpSourceRegistry {
         Self::from_db(inner).await
     }
 
-    pub fn in_memory() -> crate::VerletResult<Self> {
+    pub fn in_memory() -> crate::kernel::runtime_host::VerletResult<Self> {
         verlet_sqlite::block_on(Self::in_memory_async())
     }
 
-    pub async fn in_memory_async() -> crate::VerletResult<Self> {
+    pub async fn in_memory_async() -> crate::kernel::runtime_host::VerletResult<Self> {
         let inner = verlet_sqlite::Db::in_memory(verlet_sqlite::DbConfig::default())
             .await
             .map_err(sqlite_mcp_error)?;
         Self::from_db(inner).await
     }
 
-    async fn from_db(inner: verlet_sqlite::Db) -> crate::VerletResult<Self> {
+    async fn from_db(inner: verlet_sqlite::Db) -> crate::kernel::runtime_host::VerletResult<Self> {
         let registry = Self { inner };
         let connection = registry.connect().await?;
         init_mcp_source_schema(&connection).await?;
         Ok(registry)
     }
 
-    async fn connect(&self) -> crate::VerletResult<verlet_sqlite::Connection> {
+    async fn connect(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_sqlite::Connection> {
         self.inner.connect().await.map_err(sqlite_mcp_error)
     }
 
     pub fn upsert_source(
         &self,
         config: McpRemoteServerConfig,
-    ) -> crate::VerletResult<McpRemoteSourceRecord> {
+    ) -> crate::kernel::runtime_host::VerletResult<McpRemoteSourceRecord> {
         verlet_sqlite::block_on(self.upsert_source_async(config))
     }
 
     pub async fn upsert_source_async(
         &self,
         config: McpRemoteServerConfig,
-    ) -> crate::VerletResult<McpRemoteSourceRecord> {
+    ) -> crate::kernel::runtime_host::VerletResult<McpRemoteSourceRecord> {
         let mut connection = self.connect().await?;
         let tx = connection
             .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
             .await
             .map_err(sqlite_mcp_error)?;
         let existing = sqlite_get_mcp_source(&tx, &config.name).await?;
-        let now = crate::kernel::history::now_ms();
+        let now = verlet_history::now_ms();
         let mut record = McpRemoteSourceRecord::from_config(config, now);
         if let Some(existing) = existing {
             record.created_at_ms = existing.created_at_ms;
@@ -281,24 +289,28 @@ impl SqliteMcpSourceRegistry {
     pub fn get_source(
         &self,
         name: impl AsRef<str>,
-    ) -> crate::VerletResult<Option<McpRemoteSourceRecord>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Option<McpRemoteSourceRecord>> {
         verlet_sqlite::block_on(self.get_source_async(name))
     }
 
     pub async fn get_source_async(
         &self,
         name: impl AsRef<str>,
-    ) -> crate::VerletResult<Option<McpRemoteSourceRecord>> {
-        let name = crate::validate_record_name(name.as_ref())?;
+    ) -> crate::kernel::runtime_host::VerletResult<Option<McpRemoteSourceRecord>> {
+        let name = verlet_operations::operation_store::validate_record_name(name.as_ref())?;
         let connection = self.connect().await?;
         sqlite_get_mcp_source(&connection, &name).await
     }
 
-    pub fn list_sources(&self) -> crate::VerletResult<Vec<McpRemoteSourceRecord>> {
+    pub fn list_sources(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<McpRemoteSourceRecord>> {
         verlet_sqlite::block_on(self.list_sources_async())
     }
 
-    pub async fn list_sources_async(&self) -> crate::VerletResult<Vec<McpRemoteSourceRecord>> {
+    pub async fn list_sources_async(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<McpRemoteSourceRecord>> {
         let connection = self.connect().await?;
         let mut rows = connection
             .query(
@@ -315,12 +327,18 @@ impl SqliteMcpSourceRegistry {
         Ok(records)
     }
 
-    pub fn delete_source(&self, name: impl AsRef<str>) -> crate::VerletResult<bool> {
+    pub fn delete_source(
+        &self,
+        name: impl AsRef<str>,
+    ) -> crate::kernel::runtime_host::VerletResult<bool> {
         verlet_sqlite::block_on(self.delete_source_async(name))
     }
 
-    pub async fn delete_source_async(&self, name: impl AsRef<str>) -> crate::VerletResult<bool> {
-        let name = crate::validate_record_name(name.as_ref())?;
+    pub async fn delete_source_async(
+        &self,
+        name: impl AsRef<str>,
+    ) -> crate::kernel::runtime_host::VerletResult<bool> {
+        let name = verlet_operations::operation_store::validate_record_name(name.as_ref())?;
         let connection = self.connect().await?;
         let deleted = connection
             .execute(
@@ -335,26 +353,28 @@ impl SqliteMcpSourceRegistry {
     pub fn update_discovered_tools(
         &self,
         name: impl AsRef<str>,
-        tools: Vec<crate::ToolDefinition>,
-    ) -> crate::VerletResult<McpRemoteSourceRecord> {
+        tools: Vec<verlet_provider::ToolDefinition>,
+    ) -> crate::kernel::runtime_host::VerletResult<McpRemoteSourceRecord> {
         verlet_sqlite::block_on(self.update_discovered_tools_async(name, tools))
     }
 
     pub async fn update_discovered_tools_async(
         &self,
         name: impl AsRef<str>,
-        tools: Vec<crate::ToolDefinition>,
-    ) -> crate::VerletResult<McpRemoteSourceRecord> {
-        let name = crate::validate_record_name(name.as_ref())?;
+        tools: Vec<verlet_provider::ToolDefinition>,
+    ) -> crate::kernel::runtime_host::VerletResult<McpRemoteSourceRecord> {
+        let name = verlet_operations::operation_store::validate_record_name(name.as_ref())?;
         let mut connection = self.connect().await?;
         let tx = connection
             .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
             .await
             .map_err(sqlite_mcp_error)?;
         let mut record = sqlite_get_mcp_source(&tx, &name).await?.ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(format!("remote MCP source {name:?} was not found"))
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "remote MCP source {name:?} was not found"
+            ))
         })?;
-        let now = crate::kernel::history::now_ms();
+        let now = verlet_history::now_ms();
         record.discovered_tools = tools;
         record.discovered_at_ms = Some(now);
         record.updated_at_ms = now;
@@ -405,11 +425,13 @@ impl McpStdioServerConfig {
 
 pub struct McpStdioToolProvider {
     client: std::sync::Arc<tokio::sync::Mutex<McpStdioClient>>,
-    tools: Vec<crate::ToolDefinition>,
+    tools: Vec<verlet_provider::ToolDefinition>,
 }
 
 impl McpStdioToolProvider {
-    pub async fn connect(config: McpStdioServerConfig) -> crate::VerletResult<Self> {
+    pub async fn connect(
+        config: McpStdioServerConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let mut client = McpStdioClient::spawn(config.clone()).await?;
         client.initialize().await?;
         let tools = client.list_tools().await?;
@@ -422,15 +444,15 @@ impl McpStdioToolProvider {
 }
 
 #[async_trait::async_trait]
-impl crate::AgentKernelToolProvider for McpStdioToolProvider {
-    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+impl crate::agent::agent_tool_router::AgentKernelToolProvider for McpStdioToolProvider {
+    async fn tool_definitions(&self) -> Vec<verlet_provider::ToolDefinition> {
         self.tools.clone()
     }
 
     async fn invoke_tool_call(
         &self,
-        call: crate::AgentKernelToolCall,
-    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
         if !self.tools.iter().any(|tool| tool.name == call.tool_name) {
             return Ok(None);
         }
@@ -440,7 +462,7 @@ impl crate::AgentKernelToolProvider for McpStdioToolProvider {
             .await
             .call_tool(&call.tool_name, call.arguments)
             .await?;
-        Ok(Some(crate::CanonicalMessage::tool_result(
+        Ok(Some(verlet_history::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             result.content,
@@ -451,14 +473,14 @@ impl crate::AgentKernelToolProvider for McpStdioToolProvider {
 
 pub struct McpRemoteToolProvider {
     client: std::sync::Arc<tokio::sync::Mutex<McpRemoteClient>>,
-    tools: Vec<crate::ToolDefinition>,
+    tools: Vec<verlet_provider::ToolDefinition>,
 }
 
 impl McpRemoteToolProvider {
     pub async fn connect(
         config: McpRemoteServerConfig,
-        secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
-    ) -> crate::VerletResult<Self> {
+        secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let mut client = McpRemoteClient::new(config.clone(), secret_resolver)?;
         client.initialize().await?;
         let tools = client.list_tools().await?;
@@ -473,13 +495,13 @@ impl McpRemoteToolProvider {
 #[derive(Clone)]
 pub struct McpToolUniverseDiscoverer {
     registry: SqliteMcpSourceRegistry,
-    secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
+    secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
 }
 
 impl McpToolUniverseDiscoverer {
     pub fn new(
         registry: SqliteMcpSourceRegistry,
-        secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
+        secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
     ) -> Self {
         Self {
             registry,
@@ -490,7 +512,7 @@ impl McpToolUniverseDiscoverer {
     pub async fn caller_for(
         &self,
         server_ref: &str,
-    ) -> crate::VerletResult<std::sync::Arc<McpRemoteToolProvider>> {
+    ) -> crate::kernel::runtime_host::VerletResult<std::sync::Arc<McpRemoteToolProvider>> {
         let record = self.source_record(server_ref).await?;
         Ok(std::sync::Arc::new(
             McpRemoteToolProvider::connect(record.to_config(), self.secret_resolver.clone())
@@ -498,10 +520,13 @@ impl McpToolUniverseDiscoverer {
         ))
     }
 
-    async fn source_record(&self, server_ref: &str) -> crate::VerletResult<McpRemoteSourceRecord> {
+    async fn source_record(
+        &self,
+        server_ref: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<McpRemoteSourceRecord> {
         let name = source_name_from_server_ref(server_ref)?;
         self.registry.get_source_async(&name).await?.ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "remote MCP source {name:?} was not found for server_ref {server_ref:?}"
             ))
         })
@@ -509,30 +534,37 @@ impl McpToolUniverseDiscoverer {
 }
 
 #[async_trait::async_trait]
-impl crate::ToolUniverseDiscoverer for McpToolUniverseDiscoverer {
+impl crate::agent::tool_universe::ToolUniverseDiscoverer for McpToolUniverseDiscoverer {
     async fn discover(
         &self,
         server_ref: &str,
-    ) -> crate::VerletResult<crate::ToolUniverseDiscovery> {
+    ) -> crate::kernel::runtime_host::VerletResult<crate::agent::tool_universe::ToolUniverseDiscovery>
+    {
         let caller = self.caller_for(server_ref).await?;
         let mut tools = Vec::new();
         for definition in caller.tool_definitions().await {
-            tools.push(crate::WitnessedToolContract::witness(&definition)?);
+            tools.push(crate::agent::tool_universe::WitnessedToolContract::witness(
+                &definition,
+            )?);
         }
-        crate::ToolUniverseDiscovery::witness(server_ref, tools, crate::kernel::history::now_ms())
+        crate::agent::tool_universe::ToolUniverseDiscovery::witness(
+            server_ref,
+            tools,
+            verlet_history::now_ms(),
+        )
     }
 }
 
 #[async_trait::async_trait]
-impl crate::AgentKernelToolProvider for McpRemoteToolProvider {
-    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+impl crate::agent::agent_tool_router::AgentKernelToolProvider for McpRemoteToolProvider {
+    async fn tool_definitions(&self) -> Vec<verlet_provider::ToolDefinition> {
         self.tools.clone()
     }
 
     async fn invoke_tool_call(
         &self,
-        call: crate::AgentKernelToolCall,
-    ) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
+        call: crate::agent::agent_tool_router::AgentKernelToolCall,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
         if !self.tools.iter().any(|tool| tool.name == call.tool_name) {
             return Ok(None);
         }
@@ -542,7 +574,7 @@ impl crate::AgentKernelToolProvider for McpRemoteToolProvider {
             .await
             .call_tool(&call.tool_name, call.arguments)
             .await?;
-        Ok(Some(crate::CanonicalMessage::tool_result(
+        Ok(Some(verlet_history::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             result.content,
@@ -552,16 +584,18 @@ impl crate::AgentKernelToolProvider for McpRemoteToolProvider {
 }
 
 #[async_trait::async_trait]
-impl crate::ToolUniverseCaller for McpRemoteToolProvider {
+impl crate::agent::tool_universe::ToolUniverseCaller for McpRemoteToolProvider {
     async fn call_tool(
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
-    ) -> crate::VerletResult<crate::ToolUniverseCallOutput> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::agent::tool_universe::ToolUniverseCallOutput,
+    > {
         if !self.tools.iter().any(|tool| tool.name == tool_name) {
-            return Err(crate::VerletError::RuntimeExecution(format!(
-                "remote MCP provider does not expose tool {tool_name:?}"
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!("remote MCP provider does not expose tool {tool_name:?}"),
+            ));
         }
         let result = self
             .client
@@ -569,7 +603,7 @@ impl crate::ToolUniverseCaller for McpRemoteToolProvider {
             .await
             .call_tool(tool_name, arguments)
             .await?;
-        Ok(crate::ToolUniverseCallOutput {
+        Ok(crate::agent::tool_universe::ToolUniverseCallOutput {
             content: result.content,
             is_error: result.is_error,
         })
@@ -577,9 +611,9 @@ impl crate::ToolUniverseCaller for McpRemoteToolProvider {
 }
 
 fn filter_tools(
-    tools: Vec<crate::ToolDefinition>,
+    tools: Vec<verlet_provider::ToolDefinition>,
     include_tools: Option<&std::collections::BTreeSet<String>>,
-) -> Vec<crate::ToolDefinition> {
+) -> Vec<verlet_provider::ToolDefinition> {
     match include_tools {
         Some(include_tools) => tools
             .into_iter()
@@ -589,13 +623,17 @@ fn filter_tools(
     }
 }
 
-fn source_name_from_server_ref(server_ref: &str) -> crate::VerletResult<String> {
+fn source_name_from_server_ref(
+    server_ref: &str,
+) -> crate::kernel::runtime_host::VerletResult<String> {
     let name = server_ref.strip_prefix("mcp://").ok_or_else(|| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "server_ref {server_ref:?} must start with mcp://"
         ))
     })?;
-    Ok(crate::validate_record_name(name)?)
+    Ok(verlet_operations::operation_store::validate_record_name(
+        name,
+    )?)
 }
 
 struct McpToolCallResult {
@@ -606,21 +644,21 @@ struct McpToolCallResult {
 struct McpRemoteClient {
     config: McpRemoteServerConfig,
     http: reqwest::Client,
-    secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
+    secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
     next_id: u64,
 }
 
 impl McpRemoteClient {
     fn new(
         config: McpRemoteServerConfig,
-        secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
-    ) -> crate::VerletResult<Self> {
+        secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         validate_remote_mcp_url(&config.url)?;
         let http = reqwest::Client::builder()
             .timeout(config.timeout())
             .build()
             .map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to construct remote MCP HTTP client: {err}"
                 ))
             })?;
@@ -632,7 +670,7 @@ impl McpRemoteClient {
         })
     }
 
-    async fn initialize(&mut self) -> crate::VerletResult<()> {
+    async fn initialize(&mut self) -> crate::kernel::runtime_host::VerletResult<()> {
         self.request(
             "initialize",
             serde_json::json!({
@@ -649,7 +687,9 @@ impl McpRemoteClient {
             .await
     }
 
-    async fn list_tools(&mut self) -> crate::VerletResult<Vec<crate::ToolDefinition>> {
+    async fn list_tools(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_provider::ToolDefinition>> {
         let result = self.request("tools/list", serde_json::json!({})).await?;
         tools_from_mcp_result(&self.config.name, &result)
     }
@@ -658,7 +698,7 @@ impl McpRemoteClient {
         &mut self,
         name: &str,
         arguments: serde_json::Value,
-    ) -> crate::VerletResult<McpToolCallResult> {
+    ) -> crate::kernel::runtime_host::VerletResult<McpToolCallResult> {
         let result = self
             .request(
                 "tools/call",
@@ -678,7 +718,11 @@ impl McpRemoteClient {
         })
     }
 
-    async fn notify(&mut self, method: &str, params: serde_json::Value) -> crate::VerletResult<()> {
+    async fn notify(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let message = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -692,7 +736,7 @@ impl McpRemoteClient {
         &mut self,
         method: &str,
         params: serde_json::Value,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         let id = self.next_id;
         self.next_id += 1;
         let message = serde_json::json!({
@@ -707,26 +751,30 @@ impl McpRemoteClient {
                 continue;
             }
             if let Some(error) = value.get("error") {
-                return Err(crate::VerletError::RuntimeExecution(format!(
-                    "remote MCP source `{}` rejected `{method}`: {error}",
-                    self.config.name
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                    format!(
+                        "remote MCP source `{}` rejected `{method}`: {error}",
+                        self.config.name
+                    ),
+                ));
             }
             return Ok(value
                 .get("result")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null));
         }
-        Err(crate::VerletError::RuntimeExecution(format!(
-            "remote MCP source `{}` returned no response for request id {id}",
-            self.config.name
-        )))
+        Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!(
+                "remote MCP source `{}` returned no response for request id {id}",
+                self.config.name
+            ),
+        ))
     }
 
     async fn post_message(
         &self,
         message: serde_json::Value,
-    ) -> crate::VerletResult<Vec<serde_json::Value>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<serde_json::Value>> {
         let mut request = self
             .http
             .post(&self.config.url)
@@ -739,7 +787,7 @@ impl McpRemoteClient {
         }
         if let Some(secret_name) = &self.config.bearer_secret {
             let resolver = self.secret_resolver.as_ref().ok_or_else(|| {
-                crate::VerletError::RuntimeExecution(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                     "remote MCP source `{}` requires bearer secret but no secret resolver is configured",
                     self.config.name
                 ))
@@ -748,13 +796,13 @@ impl McpRemoteClient {
                 .resolve_secret(secret_name)
                 .await
                 .map_err(|err| {
-                    crate::VerletError::RuntimeExecution(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                         "remote MCP source `{}` failed to resolve bearer secret: {err}",
                         self.config.name
                     ))
                 })?
                 .ok_or_else(|| {
-                    crate::VerletError::RuntimeExecution(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                         "remote MCP source `{}` requires a bearer secret that is not available",
                         self.config.name
                     ))
@@ -762,7 +810,7 @@ impl McpRemoteClient {
             request = request.bearer_auth(secret.value);
         }
         let response = request.send().await.map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "remote MCP source `{}` request failed: {}",
                 self.config.name,
                 sanitize_http_error(err)
@@ -776,23 +824,27 @@ impl McpRemoteClient {
             .unwrap_or("")
             .to_string();
         let bytes = response.bytes().await.map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "remote MCP source `{}` response read failed: {}",
                 self.config.name,
                 sanitize_http_error(err)
             ))
         })?;
         if bytes.len() > self.config.max_output_bytes() {
-            return Err(crate::VerletError::RuntimeExecution(format!(
-                "remote MCP source `{}` response exceeded max_output_bytes",
-                self.config.name
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!(
+                    "remote MCP source `{}` response exceeded max_output_bytes",
+                    self.config.name
+                ),
+            ));
         }
         if !status.is_success() {
-            return Err(crate::VerletError::RuntimeExecution(format!(
-                "remote MCP source `{}` returned HTTP status {}",
-                self.config.name, status
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!(
+                    "remote MCP source `{}` returned HTTP status {}",
+                    self.config.name, status
+                ),
+            ));
         }
         parse_mcp_http_response(&self.config.name, &content_type, &bytes)
     }
@@ -807,7 +859,9 @@ struct McpStdioClient {
 }
 
 impl McpStdioClient {
-    async fn spawn(config: McpStdioServerConfig) -> crate::VerletResult<Self> {
+    async fn spawn(
+        config: McpStdioServerConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let mut command = tokio::process::Command::new(&config.command);
         command.args(&config.args);
         if let Some(cwd) = &config.cwd {
@@ -818,19 +872,19 @@ impl McpStdioClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
         let mut child = command.spawn().map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to launch MCP stdio server `{}`: {err}",
                 config.name
             ))
         })?;
         let stdin = child.stdin.take().ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "MCP stdio server `{}` did not expose stdin",
                 config.name
             ))
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "MCP stdio server `{}` did not expose stdout",
                 config.name
             ))
@@ -844,7 +898,7 @@ impl McpStdioClient {
         })
     }
 
-    async fn initialize(&mut self) -> crate::VerletResult<()> {
+    async fn initialize(&mut self) -> crate::kernel::runtime_host::VerletResult<()> {
         self.request(
             "initialize",
             serde_json::json!({
@@ -861,7 +915,9 @@ impl McpStdioClient {
             .await
     }
 
-    async fn list_tools(&mut self) -> crate::VerletResult<Vec<crate::ToolDefinition>> {
+    async fn list_tools(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_provider::ToolDefinition>> {
         let result = self.request("tools/list", serde_json::json!({})).await?;
         tools_from_mcp_result(&self.server_name, &result)
     }
@@ -870,7 +926,7 @@ impl McpStdioClient {
         &mut self,
         name: &str,
         arguments: serde_json::Value,
-    ) -> crate::VerletResult<McpToolCallResult> {
+    ) -> crate::kernel::runtime_host::VerletResult<McpToolCallResult> {
         let result = self
             .request(
                 "tools/call",
@@ -890,7 +946,11 @@ impl McpStdioClient {
         })
     }
 
-    async fn notify(&mut self, method: &str, params: serde_json::Value) -> crate::VerletResult<()> {
+    async fn notify(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let message = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -903,7 +963,7 @@ impl McpStdioClient {
         &mut self,
         method: &str,
         params: serde_json::Value,
-    ) -> crate::VerletResult<serde_json::Value> {
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         let id = self.next_id;
         self.next_id += 1;
         let message = serde_json::json!({
@@ -915,22 +975,24 @@ impl McpStdioClient {
         self.write_message(&message).await?;
         for _ in 0..64 {
             let line = self.stdout.next_line().await.map_err(|err| {
-                crate::VerletError::RuntimeExecution(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                     "failed to read MCP response from `{}`: {err}",
                     self.server_name
                 ))
             })?;
             let Some(line) = line else {
-                return Err(crate::VerletError::RuntimeExecution(format!(
-                    "MCP server `{}` closed stdout while waiting for `{method}`",
-                    self.server_name
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                    format!(
+                        "MCP server `{}` closed stdout while waiting for `{method}`",
+                        self.server_name
+                    ),
+                ));
             };
             if line.trim().is_empty() {
                 continue;
             }
             let value: serde_json::Value = serde_json::from_str(&line).map_err(|err| {
-                crate::VerletError::RuntimeExecution(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                     "MCP server `{}` emitted invalid JSON: {err}: {line}",
                     self.server_name
                 ))
@@ -939,40 +1001,49 @@ impl McpStdioClient {
                 continue;
             }
             if let Some(error) = value.get("error") {
-                return Err(crate::VerletError::RuntimeExecution(format!(
-                    "MCP server `{}` rejected `{method}`: {error}",
-                    self.server_name
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                    format!(
+                        "MCP server `{}` rejected `{method}`: {error}",
+                        self.server_name
+                    ),
+                ));
             }
             return Ok(value
                 .get("result")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null));
         }
-        Err(crate::VerletError::RuntimeExecution(format!(
-            "timed out waiting for MCP response id {id} from `{}`",
-            self.server_name
-        )))
+        Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!(
+                "timed out waiting for MCP response id {id} from `{}`",
+                self.server_name
+            ),
+        ))
     }
 
-    async fn write_message(&mut self, message: &serde_json::Value) -> crate::VerletResult<()> {
+    async fn write_message(
+        &mut self,
+        message: &serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let encoded = serde_json::to_vec(message).map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!("failed to encode MCP request: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                "failed to encode MCP request: {err}"
+            ))
         })?;
         self.stdin.write_all(&encoded).await.map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "failed to write MCP request to `{}`: {err}",
                 self.server_name
             ))
         })?;
         self.stdin.write_all(b"\n").await.map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "failed to write MCP request newline to `{}`: {err}",
                 self.server_name
             ))
         })?;
         self.stdin.flush().await.map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "failed to flush MCP request to `{}`: {err}",
                 self.server_name
             ))
@@ -1022,12 +1093,12 @@ fn mcp_content_text(result: &serde_json::Value) -> String {
 fn tools_from_mcp_result(
     server_name: &str,
     result: &serde_json::Value,
-) -> crate::VerletResult<Vec<crate::ToolDefinition>> {
+) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_provider::ToolDefinition>> {
     let tools = result
         .get("tools")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "MCP server `{server_name}` returned tools/list without tools array"
             ))
         })?;
@@ -1037,7 +1108,7 @@ fn tools_from_mcp_result(
             .get("name")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| {
-                crate::VerletError::RuntimeExecution(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                     "MCP server `{server_name}` returned a tool without a name"
                 ))
             })?
@@ -1052,7 +1123,11 @@ fn tools_from_mcp_result(
             .or_else(|| tool.get("input_schema"))
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"type":"object", "additionalProperties": true}));
-        definitions.push(crate::ToolDefinition::new(name, description, input_schema));
+        definitions.push(verlet_provider::ToolDefinition::new(
+            name,
+            description,
+            input_schema,
+        ));
     }
     Ok(definitions)
 }
@@ -1061,9 +1136,9 @@ fn parse_mcp_http_response(
     server_name: &str,
     content_type: &str,
     bytes: &[u8],
-) -> crate::VerletResult<Vec<serde_json::Value>> {
+) -> crate::kernel::runtime_host::VerletResult<Vec<serde_json::Value>> {
     let text = std::str::from_utf8(bytes).map_err(|err| {
-        crate::VerletError::RuntimeExecution(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
             "remote MCP source `{server_name}` returned non-UTF8 response: {err}"
         ))
     })?;
@@ -1071,7 +1146,7 @@ fn parse_mcp_http_response(
         return parse_mcp_sse_values(server_name, text);
     }
     let value: serde_json::Value = serde_json::from_str(text).map_err(|err| {
-        crate::VerletError::RuntimeExecution(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
             "remote MCP source `{server_name}` returned invalid JSON: {err}: {text}"
         ))
     })?;
@@ -1088,7 +1163,7 @@ fn looks_like_sse(text: &str) -> bool {
 fn parse_mcp_sse_values(
     server_name: &str,
     text: &str,
-) -> crate::VerletResult<Vec<serde_json::Value>> {
+) -> crate::kernel::runtime_host::VerletResult<Vec<serde_json::Value>> {
     let mut values = Vec::new();
     let mut data_lines = Vec::new();
     for line in text.lines().chain([""]) {
@@ -1098,7 +1173,7 @@ fn parse_mcp_sse_values(
                 let data = data_lines.join("\n");
                 if data.trim() != "[DONE]" {
                     let value: serde_json::Value = serde_json::from_str(&data).map_err(|err| {
-                        crate::VerletError::RuntimeExecution(format!(
+                        crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                             "remote MCP source `{server_name}` returned invalid SSE JSON: {err}: {data}"
                         ))
                     })?;
@@ -1113,22 +1188,24 @@ fn parse_mcp_sse_values(
         }
     }
     if values.is_empty() {
-        return Err(crate::VerletError::RuntimeExecution(format!(
-            "remote MCP source `{server_name}` returned empty SSE response"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!("remote MCP source `{server_name}` returned empty SSE response"),
+        ));
     }
     Ok(values)
 }
 
-fn validate_remote_mcp_url(url: &str) -> crate::VerletResult<()> {
+fn validate_remote_mcp_url(url: &str) -> crate::kernel::runtime_host::VerletResult<()> {
     let url = reqwest::Url::parse(url).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("remote MCP URL {url:?} is invalid: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "remote MCP URL {url:?} is invalid: {err}"
+        ))
     })?;
     match url.scheme() {
         "http" | "https" => Ok(()),
-        other => Err(crate::VerletError::RuntimeFactory(format!(
-            "remote MCP URL scheme {other:?} is not supported"
-        ))),
+        other => Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("remote MCP URL scheme {other:?} is not supported"),
+        )),
     }
 }
 
@@ -1139,7 +1216,9 @@ fn sanitize_http_error(err: reqwest::Error) -> String {
     err.without_url().to_string()
 }
 
-async fn init_mcp_source_schema(connection: &verlet_sqlite::Connection) -> crate::VerletResult<()> {
+async fn init_mcp_source_schema(
+    connection: &verlet_sqlite::Connection,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     connection
         .execute_batch(
             r#"
@@ -1159,7 +1238,7 @@ async fn init_mcp_source_schema(connection: &verlet_sqlite::Connection) -> crate
 async fn sqlite_get_mcp_source(
     connection: &verlet_sqlite::Connection,
     name: &str,
-) -> crate::VerletResult<Option<McpRemoteSourceRecord>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<McpRemoteSourceRecord>> {
     let mut rows = connection
         .query(
             "SELECT record_json FROM cooldis_mcp_source_records WHERE name = ?1",
@@ -1179,9 +1258,9 @@ async fn sqlite_get_mcp_source(
 async fn sqlite_put_mcp_source(
     connection: &verlet_sqlite::Connection,
     record: &McpRemoteSourceRecord,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let record_json = serde_json::to_string(record).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to encode remote MCP source record: {err}"
         ))
     })?;
@@ -1216,8 +1295,10 @@ async fn sqlite_put_mcp_source(
     Ok(())
 }
 
-fn sqlite_mcp_error(err: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(format!("remote MCP registry failed: {err}"))
+fn sqlite_mcp_error(err: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+        "remote MCP registry failed: {err}"
+    ))
 }
 
 #[cfg(test)]

@@ -43,25 +43,27 @@ fn parse_debug_bind_requires_thread_id_and_rejects_conflicting_endpoints() {
 
 #[test]
 fn legacy_receipts_assemble_with_unrecorded_origins() {
-    let compile: crate::AgentManifestCompileReceipt = serde_json::from_value(serde_json::json!({
-        "ref_uri": "agent://legacy@1.0.0",
-        "manifest_hash": format!("sha256:{}", "1".repeat(64)),
-        "source_hash": format!("sha256:{}", "2".repeat(64)),
-    }))
-    .unwrap();
-    let bind: crate::AgentManifestBindReceipt = serde_json::from_value(serde_json::json!({
-        "ref_uri": "agent://legacy@1.0.0",
-        "manifest_hash": format!("sha256:{}", "1".repeat(64)),
-        "model_profile_id": "default",
-        "provider_id": "local_offline",
-        "model_id": "echo",
-        "tool_ids": [],
-        "operation_bindings": [],
-        "granted": [],
-        "effective_runtime": {},
-        "overridden_keys": [],
-    }))
-    .unwrap();
+    let compile: crate::agent::manifest_bind::AgentManifestCompileReceipt =
+        serde_json::from_value(serde_json::json!({
+            "ref_uri": "agent://legacy@1.0.0",
+            "manifest_hash": format!("sha256:{}", "1".repeat(64)),
+            "source_hash": format!("sha256:{}", "2".repeat(64)),
+        }))
+        .unwrap();
+    let bind: crate::agent::manifest_bind::AgentManifestBindReceipt =
+        serde_json::from_value(serde_json::json!({
+            "ref_uri": "agent://legacy@1.0.0",
+            "manifest_hash": format!("sha256:{}", "1".repeat(64)),
+            "model_profile_id": "default",
+            "provider_id": "local_offline",
+            "model_id": "echo",
+            "tool_ids": [],
+            "operation_bindings": [],
+            "granted": [],
+            "effective_runtime": {},
+            "overridden_keys": [],
+        }))
+        .unwrap();
 
     let explanation = crate::cli::debug_bind::assemble_bind_explanation(
         "thread-1",
@@ -82,33 +84,35 @@ fn legacy_receipts_assemble_with_unrecorded_origins() {
 
 #[test]
 fn grant_explanations_preserve_subject_expiry_and_lapse_witnesses() {
-    let compile: crate::AgentManifestCompileReceipt = serde_json::from_value(serde_json::json!({
-        "ref_uri": "agent://grants@1.0.0",
-        "manifest_hash": "sha256:manifest",
-        "source_hash": "sha256:source",
-    }))
-    .unwrap();
-    let bind: crate::AgentManifestBindReceipt = serde_json::from_value(serde_json::json!({
-        "ref_uri": "agent://grants@1.0.0",
-        "manifest_hash": "sha256:manifest",
-        "model_profile_id": "default",
-        "provider_id": "local_offline",
-        "model_id": "echo",
-        "tool_ids": [],
-        "operation_bindings": [],
-        "granted": [],
-        "grant_bindings": [{
-            "subject_kind": "tool",
-            "subject_id": "search",
-            "capability": "net:https://example.test",
-            "expires_at": "2026-07-16T20:00:00Z",
-            "lapsed_at_bind": true,
-            "surface_excluded": true
-        }],
-        "effective_runtime": {},
-        "overridden_keys": [],
-    }))
-    .unwrap();
+    let compile: crate::agent::manifest_bind::AgentManifestCompileReceipt =
+        serde_json::from_value(serde_json::json!({
+            "ref_uri": "agent://grants@1.0.0",
+            "manifest_hash": "sha256:manifest",
+            "source_hash": "sha256:source",
+        }))
+        .unwrap();
+    let bind: crate::agent::manifest_bind::AgentManifestBindReceipt =
+        serde_json::from_value(serde_json::json!({
+            "ref_uri": "agent://grants@1.0.0",
+            "manifest_hash": "sha256:manifest",
+            "model_profile_id": "default",
+            "provider_id": "local_offline",
+            "model_id": "echo",
+            "tool_ids": [],
+            "operation_bindings": [],
+            "granted": [],
+            "grant_bindings": [{
+                "subject_kind": "tool",
+                "subject_id": "search",
+                "capability": "net:https://example.test",
+                "expires_at": "2026-07-16T20:00:00Z",
+                "lapsed_at_bind": true,
+                "surface_excluded": true
+            }],
+            "effective_runtime": {},
+            "overridden_keys": [],
+        }))
+        .unwrap();
 
     let explanation = crate::cli::debug_bind::assemble_bind_explanation(
         "thread-1",
@@ -141,28 +145,28 @@ fn active_receipts_follow_the_highest_bind_sequence_and_its_provenance() {
         crate::cli::debug_bind::RecordedReceiptEvent {
             event_id: "compile-1".to_string(),
             sequence: 1,
-            kind: crate::EventKind::ManifestCompileCompleted.to_string(),
+            kind: verlet_history::EventKind::ManifestCompileCompleted.to_string(),
             source_event_ids: Vec::new(),
             payload: serde_json::json!({"generation": 1}),
         },
         crate::cli::debug_bind::RecordedReceiptEvent {
             event_id: "bind-1".to_string(),
             sequence: 2,
-            kind: crate::EventKind::ManifestBindCompleted.to_string(),
+            kind: verlet_history::EventKind::ManifestBindCompleted.to_string(),
             source_event_ids: vec!["compile-1".to_string()],
             payload: serde_json::json!({"generation": 1}),
         },
         crate::cli::debug_bind::RecordedReceiptEvent {
             event_id: "compile-2".to_string(),
             sequence: 3,
-            kind: crate::EventKind::ManifestCompileCompleted.to_string(),
+            kind: verlet_history::EventKind::ManifestCompileCompleted.to_string(),
             source_event_ids: Vec::new(),
             payload: serde_json::json!({"generation": 2}),
         },
         crate::cli::debug_bind::RecordedReceiptEvent {
             event_id: "bind-2".to_string(),
             sequence: 4,
-            kind: crate::EventKind::ManifestBindCompleted.to_string(),
+            kind: verlet_history::EventKind::ManifestBindCompleted.to_string(),
             source_event_ids: vec!["compile-2".to_string()],
             payload: serde_json::json!({"generation": 2}),
         },
@@ -176,23 +180,24 @@ fn active_receipts_follow_the_highest_bind_sequence_and_its_provenance() {
 
 #[test]
 fn operation_tool_origins_are_not_guessed_from_receipt_order() {
-    let bind: crate::AgentManifestBindReceipt = serde_json::from_value(serde_json::json!({
-        "ref_uri": "agent://tools@1.0.0",
-        "manifest_hash": format!("sha256:{}", "1".repeat(64)),
-        "model_profile_id": "default",
-        "provider_id": "local_offline",
-        "model_id": "echo",
-        "tool_ids": ["manifest-tool-id"],
-        "operation_bindings": [{
-            "name": "operation-record",
-            "artifact_hash": "a".repeat(64),
-            "operations": ["operation-name"]
-        }],
-        "granted": [],
-        "effective_runtime": {},
-        "overridden_keys": []
-    }))
-    .unwrap();
+    let bind: crate::agent::manifest_bind::AgentManifestBindReceipt =
+        serde_json::from_value(serde_json::json!({
+            "ref_uri": "agent://tools@1.0.0",
+            "manifest_hash": format!("sha256:{}", "1".repeat(64)),
+            "model_profile_id": "default",
+            "provider_id": "local_offline",
+            "model_id": "echo",
+            "tool_ids": ["manifest-tool-id"],
+            "operation_bindings": [{
+                "name": "operation-record",
+                "artifact_hash": "a".repeat(64),
+                "operations": ["operation-name"]
+            }],
+            "granted": [],
+            "effective_runtime": {},
+            "overridden_keys": []
+        }))
+        .unwrap();
 
     let tools = crate::cli::debug_bind::assemble_tools(&bind);
 
@@ -241,32 +246,34 @@ fn operation_tool_origins_are_not_guessed_from_receipt_order() {
 
 #[test]
 fn alias_timestamp_overflow_is_rejected() {
-    let compile: crate::AgentManifestCompileReceipt = serde_json::from_value(serde_json::json!({
-        "ref_uri": "agent://alias@1.0.0",
-        "manifest_hash": format!("sha256:{}", "1".repeat(64)),
-        "source_hash": format!("sha256:{}", "2".repeat(64)),
-        "alias": {
-            "ref_uri": "agent://alias@latest",
-            "alias": "latest",
-            "version": "1.0.0",
+    let compile: crate::agent::manifest_bind::AgentManifestCompileReceipt =
+        serde_json::from_value(serde_json::json!({
+            "ref_uri": "agent://alias@1.0.0",
             "manifest_hash": format!("sha256:{}", "1".repeat(64)),
-            "resolved_at_ms": u64::MAX
-        }
-    }))
-    .unwrap();
-    let bind: crate::AgentManifestBindReceipt = serde_json::from_value(serde_json::json!({
-        "ref_uri": "agent://alias@1.0.0",
-        "manifest_hash": format!("sha256:{}", "1".repeat(64)),
-        "model_profile_id": "default",
-        "provider_id": "local_offline",
-        "model_id": "echo",
-        "tool_ids": [],
-        "operation_bindings": [],
-        "granted": [],
-        "effective_runtime": {},
-        "overridden_keys": []
-    }))
-    .unwrap();
+            "source_hash": format!("sha256:{}", "2".repeat(64)),
+            "alias": {
+                "ref_uri": "agent://alias@latest",
+                "alias": "latest",
+                "version": "1.0.0",
+                "manifest_hash": format!("sha256:{}", "1".repeat(64)),
+                "resolved_at_ms": u64::MAX
+            }
+        }))
+        .unwrap();
+    let bind: crate::agent::manifest_bind::AgentManifestBindReceipt =
+        serde_json::from_value(serde_json::json!({
+            "ref_uri": "agent://alias@1.0.0",
+            "manifest_hash": format!("sha256:{}", "1".repeat(64)),
+            "model_profile_id": "default",
+            "provider_id": "local_offline",
+            "model_id": "echo",
+            "tool_ids": [],
+            "operation_bindings": [],
+            "granted": [],
+            "effective_runtime": {},
+            "overridden_keys": []
+        }))
+        .unwrap();
 
     let err = crate::cli::debug_bind::assemble_bind_explanation(
         "thread-1",
@@ -320,18 +327,20 @@ fn render_bind_explanation_matches_pinned_format() {
             profile_id: "fast".to_string(),
             provider_id: "openai".to_string(),
             model_id: "gpt-5".to_string(),
-            origin: Some(crate::AgentManifestModelProfileOrigin::SelectedAtStart),
+            origin: Some(
+                crate::agent::manifest_bind::AgentManifestModelProfileOrigin::SelectedAtStart,
+            ),
         },
         placement: Some(crate::cli::debug_bind::BindPlacementExplanation {
             target: "remote".to_string(),
             executor_ref: Some("executor://pool/main".to_string()),
-            origin: Some(crate::AgentManifestBindingOrigin::BindOverride),
+            origin: Some(crate::agent::manifest_bind::AgentManifestBindingOrigin::BindOverride),
         }),
         workspace: Some(crate::cli::debug_bind::BindWorkspaceExplanation {
             guest_path: std::path::PathBuf::from("/workspace"),
             host_path: std::path::PathBuf::from("/srv/repo"),
             mode: "rw".to_string(),
-            origin: Some(crate::AgentManifestBindingOrigin::DaemonDefault),
+            origin: Some(crate::agent::manifest_bind::AgentManifestBindingOrigin::DaemonDefault),
         }),
         runtime: vec![
             crate::cli::debug_bind::BindRuntimeExplanation {

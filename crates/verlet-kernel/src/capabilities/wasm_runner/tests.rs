@@ -1,4 +1,4 @@
-use crate::capabilities::wasm_runner::FileSystem as _;
+use bashkit::FileSystem as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 
@@ -82,7 +82,7 @@ async fn wasm_runtime_factory_uses_signal_trap_handler_on_macos() {
     let manifest = factory.describe().await.unwrap().unwrap();
     assert!(
         manifest
-            .operation(crate::capabilities::wasm_runner::DEFAULT_OPERATION_NAME)
+            .operation(verlet_wasm::DEFAULT_OPERATION_NAME)
             .is_some()
     );
 }
@@ -93,7 +93,7 @@ fn operation_guest() -> String {
 
 fn operation_guest_with_required_capabilities(required_capabilities: Vec<&str>) -> String {
     let manifest = serde_json::json!({
-        "abi": crate::capabilities::wasm_runner::OPERATION_ABI,
+        "abi": verlet_wasm::runner::OPERATION_ABI,
         "operations": [{
             "id": 1,
             "name": "handle_turn",
@@ -181,13 +181,13 @@ fn operation_guest_with_required_capabilities(required_capabilities: Vec<&str>) 
         manifest_len = manifest.len(),
         event = wat_bytes(event),
         event_len = event.len(),
-        not_found = crate::capabilities::wasm_runner::STATUS_NOT_FOUND,
+        not_found = verlet_wasm::runner::STATUS_NOT_FOUND,
     )
 }
 
 fn capability_manifest_guest() -> String {
     let manifest = serde_json::json!({
-        "abi": crate::capabilities::wasm_runner::OPERATION_ABI,
+        "abi": verlet_wasm::runner::OPERATION_ABI,
         "operations": [{
             "id": 1,
             "name": "handle_turn",
@@ -225,7 +225,7 @@ fn capability_manifest_guest() -> String {
 
 fn http_guest(url: &str, required_capabilities: Vec<String>) -> String {
     let manifest = serde_json::json!({
-        "abi": crate::capabilities::wasm_runner::OPERATION_ABI,
+        "abi": verlet_wasm::runner::OPERATION_ABI,
         "operations": [{
             "id": 1,
             "name": "search",
@@ -238,7 +238,7 @@ fn http_guest(url: &str, required_capabilities: Vec<String>) -> String {
     })
     .to_string();
     let request = serde_json::json!({
-        "abi": crate::capabilities::wasm_runner::HTTP_ABI,
+        "abi": verlet_wasm::runner::HTTP_ABI,
         "method": "POST",
         "url": url,
         "headers": [["content-type", "application/json"]],
@@ -353,7 +353,7 @@ fn http_guest(url: &str, required_capabilities: Vec<String>) -> String {
         request_len = request.len(),
         body = wat_bytes(body),
         body_len = body.len(),
-        not_found = crate::capabilities::wasm_runner::STATUS_NOT_FOUND,
+        not_found = verlet_wasm::runner::STATUS_NOT_FOUND,
     )
 }
 
@@ -364,8 +364,10 @@ fn wasm_vfs_tools_guest() -> Vec<u8> {
             .join("tests")
             .join("fixtures")
             .join("wasm-vfs-tools");
-        let build = crate::build_rust_wasm_module(crate::RustWasmBuildOptions::new(fixture_dir))
-            .expect("failed to build Rust Wasm VFS fixture");
+        let build = crate::operations::operation_builder::build_rust_wasm_module(
+            crate::operations::operation_builder::RustWasmBuildOptions::new(fixture_dir),
+        )
+        .expect("failed to build Rust Wasm VFS fixture");
         std::fs::read(build.artifact_path).expect("failed to read compiled Rust Wasm VFS fixture")
     })
     .clone()
@@ -373,7 +375,7 @@ fn wasm_vfs_tools_guest() -> Vec<u8> {
 
 fn wasm_vfs_probe_guest() -> String {
     let manifest = serde_json::json!({
-        "abi": crate::capabilities::wasm_runner::OPERATION_ABI,
+        "abi": verlet_wasm::runner::OPERATION_ABI,
         "operations": [
             {
                 "id": 1,
@@ -417,19 +419,16 @@ fn render_vfs_fixture(template: &str, manifest: &str) -> String {
         .replace("{{manifest_len}}", &manifest.len().to_string())
         .replace(
             "{{not_found}}",
-            &crate::capabilities::wasm_runner::STATUS_NOT_FOUND.to_string(),
+            &verlet_wasm::runner::STATUS_NOT_FOUND.to_string(),
         )
         .replace(
             "{{read_mode}}",
-            &crate::capabilities::wasm_runner::FS_MODE_READ.to_string(),
+            &verlet_wasm::runner::FS_MODE_READ.to_string(),
         )
-        .replace(
-            "{{eof}}",
-            &crate::capabilities::wasm_runner::STATUS_EOF.to_string(),
-        )
+        .replace("{{eof}}", &verlet_wasm::runner::STATUS_EOF.to_string())
 }
 
-async fn wasm_cat_vfs() -> std::sync::Arc<crate::capabilities::wasm_runner::VerletVfs> {
+async fn wasm_cat_vfs() -> std::sync::Arc<verlet_vfs::VerletVfs> {
     let workspace = std::sync::Arc::new(bashkit::InMemoryFs::new());
     workspace
         .write_file(
@@ -445,9 +444,9 @@ async fn wasm_cat_vfs() -> std::sync::Arc<crate::capabilities::wasm_runner::Verl
         )
         .await
         .unwrap();
-    let vfs = std::sync::Arc::new(crate::capabilities::wasm_runner::VerletVfs::new(
-        std::sync::Arc::new(bashkit::InMemoryFs::new()),
-    ));
+    let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
     vfs.mount("/workspace", workspace).unwrap();
     vfs
 }
@@ -564,8 +563,8 @@ fn http_request_bytes(
     max_response_bytes: Option<usize>,
     secret_headers: Vec<(String, String)>,
 ) -> Vec<u8> {
-    serde_json::to_vec(&crate::capabilities::wasm_runner::WasmHttpRequest {
-        abi: crate::capabilities::wasm_runner::HTTP_ABI.to_string(),
+    serde_json::to_vec(&verlet_wasm::WasmHttpRequest {
+        abi: verlet_wasm::runner::HTTP_ABI.to_string(),
         method: "POST".to_string(),
         url: url.to_string(),
         headers: vec![("content-type".to_string(), "application/json".to_string())],
@@ -579,39 +578,52 @@ fn http_request_bytes(
     .unwrap()
 }
 
-async fn next_output(events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>) -> String {
-    loop {
-        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
-            .await
-            .expect("timed out waiting for event")
-            .expect("event stream closed");
-        if let crate::ThreadEvent::Output { text, .. } = event {
-            return text;
-        }
-    }
-}
-
-async fn next_cancelled(
-    events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>,
+async fn next_output(
+    events: &mut tokio::sync::broadcast::Receiver<
+        crate::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
 ) -> String {
     loop {
         let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("timed out waiting for event")
             .expect("event stream closed");
-        if let crate::ThreadEvent::Cancelled { reason, .. } = event {
-            return reason;
+        if let crate::kernel::runtime_host::runtime_api::ThreadEvent::Output { text, .. } = event {
+            return text;
         }
     }
 }
 
-async fn next_failed(events: &mut tokio::sync::broadcast::Receiver<crate::ThreadEvent>) -> String {
+async fn next_cancelled(
+    events: &mut tokio::sync::broadcast::Receiver<
+        crate::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
+) -> String {
     loop {
         let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
             .await
             .expect("timed out waiting for event")
             .expect("event stream closed");
-        if let crate::ThreadEvent::Failed { message, .. } = event {
+        if let crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled { reason, .. } =
+            event
+        {
+            return reason;
+        }
+    }
+}
+
+async fn next_failed(
+    events: &mut tokio::sync::broadcast::Receiver<
+        crate::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
+) -> String {
+    loop {
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(30), events.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("event stream closed");
+        if let crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed { message, .. } = event
+        {
             return message;
         }
     }
@@ -623,11 +635,11 @@ async fn wasm_runtime_runs_guest_and_mirrors_output() {
         crate::capabilities::wasm_runner::WasmRuntimeFactory::from_bytes(wat_guest(echo_guest()))
             .unwrap(),
     );
-    let host = crate::RuntimeHost::new(factory);
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory);
     let thread = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -661,16 +673,13 @@ async fn wasm_operation_manifest_is_discovered_at_registration() {
         .unwrap()
         .expect("operation manifest");
 
-    assert_eq!(
-        manifest.abi,
-        crate::capabilities::wasm_runner::OPERATION_ABI
-    );
+    assert_eq!(manifest.abi, verlet_wasm::runner::OPERATION_ABI);
     assert_eq!(manifest.operations.len(), 1);
     assert_eq!(manifest.operations[0].id, 1);
     assert_eq!(manifest.operations[0].name, "handle_turn");
     assert_eq!(
         manifest.operations[0].mode,
-        crate::WasmOperationMode::Streaming
+        verlet_abi::WasmOperationMode::Streaming
     );
 }
 
@@ -842,7 +851,7 @@ async fn wasm_operation_can_be_invoked_as_process_handle() {
 
     assert_eq!(
         process.backend(),
-        &crate::VerletProcessBackend::WasmOperation
+        &verlet_process::process::VerletProcessBackend::WasmOperation
     );
     assert_eq!(output.stdout_text_lossy(), "op:hello process");
     assert_eq!(
@@ -861,11 +870,11 @@ async fn wasm_runtime_uses_described_operation_for_thread_submit() {
         ))
         .unwrap(),
     );
-    let host = crate::RuntimeHost::new(factory);
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory);
     let thread = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -901,17 +910,14 @@ async fn wasm_operation_required_capabilities_fail_before_guest_execution() {
 
 #[tokio::test]
 async fn wasm_operation_preserves_invocation_identity_without_guest_authority() {
-    let context = crate::capabilities::wasm_runner::InvocationContext::new(
-        crate::ExecutionPrincipal::system("tool-runner"),
-    )
-    .with_caller(crate::Principal::user("user-123"))
-    .with_audit_metadata("request_id", "req-123");
+    let context =
+        verlet_abi::InvocationContext::new(verlet_abi::ExecutionPrincipal::system("tool-runner"))
+            .with_caller(verlet_abi::Principal::user("user-123"))
+            .with_audit_metadata("request_id", "req-123");
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(
-                operation_guest(),
-            )),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            operation_guest(),
+        )))
         .with_invocation_context(context.clone()),
     )
     .unwrap();
@@ -924,11 +930,11 @@ async fn wasm_operation_preserves_invocation_identity_without_guest_authority() 
     assert_eq!(output.invocation_context, context);
     assert_eq!(
         output.invocation_context.caller,
-        Some(crate::Principal::user("user-123"))
+        Some(verlet_abi::Principal::user("user-123"))
     );
     assert_eq!(
         output.invocation_context.execution,
-        crate::ExecutionPrincipal::system("tool-runner")
+        verlet_abi::ExecutionPrincipal::system("tool-runner")
     );
     assert_eq!(
         output.invocation_context.audit_metadata["request_id"],
@@ -939,14 +945,11 @@ async fn wasm_operation_preserves_invocation_identity_without_guest_authority() 
 
 #[tokio::test]
 async fn wasm_operation_accepts_invocation_context_grants_before_guest_execution() {
-    let context = crate::capabilities::wasm_runner::InvocationContext::anonymous()
-        .with_grant("verlet:secret/read");
+    let context = verlet_abi::InvocationContext::anonymous().with_grant("verlet:secret/read");
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(
-                operation_guest_with_required_capabilities(vec!["verlet:secret/read"]),
-            )),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            operation_guest_with_required_capabilities(vec!["verlet:secret/read"]),
+        )))
         .with_invocation_context(context),
     )
     .unwrap();
@@ -962,9 +965,9 @@ async fn wasm_operation_accepts_invocation_context_grants_before_guest_execution
 #[tokio::test]
 async fn wasm_cat_reads_file_from_verlet_vfs() {
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wasm_vfs_tools_guest()),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_vfs_tools_guest(),
+        ))
         .with_vfs(wasm_cat_vfs().await),
     )
     .unwrap();
@@ -985,9 +988,9 @@ async fn wasm_cat_reads_file_from_verlet_vfs() {
 #[tokio::test]
 async fn wasm_tail_reads_last_two_lines_from_verlet_vfs() {
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wasm_vfs_tools_guest()),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_vfs_tools_guest(),
+        ))
         .with_vfs(wasm_cat_vfs().await),
     )
     .unwrap();
@@ -1005,9 +1008,9 @@ async fn wasm_tail_reads_last_two_lines_from_verlet_vfs() {
 #[tokio::test]
 async fn wasm_cat_missing_vfs_file_returns_not_found() {
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wasm_vfs_tools_guest()),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_vfs_tools_guest(),
+        ))
         .with_vfs(wasm_cat_vfs().await),
     )
     .unwrap();
@@ -1025,11 +1028,9 @@ async fn wasm_cat_missing_vfs_file_returns_not_found() {
 #[tokio::test]
 async fn wasm_vfs_read_imports_fail_closed_for_invalid_mode_and_handle() {
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(
-                wasm_vfs_probe_guest(),
-            )),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            wasm_vfs_probe_guest(),
+        )))
         .with_vfs(wasm_cat_vfs().await),
     )
     .unwrap();
@@ -1052,11 +1053,9 @@ async fn wasm_vfs_read_imports_fail_closed_for_invalid_mode_and_handle() {
 #[tokio::test]
 async fn wasm_vfs_close_drops_invocation_local_handles() {
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(
-                wasm_vfs_probe_guest(),
-            )),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            wasm_vfs_probe_guest(),
+        )))
         .with_vfs(wasm_cat_vfs().await),
     )
     .unwrap();
@@ -1083,17 +1082,16 @@ async fn wasm_http_operation_can_call_mock_exa_api() {
     )
     .await;
     let url = format!("{base_url}/search");
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
     let http_grant = format!("net.http.private:POST:{origin}");
     let guest = http_guest(
         &url,
         vec![http_grant.clone(), "secret:EXAMPLE_API_KEY".to_string()],
     );
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(&guest)),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            &guest,
+        )))
         .with_capability_grant(http_grant)
         .with_capability_grant("secret:EXAMPLE_API_KEY")
         .with_secret("EXAMPLE_API_KEY", "test-secret"),
@@ -1126,24 +1124,22 @@ async fn wasm_http_import_uses_invocation_context_grants_for_privileged_work() {
     )
     .await;
     let url = format!("{base_url}/search");
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
     let http_grant = format!("net.http.private:POST:{origin}");
     let guest = http_guest(
         &url,
         vec![http_grant.clone(), "secret:EXAMPLE_API_KEY".to_string()],
     );
-    let context = crate::capabilities::wasm_runner::InvocationContext::new(
-        crate::ExecutionPrincipal::system("http-broker"),
-    )
-    .with_caller(crate::Principal::agent("agent-123"))
-    .with_grant(http_grant)
-    .with_grant("secret:EXAMPLE_API_KEY")
-    .with_audit_metadata("request_id", "req-http-1");
+    let context =
+        verlet_abi::InvocationContext::new(verlet_abi::ExecutionPrincipal::system("http-broker"))
+            .with_caller(verlet_abi::Principal::agent("agent-123"))
+            .with_grant(http_grant)
+            .with_grant("secret:EXAMPLE_API_KEY")
+            .with_audit_metadata("request_id", "req-http-1");
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(&guest)),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            &guest,
+        )))
         .with_invocation_context(context)
         .with_secret("EXAMPLE_API_KEY", "delegated-secret"),
     )
@@ -1160,7 +1156,7 @@ async fn wasm_http_import_uses_invocation_context_grants_for_privileged_work() {
     );
     assert_eq!(
         output.invocation_context.execution,
-        crate::ExecutionPrincipal::system("http-broker")
+        verlet_abi::ExecutionPrincipal::system("http-broker")
     );
     assert!(String::from_utf8_lossy(&output.events).contains(r#""status":200"#));
     server.await.unwrap();
@@ -1175,17 +1171,16 @@ async fn wasm_http_operation_treats_http_error_status_as_response() {
     )
     .await;
     let url = format!("{base_url}/search");
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
     let http_grant = format!("net.http.private:POST:{origin}");
     let guest = http_guest(
         &url,
         vec![http_grant.clone(), "secret:EXAMPLE_API_KEY".to_string()],
     );
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(&guest)),
-        )
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            &guest,
+        )))
         .with_capability_grant(http_grant)
         .with_capability_grant("secret:EXAMPLE_API_KEY")
         .with_secret("EXAMPLE_API_KEY", "test-secret"),
@@ -1209,9 +1204,9 @@ async fn wasm_http_operation_treats_http_error_status_as_response() {
 async fn wasm_http_operation_denies_ungranted_network_request() {
     let guest = http_guest("http://127.0.0.1:9/search", Vec::new());
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-            crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(&guest)),
-        ),
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            &guest,
+        ))),
     )
     .unwrap();
 
@@ -1227,17 +1222,14 @@ async fn wasm_http_operation_denies_ungranted_network_request() {
 async fn wasm_http_request_truncates_response_to_requested_cap() {
     let (base_url, server) = spawn_http_server(200, r#"{"abcdef":true}"#, Vec::new()).await;
     let url = format!("{base_url}/search");
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([format!(
-        "net.http.private:POST:{origin}"
-    )]);
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([format!("net.http.private:POST:{origin}")]);
 
-    let exchange = crate::capabilities::wasm_runner::execute_http_request(
+    let exchange = verlet_wasm::runner::execute_http_request(
         http_request_bytes(&url, Some(4), Vec::new()),
         br#"{"query":"verlet"}"#.to_vec(),
         grants,
-        crate::capabilities::wasm_runner::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -1251,13 +1243,10 @@ async fn wasm_http_request_truncates_response_to_requested_cap() {
 async fn wasm_http_response_envelope_stays_valid_and_within_the_requested_cap() {
     let (base_url, server) = spawn_http_bytes_server(vec![1_u8; 100_000]).await;
     let url = format!("{base_url}/binary");
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([format!(
-        "net.http.private:POST:{origin}"
-    )]);
-    let request = crate::capabilities::wasm_runner::WasmHttpRequest {
-        abi: crate::capabilities::wasm_runner::HTTP_ABI.to_string(),
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([format!("net.http.private:POST:{origin}")]);
+    let request = verlet_wasm::WasmHttpRequest {
+        abi: verlet_wasm::runner::HTTP_ABI.to_string(),
         method: "POST".to_string(),
         url,
         headers: Vec::new(),
@@ -1269,11 +1258,11 @@ async fn wasm_http_response_envelope_stays_valid_and_within_the_requested_cap() 
         max_response_bytes: Some(262_144),
     };
 
-    let exchange = crate::capabilities::wasm_runner::execute_http_request(
+    let exchange = verlet_wasm::runner::execute_http_request(
         serde_json::to_vec(&request).unwrap(),
         Vec::new(),
         grants,
-        crate::capabilities::wasm_runner::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -1288,13 +1277,10 @@ async fn wasm_http_response_envelope_stays_valid_and_within_the_requested_cap() 
 #[tokio::test]
 async fn wasm_http_input_mapping_enforces_pinned_parameter_schemas() {
     let url = "http://127.0.0.1:9/items/{id}";
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([format!(
-        "net.http.private:GET:{origin}"
-    )]);
-    let request = crate::capabilities::wasm_runner::WasmHttpRequest {
-        abi: crate::capabilities::wasm_runner::HTTP_ABI.to_string(),
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([format!("net.http.private:GET:{origin}")]);
+    let request = verlet_wasm::WasmHttpRequest {
+        abi: verlet_wasm::runner::HTTP_ABI.to_string(),
         method: "GET".to_string(),
         url: url.to_string(),
         headers: Vec::new(),
@@ -1314,19 +1300,16 @@ async fn wasm_http_input_mapping_enforces_pinned_parameter_schemas() {
         max_response_bytes: Some(262_144),
     };
 
-    let err = crate::capabilities::wasm_runner::execute_http_request(
+    let err = verlet_wasm::runner::execute_http_request(
         serde_json::to_vec(&request).unwrap(),
         br#"{"id":"not-an-integer"}"#.to_vec(),
         grants,
-        crate::capabilities::wasm_runner::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .unwrap_err();
 
-    assert_eq!(
-        err.status,
-        crate::capabilities::wasm_runner::STATUS_INVALID_ARGUMENT
-    );
+    assert_eq!(err.status, verlet_wasm::runner::STATUS_INVALID_ARGUMENT);
     assert!(err.message.contains("pinned schema"), "{}", err.message);
 }
 
@@ -1334,13 +1317,10 @@ async fn wasm_http_input_mapping_enforces_pinned_parameter_schemas() {
 async fn wasm_http_input_mapping_allows_an_omitted_optional_body() {
     let (base_url, server) = spawn_http_server(200, r#"{"ok":true}"#, Vec::new()).await;
     let url = format!("{base_url}/optional");
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([format!(
-        "net.http.private:POST:{origin}"
-    )]);
-    let request = crate::capabilities::wasm_runner::WasmHttpRequest {
-        abi: crate::capabilities::wasm_runner::HTTP_ABI.to_string(),
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([format!("net.http.private:POST:{origin}")]);
+    let request = verlet_wasm::WasmHttpRequest {
+        abi: verlet_wasm::runner::HTTP_ABI.to_string(),
         method: "POST".to_string(),
         url,
         headers: Vec::new(),
@@ -1358,11 +1338,11 @@ async fn wasm_http_input_mapping_allows_an_omitted_optional_body() {
         max_response_bytes: Some(262_144),
     };
 
-    let exchange = crate::capabilities::wasm_runner::execute_http_request(
+    let exchange = verlet_wasm::runner::execute_http_request(
         serde_json::to_vec(&request).unwrap(),
         br#"{}"#.to_vec(),
         grants,
-        crate::capabilities::wasm_runner::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -1374,14 +1354,13 @@ async fn wasm_http_input_mapping_allows_an_omitted_optional_body() {
 #[tokio::test]
 async fn wasm_http_rejects_protected_secret_header_injection() {
     let url = "http://127.0.0.1:9/search";
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([
         format!("net.http.private:POST:{origin}"),
         "secret:HOST_OVERRIDE".to_string(),
     ]);
-    let request = crate::capabilities::wasm_runner::WasmHttpRequest {
-        abi: crate::capabilities::wasm_runner::HTTP_ABI.to_string(),
+    let request = verlet_wasm::WasmHttpRequest {
+        abi: verlet_wasm::runner::HTTP_ABI.to_string(),
         method: "POST".to_string(),
         url: url.to_string(),
         headers: Vec::new(),
@@ -1393,11 +1372,11 @@ async fn wasm_http_rejects_protected_secret_header_injection() {
         max_response_bytes: Some(262_144),
     };
 
-    let err = crate::capabilities::wasm_runner::execute_http_request(
+    let err = verlet_wasm::runner::execute_http_request(
         serde_json::to_vec(&request).unwrap(),
         Vec::new(),
         grants,
-        crate::capabilities::wasm_runner::BTreeMap::from([(
+        std::collections::BTreeMap::from([(
             "HOST_OVERRIDE".to_string(),
             "other.example".to_string(),
         )]),
@@ -1405,10 +1384,7 @@ async fn wasm_http_rejects_protected_secret_header_injection() {
     .await
     .unwrap_err();
 
-    assert_eq!(
-        err.status,
-        crate::capabilities::wasm_runner::STATUS_INVALID_ARGUMENT
-    );
+    assert_eq!(err.status, verlet_wasm::runner::STATUS_INVALID_ARGUMENT);
     assert!(
         err.message.contains("forbidden HTTP header"),
         "{}",
@@ -1421,17 +1397,14 @@ async fn wasm_http_rejects_protected_secret_header_injection() {
 async fn wasm_http_request_does_not_follow_redirects() {
     let (base_url, server) = spawn_http_redirect_server("http://127.0.0.1:1/private").await;
     let url = format!("{base_url}/redirect");
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([format!(
-        "net.http.private:POST:{origin}"
-    )]);
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([format!("net.http.private:POST:{origin}")]);
 
-    let exchange = crate::capabilities::wasm_runner::execute_http_request(
+    let exchange = verlet_wasm::runner::execute_http_request(
         http_request_bytes(&url, None, Vec::new()),
         Vec::new(),
         grants,
-        crate::capabilities::wasm_runner::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -1444,67 +1417,58 @@ async fn wasm_http_request_does_not_follow_redirects() {
 #[tokio::test]
 async fn wasm_http_request_requires_private_grant_for_loopback() {
     let url = "http://127.0.0.1:9/search";
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
-    let grants =
-        crate::capabilities::wasm_runner::BTreeSet::from([format!("net.http:POST:{origin}")]);
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([format!("net.http:POST:{origin}")]);
 
-    let err = crate::capabilities::wasm_runner::execute_http_request(
+    let err = verlet_wasm::runner::execute_http_request(
         http_request_bytes(url, None, Vec::new()),
         Vec::new(),
         grants,
-        crate::capabilities::wasm_runner::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .unwrap_err();
 
-    assert_eq!(
-        err.status,
-        crate::capabilities::wasm_runner::STATUS_CAPABILITY_DENIED
-    );
+    assert_eq!(err.status, verlet_wasm::runner::STATUS_CAPABILITY_DENIED);
     assert!(err.message.contains("net.http.private:POST"));
 }
 
 #[test]
 fn wasm_http_capability_allows_public_origin_wildcards() {
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([
+    let grants = std::collections::BTreeSet::from([
         "net.http:GET:https://*".to_string(),
         "net.http:GET:http://*".to_string(),
     ]);
 
-    crate::capabilities::wasm_runner::ensure_http_capability(
+    verlet_wasm::runner::ensure_http_capability(
         &grants,
         &reqwest::Method::GET,
         "https://example.com",
         false,
     )
     .unwrap();
-    crate::capabilities::wasm_runner::ensure_http_capability(
+    verlet_wasm::runner::ensure_http_capability(
         &grants,
         &reqwest::Method::GET,
         "http://news.example:8080",
         false,
     )
     .unwrap();
-    let err = crate::capabilities::wasm_runner::ensure_http_capability(
+    let err = verlet_wasm::runner::ensure_http_capability(
         &grants,
         &reqwest::Method::POST,
         "https://example.com",
         false,
     )
     .unwrap_err();
-    assert_eq!(
-        err.status,
-        crate::capabilities::wasm_runner::STATUS_CAPABILITY_DENIED
-    );
+    assert_eq!(err.status, verlet_wasm::runner::STATUS_CAPABILITY_DENIED);
 }
 
 #[test]
 fn wasm_http_capability_wildcards_do_not_cross_private_namespace() {
-    let grants =
-        crate::capabilities::wasm_runner::BTreeSet::from(["net.http:GET:http://*".to_string()]);
+    let grants = std::collections::BTreeSet::from(["net.http:GET:http://*".to_string()]);
 
-    let err = crate::capabilities::wasm_runner::ensure_http_capability(
+    let err = verlet_wasm::runner::ensure_http_capability(
         &grants,
         &reqwest::Method::GET,
         "http://127.0.0.1:9",
@@ -1512,27 +1476,23 @@ fn wasm_http_capability_wildcards_do_not_cross_private_namespace() {
     )
     .unwrap_err();
 
-    assert_eq!(
-        err.status,
-        crate::capabilities::wasm_runner::STATUS_CAPABILITY_DENIED
-    );
+    assert_eq!(err.status, verlet_wasm::runner::STATUS_CAPABILITY_DENIED);
     assert!(err.message.contains("net.http.private:GET"));
 }
 
 #[test]
 fn wasm_http_capability_allows_method_wildcards() {
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([
-        "net.http:*:https://api.example.com".to_string(),
-    ]);
+    let grants =
+        std::collections::BTreeSet::from(["net.http:*:https://api.example.com".to_string()]);
 
-    crate::capabilities::wasm_runner::ensure_http_capability(
+    verlet_wasm::runner::ensure_http_capability(
         &grants,
         &reqwest::Method::GET,
         "https://api.example.com",
         false,
     )
     .unwrap();
-    crate::capabilities::wasm_runner::ensure_http_capability(
+    verlet_wasm::runner::ensure_http_capability(
         &grants,
         &reqwest::Method::POST,
         "https://api.example.com",
@@ -1544,42 +1504,39 @@ fn wasm_http_capability_allows_method_wildcards() {
 #[tokio::test]
 async fn wasm_http_secret_diagnostics_redact_secret_names() {
     let url = "http://127.0.0.1:9/search";
-    let origin =
-        crate::capabilities::wasm_runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
     let secret_headers = vec![("x-api-key".to_string(), "EXAMPLE_API_KEY".to_string())];
-    let grants = crate::capabilities::wasm_runner::BTreeSet::from([format!(
-        "net.http.private:POST:{origin}"
-    )]);
+    let grants = std::collections::BTreeSet::from([format!("net.http.private:POST:{origin}")]);
 
-    let missing_grant = crate::capabilities::wasm_runner::execute_http_request(
+    let missing_grant = verlet_wasm::runner::execute_http_request(
         http_request_bytes(url, None, secret_headers.clone()),
         Vec::new(),
         grants.clone(),
-        crate::capabilities::wasm_runner::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .unwrap_err();
     assert_eq!(
         missing_grant.status,
-        crate::capabilities::wasm_runner::STATUS_CAPABILITY_DENIED
+        verlet_wasm::runner::STATUS_CAPABILITY_DENIED
     );
     assert!(!missing_grant.message.contains("EXAMPLE_API_KEY"));
     assert_eq!(missing_grant.message, "missing required secret capability");
 
-    let missing_secret = crate::capabilities::wasm_runner::execute_http_request(
+    let missing_secret = verlet_wasm::runner::execute_http_request(
         http_request_bytes(url, None, secret_headers),
         Vec::new(),
         grants
             .into_iter()
             .chain(["secret:EXAMPLE_API_KEY".to_string()])
             .collect(),
-        crate::capabilities::wasm_runner::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
     )
     .await
     .unwrap_err();
     assert_eq!(
         missing_secret.status,
-        crate::capabilities::wasm_runner::STATUS_CAPABILITY_DENIED
+        verlet_wasm::runner::STATUS_CAPABILITY_DENIED
     );
     assert!(!missing_secret.message.contains("EXAMPLE_API_KEY"));
     assert_eq!(missing_secret.message, "required secret is not available");
@@ -1589,21 +1546,19 @@ async fn wasm_http_secret_diagnostics_redact_secret_names() {
 async fn wasm_runtime_accepts_cancel_during_guest_execution() {
     let factory = std::sync::Arc::new(
         crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-            crate::capabilities::wasm_runner::WasmRuntimeConfig::new(
-                crate::capabilities::wasm_runner::WasmRuntimeArtifact::bytes(wat_guest(
-                    loop_guest(),
-                )),
-            )
+            verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+                wat_guest(loop_guest()),
+            ))
             .with_fuel(Some(u64::MAX))
             .with_fuel_yield_interval(Some(1_000)),
         )
         .unwrap(),
     );
-    let host = crate::RuntimeHost::new(factory);
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory);
     let thread = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();
@@ -1627,11 +1582,11 @@ async fn wasm_runtime_rejects_ungranted_wasi_imports() {
         ))
         .unwrap(),
     );
-    let host = crate::RuntimeHost::new(factory);
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory);
     let thread = host
         .start_thread(
-            crate::ThreadCoordinates::new("tenant", "user", "session"),
-            crate::ThreadTopology::root(),
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+            verlet_runtime_contracts::ThreadTopology::root(),
         )
         .await
         .unwrap();

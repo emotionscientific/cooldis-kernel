@@ -5,24 +5,24 @@ pub enum LoopContinuationReceipt {
         loop_id: String,
         parent_turn_id: String,
         next_turn_id: String,
-        accepted_event_id: crate::kernel::history::EventRecordId,
+        accepted_event_id: verlet_history::EventRecordId,
     },
     Rejected {
         loop_id: String,
         parent_turn_id: String,
         reason: String,
-        rejected_event_id: crate::kernel::history::EventRecordId,
+        rejected_event_id: verlet_history::EventRecordId,
     },
 }
 
 pub(super) async fn latest_turn_continue_request(
-    store: &dyn crate::kernel::history::RuntimeStore,
+    store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     loop_id: &str,
     parent_turn_id: &str,
 ) -> crate::kernel::runtime_host::VerletResult<
     Option<(
-        crate::kernel::history::EventRecord,
+        verlet_history::EventRecord,
         crate::kernel::control_decision::TurnContinueRequestedPayload,
     )>,
 > {
@@ -35,7 +35,7 @@ pub(super) async fn latest_turn_continue_request(
         .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut latest = None;
     for event in events {
-        if event.kind != crate::kernel::history::EventKind::TurnContinueRequested {
+        if event.kind != verlet_history::EventKind::TurnContinueRequested {
             continue;
         }
         let payload = match serde_json::from_value::<
@@ -61,7 +61,7 @@ pub(super) async fn latest_turn_continue_request(
 }
 
 pub(super) async fn existing_continuation_receipt(
-    store: &dyn crate::kernel::history::RuntimeStore,
+    store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     subject: &crate::kernel::control_decision::TurnContinuationSubject,
     snapshot_id: &str,
@@ -76,7 +76,7 @@ pub(super) async fn existing_continuation_receipt(
     let mut latest = None;
     for event in events {
         let receipt = match event.kind {
-            crate::kernel::history::EventKind::TurnContinuationAccepted => {
+            verlet_history::EventKind::TurnContinuationAccepted => {
                 let payload = serde_json::from_value::<
                     crate::kernel::control_decision::TurnContinuationAcceptedPayload,
                 >(event.payload.clone())
@@ -95,7 +95,7 @@ pub(super) async fn existing_continuation_receipt(
                     accepted_event_id: event.id,
                 }
             }
-            crate::kernel::history::EventKind::TurnContinuationRejected => {
+            verlet_history::EventKind::TurnContinuationRejected => {
                 let payload = serde_json::from_value::<
                     crate::kernel::control_decision::TurnContinuationRejectedPayload,
                 >(event.payload.clone())
@@ -129,18 +129,18 @@ pub(super) async fn existing_continuation_receipt(
 }
 
 pub(super) async fn append_continuation_accepted_event(
-    store: &dyn crate::kernel::history::RuntimeStore,
+    store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     subject: &crate::kernel::control_decision::TurnContinuationSubject,
     snapshot_id: &str,
     mandate_id: &str,
     next_turn_id: &str,
-    consumed_request_id: crate::kernel::history::EventRecordId,
-) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
+    consumed_request_id: verlet_history::EventRecordId,
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     append_control_discharge(
         store,
         coordinates,
-        crate::kernel::history::EventKind::TurnContinuationAccepted,
+        verlet_history::EventKind::TurnContinuationAccepted,
         serde_json::to_value(
             crate::kernel::control_decision::TurnContinuationAcceptedPayload {
                 subject: subject.clone(),
@@ -158,17 +158,17 @@ pub(super) async fn append_continuation_accepted_event(
 }
 
 pub(super) async fn append_continuation_rejected_event(
-    store: &dyn crate::kernel::history::RuntimeStore,
+    store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     subject: &crate::kernel::control_decision::TurnContinuationSubject,
     snapshot_id: &str,
     reason: &str,
-    consumed_request_id: crate::kernel::history::EventRecordId,
-) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
+    consumed_request_id: verlet_history::EventRecordId,
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     append_control_discharge(
         store,
         coordinates,
-        crate::kernel::history::EventKind::TurnContinuationRejected,
+        verlet_history::EventKind::TurnContinuationRejected,
         serde_json::to_value(
             crate::kernel::control_decision::TurnContinuationRejectedPayload {
                 subject: subject.clone(),
@@ -185,28 +185,28 @@ pub(super) async fn append_continuation_rejected_event(
 }
 
 async fn append_control_discharge(
-    store: &dyn crate::kernel::history::RuntimeStore,
+    store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
-    kind: crate::kernel::history::EventKind,
+    kind: verlet_history::EventKind,
     payload: serde_json::Value,
-    source_event_id: crate::kernel::history::EventRecordId,
+    source_event_id: verlet_history::EventRecordId,
     function: &str,
-) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     store
         .append_events(
             &crate::kernel::control_decision::control_stream_id(coordinates),
-            vec![crate::kernel::history::NewEventRecord::discharged(
+            vec![verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
                 kind,
                 payload,
-                crate::kernel::history::EventProvenance {
+                verlet_history::EventProvenance {
                     source_streams: vec![crate::kernel::control_decision::control_stream_id(
                         coordinates,
                     )],
                     source_event_ids: vec![source_event_id],
                     discharged_by: Some("scheduler:turn-continuation".to_string()),
                     function: Some(function.to_string()),
-                    ..crate::kernel::history::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             )],
         )
@@ -222,33 +222,33 @@ async fn append_control_discharge(
 }
 
 pub(super) async fn append_loop_turn_submitted_event(
-    store: &dyn crate::kernel::history::RuntimeStore,
+    store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     next_turn_id: &str,
-    accepted_event_id: crate::kernel::history::EventRecordId,
-) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
+    accepted_event_id: verlet_history::EventRecordId,
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     if let Some(existing) = turn_submitted_event(store, coordinates, next_turn_id).await? {
         return Ok(existing);
     }
     store
         .append_events(
-            &crate::kernel::history::EventStreamId::for_thread(coordinates),
-            vec![crate::kernel::history::NewEventRecord::discharged(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            vec![verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::kernel::history::EventKind::TurnSubmitted,
+                verlet_history::EventKind::TurnSubmitted,
                 serde_json::json!({
                     "turn_id": next_turn_id,
                     "source": "turn.continuation.accepted",
                     "accepted_event_id": accepted_event_id.to_string(),
                 }),
-                crate::kernel::history::EventProvenance {
+                verlet_history::EventProvenance {
                     source_streams: vec![crate::kernel::control_decision::control_stream_id(
                         coordinates,
                     )],
                     source_event_ids: vec![accepted_event_id],
                     discharged_by: Some("scheduler:loop-continuation".to_string()),
                     function: Some("turn_submit/v1".to_string()),
-                    ..crate::kernel::history::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             )],
         )
@@ -264,13 +264,13 @@ pub(super) async fn append_loop_turn_submitted_event(
 }
 
 pub(super) async fn turn_submitted_event(
-    store: &dyn crate::kernel::history::RuntimeStore,
+    store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
-) -> crate::kernel::runtime_host::VerletResult<Option<crate::kernel::history::EventRecord>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::EventRecord>> {
     let events = store
         .read_events(
-            &crate::kernel::history::EventStreamId::for_thread(coordinates),
+            &verlet_history::EventStreamId::for_thread(coordinates),
             None,
         )
         .await
@@ -278,7 +278,7 @@ pub(super) async fn turn_submitted_event(
     Ok(events
         .into_iter()
         .filter(|event| {
-            event.kind == crate::kernel::history::EventKind::TurnSubmitted
+            event.kind == verlet_history::EventKind::TurnSubmitted
                 && event
                     .payload
                     .get("turn_id")
@@ -289,7 +289,7 @@ pub(super) async fn turn_submitted_event(
 }
 
 pub(super) async fn decide_continuation(
-    store: &dyn crate::kernel::history::RuntimeStore,
+    store: &dyn verlet_history::RuntimeStore,
     request: crate::kernel::control_decision::TurnContinuationDecisionRequest,
 ) -> crate::kernel::runtime_host::VerletResult<
     crate::kernel::control_decision::TurnContinuationDecision,

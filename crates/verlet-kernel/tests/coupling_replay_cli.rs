@@ -1,4 +1,4 @@
-use verlet::EventStore as _;
+use verlet_history::EventStore as _;
 
 #[tokio::test]
 async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
@@ -10,20 +10,24 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     let coupling_path = root.join("coupling.json");
     let quota_coupling_path = root.join("quota-coupling.json");
 
-    let build =
-        verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(&example_module)).unwrap();
-    let operation = verlet::LocalOperationRegistry::new(&registry_root)
-        .publish_artifact(verlet::PublishOperationRequest {
-            name: "counter".to_string(),
-            artifact_path: build.artifact_path.clone(),
-            source: verlet::PublishedOperationSource::Rust {
-                module_path: example_module,
-                release: true,
+    let build = verlet::operations::operation_builder::build_rust_wasm_module(
+        verlet::operations::operation_builder::RustWasmBuildOptions::new(&example_module),
+    )
+    .unwrap();
+    let operation = verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "counter".to_string(),
+                artifact_path: build.artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Rust {
+                    module_path: example_module,
+                    release: true,
+                },
+                interface: None,
+                capability_grants: std::collections::BTreeSet::new(),
+                metadata: std::collections::BTreeMap::new(),
             },
-            interface: None,
-            capability_grants: std::collections::BTreeSet::new(),
-            metadata: std::collections::BTreeMap::new(),
-        })
+        )
         .await
         .unwrap();
     let artifact_ref = format!(
@@ -31,29 +35,30 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
         operation.active_artifact_hash
     );
 
-    let coordinates = verlet::ThreadCoordinates::new("tenant", "user", "counter-session");
-    let store = verlet::SqliteSessionStore::open(&recording_path)
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "counter-session");
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&recording_path)
         .await
         .unwrap();
     let coupling = counter_coupling("org.example.counter", &artifact_ref, None);
     std::fs::write(
         &coupling_path,
-        serde_json::to_vec_pretty(&verlet::BoundCouplingSet::new(
+        serde_json::to_vec_pretty(&verlet::agent::manifest_bind::BoundCouplingSet::new(
             "snapshot-counter",
             vec![coupling.clone()],
         ))
         .unwrap(),
     )
     .unwrap();
-    let executor = verlet::WasmCouplingExecutor::new(&registry_root);
-    let scheduler = verlet::CouplingScheduler::new(&store, &executor);
+    let executor = verlet::kernel::wasm_couplings::WasmCouplingExecutor::new(&registry_root);
+    let scheduler = verlet::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
     for index in 1..=3 {
         let appended = store
             .append_events(
-                &verlet::EventStreamId::for_thread(&coordinates),
-                vec![verlet::NewEventRecord::witnessed(
+                &verlet_history::EventStreamId::for_thread(&coordinates),
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    verlet::EventKind::TurnCompleted,
+                    verlet_history::EventKind::TurnCompleted,
                     serde_json::json!({"turn_id": format!("turn-{index}")}),
                 )],
             )
@@ -61,7 +66,10 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
             .unwrap();
         scheduler
             .run_batch(
-                &verlet::BoundCouplingSet::new("snapshot-counter", vec![coupling.clone()]),
+                &verlet::agent::manifest_bind::BoundCouplingSet::new(
+                    "snapshot-counter",
+                    vec![coupling.clone()],
+                ),
                 appended,
             )
             .await
@@ -69,7 +77,10 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     }
     let live_derived = store
         .read_events(
-            &verlet::EventStreamId::new(format!("derived:counter:{}", coordinates.thread_id)),
+            &verlet_history::EventStreamId::new(format!(
+                "derived:counter:{}",
+                coordinates.thread_id
+            )),
             None,
         )
         .await
@@ -117,14 +128,14 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     let quota_coupling = counter_coupling(
         "org.example.counter.quota",
         &artifact_ref,
-        Some(verlet::AgentManifestCouplingQuota {
+        Some(verlet_agent::manifest_schema::AgentManifestCouplingQuota {
             per_turn: None,
             per_thread: Some(1),
         }),
     );
     std::fs::write(
         &quota_coupling_path,
-        serde_json::to_vec_pretty(&verlet::BoundCouplingSet::new(
+        serde_json::to_vec_pretty(&verlet::agent::manifest_bind::BoundCouplingSet::new(
             "snapshot-quota",
             vec![quota_coupling],
         ))
@@ -169,8 +180,10 @@ async fn coupling_replay_guides_user_when_daemon_holds_journal() {
     let journal_path = root.join("session_history.sqlite3");
     let coupling_path = root.join("coupling.json");
 
-    let build =
-        verlet::build_rust_wasm_module(verlet::RustWasmBuildOptions::new(&example_module)).unwrap();
+    let build = verlet::operations::operation_builder::build_rust_wasm_module(
+        verlet::operations::operation_builder::RustWasmBuildOptions::new(&example_module),
+    )
+    .unwrap();
     let coupling = counter_coupling(
         "org.example.counter",
         "op://counter/fold_counter@sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -178,15 +191,20 @@ async fn coupling_replay_guides_user_when_daemon_holds_journal() {
     );
     std::fs::write(
         &coupling_path,
-        serde_json::to_vec_pretty(&verlet::BoundCouplingSet::new("snapshot", vec![coupling]))
-            .unwrap(),
+        serde_json::to_vec_pretty(&verlet::agent::manifest_bind::BoundCouplingSet::new(
+            "snapshot",
+            vec![coupling],
+        ))
+        .unwrap(),
     )
     .unwrap();
 
-    let held_store = verlet::SqliteSessionStore::open(&journal_path)
+    let held_store = verlet_history_sqlite::SqliteSessionStore::open(&journal_path)
         .await
         .unwrap();
-    let thread_id = verlet::ThreadCoordinates::new("tenant", "user", "held-journal").thread_id;
+    let thread_id =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "held-journal")
+            .thread_id;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .args([
             "coupling",
@@ -221,27 +239,27 @@ async fn coupling_replay_guides_user_when_daemon_holds_journal() {
 fn counter_coupling(
     id: &str,
     artifact_ref: &str,
-    quota: Option<verlet::AgentManifestCouplingQuota>,
-) -> verlet::BoundCoupling {
+    quota: Option<verlet_agent::manifest_schema::AgentManifestCouplingQuota>,
+) -> verlet::agent::manifest_bind::BoundCoupling {
     let hash = artifact_ref.rsplit_once("@sha256:").unwrap().1;
-    verlet::BoundCoupling {
+    verlet::agent::manifest_bind::BoundCoupling {
         id: id.to_string(),
-        role: verlet::CouplingRole::Projection,
-        trigger_kind: verlet::EventKind::TurnCompleted,
+        role: verlet::agent::manifest_bind::CouplingRole::Projection,
+        trigger_kind: verlet_history::EventKind::TurnCompleted,
         trigger_match: std::collections::BTreeMap::new(),
         trigger_quota: quota.unwrap_or_default(),
-        source_selectors: vec![verlet::BoundCouplingSelector {
+        source_selectors: vec![verlet::agent::manifest_bind::BoundCouplingSelector {
             stream: "thread".to_string(),
-            kinds: vec![verlet::EventKind::TurnCompleted],
+            kinds: vec![verlet_history::EventKind::TurnCompleted],
             scope: None,
             since: None,
         }],
-        sink: verlet::BoundCouplingSink {
+        sink: verlet::agent::manifest_bind::BoundCouplingSink {
             stream: "derived:counter".to_string(),
-            kinds: vec![verlet::EventKind::PlacementDecision],
+            kinds: vec![verlet_history::EventKind::PlacementDecision],
         },
         function_ref: artifact_ref.to_string(),
-        function: verlet::BoundCouplingFunction {
+        function: verlet::agent::manifest_bind::BoundCouplingFunction {
             name: "counter".to_string(),
             artifact_hash: hash.to_string(),
             operation_name: Some("fold_counter".to_string()),
@@ -250,7 +268,7 @@ fn counter_coupling(
             "stream.read:thread".to_string(),
             "stream.write:derived:counter".to_string(),
         ],
-        budget: verlet::AgentManifestCouplingBudget {
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
         },

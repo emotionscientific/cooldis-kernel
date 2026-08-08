@@ -29,11 +29,11 @@
 //! [`StreamLeaseAuthority::append_if_current`]: crate::daemon::remote_store::lease::StreamLeaseAuthority::append_if_current
 //! [`SyncCredentialAuthority::verify_token`]: crate::daemon::remote_store::lease::SyncCredentialAuthority::verify_token
 
-use crate::EventStore as _;
 use crate::daemon::remote_store::lease::StreamLeaseAuthority as _;
 use crate::daemon::remote_store::lease::SyncCredentialAuthority as _;
 use crate::daemon::remote_store::queue::RemoteIngressQueue as _;
 use sha2::Digest as _;
+use verlet_history::EventStore as _;
 
 /// Wire schema identifier for [`SyncPushRequestV1`].
 pub const SYNC_PUSH_SCHEMA_V1: &str = "cooldis.stream.sync_push/1";
@@ -63,13 +63,13 @@ pub const SYNC_LEASE_RENEWAL_SCHEMA_V1: &str = "cooldis.stream.sync_lease_renewa
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SyncPushRequestV1 {
     pub schema: String,
-    pub stream_id: crate::EventStreamId,
+    pub stream_id: verlet_history::EventStreamId,
     pub lease_id: crate::daemon::remote_store::lease::StreamLeaseId,
     /// The sequence the pusher believes comes next (1-based, per
     /// `append_events_fenced`). A mismatch is a fence conflict, never a
     /// partial append.
-    pub expected_next_sequence: crate::EventSequence,
-    pub records: Vec<crate::StreamRecordEnvelopeV1>,
+    pub expected_next_sequence: verlet_history::EventSequence,
+    pub records: Vec<verlet_history::StreamRecordEnvelopeV1>,
 }
 
 impl std::fmt::Debug for SyncPushRequestV1 {
@@ -87,24 +87,24 @@ impl std::fmt::Debug for SyncPushRequestV1 {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SyncPullRequestV1 {
     pub schema: String,
-    pub stream_id: crate::EventStreamId,
+    pub stream_id: verlet_history::EventStreamId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<crate::StreamCursorV1>,
+    pub cursor: Option<verlet_history::StreamCursorV1>,
 }
 
 /// One page from the daemon's pull surface.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SyncPullResponseV1 {
     pub schema: String,
-    pub records: Vec<crate::StreamRecordEnvelopeV1>,
+    pub records: Vec<verlet_history::StreamRecordEnvelopeV1>,
 }
 
 /// Authenticated acknowledgement of one queue delivery.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SyncIngressQueueAckRequestV1 {
     pub schema: String,
-    pub target_thread_id: crate::ThreadId,
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
 }
 
 /// Result of renewing the lease bound to the bearer credential.
@@ -153,7 +153,7 @@ pub enum SyncPushRejectionReason {
     /// Lease and scope passed but the stream tail moved past
     /// `expected_next_sequence`.
     SequenceFenceConflict {
-        actual_next_sequence: crate::EventSequence,
+        actual_next_sequence: verlet_history::EventSequence,
     },
 }
 
@@ -193,7 +193,7 @@ impl std::fmt::Debug for SyncPushRejectionReason {
 #[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SyncPushRejectionV1 {
     pub schema: String,
-    pub stream_id: crate::EventStreamId,
+    pub stream_id: verlet_history::EventStreamId,
     pub lease_id: crate::daemon::remote_store::lease::StreamLeaseId,
     pub reason: SyncPushRejectionReason,
     pub rejected_at_ms: i64,
@@ -216,7 +216,9 @@ impl std::fmt::Debug for SyncPushRejectionV1 {
 pub enum SyncPushOutcome {
     /// All checks passed and the batch appended atomically; the ack
     /// carries the new durable tail.
-    Accepted { ack: crate::StreamAppendAckV1 },
+    Accepted {
+        ack: verlet_history::StreamAppendAckV1,
+    },
     /// A check failed. The rejection was durably witnessed before this
     /// value was returned; the pusher must treat `LeaseFence` rejections as
     /// terminal for its lease.
@@ -233,13 +235,15 @@ impl SyncPushOutcome {
                 let Some(last) = request.records.last() else {
                     return false;
                 };
-                ack.schema == crate::STREAM_APPEND_ACK_SCHEMA_V1
+                ack.schema == verlet_history::STREAM_APPEND_ACK_SCHEMA_V1
                     && ack.stream_id == request.stream_id
                     && ack.start_sequence == request.expected_next_sequence
                     && ack.end_sequence == last.sequence
                     && ack.tail_sequence == last.sequence
                     && ack.tail_event_id == last.event_id
-                    && ack.acks.contains(&crate::StreamAckClass::StreamCommitted)
+                    && ack
+                        .acks
+                        .contains(&verlet_history::StreamAckClass::StreamCommitted)
             }
             Self::Rejected { rejection } => {
                 rejection.schema == SYNC_PUSH_REJECTION_SCHEMA_V1
@@ -260,7 +264,7 @@ impl SyncPushOutcome {
 pub struct SyncPushRejectionWitnessV1 {
     pub schema: String,
     pub request_fingerprint: String,
-    pub stream_id: crate::EventStreamId,
+    pub stream_id: verlet_history::EventStreamId,
     pub reason: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub detail: serde_json::Value,
@@ -284,7 +288,7 @@ pub trait SyncPushGate: Send + Sync {
         &self,
         bearer_token: &str,
         request: SyncPushRequestV1,
-    ) -> crate::VerletResult<SyncPushOutcome>;
+    ) -> crate::kernel::runtime_host::VerletResult<SyncPushOutcome>;
 }
 
 /// Authenticated child-side lease renewal through the daemon endpoint.
@@ -305,7 +309,9 @@ pub trait SyncLeaseRenewer: Send + Sync {
     async fn renew_lease(
         &self,
         bearer_token: &str,
-    ) -> crate::VerletResult<Option<crate::daemon::remote_store::lease::StreamLeaseGrantV1>>;
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Option<crate::daemon::remote_store::lease::StreamLeaseGrantV1>,
+    >;
 }
 
 /// The endpoint-side pull surface.
@@ -322,9 +328,9 @@ pub trait SyncPullSource: Send + Sync {
     async fn pull_after(
         &self,
         bearer_token: &str,
-        stream_id: &crate::EventStreamId,
-        cursor: Option<crate::StreamCursorV1>,
-    ) -> crate::VerletResult<Vec<crate::StreamRecordEnvelopeV1>>;
+        stream_id: &verlet_history::EventStreamId,
+        cursor: Option<verlet_history::StreamCursorV1>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::StreamRecordEnvelopeV1>>;
 }
 
 /// Child-side bookkeeping after its own ingress lane accepted a queue row.
@@ -334,16 +340,16 @@ pub trait SyncIngressQueueAcknowledger: Send + Sync {
         &self,
         bearer_token: &str,
         request: SyncIngressQueueAckRequestV1,
-    ) -> crate::VerletResult<()>;
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 }
 
 /// SQLite-backed daemon endpoint composing credential, lease, and event-store
 /// authorities without adding another append surface.
 #[derive(Clone)]
 pub struct SqliteSyncEndpoint {
-    store: crate::SqliteSessionStore,
+    store: verlet_history_sqlite::SqliteSessionStore,
     authority: std::sync::Arc<crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority>,
-    clock: std::sync::Arc<dyn crate::DaemonClock>,
+    clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
     ingress_queue: crate::daemon::remote_store::queue::SqliteRemoteIngressQueue,
 }
 
@@ -357,10 +363,10 @@ impl SqliteSyncEndpoint {
     /// Initialize the durable rejection-witness table over the same engine
     /// owner used by the lease authority and event store.
     pub async fn new(
-        store: crate::SqliteSessionStore,
+        store: verlet_history_sqlite::SqliteSessionStore,
         authority: std::sync::Arc<crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority>,
-        clock: std::sync::Arc<dyn crate::DaemonClock>,
-    ) -> crate::VerletResult<Self> {
+        clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let ingress_queue =
             crate::daemon::remote_store::queue::SqliteRemoteIngressQueue::new(store.clone())
                 .await?;
@@ -377,8 +383,8 @@ impl SqliteSyncEndpoint {
     /// List redacted rejection witnesses, optionally narrowed to one stream.
     pub async fn rejection_witnesses(
         &self,
-        stream_id: Option<&crate::EventStreamId>,
-    ) -> crate::VerletResult<Vec<SyncPushRejectionWitnessV1>> {
+        stream_id: Option<&verlet_history::EventStreamId>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<SyncPushRejectionWitnessV1>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let (sql, parameter) = match stream_id {
@@ -406,13 +412,15 @@ impl SqliteSyncEndpoint {
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             let encoded = row.get::<String>(0).map_err(storage_error)?;
             witnesses.push(serde_json::from_str(&encoded).map_err(|error| {
-                crate::VerletError::History(format!("decode sync rejection witness: {error}"))
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "decode sync rejection witness: {error}"
+                ))
             })?);
         }
         Ok(witnesses)
     }
 
-    async fn init_witness_schema(&self) -> crate::VerletResult<()> {
+    async fn init_witness_schema(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         cancellation_safe(async move {
             let database = store.sqlite_database();
@@ -448,7 +456,7 @@ impl SqliteSyncEndpoint {
         &self,
         request: &SyncPushRequestV1,
         reason: SyncPushRejectionReason,
-    ) -> crate::VerletResult<SyncPushOutcome> {
+    ) -> crate::kernel::runtime_host::VerletResult<SyncPushOutcome> {
         let rejected_at_ms = self.clock.now().timestamp_millis();
         let rejection = SyncPushRejectionV1 {
             schema: SYNC_PUSH_REJECTION_SCHEMA_V1.to_string(),
@@ -465,7 +473,7 @@ impl SqliteSyncEndpoint {
         &self,
         request: &SyncPushRequestV1,
         rejection: &SyncPushRejectionV1,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let request_fingerprint = rejection_fingerprint(request, &rejection.reason)?;
         let (reason, detail) = redacted_rejection_reason(&rejection.reason);
         let witness = SyncPushRejectionWitnessV1 {
@@ -477,7 +485,9 @@ impl SqliteSyncEndpoint {
             rejected_at_ms: rejection.rejected_at_ms,
         };
         let witness_json = serde_json::to_string(&witness).map_err(|error| {
-            crate::VerletError::History(format!("encode sync rejection witness: {error}"))
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "encode sync rejection witness: {error}"
+            ))
         })?;
         let store = self.store.clone();
         cancellation_safe(async move {
@@ -515,7 +525,7 @@ impl SyncPushGate for SqliteSyncEndpoint {
         &self,
         bearer_token: &str,
         request: SyncPushRequestV1,
-    ) -> crate::VerletResult<SyncPushOutcome> {
+    ) -> crate::kernel::runtime_host::VerletResult<SyncPushOutcome> {
         let Some(identity) = self.authority.verify_token(bearer_token).await? else {
             return self
                 .reject(&request, SyncPushRejectionReason::CredentialUnknown)
@@ -584,7 +594,9 @@ impl SyncLeaseRenewer for SqliteSyncEndpoint {
     async fn renew_lease(
         &self,
         bearer_token: &str,
-    ) -> crate::VerletResult<Option<crate::daemon::remote_store::lease::StreamLeaseGrantV1>> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Option<crate::daemon::remote_store::lease::StreamLeaseGrantV1>,
+    > {
         let Some(identity) = self.authority.verify_token(bearer_token).await? else {
             return Ok(None);
         };
@@ -600,9 +612,10 @@ impl SyncPullSource for SqliteSyncEndpoint {
     async fn pull_after(
         &self,
         bearer_token: &str,
-        stream_id: &crate::EventStreamId,
-        cursor: Option<crate::StreamCursorV1>,
-    ) -> crate::VerletResult<Vec<crate::StreamRecordEnvelopeV1>> {
+        stream_id: &verlet_history::EventStreamId,
+        cursor: Option<verlet_history::StreamCursorV1>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::StreamRecordEnvelopeV1>>
+    {
         let Some(identity) = self.authority.verify_token(bearer_token).await? else {
             return Err(not_authorized());
         };
@@ -616,7 +629,7 @@ impl SyncPullSource for SqliteSyncEndpoint {
             .as_str()
             .starts_with(crate::daemon::remote_store::queue::SYNC_INGRESS_QUEUE_STREAM_PREFIX)
         {
-            return Err(crate::VerletError::History(
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "invalid remote ingress queue stream".to_string(),
             ));
         }
@@ -628,7 +641,7 @@ impl SyncPullSource for SqliteSyncEndpoint {
             }
             None => self.store.read_events(stream_id, None).await,
         }
-        .map_err(|error| crate::VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::kernel::runtime_host::VerletError::History(error.to_string()))?;
         Ok(events
             .into_iter()
             .map(|event| event.to_stream_record_v1())
@@ -642,9 +655,9 @@ impl SyncIngressQueueAcknowledger for SqliteSyncEndpoint {
         &self,
         bearer_token: &str,
         request: SyncIngressQueueAckRequestV1,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if request.schema != SYNC_INGRESS_QUEUE_ACK_SCHEMA_V1 {
-            return Err(crate::VerletError::History(
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "unsupported remote ingress acknowledgement schema".to_string(),
             ));
         }
@@ -665,7 +678,7 @@ impl SyncIngressQueueAcknowledger for SqliteSyncEndpoint {
 
 fn validate_push_request(
     request: &SyncPushRequestV1,
-) -> Result<Vec<crate::NewEventRecord>, String> {
+) -> Result<Vec<verlet_history::NewEventRecord>, String> {
     if request.schema != SYNC_PUSH_SCHEMA_V1 {
         return Err("unsupported sync push schema".to_string());
     }
@@ -682,7 +695,7 @@ fn validate_push_request(
             .get()
             .checked_add(index as i64)
             .ok_or_else(|| "sync push sequence overflow".to_string())?;
-        if envelope.schema != crate::STREAM_RECORD_SCHEMA_V1 {
+        if envelope.schema != verlet_history::STREAM_RECORD_SCHEMA_V1 {
             return Err("record uses an unsupported stream schema".to_string());
         }
         if envelope.stream_id != request.stream_id {
@@ -698,12 +711,12 @@ fn validate_push_request(
         }
         let kind = envelope
             .kind
-            .parse::<crate::EventKind>()
+            .parse::<verlet_history::EventKind>()
             .map_err(|_| "record kind is not in the frozen event vocabulary".to_string())?;
         if envelope.payload_schema != kind.payload_schema_id() {
             return Err("record payload schema does not match its kind".to_string());
         }
-        let event = crate::EventRecord {
+        let event = verlet_history::EventRecord {
             id: envelope.event_id,
             stream_id: envelope.stream_id.clone(),
             sequence: envelope.sequence,
@@ -717,7 +730,7 @@ fn validate_push_request(
         event
             .validate_stream_record_v1()
             .map_err(|_| "record or payload violates the V1 stream schema".to_string())?;
-        records.push(crate::NewEventRecord {
+        records.push(verlet_history::NewEventRecord {
             id: event.id,
             coordinates: event.coordinates,
             created_at_ms: event.created_at_ms,
@@ -733,9 +746,11 @@ fn validate_push_request(
 fn rejection_fingerprint(
     request: &SyncPushRequestV1,
     reason: &SyncPushRejectionReason,
-) -> crate::VerletResult<String> {
+) -> crate::kernel::runtime_host::VerletResult<String> {
     let encoded = serde_json::to_vec(&(request, reason)).map_err(|error| {
-        crate::VerletError::History(format!("encode sync rejection fingerprint: {error}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "encode sync rejection fingerprint: {error}"
+        ))
     })?;
     Ok(format!("sha256:{:x}", sha2::Sha256::digest(encoded)))
 }
@@ -770,22 +785,26 @@ fn redacted_rejection_reason(reason: &SyncPushRejectionReason) -> (String, serde
     }
 }
 
-fn not_authorized() -> crate::VerletError {
-    crate::VerletError::History("sync pull not authorized".to_string())
+fn not_authorized() -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History("sync pull not authorized".to_string())
 }
 
-fn storage_error(error: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::History(error.to_string())
+fn storage_error(error: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(error.to_string())
 }
 
 async fn cancellation_safe<T>(
-    future: impl std::future::Future<Output = crate::VerletResult<T>> + Send + 'static,
-) -> crate::VerletResult<T>
+    future: impl std::future::Future<Output = crate::kernel::runtime_host::VerletResult<T>>
+    + Send
+    + 'static,
+) -> crate::kernel::runtime_host::VerletResult<T>
 where
     T: Send + 'static,
 {
     tokio::spawn(future).await.map_err(|error| {
-        crate::VerletError::History(format!("sync endpoint transaction task failed: {error}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "sync endpoint transaction task failed: {error}"
+        ))
     })?
 }
 
@@ -818,19 +837,23 @@ impl Default for VerletDaemonSyncConfig {
 impl VerletDaemonSyncConfig {
     /// Parse the configured endpoint address using the daemon app-server's
     /// listen grammar. `None` keeps the endpoint disabled.
-    pub fn listen_addr(&self) -> crate::VerletResult<Option<crate::AppServerListenAddr>> {
+    pub fn listen_addr(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Option<crate::adapters::app_server::AppServerListenAddr>,
+    > {
         self.listen
             .as_deref()
-            .map(crate::AppServerListenAddr::parse)
+            .map(crate::adapters::app_server::AppServerListenAddr::parse)
             .transpose()
     }
 
     /// Validate the standalone sync configuration before the endpoint is
     /// started.
-    pub fn validate(&self) -> crate::VerletResult<()> {
+    pub fn validate(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         self.listen_addr()?;
         if self.lease_ttl_secs == 0 {
-            return Err(crate::VerletError::RuntimeFactory(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "daemon.sync.lease_ttl_secs must be greater than zero".to_string(),
             ));
         }
@@ -972,7 +995,7 @@ mod tests {
         assert!(matches!(
             ack,
             crate::daemon::remote_store::endpoint::SyncPushOutcome::Accepted { ref ack }
-                if ack.tail_sequence == crate::EventSequence::new(1)
+                if ack.tail_sequence == verlet_history::EventSequence::new(1)
                     && ack.acks.len() == 2
         ));
         assert!(ack.matches_request(&push));
@@ -1004,7 +1027,7 @@ mod tests {
                     },
                     ..
                 }
-            } if actual_next_sequence == crate::EventSequence::new(2)
+            } if actual_next_sequence == verlet_history::EventSequence::new(2)
         ));
         assert!(rejection.matches_request(&push));
         let encoded_rejection = serde_json::to_value(&rejection).unwrap();
@@ -1031,7 +1054,7 @@ mod tests {
         else {
             unreachable!();
         };
-        ack.tail_event_id = crate::EventRecordId::new();
+        ack.tail_event_id = verlet_history::EventRecordId::new();
         assert!(!invalid_ack.matches_request(&push));
     }
 

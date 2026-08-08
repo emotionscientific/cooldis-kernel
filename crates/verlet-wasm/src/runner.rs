@@ -84,7 +84,7 @@ impl WasmRuntimeFactory {
         &self,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> crate::VerletWasmResult<verlet_process::WasmOperationOutput> {
+    ) -> crate::VerletWasmResult<verlet_process::process::WasmOperationOutput> {
         let module = self.load_module().await?;
         let manifest = load_operation_manifest(&self.engine, &module, &self.config)
             .await?
@@ -108,9 +108,9 @@ impl WasmRuntimeFactory {
         &self,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> crate::VerletWasmResult<verlet_process::VerletProcessHandle> {
+    ) -> crate::VerletWasmResult<verlet_process::process::VerletProcessHandle> {
         let output = self.invoke_operation_bytes(operation_name, input).await?;
-        Ok(verlet_process::VerletProcessHandle::from_wasm_operation_output(None, output))
+        Ok(verlet_process::process::VerletProcessHandle::from_wasm_operation_output(None, output))
     }
 
     pub async fn build_runtime(&self) -> crate::VerletWasmResult<WasmModuleRuntime> {
@@ -195,7 +195,7 @@ impl WasmModuleRuntime {
         &self,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> crate::VerletWasmResult<verlet_process::WasmOperationOutput> {
+    ) -> crate::VerletWasmResult<verlet_process::process::WasmOperationOutput> {
         let manifest = self.manifest.as_ref().ok_or_else(|| {
             crate::VerletWasmError::RuntimeExecution(format!(
                 "wasm module does not export {DESCRIBE_EXPORT}"
@@ -333,7 +333,7 @@ async fn execute_operation(
     manifest: &verlet_abi::WasmOperationManifest,
     operation_name: &str,
     input: Vec<u8>,
-) -> crate::VerletWasmResult<verlet_process::WasmOperationOutput> {
+) -> crate::VerletWasmResult<verlet_process::process::WasmOperationOutput> {
     let operation = manifest
         .operation(operation_name)
         .ok_or_else(|| {
@@ -391,7 +391,7 @@ async fn execute_operation(
     }
     let mut state = store.into_data();
     let invocation_context = state.invocation_context.clone();
-    Ok(verlet_process::WasmOperationOutput {
+    Ok(verlet_process::process::WasmOperationOutput {
         manifest: manifest.clone(),
         operation,
         output: state.take_sink(OUTPUT_SINK),
@@ -1319,7 +1319,7 @@ fn apply_http_input_mapping(
     let input: serde_json::Value = serde_json::from_slice(&input_bytes)
         .map_err(|err| WasmHttpError::invalid_argument(format!("invalid JSON input: {err}")))?;
     if let Some(input_schema) = &mapping.input_schema {
-        verlet_runtime_contracts::validate_json_value_against_schema(
+        verlet_runtime_contracts::schema::validate_json_value_against_schema(
             input_schema,
             &input,
             "HTTP mapped input",
@@ -1342,7 +1342,7 @@ fn apply_http_input_mapping(
             }
             continue;
         };
-        verlet_runtime_contracts::validate_json_value_against_schema(
+        verlet_runtime_contracts::schema::validate_json_value_against_schema(
             &parameter.schema,
             value,
             &format!("HTTP input property {:?}", parameter.input_property),
@@ -1405,7 +1405,7 @@ fn apply_http_input_mapping(
     if body.is_null() {
         Ok(Vec::new())
     } else {
-        verlet_runtime_contracts::validate_json_value_against_schema(
+        verlet_runtime_contracts::schema::validate_json_value_against_schema(
             &request_body.schema,
             body,
             "HTTP request body",

@@ -669,12 +669,14 @@ fn read_json_schema(path: &std::path::Path, label: &str) -> crate::VerletResult<
             path.display()
         ))
     })?;
-    verlet_runtime_contracts::validate_json_schema_subset(&value, label).map_err(|err| {
-        crate::VerletOperationsError::RuntimeFactory(format!(
-            "JSON schema {} is not in the supported Verlet schema subset: {err}",
-            path.display()
-        ))
-    })?;
+    verlet_runtime_contracts::schema::validate_json_schema_subset(&value, label).map_err(
+        |err| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
+                "JSON schema {} is not in the supported Verlet schema subset: {err}",
+                path.display()
+            ))
+        },
+    )?;
     Ok(value)
 }
 
@@ -728,14 +730,13 @@ fn validate_fixture_json(
             path.display()
         ))
     })?;
-    verlet_runtime_contracts::validate_json_value_against_schema(schema, &value, label).map_err(
-        |err| {
+    verlet_runtime_contracts::schema::validate_json_value_against_schema(schema, &value, label)
+        .map_err(|err| {
             crate::VerletOperationsError::RuntimeFactory(format!(
                 "JSON fixture {} failed schema validation: {err}",
                 path.display()
             ))
-        },
-    )
+        })
 }
 
 fn text_sha256(bytes: &[u8]) -> String {

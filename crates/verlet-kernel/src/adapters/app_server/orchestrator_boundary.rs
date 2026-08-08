@@ -6,7 +6,7 @@
 //! implementation ticket. Wire-up (dispatcher arms, authority tables, both
 //! classifiers, drift test, docs) follows the standard method checklist.
 
-use crate::EventStore as _;
+use verlet_history::EventStore as _;
 /// Stream id prefix for client-owned streams. Grammar per ADR 0009:
 /// `client:` followed by one or more `[a-z0-9][a-z0-9-]*` segments joined
 /// by `:`. Recovery and ingress sweeps skip this prefix exactly as they
@@ -96,7 +96,7 @@ pub(super) struct StreamAppendRecord {
 pub(super) struct StreamReadParams {
     pub(super) stream: String,
     #[serde(default)]
-    pub(super) stream_cursor: Option<crate::StreamCursorV1>,
+    pub(super) stream_cursor: Option<verlet_history::StreamCursorV1>,
     /// 1..=500, default 100 (same clamp as `thread/events/list`).
     #[serde(default)]
     pub(super) limit: Option<usize>,
@@ -291,7 +291,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(crate::adapters::app_server::connection::json_codec_error)?;
         let envelope_digest = crate::agent::manifest_bind::canonical_json_hash(&envelope_value)
             .map_err(crate::adapters::app_server::connection::internal_error)?;
-        let payload = crate::IoIngressReceivedPayload {
+        let payload = verlet_history::IoIngressReceivedPayload {
             route_id: Some(format!("surface:{ENVELOPE_INGRESS_SURFACE}")),
             dedupe_key: Some(dedupe_key.clone()),
             external_conversation_id: Some(params.thread_id.clone()),
@@ -309,17 +309,17 @@ impl crate::adapters::app_server::VerletAppServer {
             &principal,
             Some(&envelope.metadata),
         )?;
-        let store = crate::SqliteSessionStore::open(&self.inner.session_store_path)
+        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(history_internal_error)?;
-        let stream_id = crate::control_stream_id(&coordinates);
+        let stream_id = crate::kernel::control_decision::control_stream_id(&coordinates);
         let ingress_event = loop {
             let events = store
                 .read_events(&stream_id, None)
                 .await
                 .map_err(history_internal_error)?;
             if let Some(existing) = events.iter().find(|event| {
-                event.kind == crate::EventKind::IoIngressReceived
+                event.kind == verlet_history::EventKind::IoIngressReceived
                     && event
                         .payload
                         .get("dedupe_key")
@@ -330,8 +330,8 @@ impl crate::adapters::app_server::VerletAppServer {
             }
             let expected = events
                 .last()
-                .map(|event| crate::EventSequence::new(event.sequence.get() + 1))
-                .unwrap_or_else(|| crate::EventSequence::new(1));
+                .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| verlet_history::EventSequence::new(1));
             match store
                 .append_events_fenced(&stream_id, expected, vec![ingress_record.clone()])
                 .await
@@ -339,13 +339,13 @@ impl crate::adapters::app_server::VerletAppServer {
                 Ok(mut appended) => {
                     break appended.pop().ok_or_else(|| {
                         crate::adapters::app_server::connection::internal_error(
-                            crate::VerletError::History(
+                            crate::kernel::runtime_host::VerletError::History(
                                 "ingress witness append returned no record".to_string(),
                             ),
                         )
                     })?;
                 }
-                Err(crate::HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
                 Err(err) => return Err(history_internal_error(err)),
             }
         };
@@ -388,7 +388,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 &coordinates,
                 turn_id,
                 input,
-                crate::TurnSubmissionMode::Queue,
+                verlet_runtime_contracts::TurnSubmissionMode::Queue,
                 None,
             )
             .await
@@ -427,7 +427,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .records
             .into_iter()
             .map(|record| {
-                let payload = crate::ClientRecordAppendedPayload {
+                let payload = verlet_history::ClientRecordAppendedPayload {
                     client_kind: record.kind,
                     client_schema: record.payload_schema,
                     principal_id: principal_id.clone(),
@@ -435,19 +435,19 @@ impl crate::adapters::app_server::VerletAppServer {
                 };
                 serde_json::to_value(payload)
                     .map(|payload| {
-                        crate::NewEventRecord::witnessed(
+                        verlet_history::NewEventRecord::witnessed(
                             coordinates.clone(),
-                            crate::EventKind::ClientRecordAppended,
+                            verlet_history::EventKind::ClientRecordAppended,
                             payload,
                         )
                     })
                     .map_err(crate::adapters::app_server::connection::json_codec_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let store = crate::SqliteSessionStore::open(&self.inner.session_store_path)
+        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(history_internal_error)?;
-        let stream_id = crate::EventStreamId::new(params.stream.clone());
+        let stream_id = verlet_history::EventStreamId::new(params.stream.clone());
         let appended = match params.expected_sequence {
             Some(expected) => {
                 let expected = i64::try_from(expected).map_err(|_| {
@@ -463,11 +463,15 @@ impl crate::adapters::app_server::VerletAppServer {
                     ));
                 }
                 match store
-                    .append_events_fenced(&stream_id, crate::EventSequence::new(expected), records)
+                    .append_events_fenced(
+                        &stream_id,
+                        verlet_history::EventSequence::new(expected),
+                        records,
+                    )
                     .await
                 {
                     Ok(appended) => appended,
-                    Err(crate::HistoryError::AppendFenceConflict {
+                    Err(verlet_history::HistoryError::AppendFenceConflict {
                         expected_next_sequence,
                         actual_next_sequence,
                         ..
@@ -504,8 +508,8 @@ impl crate::adapters::app_server::VerletAppServer {
         params: StreamReadParams,
     ) -> Result<serde_json::Value, crate::adapters::app_server::connection::JsonRpcErrorError> {
         validate_client_stream_id(&params.stream)?;
-        let stream_id = crate::EventStreamId::new(params.stream);
-        let store = crate::SqliteSessionStore::open(&self.inner.session_store_path)
+        let stream_id = verlet_history::EventStreamId::new(params.stream);
+        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
             .await
             .map_err(history_internal_error)?;
         let mut events = if let Some(cursor) = params.stream_cursor.as_ref() {
@@ -536,7 +540,7 @@ impl crate::adapters::app_server::VerletAppServer {
         let mut page = events.into_iter().take(limit + 1).collect::<Vec<_>>();
         let stream_cursor = if page.len() > limit {
             page.pop();
-            page.last().map(crate::EventRecord::cursor_v1)
+            page.last().map(verlet_history::EventRecord::cursor_v1)
         } else {
             None
         };
@@ -549,7 +553,7 @@ impl crate::adapters::app_server::VerletAppServer {
 }
 
 fn ingress_submit_result(
-    ingress_event_id: crate::EventRecordId,
+    ingress_event_id: verlet_history::EventRecordId,
     deduped: bool,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -562,22 +566,28 @@ fn ingress_submit_result(
 fn client_stream_coordinates(
     connection: &crate::adapters::app_server::connection::ConnectionState,
     stream: &str,
-) -> Result<crate::ThreadCoordinates, crate::adapters::app_server::connection::JsonRpcErrorError> {
+) -> Result<
+    verlet_runtime_contracts::ThreadCoordinates,
+    crate::adapters::app_server::connection::JsonRpcErrorError,
+> {
     let namespace = uuid::Uuid::parse_str(CLIENT_STREAM_THREAD_NAMESPACE).map_err(|err| {
-        crate::adapters::app_server::connection::internal_error(crate::VerletError::History(
-            format!("invalid client stream UUID namespace: {err}"),
-        ))
+        crate::adapters::app_server::connection::internal_error(
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "invalid client stream UUID namespace: {err}"
+            )),
+        )
     })?;
-    let thread_id =
-        crate::ThreadId::parse_str(&uuid::Uuid::new_v5(&namespace, stream.as_bytes()).to_string())
-            .map_err(|err| {
-                crate::adapters::app_server::connection::internal_error(
-                    crate::VerletError::History(format!(
-                        "client stream coordinate UUID failed: {err}"
-                    )),
-                )
-            })?;
-    Ok(crate::ThreadCoordinates {
+    let thread_id = verlet_runtime_contracts::ThreadId::parse_str(
+        &uuid::Uuid::new_v5(&namespace, stream.as_bytes()).to_string(),
+    )
+    .map_err(|err| {
+        crate::adapters::app_server::connection::internal_error(
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "client stream coordinate UUID failed: {err}"
+            )),
+        )
+    })?;
+    Ok(verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: connection.app.inner.tenant_id.clone(),
         user_id: connection.resolved_principal.principal_id.to_string(),
         session_id: connection.witnessed_session_id.clone(),
@@ -586,25 +596,28 @@ fn client_stream_coordinates(
 }
 
 fn client_stream_record_json(
-    record: &crate::EventRecord,
+    record: &verlet_history::EventRecord,
 ) -> Result<serde_json::Value, crate::adapters::app_server::connection::JsonRpcErrorError> {
-    if record.kind != crate::EventKind::ClientRecordAppended {
+    if record.kind != verlet_history::EventKind::ClientRecordAppended {
         return Err(crate::adapters::app_server::connection::internal_error(
-            crate::VerletError::History(format!(
+            crate::kernel::runtime_host::VerletError::History(format!(
                 "client stream {} contains non-client carrier kind {}",
                 record.stream_id, record.kind
             )),
         ));
     }
-    let payload =
-        serde_json::from_value::<crate::ClientRecordAppendedPayload>(record.payload.clone())
-            .map_err(crate::adapters::app_server::connection::json_codec_error)?;
+    let payload = serde_json::from_value::<verlet_history::ClientRecordAppendedPayload>(
+        record.payload.clone(),
+    )
+    .map_err(crate::adapters::app_server::connection::json_codec_error)?;
     let mut value = serde_json::to_value(record.to_stream_record_v1())
         .map_err(crate::adapters::app_server::connection::json_codec_error)?;
     let object = value.as_object_mut().ok_or_else(|| {
-        crate::adapters::app_server::connection::internal_error(crate::VerletError::History(
-            "client stream record envelope did not encode as an object".to_string(),
-        ))
+        crate::adapters::app_server::connection::internal_error(
+            crate::kernel::runtime_host::VerletError::History(
+                "client stream record envelope did not encode as an object".to_string(),
+            ),
+        )
     })?;
     object.insert("kind".to_string(), serde_json::json!(payload.client_kind));
     object.insert(
@@ -622,25 +635,25 @@ fn client_stream_record_json(
 }
 
 fn history_internal_error(
-    error: crate::HistoryError,
+    error: verlet_history::HistoryError,
 ) -> crate::adapters::app_server::connection::JsonRpcErrorError {
-    crate::adapters::app_server::connection::internal_error(crate::VerletError::History(
-        error.to_string(),
-    ))
+    crate::adapters::app_server::connection::internal_error(
+        crate::kernel::runtime_host::VerletError::History(error.to_string()),
+    )
 }
 
 fn stream_read_history_error(
-    error: crate::HistoryError,
+    error: verlet_history::HistoryError,
 ) -> crate::adapters::app_server::connection::JsonRpcErrorError {
     match error {
-        crate::HistoryError::StreamCursorStreamMismatch { .. }
-        | crate::HistoryError::StreamCursorMismatch { .. } => {
+        verlet_history::HistoryError::StreamCursorStreamMismatch { .. }
+        | verlet_history::HistoryError::StreamCursorMismatch { .. } => {
             crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("malformed stream/read cursor: {error}"),
             )
         }
-        crate::HistoryError::Codec(message) if message.contains("stream cursor") => {
+        verlet_history::HistoryError::Codec(message) if message.contains("stream cursor") => {
             crate::adapters::app_server::connection::jsonrpc_error(
                 -32602,
                 format!("malformed stream/read cursor: {message}"),

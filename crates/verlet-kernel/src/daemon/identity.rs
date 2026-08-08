@@ -344,13 +344,13 @@ pub trait IdentityAuthority: Send + Sync {
         principal_id: &PrincipalId,
         kind: PrincipalKind,
         display: &str,
-    ) -> crate::VerletResult<PrincipalRecordV1>;
+    ) -> crate::kernel::runtime_host::VerletResult<PrincipalRecordV1>;
 
     async fn revoke_principal(
         &self,
         revoked_by: &PrincipalId,
         principal_id: &PrincipalId,
-    ) -> crate::VerletResult<()>;
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 
     /// Mint a credential for a principal. Returns the persisted record and
     /// the bearer secret, which is shown exactly once and never persisted.
@@ -359,49 +359,63 @@ pub trait IdentityAuthority: Send + Sync {
         minted_by: &PrincipalId,
         principal_id: &PrincipalId,
         expires_at_ms: Option<i64>,
-    ) -> crate::VerletResult<(IdentityCredentialV1, String)>;
+    ) -> crate::kernel::runtime_host::VerletResult<(IdentityCredentialV1, String)>;
 
     async fn revoke_credential(
         &self,
         revoked_by: &PrincipalId,
         credential_id: &str,
-    ) -> crate::VerletResult<()>;
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 
     /// Resolve a bearer token to a principal. `Ok(None)` is the fail-closed
     /// rejection outcome: unknown, expired, or revoked credentials and
     /// revoked principals all resolve to nothing.
-    async fn verify_token(&self, token: &str) -> crate::VerletResult<Option<ResolvedPrincipal>>;
+    async fn verify_token(
+        &self,
+        token: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<ResolvedPrincipal>>;
 
     /// Resolve a same-uid Unix peer to the operator principal. Local mode
     /// only (ADR 0008 D3): in managed mode this returns `Ok(None)` and the
     /// attempt is witnessed with [`IdentityAuthRejectionReason::PeerMappingDisabled`].
-    async fn resolve_peer_uid(&self, uid: u32) -> crate::VerletResult<Option<ResolvedPrincipal>>;
+    async fn resolve_peer_uid(
+        &self,
+        uid: u32,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<ResolvedPrincipal>>;
 
-    async fn list_principals(&self) -> crate::VerletResult<Vec<PrincipalRecordV1>>;
+    async fn list_principals(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<PrincipalRecordV1>>;
 
     async fn list_credentials(
         &self,
         principal_id: &PrincipalId,
-    ) -> crate::VerletResult<Vec<IdentityCredentialV1>>;
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<IdentityCredentialV1>>;
 
     /// Witness a boundary session opening (ADR 0008 D6).
-    async fn witness_session_opened(&self, session: &IdentitySessionV1) -> crate::VerletResult<()>;
+    async fn witness_session_opened(
+        &self,
+        session: &IdentitySessionV1,
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 
     /// Witness a boundary session closing.
     async fn witness_session_closed(
         &self,
         session_id: &str,
         closed_at_ms: i64,
-    ) -> crate::VerletResult<()>;
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 
     /// Witness a rejected authentication or authorization attempt.
     async fn witness_auth_rejected(
         &self,
         rejection: &IdentityAuthRejectionV1,
-    ) -> crate::VerletResult<()>;
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 
     /// Witness a host-authority effect before it is allowed to proceed.
-    async fn witness_host_effect(&self, effect: &IdentityHostEffectV1) -> crate::VerletResult<()>;
+    async fn witness_host_effect(
+        &self,
+        effect: &IdentityHostEffectV1,
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 }
 
 /// SQLite-backed durable authority for identity-plane records.
@@ -412,8 +426,8 @@ pub trait IdentityAuthority: Send + Sync {
 /// SHA-256 digests.
 #[derive(Clone)]
 pub struct SqliteIdentityAuthority {
-    store: crate::SqliteSessionStore,
-    clock: std::sync::Arc<dyn crate::DaemonClock>,
+    store: verlet_history_sqlite::SqliteSessionStore,
+    clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
     peer_operator: Option<PrincipalId>,
 }
 
@@ -432,10 +446,10 @@ impl SqliteIdentityAuthority {
     /// operator it resolves to. The boundary remains responsible for proving
     /// that the supplied uid belongs to the daemon user.
     pub async fn new(
-        store: crate::SqliteSessionStore,
-        clock: std::sync::Arc<dyn crate::DaemonClock>,
+        store: verlet_history_sqlite::SqliteSessionStore,
+        clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
         peer_operator: Option<PrincipalId>,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let authority = Self {
             store,
             clock,
@@ -453,7 +467,8 @@ impl SqliteIdentityAuthority {
         &self,
         principal_id: &PrincipalId,
         display: &str,
-    ) -> crate::VerletResult<(PrincipalRecordV1, IdentityCredentialV1, String)> {
+    ) -> crate::kernel::runtime_host::VerletResult<(PrincipalRecordV1, IdentityCredentialV1, String)>
+    {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let principal_id = principal_id.clone();
@@ -538,7 +553,7 @@ impl SqliteIdentityAuthority {
         .await
     }
 
-    async fn init_schema(&self) -> crate::VerletResult<()> {
+    async fn init_schema(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         cancellation_safe(async move {
             let _writer = store.daemon_write_guard().await;
@@ -640,7 +655,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         principal_id: &PrincipalId,
         kind: PrincipalKind,
         display: &str,
-    ) -> crate::VerletResult<PrincipalRecordV1> {
+    ) -> crate::kernel::runtime_host::VerletResult<PrincipalRecordV1> {
         if !kind.is_declarable() {
             return Err(authority_error(
                 "member principals are reserved and cannot be declared in identity plane v0",
@@ -708,7 +723,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         &self,
         revoked_by: &PrincipalId,
         principal_id: &PrincipalId,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let revoked_by = revoked_by.clone();
@@ -747,7 +762,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         minted_by: &PrincipalId,
         principal_id: &PrincipalId,
         expires_at_ms: Option<i64>,
-    ) -> crate::VerletResult<(IdentityCredentialV1, String)> {
+    ) -> crate::kernel::runtime_host::VerletResult<(IdentityCredentialV1, String)> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let minted_by = minted_by.clone();
@@ -810,7 +825,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         &self,
         revoked_by: &PrincipalId,
         credential_id: &str,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         let clock = std::sync::Arc::clone(&self.clock);
         let revoked_by = revoked_by.clone();
@@ -844,7 +859,10 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         .await
     }
 
-    async fn verify_token(&self, token: &str) -> crate::VerletResult<Option<ResolvedPrincipal>> {
+    async fn verify_token(
+        &self,
+        token: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<ResolvedPrincipal>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let digest = identity_token_digest(token);
@@ -889,7 +907,10 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         Ok(principal)
     }
 
-    async fn resolve_peer_uid(&self, uid: u32) -> crate::VerletResult<Option<ResolvedPrincipal>> {
+    async fn resolve_peer_uid(
+        &self,
+        uid: u32,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<ResolvedPrincipal>> {
         let Some(principal_id) = self.peer_operator.as_ref() else {
             return Ok(None);
         };
@@ -924,7 +945,9 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         }))
     }
 
-    async fn list_principals(&self) -> crate::VerletResult<Vec<PrincipalRecordV1>> {
+    async fn list_principals(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<PrincipalRecordV1>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let mut rows = connection
@@ -947,7 +970,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
     async fn list_credentials(
         &self,
         principal_id: &PrincipalId,
-    ) -> crate::VerletResult<Vec<IdentityCredentialV1>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<IdentityCredentialV1>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let mut rows = connection
@@ -968,7 +991,10 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         Ok(credentials)
     }
 
-    async fn witness_session_opened(&self, session: &IdentitySessionV1) -> crate::VerletResult<()> {
+    async fn witness_session_opened(
+        &self,
+        session: &IdentitySessionV1,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if session.schema != IDENTITY_SESSION_SCHEMA_V1 {
             return Err(authority_error(
                 "identity session schema id is not supported",
@@ -1020,7 +1046,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         &self,
         session_id: &str,
         closed_at_ms: i64,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         let session_id = session_id.to_string();
         cancellation_safe(async move {
@@ -1062,7 +1088,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
     async fn witness_auth_rejected(
         &self,
         rejection: &IdentityAuthRejectionV1,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if rejection.schema != IDENTITY_AUTH_REJECTION_SCHEMA_V1 {
             return Err(authority_error(
                 "identity auth rejection schema id is not supported",
@@ -1107,7 +1133,10 @@ impl IdentityAuthority for SqliteIdentityAuthority {
         .await
     }
 
-    async fn witness_host_effect(&self, effect: &IdentityHostEffectV1) -> crate::VerletResult<()> {
+    async fn witness_host_effect(
+        &self,
+        effect: &IdentityHostEffectV1,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if effect.schema != IDENTITY_HOST_EFFECT_SCHEMA_V1 {
             return Err(authority_error(
                 "identity host effect schema id is not supported",
@@ -1167,7 +1196,7 @@ impl IdentityAuthority for SqliteIdentityAuthority {
 
 async fn active_operator_exists(
     connection: &verlet_sqlite::Connection,
-) -> crate::VerletResult<bool> {
+) -> crate::kernel::runtime_host::VerletResult<bool> {
     let operator_kind: &str = PrincipalKind::Operator.as_ref();
     let mut rows = connection
         .query(
@@ -1185,7 +1214,7 @@ async fn active_operator_exists(
 async fn principal_is_active(
     connection: &verlet_sqlite::Connection,
     principal_id: &PrincipalId,
-) -> crate::VerletResult<bool> {
+) -> crate::kernel::runtime_host::VerletResult<bool> {
     let mut rows = connection
         .query(
             "SELECT 1
@@ -1208,7 +1237,7 @@ enum PrincipalStatus {
 async fn principal_status(
     connection: &verlet_sqlite::Connection,
     principal_id: &PrincipalId,
-) -> crate::VerletResult<Option<PrincipalStatus>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<PrincipalStatus>> {
     let mut rows = connection
         .query(
             "SELECT revoked_at_ms
@@ -1232,7 +1261,9 @@ async fn principal_status(
     }
 }
 
-fn principal_from_row(row: &verlet_sqlite::Row) -> crate::VerletResult<PrincipalRecordV1> {
+fn principal_from_row(
+    row: &verlet_sqlite::Row,
+) -> crate::kernel::runtime_host::VerletResult<PrincipalRecordV1> {
     let principal_id: String = row.get(1).map_err(storage_error)?;
     let raw_kind: String = row.get(2).map_err(storage_error)?;
     let kind: PrincipalKind = raw_kind.parse().map_err(|_| {
@@ -1252,7 +1283,9 @@ fn principal_from_row(row: &verlet_sqlite::Row) -> crate::VerletResult<Principal
     })
 }
 
-fn credential_from_row(row: &verlet_sqlite::Row) -> crate::VerletResult<IdentityCredentialV1> {
+fn credential_from_row(
+    row: &verlet_sqlite::Row,
+) -> crate::kernel::runtime_host::VerletResult<IdentityCredentialV1> {
     Ok(IdentityCredentialV1 {
         schema: row.get(0).map_err(storage_error)?,
         credential_id: row.get(1).map_err(storage_error)?,
@@ -1265,7 +1298,7 @@ fn credential_from_row(row: &verlet_sqlite::Row) -> crate::VerletResult<Identity
     })
 }
 
-fn mint_identity_secret() -> crate::VerletResult<String> {
+fn mint_identity_secret() -> crate::kernel::runtime_host::VerletResult<String> {
     let mut random = [0_u8; 32];
     getrandom::fill(&mut random)
         .map_err(|error| authority_error(format!("failed to mint identity credential: {error}")))?;
@@ -1279,22 +1312,24 @@ fn mint_identity_secret() -> crate::VerletResult<String> {
     Ok(token)
 }
 
-fn authority_error(message: impl Into<String>) -> crate::VerletError {
-    crate::VerletError::History(message.into())
+fn authority_error(message: impl Into<String>) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(message.into())
 }
 
-fn storage_error(error: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::History(error.to_string())
+fn storage_error(error: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(error.to_string())
 }
 
 async fn cancellation_safe<T>(
-    future: impl std::future::Future<Output = crate::VerletResult<T>> + Send + 'static,
-) -> crate::VerletResult<T>
+    future: impl std::future::Future<Output = crate::kernel::runtime_host::VerletResult<T>>
+    + Send
+    + 'static,
+) -> crate::kernel::runtime_host::VerletResult<T>
 where
     T: Send + 'static,
 {
     tokio::spawn(future).await.map_err(|error| {
-        crate::VerletError::History(format!(
+        crate::kernel::runtime_host::VerletError::History(format!(
             "sqlite identity authority transaction task failed: {error}"
         ))
     })?
@@ -1383,7 +1418,7 @@ mod tests {
         }
     }
 
-    impl crate::DaemonClock for TestClock {
+    impl crate::daemon::clock_route::DaemonClock for TestClock {
         fn now(&self) -> chrono::DateTime<chrono::Utc> {
             chrono::Utc
                 .timestamp_millis_opt(self.now_ms.load(std::sync::atomic::Ordering::SeqCst))
@@ -1397,14 +1432,17 @@ mod tests {
         peer_operator: Option<crate::daemon::identity::PrincipalId>,
     ) -> (
         crate::daemon::identity::SqliteIdentityAuthority,
-        crate::SqliteSessionStore,
+        verlet_history_sqlite::SqliteSessionStore,
         std::sync::Arc<TestClock>,
     ) {
-        let store = crate::SqliteSessionStore::in_memory().await.unwrap();
+        let store = verlet_history_sqlite::SqliteSessionStore::in_memory()
+            .await
+            .unwrap();
         let clock = std::sync::Arc::new(TestClock::new(now_ms));
         let authority = crate::daemon::identity::SqliteIdentityAuthority::new(
             store.clone(),
-            std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::DaemonClock>,
+            std::sync::Arc::clone(&clock)
+                as std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
             peer_operator,
         )
         .await
@@ -2005,7 +2043,8 @@ mod tests {
 
         let reopened = crate::daemon::identity::SqliteIdentityAuthority::new(
             store,
-            std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::DaemonClock>,
+            std::sync::Arc::clone(&clock)
+                as std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
             None,
         )
         .await

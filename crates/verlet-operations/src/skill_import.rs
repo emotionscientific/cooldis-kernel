@@ -9,7 +9,7 @@ pub struct SkillImportAsset {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkillImportPlan {
-    pub package: crate::SkillPackage,
+    pub package: crate::skill_package::SkillPackage,
     pub references: Vec<String>,
     pub assets: Vec<SkillImportAsset>,
     pub omitted_scripts: Vec<String>,
@@ -19,8 +19,8 @@ pub struct SkillImportPlan {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublishedSkillImport {
-    pub skill: crate::PublishedSkillPackageRecord,
-    pub blobs: Vec<crate::PublishedBlobRecord>,
+    pub skill: crate::skill_package::PublishedSkillPackageRecord,
+    pub blobs: Vec<crate::blob_store::PublishedBlobRecord>,
 }
 
 impl SkillImportPlan {
@@ -47,7 +47,7 @@ impl SkillImportPlan {
             )));
         }
         let package_name = match package_name {
-            Some(package_name) => crate::validate_record_name(package_name)?,
+            Some(package_name) => crate::operation_store::validate_record_name(package_name)?,
             None => {
                 let inferred_name = skill_dir
                     .file_name()
@@ -58,7 +58,7 @@ impl SkillImportPlan {
                             skill_dir.display()
                         ))
                     })?;
-                crate::validate_record_name(inferred_name)?
+                crate::operation_store::validate_record_name(inferred_name)?
             }
         };
         let mut files = Vec::new();
@@ -134,7 +134,8 @@ impl SkillImportPlan {
             }
         }
 
-        let mut entry = crate::SkillPackageEntry::from_skill_body(skill_dir, compiled_body)?;
+        let mut entry =
+            crate::skill_package::SkillPackageEntry::from_skill_body(skill_dir, compiled_body)?;
         if !omitted_scripts.is_empty() {
             entry
                 .description
@@ -142,12 +143,12 @@ impl SkillImportPlan {
             entry.description.push_str(&omitted_scripts.join(", "));
             entry.description.push('.');
         }
-        let package = crate::SkillPackage::from_entries(&package_name, vec![entry])?;
+        let package = crate::skill_package::SkillPackage::from_entries(&package_name, vec![entry])?;
         let assets = asset_sources
             .into_iter()
             .enumerate()
             .map(|(index, (relative_path, source_path, bytes))| {
-                let hash = crate::wasm_sha256(&bytes);
+                let hash = crate::operation_store::wasm_sha256(&bytes);
                 SkillImportAsset {
                     relative_path,
                     resource_name: asset_resource_name(&package_name, index + 1),
@@ -168,7 +169,9 @@ impl SkillImportPlan {
     }
 
     pub fn artifact_hash(&self) -> crate::VerletResult<String> {
-        Ok(crate::wasm_sha256(&self.package.to_artifact_bytes()?))
+        Ok(crate::operation_store::wasm_sha256(
+            &self.package.to_artifact_bytes()?,
+        ))
     }
 
     pub fn pinned_ref(&self) -> crate::VerletResult<String> {
@@ -200,8 +203,8 @@ impl SkillImportPlan {
 
     pub fn publish(
         &self,
-        skill_registry: &crate::LocalSkillRegistry,
-        blob_registry: &crate::LocalBlobRegistry,
+        skill_registry: &crate::skill_package::LocalSkillRegistry,
+        blob_registry: &crate::blob_store::LocalBlobRegistry,
     ) -> crate::VerletResult<PublishedSkillImport> {
         let skill = skill_registry.publish_package(self.package.clone())?;
         let mut blobs = Vec::with_capacity(self.assets.len());
@@ -599,8 +602,8 @@ Original body.
         );
         write(&skill_dir.join("assets/payload.txt"), b"same payload\n");
         let plan = crate::skill_import::SkillImportPlan::from_directory(&skill_dir, None).unwrap();
-        let skills = crate::LocalSkillRegistry::new(root.join("skills"));
-        let blobs = crate::LocalBlobRegistry::new(root.join("blobs"));
+        let skills = crate::skill_package::LocalSkillRegistry::new(root.join("skills"));
+        let blobs = crate::blob_store::LocalBlobRegistry::new(root.join("blobs"));
 
         let first = plan.publish(&skills, &blobs).unwrap();
         let second = plan.publish(&skills, &blobs).unwrap();

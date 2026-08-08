@@ -154,7 +154,7 @@ impl LocalOperationRegistry {
             verlet_wasm::WasmRuntimeArtifact::bytes(bytes.clone()),
         )
         .with_capability_grants(request.capability_grants.clone());
-        let validation = verlet_wasm::WasmRuntimeFactory::new(validation_config)?
+        let validation = verlet_wasm::runner::WasmRuntimeFactory::new(validation_config)?
             .validate_operation_artifact()
             .await?;
         validate_required_grants(&name, &validation, &request.capability_grants)?;
@@ -511,7 +511,7 @@ impl LocalOperationRegistry {
         record: &PublishedOperationRecord,
     ) -> crate::VerletResult<verlet_wasm::WasmRuntimeConfig> {
         let config = self.load_runtime_config_for_published_record(record)?;
-        let manifest = verlet_wasm::WasmRuntimeFactory::new(config.clone())?
+        let manifest = verlet_wasm::runner::WasmRuntimeFactory::new(config.clone())?
             .validate_operation_artifact()
             .await?;
         if manifest != record.manifest {

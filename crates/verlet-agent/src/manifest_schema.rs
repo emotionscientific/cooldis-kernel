@@ -148,7 +148,7 @@ impl AgentManifestSchema {
     /// shapes, ref shapes, override allowlist keys. Field-level shape errors
     /// are already rejected at parse time.
     pub fn validate(&self) -> crate::VerletResult<()> {
-        verlet_operations::validate_record_name(&self.identity.name)?;
+        verlet_operations::operation_store::validate_record_name(&self.identity.name)?;
         if let Some(namespace) = &self.identity.namespace {
             validate_namespace(namespace)?;
         }
@@ -177,7 +177,7 @@ impl AgentManifestSchema {
         }
         let mut model_ids = std::collections::BTreeSet::new();
         for profile in &self.model_profiles {
-            verlet_operations::validate_record_name(&profile.id)?;
+            verlet_operations::operation_store::validate_record_name(&profile.id)?;
             if !model_ids.insert(profile.id.clone()) {
                 return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "duplicate model profile id {:?}",
@@ -233,7 +233,7 @@ impl AgentManifestSchema {
         for tool in &self.tools {
             let (id, reference, grants) = match tool {
                 AgentManifestTool::Bash(tool) => {
-                    verlet_operations::validate_record_name(&tool.id)?;
+                    verlet_operations::operation_store::validate_record_name(&tool.id)?;
                     validate_surface("bash command", &tool.command)?;
                     if !commands.insert(tool.command.clone()) {
                         return Err(crate::VerletAgentError::RuntimeFactory(format!(
@@ -245,7 +245,7 @@ impl AgentManifestSchema {
                     (&tool.id, &tool.operation_ref, &tool.grants)
                 }
                 AgentManifestTool::Direct(tool) => {
-                    verlet_operations::validate_record_name(&tool.id)?;
+                    verlet_operations::operation_store::validate_record_name(&tool.id)?;
                     validate_surface("direct tool_name", &tool.tool_name)?;
                     if !tool_names.insert(tool.tool_name.clone()) {
                         return Err(crate::VerletAgentError::RuntimeFactory(format!(
@@ -257,7 +257,7 @@ impl AgentManifestSchema {
                     (&tool.id, &tool.operation_ref, &tool.grants)
                 }
                 AgentManifestTool::ProtocolImport(tool) => {
-                    verlet_operations::validate_record_name(&tool.id)?;
+                    verlet_operations::operation_store::validate_record_name(&tool.id)?;
                     validate_ref_scheme("protocol tool server_ref", &tool.server_ref, "mcp://")?;
                     if tool
                         .server_ref
@@ -343,7 +343,7 @@ impl AgentManifestSchema {
 
         let mut resource_names = std::collections::BTreeSet::new();
         for resource in &self.resources {
-            verlet_operations::validate_record_name(&resource.name)?;
+            verlet_operations::operation_store::validate_record_name(&resource.name)?;
             if !resource_names.insert(resource.name.clone()) {
                 return Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "duplicate resource name {:?}",
@@ -1376,14 +1376,14 @@ fn validate_ref_scheme(label: &str, value: &str, scheme: &str) -> crate::VerletR
 }
 
 fn validate_skill_resource_ref(value: &str) -> crate::VerletResult<()> {
-    verlet_operations::DeclaredSkillPackageRef::parse(value)
+    verlet_operations::skill_package::DeclaredSkillPackageRef::parse(value)
         .map(|_| ())
         .map_err(|err| crate::VerletAgentError::RuntimeFactory(err.to_string()))
 }
 
 fn validate_artifact_ref(value: &str) -> crate::VerletResult<()> {
     if value.starts_with("skill://") {
-        return verlet_operations::DeclaredSkillPackageRef::parse(value)
+        return verlet_operations::skill_package::DeclaredSkillPackageRef::parse(value)
             .map(|_| ())
             .map_err(|err| crate::VerletAgentError::RuntimeFactory(err.to_string()));
     }
@@ -1401,13 +1401,13 @@ fn validate_artifact_ref(value: &str) -> crate::VerletResult<()> {
 
 fn validate_compile_time_artifact_ref(value: &str) -> crate::VerletResult<()> {
     if value.starts_with("skill://") {
-        return match verlet_operations::DeclaredSkillPackageRef::parse(value)? {
-            verlet_operations::DeclaredSkillPackageRef::Floating { .. } => {
+        return match verlet_operations::skill_package::DeclaredSkillPackageRef::parse(value)? {
+            verlet_operations::skill_package::DeclaredSkillPackageRef::Floating { .. } => {
                 Err(crate::VerletAgentError::RuntimeFactory(format!(
                     "floating skill ref {value:?} resolves only at bind time and must not appear in compile-time resolved_refs"
                 )))
             }
-            verlet_operations::DeclaredSkillPackageRef::Pinned(_) => Ok(()),
+            verlet_operations::skill_package::DeclaredSkillPackageRef::Pinned(_) => Ok(()),
         };
     }
     validate_artifact_ref(value)
@@ -1415,9 +1415,11 @@ fn validate_compile_time_artifact_ref(value: &str) -> crate::VerletResult<()> {
 
 fn content_hash_from_ref(reference: &str) -> Option<String> {
     if reference.starts_with("skill://") {
-        return match verlet_operations::DeclaredSkillPackageRef::parse(reference).ok()? {
-            verlet_operations::DeclaredSkillPackageRef::Floating { .. } => None,
-            verlet_operations::DeclaredSkillPackageRef::Pinned(reference) => {
+        return match verlet_operations::skill_package::DeclaredSkillPackageRef::parse(reference)
+            .ok()?
+        {
+            verlet_operations::skill_package::DeclaredSkillPackageRef::Floating { .. } => None,
+            verlet_operations::skill_package::DeclaredSkillPackageRef::Pinned(reference) => {
                 Some(format!("sha256:{}", reference.artifact_hash))
             }
         };
@@ -1612,7 +1614,7 @@ fn validate_coupling_stream(label: &str, stream: &str) -> crate::VerletResult<()
         return Ok(());
     }
     if let Some(name) = stream.strip_prefix("derived:") {
-        verlet_operations::validate_record_name(name).map_err(|err| {
+        verlet_operations::operation_store::validate_record_name(name).map_err(|err| {
             crate::VerletAgentError::RuntimeFactory(format!(
                 "{label} {stream:?} has invalid derived name: {err}"
             ))
@@ -1772,7 +1774,7 @@ fn validate_context_pipeline(context: &AgentManifestContextPipeline) -> crate::V
     let mut rest_count = 0usize;
     let mut fraction_sum = 0.0f64;
     for source in &context.sources {
-        verlet_operations::validate_record_name(&source.id)?;
+        verlet_operations::operation_store::validate_record_name(&source.id)?;
         if !source_ids.insert(source.id.clone()) {
             return Err(crate::VerletAgentError::RuntimeFactory(format!(
                 "duplicate context source id {:?}",
@@ -1845,7 +1847,7 @@ pub fn validate_namespace(value: &str) -> crate::VerletResult<String> {
         ));
     }
     for segment in trimmed.split('/') {
-        verlet_operations::validate_record_name(segment).map_err(|err| {
+        verlet_operations::operation_store::validate_record_name(segment).map_err(|err| {
             crate::VerletAgentError::RuntimeFactory(format!(
                 "invalid agent namespace segment: {err}"
             ))

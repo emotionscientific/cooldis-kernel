@@ -7,7 +7,7 @@ pub struct TurnContext {
     pub workspace_roots: Vec<std::path::PathBuf>,
     pub model: Option<String>,
     pub provider: Option<String>,
-    pub thinking: Option<crate::ThinkingConfig>,
+    pub thinking: Option<verlet_provider::ThinkingConfig>,
     pub permission_profile: Option<String>,
     pub provider_metadata: std::collections::BTreeMap<String, String>,
     pub metadata: std::collections::BTreeMap<String, String>,
@@ -34,7 +34,7 @@ pub struct TurnContextSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<crate::ThinkingConfig>,
+    pub thinking: Option<verlet_provider::ThinkingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -356,7 +356,7 @@ pub struct TurnInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<crate::ThinkingConfig>,
+    pub thinking: Option<verlet_provider::ThinkingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -454,7 +454,7 @@ impl TurnInput {
         self
     }
 
-    pub fn with_thinking(mut self, thinking: crate::ThinkingConfig) -> Self {
+    pub fn with_thinking(mut self, thinking: verlet_provider::ThinkingConfig) -> Self {
         self.thinking = Some(thinking);
         self
     }
@@ -490,15 +490,15 @@ impl TurnInput {
             .join("\n")
     }
 
-    pub fn canonical_content(&self) -> Vec<crate::kernel::history::CanonicalContent> {
+    pub fn canonical_content(&self) -> Vec<verlet_history::CanonicalContent> {
         self.content
             .iter()
             .filter_map(|content| match content {
                 TurnContent::Text { text } => {
-                    Some(crate::kernel::history::CanonicalContent::text(text.clone()))
+                    Some(verlet_history::CanonicalContent::text(text.clone()))
                 }
                 TurnContent::Image { data, mime_type } => {
-                    Some(crate::kernel::history::CanonicalContent::Image {
+                    Some(verlet_history::CanonicalContent::Image {
                         data: data.clone(),
                         mime_type: mime_type.clone(),
                     })

@@ -2,19 +2,19 @@
 fn context_compilation_is_deterministic_and_reports_drops() {
     let input = compile_input(
         vec![
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::user_text("old"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("old"),
             },
-            crate::SessionEntryKind::CustomContextMessage {
-                message: crate::CanonicalMessage::user_text("hook"),
+            verlet_history::SessionEntryKind::CustomContextMessage {
+                message: verlet_history::CanonicalMessage::user_text("hook"),
             },
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::assistant(
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::assistant(
                     "openai",
-                    crate::ProviderApi::OpenAIResponses,
+                    verlet_history::ProviderApi::OpenAIResponses,
                     "gpt-test",
-                    vec![crate::CanonicalContent::text("abcdef")],
-                    crate::CanonicalStopReason::EndTurn,
+                    vec![verlet_history::CanonicalContent::text("abcdef")],
+                    verlet_history::CanonicalStopReason::EndTurn,
                 ),
             },
         ],
@@ -38,13 +38,13 @@ fn context_compilation_is_deterministic_and_reports_drops() {
 fn synthetic_context_rebuild_preserves_persisted_timestamps() {
     let mut input = compile_input(
         vec![
-            crate::SessionEntryKind::Message {
+            verlet_history::SessionEntryKind::Message {
                 message: user_message_at("old", 100),
             },
-            crate::SessionEntryKind::Compaction {
+            verlet_history::SessionEntryKind::Compaction {
                 summary: "old facts".to_string(),
             },
-            crate::SessionEntryKind::CustomContextMessage {
+            verlet_history::SessionEntryKind::CustomContextMessage {
                 message: user_message_at("persisted hook", 300),
             },
         ],
@@ -91,14 +91,14 @@ fn synthetic_context_rebuild_preserves_persisted_timestamps() {
 fn compaction_entry_replaces_prior_model_visible_context() {
     let input = compile_input(
         vec![
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::user_text("old"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("old"),
             },
-            crate::SessionEntryKind::Compaction {
+            verlet_history::SessionEntryKind::Compaction {
                 summary: "old facts".to_string(),
             },
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::user_text("new"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("new"),
             },
         ],
         crate::kernel::context_compiler::AgentContextCompilePolicy::unbounded(),
@@ -175,8 +175,8 @@ fn static_sources_prepend_system_blocks_in_pipeline_order() {
 #[test]
 fn budget_shared_static_sources_consume_text_budget() {
     let mut input = compile_input(
-        vec![crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::user_text("abcdef"),
+        vec![verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::user_text("abcdef"),
         }],
         crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: None,
@@ -206,8 +206,8 @@ fn budget_shared_static_sources_consume_text_budget() {
 #[test]
 fn fractional_static_sources_are_capped_before_history_budget() {
     let mut input = compile_input(
-        vec![crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::user_text("abcdef"),
+        vec![verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::user_text("abcdef"),
         }],
         crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: None,
@@ -235,8 +235,8 @@ fn fractional_static_sources_are_capped_before_history_budget() {
 #[test]
 fn tiny_static_source_budget_truncates_on_utf8_boundary_without_false_retention() {
     let mut input = compile_input(
-        vec![crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::user_text("abcdef"),
+        vec![verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::user_text("abcdef"),
         }],
         crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: None,
@@ -263,8 +263,8 @@ fn tiny_static_source_budget_truncates_on_utf8_boundary_without_false_retention(
 #[test]
 fn static_source_prefix_that_trims_empty_does_not_consume_message_budget() {
     let mut input = compile_input(
-        vec![crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::user_text("abcdef"),
+        vec![verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::user_text("abcdef"),
         }],
         crate::kernel::context_compiler::AgentContextCompilePolicy {
             max_messages: None,
@@ -289,21 +289,21 @@ fn static_source_prefix_that_trims_empty_does_not_consume_message_budget() {
 }
 
 fn compile_input(
-    kinds: Vec<crate::SessionEntryKind>,
+    kinds: Vec<verlet_history::SessionEntryKind>,
     policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
 ) -> crate::kernel::context_compiler::AgentContextCompileInput {
-    let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
     let entries = kinds
         .into_iter()
-        .map(|kind| crate::SessionEntry::new(coordinates.clone(), None, kind))
+        .map(|kind| verlet_history::SessionEntry::new(coordinates.clone(), None, kind))
         .collect::<Vec<_>>();
-    let thread = crate::ThreadContext::root(coordinates);
+    let thread = verlet_runtime_contracts::ThreadContext::root(coordinates);
     crate::kernel::context_compiler::AgentContextCompileInput {
-        system: vec![crate::SystemBlock::text("system")],
+        system: vec![verlet_provider::SystemBlock::text("system")],
         static_system_sources: Vec::new(),
         session_entries: entries,
         turn_anchor_timestamp_ms: 123,
-        turn_context: crate::TurnContextSnapshot {
+        turn_context: crate::kernel::runtime_host::turn::TurnContextSnapshot {
             turn_id: "turn".to_string(),
             trace_id: "trace".to_string(),
             coordinates: thread.coordinates,
@@ -319,13 +319,13 @@ fn compile_input(
             metadata: std::collections::BTreeMap::new(),
             environment: std::collections::BTreeMap::new(),
             model_visible_context: Vec::new(),
-            budget: crate::TurnBudget::default(),
+            budget: verlet_runtime_contracts::TurnBudget::default(),
             cancellation_requested: false,
         },
         hook_contexts: Vec::new(),
         environment_contexts: Vec::new(),
         attachments: Vec::new(),
-        tools: vec![crate::ToolDefinition::new(
+        tools: vec![verlet_provider::ToolDefinition::new(
             "tool",
             "tool",
             serde_json::json!({"type":"object"}),
@@ -334,38 +334,44 @@ fn compile_input(
     }
 }
 
-fn user_message_at(text: &str, timestamp_ms: i64) -> crate::CanonicalMessage {
-    crate::CanonicalMessage::User {
-        content: vec![crate::CanonicalContent::text(text)],
+fn user_message_at(text: &str, timestamp_ms: i64) -> verlet_history::CanonicalMessage {
+    verlet_history::CanonicalMessage::User {
+        content: vec![verlet_history::CanonicalContent::text(text)],
         timestamp_ms,
     }
 }
 
-fn message_timestamps(messages: &[crate::CanonicalMessage]) -> Vec<i64> {
+fn message_timestamps(messages: &[verlet_history::CanonicalMessage]) -> Vec<i64> {
     messages
         .iter()
         .map(|message| match message {
-            crate::CanonicalMessage::User { timestamp_ms, .. }
-            | crate::CanonicalMessage::Assistant { timestamp_ms, .. }
-            | crate::CanonicalMessage::ToolResult { timestamp_ms, .. } => *timestamp_ms,
+            verlet_history::CanonicalMessage::User { timestamp_ms, .. }
+            | verlet_history::CanonicalMessage::Assistant { timestamp_ms, .. }
+            | verlet_history::CanonicalMessage::ToolResult { timestamp_ms, .. } => *timestamp_ms,
         })
         .collect()
 }
 
-fn static_source(id: &str, content: &str) -> crate::AgentManifestStaticContextSegment {
-    crate::AgentManifestStaticContextSegment {
+fn static_source(
+    id: &str,
+    content: &str,
+) -> crate::agent::manifest_bind::AgentManifestStaticContextSegment {
+    crate::agent::manifest_bind::AgentManifestStaticContextSegment {
         id: id.to_string(),
         assembler: "kernel://assembler/static".to_string(),
         input: id.to_string(),
         pinned: true,
         budget_share: None,
         ref_uri: format!("resource://artifact/sha256:{}", "a".repeat(64)),
-        content_sha256: crate::agent::contracts::sha256_hex(content.as_bytes()),
+        content_sha256: verlet_agent::contracts::sha256_hex(content.as_bytes()),
         content: content.to_string(),
     }
 }
 
-fn budgeted_static_source(id: &str, content: &str) -> crate::AgentManifestStaticContextSegment {
+fn budgeted_static_source(
+    id: &str,
+    content: &str,
+) -> crate::agent::manifest_bind::AgentManifestStaticContextSegment {
     budgeted_static_source_with_share(id, content, 1.0)
 }
 
@@ -373,24 +379,24 @@ fn budgeted_static_source_with_share(
     id: &str,
     content: &str,
     budget_share: f64,
-) -> crate::AgentManifestStaticContextSegment {
-    crate::AgentManifestStaticContextSegment {
+) -> crate::agent::manifest_bind::AgentManifestStaticContextSegment {
+    crate::agent::manifest_bind::AgentManifestStaticContextSegment {
         pinned: false,
         budget_share: Some(budget_share),
         ..static_source(id, content)
     }
 }
 
-fn message_texts(messages: &[crate::CanonicalMessage]) -> Vec<String> {
+fn message_texts(messages: &[verlet_history::CanonicalMessage]) -> Vec<String> {
     messages
         .iter()
         .map(|message| match message {
-            crate::CanonicalMessage::User { content, .. }
-            | crate::CanonicalMessage::Assistant { content, .. }
-            | crate::CanonicalMessage::ToolResult { content, .. } => content
+            verlet_history::CanonicalMessage::User { content, .. }
+            | verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .filter_map(|content| match content {
-                    crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                    verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

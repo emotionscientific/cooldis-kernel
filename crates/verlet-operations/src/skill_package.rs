@@ -50,7 +50,7 @@ impl LocalSkillRegistry {
     }
 
     pub fn load_record(&self, name: &str) -> crate::VerletResult<PublishedSkillPackageRecord> {
-        let name = crate::validate_record_name(name)?;
+        let name = crate::operation_store::validate_record_name(name)?;
         let path = self.record_path(&name)?;
         let bytes = std::fs::read(&path).map_err(|err| {
             crate::VerletOperationsError::RuntimeFactory(format!(
@@ -82,7 +82,7 @@ impl LocalSkillRegistry {
         name: &str,
         artifact_hash: &str,
     ) -> crate::VerletResult<PublishedSkillPackageRecord> {
-        let name = crate::validate_record_name(name)?;
+        let name = crate::operation_store::validate_record_name(name)?;
         validate_skill_hash(artifact_hash)?;
         let path = self.version_record_path(&name, artifact_hash)?;
         let bytes = std::fs::read(&path).map_err(|err| {
@@ -119,7 +119,7 @@ impl LocalSkillRegistry {
     }
 
     pub fn record_path(&self, name: &str) -> crate::VerletResult<std::path::PathBuf> {
-        let name = crate::validate_record_name(name)?;
+        let name = crate::operation_store::validate_record_name(name)?;
         Ok(self.root.join("records").join(format!("{name}.json")))
     }
 
@@ -128,7 +128,7 @@ impl LocalSkillRegistry {
         name: &str,
         artifact_hash: &str,
     ) -> crate::VerletResult<std::path::PathBuf> {
-        let name = crate::validate_record_name(name)?;
+        let name = crate::operation_store::validate_record_name(name)?;
         validate_skill_hash(artifact_hash)?;
         Ok(self
             .root
@@ -187,7 +187,7 @@ impl SkillPackageBlobStore {
     }
 
     fn put(&self, bytes: &[u8]) -> crate::VerletResult<String> {
-        let hash = crate::wasm_sha256(bytes);
+        let hash = crate::operation_store::wasm_sha256(bytes);
         let path = self.artifact_path(&hash)?;
         if path.exists() {
             let existing = std::fs::read(&path).map_err(|err| {
@@ -196,7 +196,7 @@ impl SkillPackageBlobStore {
                     path.display()
                 ))
             })?;
-            if crate::wasm_sha256(&existing) == hash {
+            if crate::operation_store::wasm_sha256(&existing) == hash {
                 return Ok(hash);
             }
             std::fs::remove_file(&path).map_err(|err| {
@@ -285,7 +285,7 @@ impl PublishedSkillPackageRecord {
                 self.schema_version
             )));
         }
-        let name = crate::validate_record_name(&self.name)?;
+        let name = crate::operation_store::validate_record_name(&self.name)?;
         if name != self.name {
             return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package record name {:?} did not normalize to itself",
@@ -301,7 +301,7 @@ impl PublishedSkillPackageRecord {
             )));
         }
         let bytes = self.package.to_artifact_bytes()?;
-        let expected = crate::wasm_sha256(&bytes);
+        let expected = crate::operation_store::wasm_sha256(&bytes);
         if expected != self.active_artifact_hash {
             return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package record {:?} artifact hash mismatch: expected {}, got {}",
@@ -327,7 +327,7 @@ impl SkillPackage {
         skills.sort_by(|left, right| left.name.cmp(&right.name));
         let package = Self {
             schema_version: SKILL_PACKAGE_SCHEMA_VERSION,
-            name: crate::validate_record_name(name)?,
+            name: crate::operation_store::validate_record_name(name)?,
             skills,
         };
         package.validate()?;
@@ -351,7 +351,7 @@ impl SkillPackage {
             )));
         }
         let package_name = match name {
-            Some(name) => crate::validate_record_name(name)?,
+            Some(name) => crate::operation_store::validate_record_name(name)?,
             None => {
                 let inferred = package_dir
                     .file_name()
@@ -362,7 +362,7 @@ impl SkillPackage {
                             package_dir.display()
                         ))
                     })?;
-                crate::validate_record_name(inferred)?
+                crate::operation_store::validate_record_name(inferred)?
             }
         };
         let mut skill_dirs = Vec::new();
@@ -423,7 +423,7 @@ impl SkillPackage {
                 self.schema_version
             )));
         }
-        let name = crate::validate_record_name(&self.name)?;
+        let name = crate::operation_store::validate_record_name(&self.name)?;
         if name != self.name {
             return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "skill package name {:?} did not normalize to itself",
@@ -553,10 +553,10 @@ impl DeclaredSkillPackageRef {
         })?;
         let Some((name, hash)) = body.split_once("@sha256:") else {
             return Ok(Self::Floating {
-                name: crate::validate_record_name(body)?,
+                name: crate::operation_store::validate_record_name(body)?,
             });
         };
-        let name = crate::validate_record_name(name)?;
+        let name = crate::operation_store::validate_record_name(name)?;
         validate_skill_hash(hash)?;
         Ok(Self::Pinned(SkillPackageRef {
             name,

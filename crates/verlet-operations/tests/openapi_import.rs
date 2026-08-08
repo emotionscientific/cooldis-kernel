@@ -36,15 +36,15 @@ fn operation_id_and_fallback_map_to_stable_operation_names() {
         ],
     );
 
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
-    let plan = verlet_operations::OperationImportPlan::from_package(&source).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
+    let plan = verlet_operations::openapi_plan::OperationImportPlan::from_package(&source).unwrap();
 
     assert_eq!(plan.operations[0].name, "searchThings");
     assert_eq!(plan.operations[1].name, "get_users_user_id");
     assert_eq!(plan.operations[1].path_template, "/users/{user-id}");
     assert_eq!(
         plan.operations[1].parameters[0].location,
-        verlet_operations::OperationParameterLocation::Path
+        verlet_operations::openapi_plan::OperationParameterLocation::Path
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -77,10 +77,10 @@ fn duplicate_projected_names_require_aliases() {
         "",
         &[("find", None, None), ("find", None, None)],
     );
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
     assert!(matches!(
-        verlet_operations::OperationImportPlan::from_package(&source),
-        Err(verlet_operations::OpenApiImportError::DuplicateProjectedName { .. })
+        verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::DuplicateProjectedName { .. })
     ));
 
     let package = write_package(
@@ -92,8 +92,8 @@ fn duplicate_projected_names_require_aliases() {
             ("find", Some("find_second"), None),
         ],
     );
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
-    let plan = verlet_operations::OperationImportPlan::from_package(&source).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
+    let plan = verlet_operations::openapi_plan::OperationImportPlan::from_package(&source).unwrap();
     assert_eq!(
         plan.operations
             .iter()
@@ -129,10 +129,10 @@ fn duplicate_projected_names_require_aliases() {
             ("second", Some("find_result"), None),
         ],
     );
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
     assert!(matches!(
-        verlet_operations::OperationImportPlan::from_package(&source),
-        Err(verlet_operations::OpenApiImportError::DuplicateProjectedName { .. })
+        verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::DuplicateProjectedName { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -147,8 +147,8 @@ fn path_query_header_body_and_api_key_auth_lower_into_the_plan() {
         &[("search", None, Some("Search the catalog."))],
     );
 
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
-    let plan = verlet_operations::OperationImportPlan::from_package(&source).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
+    let plan = verlet_operations::openapi_plan::OperationImportPlan::from_package(&source).unwrap();
     let operation = &plan.operations[0];
 
     assert_eq!(
@@ -164,15 +164,15 @@ fn path_query_header_body_and_api_key_auth_lower_into_the_plan() {
         [
             (
                 &"collection".to_string(),
-                &verlet_operations::OperationParameterLocation::Path
+                &verlet_operations::openapi_plan::OperationParameterLocation::Path
             ),
             (
                 &"limit".to_string(),
-                &verlet_operations::OperationParameterLocation::Query
+                &verlet_operations::openapi_plan::OperationParameterLocation::Query
             ),
             (
                 &"x-client".to_string(),
-                &verlet_operations::OperationParameterLocation::Header
+                &verlet_operations::openapi_plan::OperationParameterLocation::Header
             ),
         ]
     );
@@ -214,8 +214,8 @@ fn bearer_auth_uses_the_authorization_header_and_bearer_prefix() {
         &[("search", None, None)],
     );
 
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
-    let plan = verlet_operations::OperationImportPlan::from_package(&source).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
+    let plan = verlet_operations::openapi_plan::OperationImportPlan::from_package(&source).unwrap();
     let auth = &plan.operations[0].secret_headers[0];
     assert_eq!(auth.name, "Authorization");
     assert_eq!(auth.secret, "SEARCH_TOKEN");
@@ -247,10 +247,10 @@ fn import_rejects_credential_header_collisions_and_invalid_secret_names() {
         "[auth]\nscheme = \"apiKey\"\nheader = \"x-api-key\"\nsecret = \"SEARCH_API_KEY\"\n",
         &[("search", None, None)],
     );
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
     assert!(matches!(
-        verlet_operations::OperationImportPlan::from_package(&source),
-        Err(verlet_operations::OpenApiImportError::CredentialHeaderCollision { .. })
+        verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::CredentialHeaderCollision { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 
@@ -262,8 +262,8 @@ fn import_rejects_credential_header_collisions_and_invalid_secret_names() {
         &[("search", None, None)],
     );
     assert!(matches!(
-        verlet_operations::ImportPackageSource::load(package),
-        Err(verlet_operations::OpenApiImportError::InvalidAuthentication { .. })
+        verlet_operations::import_package::ImportPackageSource::load(package),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::InvalidAuthentication { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -283,10 +283,12 @@ fn import_rejects_reserved_or_malformed_header_parameters() {
                 "schema": {"type": "string"}
             }));
         let package = write_package(&root, spec, "", &[("search", None, None)]);
-        let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+        let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
         assert!(matches!(
-            verlet_operations::OperationImportPlan::from_package(&source),
-            Err(verlet_operations::OpenApiImportError::UnsupportedHeaderParameter { .. })
+            verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+            Err(
+                verlet_operations::openapi_plan::OpenApiImportError::UnsupportedHeaderParameter { .. }
+            )
         ));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -306,8 +308,8 @@ fn optional_body_only_operations_expose_an_omittable_body_field() {
     operation["parameters"] = serde_json::json!([]);
     operation["requestBody"]["required"] = serde_json::json!(false);
     let package = write_package(&root, spec, "", &[("search", None, None)]);
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
-    let plan = verlet_operations::OperationImportPlan::from_package(&source).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
+    let plan = verlet_operations::openapi_plan::OperationImportPlan::from_package(&source).unwrap();
     let operation = &plan.operations[0];
 
     assert_eq!(
@@ -334,8 +336,8 @@ fn server_urls_are_canonicalized_and_special_ip_ranges_request_private_grants() 
         "",
         &[("search", None, None)],
     );
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
-    let plan = verlet_operations::OperationImportPlan::from_package(&source).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
+    let plan = verlet_operations::openapi_plan::OperationImportPlan::from_package(&source).unwrap();
     let operation = &plan.operations[0];
     assert_eq!(operation.server_url, "http://127.0.0.1/v1");
     assert_eq!(operation.origin, "http://127.0.0.1");
@@ -353,8 +355,8 @@ fn server_urls_are_canonicalized_and_special_ip_ranges_request_private_grants() 
         "",
         &[("search", None, None)],
     );
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
-    let plan = verlet_operations::OperationImportPlan::from_package(&source).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
+    let plan = verlet_operations::openapi_plan::OperationImportPlan::from_package(&source).unwrap();
     assert!(
         plan.operations[0]
             .required_capabilities
@@ -369,10 +371,10 @@ fn malformed_versions_and_path_templates_fail_closed() {
     let mut spec = mapped_spec();
     spec["openapi"] = serde_json::json!("3.0.not-a-version");
     let package = write_package(&root, spec, "", &[("search", None, None)]);
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
     assert!(matches!(
-        verlet_operations::OperationImportPlan::from_package(&source),
-        Err(verlet_operations::OpenApiImportError::UnsupportedVersion { .. })
+        verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::UnsupportedVersion { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 
@@ -382,10 +384,10 @@ fn malformed_versions_and_path_templates_fail_closed() {
     let operation = paths.remove("/{collection}/search").unwrap();
     paths.insert("not/absolute".to_string(), operation);
     let package = write_package(&root, spec, "", &[("search", None, None)]);
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
     assert!(matches!(
-        verlet_operations::OperationImportPlan::from_package(&source),
-        Err(verlet_operations::OpenApiImportError::InvalidPathTemplate { .. })
+        verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::InvalidPathTemplate { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -400,8 +402,8 @@ fn package_and_operation_names_must_already_be_canonical() {
         &[("search", Some(" search_alias "), None)],
     );
     assert!(matches!(
-        verlet_operations::ImportPackageSource::load(package),
-        Err(verlet_operations::OpenApiImportError::InvalidOperationName { .. })
+        verlet_operations::import_package::ImportPackageSource::load(package),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::InvalidOperationName { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -414,10 +416,12 @@ fn unsupported_auth_callbacks_and_multipart_are_typed_errors() {
             "[auth]\nscheme = {scheme:?}\nheader = \"Authorization\"\nsecret = \"TOKEN\"\n"
         );
         let package = write_package(&root, mapped_spec(), &auth, &[("search", None, None)]);
-        let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+        let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
         assert!(matches!(
-            verlet_operations::OperationImportPlan::from_package(&source),
-            Err(verlet_operations::OpenApiImportError::UnsupportedAuthentication { .. })
+            verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+            Err(
+                verlet_operations::openapi_plan::OpenApiImportError::UnsupportedAuthentication { .. }
+            )
         ));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -426,10 +430,10 @@ fn unsupported_auth_callbacks_and_multipart_are_typed_errors() {
     let mut spec = mapped_spec();
     spec["paths"]["/{collection}/search"]["post"]["callbacks"] = serde_json::json!({"done": {}});
     let package = write_package(&root, spec, "", &[("search", None, None)]);
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
     assert!(matches!(
-        verlet_operations::OperationImportPlan::from_package(&source),
-        Err(verlet_operations::OpenApiImportError::CallbacksUnsupported { .. })
+        verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::CallbacksUnsupported { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 
@@ -446,10 +450,10 @@ fn unsupported_auth_callbacks_and_multipart_are_typed_errors() {
         }
     });
     let package = write_package(&root, spec, "", &[("search", None, None)]);
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
     assert!(matches!(
-        verlet_operations::OperationImportPlan::from_package(&source),
-        Err(verlet_operations::OpenApiImportError::MultipartUnsupported { .. })
+        verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::MultipartUnsupported { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -461,10 +465,10 @@ fn unsupported_schema_keywords_and_spec_hash_mismatches_fail_closed() {
     spec["paths"]["/{collection}/search"]["post"]["requestBody"]["content"]["application/json"]["schema"]
         ["oneOf"] = serde_json::json!([{"type": "object"}, {"type": "string"}]);
     let package = write_package(&root, spec, "", &[("search", None, None)]);
-    let source = verlet_operations::ImportPackageSource::load(package).unwrap();
+    let source = verlet_operations::import_package::ImportPackageSource::load(package).unwrap();
     assert!(matches!(
-        verlet_operations::OperationImportPlan::from_package(&source),
-        Err(verlet_operations::OpenApiImportError::UnsupportedSchema { .. })
+        verlet_operations::openapi_plan::OperationImportPlan::from_package(&source),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::UnsupportedSchema { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 
@@ -483,8 +487,8 @@ fn unsupported_schema_keywords_and_spec_hash_mismatches_fail_closed() {
     )
     .unwrap();
     assert!(matches!(
-        verlet_operations::ImportPackageSource::load(package_path),
-        Err(verlet_operations::OpenApiImportError::SpecHashMismatch { .. })
+        verlet_operations::import_package::ImportPackageSource::load(package_path),
+        Err(verlet_operations::openapi_plan::OpenApiImportError::SpecHashMismatch { .. })
     ));
     let _ = std::fs::remove_dir_all(root);
 }

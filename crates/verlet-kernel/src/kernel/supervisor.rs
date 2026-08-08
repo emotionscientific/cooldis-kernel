@@ -10,20 +10,21 @@ struct SupervisorInner {
 struct TenantRuntime {
     tenant_id: String,
     context: TenantRuntimeContext,
-    host: crate::RuntimeHost,
+    host: crate::kernel::runtime_host::RuntimeHost,
 }
 
 pub struct TenantRegistration {
     pub context: TenantRuntimeContext,
-    pub runtime_factory: std::sync::Arc<dyn crate::AgentRuntimeFactory>,
+    pub runtime_factory:
+        std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
 }
 
 #[derive(Clone)]
 pub struct TenantRuntimeContext {
     tenant_id: String,
     config: TenantRuntimeConfig,
-    session_store: Option<std::sync::Arc<dyn crate::RuntimeStore>>,
-    execution_policy: crate::RuntimeExecutionPolicy,
+    session_store: Option<std::sync::Arc<dyn verlet_history::RuntimeStore>>,
+    execution_policy: crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy,
 }
 
 impl TenantRuntimeContext {
@@ -36,13 +37,14 @@ impl TenantRuntimeContext {
             tenant_id: tenant_id.into(),
             config: TenantRuntimeConfig::local(runtime_home, state_home),
             session_store: None,
-            execution_policy: crate::RuntimeExecutionPolicy::default(),
+            execution_policy:
+                crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy::default(),
         }
     }
 
     pub fn with_session_store(
         mut self,
-        session_store: std::sync::Arc<dyn crate::RuntimeStore>,
+        session_store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
     ) -> Self {
         self.session_store = Some(session_store);
         self
@@ -50,7 +52,7 @@ impl TenantRuntimeContext {
 
     pub fn with_execution_policy(
         mut self,
-        execution_policy: crate::RuntimeExecutionPolicy,
+        execution_policy: crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy,
     ) -> Self {
         self.execution_policy = execution_policy;
         self
@@ -64,7 +66,9 @@ impl TenantRuntimeContext {
         &self.config
     }
 
-    pub fn execution_policy(&self) -> &crate::RuntimeExecutionPolicy {
+    pub fn execution_policy(
+        &self,
+    ) -> &crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy {
         &self.execution_policy
     }
 
@@ -99,7 +103,7 @@ impl TenantRuntimeContext {
         self,
     ) -> (
         TenantRuntimeContext,
-        Option<std::sync::Arc<dyn crate::RuntimeStore>>,
+        Option<std::sync::Arc<dyn verlet_history::RuntimeStore>>,
     ) {
         let session_store = self.session_store.clone();
         (self, session_store)
@@ -113,7 +117,7 @@ pub struct TenantRuntimeContextDescriptor {
     pub state_home: std::path::PathBuf,
     pub codex_home: std::path::PathBuf,
     pub session_history_path: std::path::PathBuf,
-    pub execution_policy: crate::RuntimeExecutionPolicy,
+    pub execution_policy: crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -140,7 +144,7 @@ pub struct ThreadStartRequest {
     pub user_id: String,
     pub session_id: String,
     #[serde(default)]
-    pub topology: crate::ThreadTopology,
+    pub topology: verlet_runtime_contracts::ThreadTopology,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub metadata: std::collections::BTreeMap<String, String>,
 }
@@ -158,7 +162,7 @@ pub struct SupervisorLifecycleSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TenantLifecycleSnapshot {
     pub tenant_id: String,
-    pub records: Vec<crate::ThreadLifecycleRecord>,
+    pub records: Vec<verlet_runtime_contracts::ThreadLifecycleRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -167,7 +171,7 @@ pub struct TenantSnapshot {
     pub config: TenantRuntimeConfig,
     pub context: TenantRuntimeContextDescriptor,
     pub sessions: Vec<SessionSnapshot>,
-    pub runtime: crate::RuntimeHostSnapshot,
+    pub runtime: crate::kernel::runtime_host::runtime_api::RuntimeHostSnapshot,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -189,31 +193,36 @@ impl VerletSupervisor {
     pub async fn register_tenant(
         &self,
         registration: TenantRegistration,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let mut tenants = self.inner.tenants.write().await;
         let tenant_id = registration.context.tenant_id().to_string();
         if tenants.contains_key(&tenant_id) {
-            return Err(crate::VerletError::TenantAlreadyExists(tenant_id));
+            return Err(crate::kernel::runtime_host::VerletError::TenantAlreadyExists(tenant_id));
         }
-        std::fs::create_dir_all(registration.context.runtime_home())
-            .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?;
-        std::fs::create_dir_all(registration.context.state_home())
-            .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?;
-        std::fs::create_dir_all(registration.context.codex_home())
-            .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?;
+        std::fs::create_dir_all(registration.context.runtime_home()).map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(err.to_string())
+        })?;
+        std::fs::create_dir_all(registration.context.state_home()).map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(err.to_string())
+        })?;
+        std::fs::create_dir_all(registration.context.codex_home()).map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(err.to_string())
+        })?;
 
         let (context, provided_session_store) = registration.context.take_session_store();
         let session_store = match provided_session_store {
             Some(store) => store,
             None => std::sync::Arc::new(
-                crate::SqliteSessionStore::open(context.session_history_path())
+                verlet_history_sqlite::SqliteSessionStore::open(context.session_history_path())
                     .await
-                    .map_err(|err| crate::VerletError::History(err.to_string()))?,
-            ) as std::sync::Arc<dyn crate::RuntimeStore>,
+                    .map_err(|err| {
+                        crate::kernel::runtime_host::VerletError::History(err.to_string())
+                    })?,
+            ) as std::sync::Arc<dyn verlet_history::RuntimeStore>,
         };
         let tenant = TenantRuntime {
             tenant_id: tenant_id.clone(),
-            host: crate::RuntimeHost::with_session_store_and_policy(
+            host: crate::kernel::runtime_host::RuntimeHost::with_session_store_and_policy(
                 registration.runtime_factory,
                 session_store,
                 context.execution_policy().clone(),
@@ -227,8 +236,10 @@ impl VerletSupervisor {
     pub async fn set_thread_lifecycle_sink(
         &self,
         tenant_id: &str,
-        sink: Option<std::sync::Arc<dyn crate::ThreadLifecycleSink>>,
-    ) -> crate::VerletResult<()> {
+        sink: Option<
+            std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ThreadLifecycleSink>,
+        >,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -241,7 +252,7 @@ impl VerletSupervisor {
         &self,
         tenant_id: &str,
         dispatcher: Option<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -253,8 +264,10 @@ impl VerletSupervisor {
     pub async fn set_process_handle_ingress(
         &self,
         tenant_id: &str,
-        sink: Option<std::sync::Arc<dyn crate::ProcessHandleIngressSink>>,
-    ) -> crate::VerletResult<()> {
+        sink: Option<
+            std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink>,
+        >,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -269,7 +282,7 @@ impl VerletSupervisor {
         executor: Option<
             std::sync::Arc<dyn crate::daemon::remote_store::placement::RemoteThreadExecutor>,
         >,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -281,16 +294,19 @@ impl VerletSupervisor {
     pub(crate) async fn kernel_control(
         &self,
         tenant_id: &str,
-    ) -> crate::VerletResult<crate::RuntimeKernelControl> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::runtime_host::kernel_control::RuntimeKernelControl,
+    > {
         Ok(self.tenant(tenant_id).await?.host.kernel_control())
     }
 
     pub async fn start_thread(
         &self,
         request: ThreadStartRequest,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         let tenant = self.tenant(&request.tenant_id).await?;
-        let coordinates = crate::ThreadCoordinates::new(
+        let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
             request.tenant_id.clone(),
             request.user_id.clone(),
             request.session_id.clone(),
@@ -308,10 +324,11 @@ impl VerletSupervisor {
     pub(crate) async fn start_thread_with_id(
         &self,
         request: ThreadStartRequest,
-        thread_id: crate::ThreadId,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         let tenant = self.tenant(&request.tenant_id).await?;
-        let coordinates = crate::ThreadCoordinates {
+        let coordinates = verlet_runtime_contracts::ThreadCoordinates {
             tenant_id: request.tenant_id,
             user_id: request.user_id,
             session_id: request.session_id,
@@ -329,8 +346,9 @@ impl VerletSupervisor {
 
     pub async fn load_thread_from_lifecycle(
         &self,
-        record: crate::ThreadLifecycleRecord,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        record: verlet_runtime_contracts::ThreadLifecycleRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         let tenant = self.tenant(&record.coordinates.tenant_id).await?;
         let requested_scope = record.coordinates.scope();
         let topology = record.topology;
@@ -345,15 +363,16 @@ impl VerletSupervisor {
     pub(crate) async fn runtime_store(
         &self,
         tenant_id: &str,
-    ) -> crate::VerletResult<std::sync::Arc<dyn crate::RuntimeStore>> {
+    ) -> crate::kernel::runtime_host::VerletResult<std::sync::Arc<dyn verlet_history::RuntimeStore>>
+    {
         Ok(self.tenant(tenant_id).await?.host.runtime_store())
     }
 
     async fn validate_thread_topology(
         tenant: &TenantRuntime,
-        requested_scope: &crate::ThreadScope,
-        topology: &crate::ThreadTopology,
-    ) -> crate::VerletResult<()> {
+        requested_scope: &verlet_runtime_contracts::ThreadScope,
+        topology: &verlet_runtime_contracts::ThreadTopology,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         for related_thread_id in topology.related_thread_ids() {
             Self::validate_related_thread_scope(tenant, requested_scope, related_thread_id).await?;
         }
@@ -362,21 +381,25 @@ impl VerletSupervisor {
 
     async fn validate_related_thread_scope(
         tenant: &TenantRuntime,
-        requested_scope: &crate::ThreadScope,
-        related_thread_id: crate::ThreadId,
-    ) -> crate::VerletResult<()> {
+        requested_scope: &verlet_runtime_contracts::ThreadScope,
+        related_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let related = tenant
             .host
             .get_thread(related_thread_id)
             .await
-            .map_err(|_| crate::VerletError::RelatedThreadNotFound(related_thread_id))?;
+            .map_err(|_| {
+                crate::kernel::runtime_host::VerletError::RelatedThreadNotFound(related_thread_id)
+            })?;
         let actual_scope = related.context().coordinates.scope();
         if actual_scope != *requested_scope {
-            return Err(crate::VerletError::RelatedThreadScopeMismatch {
-                thread_id: related_thread_id,
-                requested: Box::new(requested_scope.clone()),
-                actual: Box::new(actual_scope),
-            });
+            return Err(
+                crate::kernel::runtime_host::VerletError::RelatedThreadScopeMismatch {
+                    thread_id: related_thread_id,
+                    requested: Box::new(requested_scope.clone()),
+                    actual: Box::new(actual_scope),
+                },
+            );
         }
         Ok(())
     }
@@ -384,8 +407,9 @@ impl VerletSupervisor {
     pub async fn get_thread(
         &self,
         tenant_id: &str,
-        thread_id: crate::ThreadId,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         self.tenant(tenant_id)
             .await?
             .host
@@ -395,8 +419,9 @@ impl VerletSupervisor {
 
     pub async fn get_thread_at(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         let thread = self
             .get_thread(&coordinates.tenant_id, coordinates.thread_id)
             .await?;
@@ -407,8 +432,8 @@ impl VerletSupervisor {
     pub(crate) async fn wait_for_thread_start_reservation(
         &self,
         tenant_id: &str,
-        thread_id: crate::ThreadId,
-    ) -> crate::VerletResult<()> {
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -420,10 +445,10 @@ impl VerletSupervisor {
     pub async fn submit(
         &self,
         tenant_id: &str,
-        thread_id: crate::ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
         input: impl Into<String>,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -434,10 +459,10 @@ impl VerletSupervisor {
     pub async fn submit_turn(
         &self,
         tenant_id: &str,
-        thread_id: crate::ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
-        input: crate::TurnInput,
-    ) -> crate::VerletResult<()> {
+        input: crate::kernel::runtime_host::turn::TurnInput,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -448,11 +473,11 @@ impl VerletSupervisor {
     pub async fn submit_with_mode(
         &self,
         tenant_id: &str,
-        thread_id: crate::ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
         input: impl Into<String>,
-        mode: crate::TurnSubmissionMode,
-    ) -> crate::VerletResult<()> {
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -463,11 +488,11 @@ impl VerletSupervisor {
     pub async fn submit_turn_with_mode(
         &self,
         tenant_id: &str,
-        thread_id: crate::ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,
-        input: crate::TurnInput,
-        mode: crate::TurnSubmissionMode,
-    ) -> crate::VerletResult<()> {
+        input: crate::kernel::runtime_host::turn::TurnInput,
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -477,10 +502,10 @@ impl VerletSupervisor {
 
     pub async fn submit_to(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: impl Into<String>,
         input: impl Into<String>,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(coordinates).await?;
         self.tenant(&coordinates.tenant_id)
             .await?
@@ -491,10 +516,10 @@ impl VerletSupervisor {
 
     pub async fn submit_turn_to(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: impl Into<String>,
-        input: crate::TurnInput,
-    ) -> crate::VerletResult<()> {
+        input: crate::kernel::runtime_host::turn::TurnInput,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(coordinates).await?;
         self.tenant(&coordinates.tenant_id)
             .await?
@@ -505,11 +530,11 @@ impl VerletSupervisor {
 
     pub async fn submit_to_with_mode(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: impl Into<String>,
         input: impl Into<String>,
-        mode: crate::TurnSubmissionMode,
-    ) -> crate::VerletResult<()> {
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(coordinates).await?;
         self.tenant(&coordinates.tenant_id)
             .await?
@@ -520,11 +545,11 @@ impl VerletSupervisor {
 
     pub async fn submit_turn_to_with_mode(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: impl Into<String>,
-        input: crate::TurnInput,
-        mode: crate::TurnSubmissionMode,
-    ) -> crate::VerletResult<()> {
+        input: crate::kernel::runtime_host::turn::TurnInput,
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(coordinates).await?;
         self.tenant(&coordinates.tenant_id)
             .await?
@@ -535,12 +560,12 @@ impl VerletSupervisor {
 
     pub(crate) async fn submit_admitted_turn_to(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: impl Into<String>,
-        input: crate::TurnInput,
-        mode: crate::TurnSubmissionMode,
+        input: crate::kernel::runtime_host::turn::TurnInput,
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
         admission: Option<crate::kernel::admission::AdmissionGateContext>,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(coordinates).await?;
         let tenant = self.tenant(&coordinates.tenant_id).await?;
         crate::kernel::admission::submit_turn(
@@ -556,12 +581,14 @@ impl VerletSupervisor {
 
     pub(crate) async fn reserve_admitted_turn_to(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: impl Into<String>,
-        input: crate::TurnInput,
-        mode: crate::TurnSubmissionMode,
+        input: crate::kernel::runtime_host::turn::TurnInput,
+        mode: verlet_runtime_contracts::TurnSubmissionMode,
         admission: Option<crate::kernel::admission::AdmissionGateContext>,
-    ) -> crate::VerletResult<crate::kernel::runtime_host::ReservedTurnSubmission> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::runtime_host::ReservedTurnSubmission,
+    > {
         self.get_thread_at(coordinates).await?;
         let tenant = self.tenant(&coordinates.tenant_id).await?;
         crate::kernel::admission::reserve_turn(
@@ -577,10 +604,10 @@ impl VerletSupervisor {
 
     pub async fn compact_thread_at(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: impl Into<String>,
         summary: Option<String>,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(coordinates).await?;
         self.tenant(&coordinates.tenant_id)
             .await?
@@ -592,9 +619,9 @@ impl VerletSupervisor {
     pub async fn cancel(
         &self,
         tenant_id: &str,
-        thread_id: crate::ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         reason: impl Into<String>,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -604,9 +631,9 @@ impl VerletSupervisor {
 
     pub async fn cancel_at(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         reason: impl Into<String>,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(coordinates).await?;
         self.tenant(&coordinates.tenant_id)
             .await?
@@ -618,8 +645,8 @@ impl VerletSupervisor {
     pub async fn shutdown_thread(
         &self,
         tenant_id: &str,
-        thread_id: crate::ThreadId,
-    ) -> crate::VerletResult<()> {
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.tenant(tenant_id)
             .await?
             .host
@@ -629,8 +656,8 @@ impl VerletSupervisor {
 
     pub async fn shutdown_thread_at(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-    ) -> crate::VerletResult<()> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(coordinates).await?;
         self.shutdown_thread(&coordinates.tenant_id, coordinates.thread_id)
             .await
@@ -639,11 +666,15 @@ impl VerletSupervisor {
     pub async fn shutdown_tenant(
         &self,
         tenant_id: &str,
-    ) -> crate::VerletResult<Vec<crate::ThreadId>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_runtime_contracts::ThreadId>> {
         self.tenant(tenant_id).await?.host.shutdown_all().await
     }
 
-    pub async fn shutdown_all(&self) -> crate::VerletResult<Vec<(String, Vec<crate::ThreadId>)>> {
+    pub async fn shutdown_all(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Vec<(String, Vec<verlet_runtime_contracts::ThreadId>)>,
+    > {
         let tenants = {
             let tenants = self.inner.tenants.read().await;
             tenants
@@ -662,8 +693,10 @@ impl VerletSupervisor {
     pub async fn children_of(
         &self,
         tenant_id: &str,
-        parent_thread_id: crate::ThreadId,
-    ) -> crate::VerletResult<Vec<crate::RuntimeThreadHandle>> {
+        parent_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Vec<crate::kernel::runtime_host::RuntimeThreadHandle>,
+    > {
         Ok(self
             .tenant(tenant_id)
             .await?
@@ -674,8 +707,10 @@ impl VerletSupervisor {
 
     pub async fn children_of_at(
         &self,
-        parent_coordinates: &crate::ThreadCoordinates,
-    ) -> crate::VerletResult<Vec<crate::RuntimeThreadHandle>> {
+        parent_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Vec<crate::kernel::runtime_host::RuntimeThreadHandle>,
+    > {
         self.tenant(&parent_coordinates.tenant_id)
             .await?
             .host
@@ -685,11 +720,13 @@ impl VerletSupervisor {
 
     pub async fn create_checkpoint_at(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        parent_checkpoint_id: Option<crate::ThreadCheckpointId>,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_checkpoint_id: Option<verlet_runtime_contracts::ThreadCheckpointId>,
         label: Option<String>,
         metadata: std::collections::BTreeMap<String, String>,
-    ) -> crate::VerletResult<crate::ThreadCheckpoint> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+    > {
         self.get_thread_at(coordinates).await?;
         self.tenant(&coordinates.tenant_id)
             .await?
@@ -701,8 +738,9 @@ impl VerletSupervisor {
     pub async fn resume_thread_at(
         &self,
         tenant_id: &str,
-        checkpoint_id: crate::ThreadCheckpointId,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         self.tenant(tenant_id)
             .await?
             .host
@@ -712,9 +750,11 @@ impl VerletSupervisor {
 
     pub async fn checkpoint_at(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        checkpoint_id: crate::ThreadCheckpointId,
-    ) -> crate::VerletResult<crate::ThreadCheckpoint> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+    > {
         self.get_thread_at(coordinates).await?;
         let checkpoint = self
             .tenant(&coordinates.tenant_id)
@@ -723,19 +763,22 @@ impl VerletSupervisor {
             .checkpoint(checkpoint_id)
             .await?;
         if checkpoint.coordinates.thread_id != coordinates.thread_id {
-            return Err(crate::VerletError::ThreadScopeMismatch {
-                thread_id: coordinates.thread_id,
-                requested: Box::new(coordinates.scope()),
-                actual: Box::new(checkpoint.coordinates.scope()),
-            });
+            return Err(
+                crate::kernel::runtime_host::VerletError::ThreadScopeMismatch {
+                    thread_id: coordinates.thread_id,
+                    requested: Box::new(coordinates.scope()),
+                    actual: Box::new(checkpoint.coordinates.scope()),
+                },
+            );
         }
         Ok(checkpoint)
     }
 
     pub async fn resume_thread_from_checkpoint_at(
         &self,
-        checkpoint: crate::ThreadCheckpoint,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        checkpoint: crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         self.tenant(&checkpoint.coordinates.tenant_id)
             .await?
             .host
@@ -745,9 +788,10 @@ impl VerletSupervisor {
 
     pub async fn fork_thread_at(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        checkpoint_id: Option<crate::ThreadCheckpointId>,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        checkpoint_id: Option<verlet_runtime_contracts::ThreadCheckpointId>,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         self.get_thread_at(coordinates).await?;
         self.tenant(&coordinates.tenant_id)
             .await?
@@ -758,8 +802,9 @@ impl VerletSupervisor {
 
     pub async fn fork_thread_from_checkpoint_at(
         &self,
-        checkpoint: crate::ThreadCheckpoint,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        checkpoint: crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         self.tenant(&checkpoint.coordinates.tenant_id)
             .await?
             .host
@@ -769,9 +814,10 @@ impl VerletSupervisor {
 
     pub(crate) async fn fork_thread_from_checkpoint_with_id_at(
         &self,
-        checkpoint: crate::ThreadCheckpoint,
-        child_thread_id: crate::ThreadId,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        checkpoint: crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+        child_thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         self.tenant(&checkpoint.coordinates.tenant_id)
             .await?
             .host
@@ -781,10 +827,10 @@ impl VerletSupervisor {
 
     pub async fn fork_history_by_reference_at(
         &self,
-        source_coordinates: &crate::ThreadCoordinates,
-        target_coordinates: &crate::ThreadCoordinates,
-        base: crate::ThreadBaseRef,
-    ) -> crate::VerletResult<()> {
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        base: verlet_history::ThreadBaseRef,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.get_thread_at(source_coordinates).await?;
         self.get_thread_at(target_coordinates).await?;
         self.tenant(&source_coordinates.tenant_id)
@@ -824,35 +870,44 @@ impl VerletSupervisor {
         SupervisorLifecycleSnapshot { tenants: snapshots }
     }
 
-    async fn tenant(&self, tenant_id: &str) -> crate::VerletResult<std::sync::Arc<TenantRuntime>> {
+    async fn tenant(
+        &self,
+        tenant_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<std::sync::Arc<TenantRuntime>> {
         self.inner
             .tenants
             .read()
             .await
             .get(tenant_id)
             .cloned()
-            .ok_or_else(|| crate::VerletError::TenantNotFound(tenant_id.to_string()))
+            .ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::TenantNotFound(tenant_id.to_string())
+            })
     }
 
     fn validate_thread_scope(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        thread: &crate::RuntimeThreadHandle,
-    ) -> crate::VerletResult<()> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        thread: &crate::kernel::runtime_host::RuntimeThreadHandle,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let requested = coordinates.scope();
         let actual = thread.context().coordinates.scope();
         if requested != actual {
-            return Err(crate::VerletError::ThreadScopeMismatch {
-                thread_id: coordinates.thread_id,
-                requested: Box::new(requested),
-                actual: Box::new(actual),
-            });
+            return Err(
+                crate::kernel::runtime_host::VerletError::ThreadScopeMismatch {
+                    thread_id: coordinates.thread_id,
+                    requested: Box::new(requested),
+                    actual: Box::new(actual),
+                },
+            );
         }
         Ok(())
     }
 }
 
-fn sessions_from_runtime_snapshot(runtime: &crate::RuntimeHostSnapshot) -> Vec<SessionSnapshot> {
+fn sessions_from_runtime_snapshot(
+    runtime: &crate::kernel::runtime_host::runtime_api::RuntimeHostSnapshot,
+) -> Vec<SessionSnapshot> {
     let mut session_counts = std::collections::BTreeMap::<(String, String), usize>::new();
     for thread in &runtime.threads {
         let coordinates = &thread.context.coordinates;

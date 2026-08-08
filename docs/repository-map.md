@@ -41,9 +41,9 @@ crates/verlet-kernel/
 └── tests/                      # kernel integration tests, smoke entrypoints, and fixtures
 ```
 
-External callers can use either the domain namespaces, such as
-`verlet::kernel::runtime_host::RuntimeHost`, or the existing flat re-exports,
-such as `verlet::RuntimeHost`.
+External callers name items through their domain namespace, such as
+`verlet::kernel::runtime_host::RuntimeHost`. There are no flat crate-root
+re-exports.
 
 ## Boundary Rule
 

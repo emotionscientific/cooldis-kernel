@@ -6,11 +6,12 @@ async fn command_hook_handler_reads_json_stdin_and_returns_pre_tool_output() {
             r#"cat >/dev/null; printf '%s' '{"updated_input":{"input":"rewritten"},"additional_context":"ctx"}'"#,
         )
         .with_matcher("echo_search");
-    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
-    let turn_context = crate::TurnContext::new(
-        crate::ThreadContext::root(coordinates),
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let turn_context = crate::kernel::runtime_host::turn::TurnContext::new(
+        verlet_runtime_contracts::ThreadContext::root(coordinates),
         "turn-1",
-        &crate::TurnInput::text("hello"),
+        &crate::kernel::runtime_host::turn::TurnInput::text("hello"),
         tokio_util::sync::CancellationToken::new(),
     );
     let request = crate::agent::hooks::PreToolUseHookRequest {
@@ -38,7 +39,8 @@ async fn command_hook_handler_reads_json_stdin_and_returns_pre_tool_output() {
 
 #[test]
 fn hook_request_serializes_stable_shape() {
-    let coordinates = crate::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
     let request = crate::agent::hooks::HookRequest::SessionStart(
         crate::agent::hooks::SessionStartHookRequest {
             coordinates: coordinates.clone(),

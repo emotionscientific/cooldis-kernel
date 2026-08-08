@@ -158,11 +158,11 @@ impl<S> FaultingRuntimeStore<S> {
     async fn start(
         &self,
         operation: &'static str,
-    ) -> verlet::HistoryResult<Option<AfterAction<String>>> {
+    ) -> verlet_history::HistoryResult<Option<AfterAction<String>>> {
         match self.faults.next(operation) {
             Some(FaultAction::Fail(message)) => match message.strip_prefix("test panic: ") {
                 Some(message) => panic!("{message}"),
-                None => Err(verlet::HistoryError::Storage(message)),
+                None => Err(verlet_history::HistoryError::Storage(message)),
             },
             Some(FaultAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
@@ -175,12 +175,12 @@ impl<S> FaultingRuntimeStore<S> {
     }
 
     async fn finish<T>(
-        result: verlet::HistoryResult<T>,
+        result: verlet_history::HistoryResult<T>,
         after: Option<AfterAction<String>>,
-    ) -> verlet::HistoryResult<T> {
+    ) -> verlet_history::HistoryResult<T> {
         let value = result?;
         match after {
-            Some(AfterAction::Fail(message)) => Err(verlet::HistoryError::Storage(message)),
+            Some(AfterAction::Fail(message)) => Err(verlet_history::HistoryError::Storage(message)),
             Some(AfterAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
                 Ok(value)
@@ -191,13 +191,15 @@ impl<S> FaultingRuntimeStore<S> {
 }
 
 #[async_trait::async_trait]
-impl<S: verlet::RuntimeStore + 'static> verlet::SessionStore for FaultingRuntimeStore<S> {
+impl<S: verlet_history::RuntimeStore + 'static> verlet_history::SessionStore
+    for FaultingRuntimeStore<S>
+{
     async fn append(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-        parent_entry_id: Option<verlet::SessionEntryId>,
-        kind: verlet::SessionEntryKind,
-    ) -> verlet::HistoryResult<verlet::SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         let after = self.start("append").await?;
         Self::finish(
             self.inner.append(coordinates, parent_entry_id, kind).await,
@@ -208,11 +210,11 @@ impl<S: verlet::RuntimeStore + 'static> verlet::SessionStore for FaultingRuntime
 
     async fn append_with_provenance(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-        parent_entry_id: Option<verlet::SessionEntryId>,
-        kind: verlet::SessionEntryKind,
-        provenance: verlet::EventProvenance,
-    ) -> verlet::HistoryResult<verlet::SessionEntry> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_entry_id: Option<verlet_history::SessionEntryId>,
+        kind: verlet_history::SessionEntryKind,
+        provenance: verlet_history::EventProvenance,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         let after = self.start("append_with_provenance").await?;
         Self::finish(
             self.inner
@@ -225,10 +227,10 @@ impl<S: verlet::RuntimeStore + 'static> verlet::SessionStore for FaultingRuntime
 
     async fn append_turn_input(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
-        kind: verlet::SessionEntryKind,
-    ) -> verlet::HistoryResult<verlet::SessionEntry> {
+        kind: verlet_history::SessionEntryKind,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionEntry> {
         let after = self.start("append_turn_input").await?;
         Self::finish(
             self.inner
@@ -241,17 +243,17 @@ impl<S: verlet::RuntimeStore + 'static> verlet::SessionStore for FaultingRuntime
 
     async fn active_leaf(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-    ) -> verlet::HistoryResult<Option<verlet::SessionEntryId>> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntryId>> {
         let after = self.start("active_leaf").await?;
         Self::finish(self.inner.active_leaf(coordinates).await, after).await
     }
 
     async fn select_branch(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-        leaf_entry_id: Option<verlet::SessionEntryId>,
-    ) -> verlet::HistoryResult<()> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        leaf_entry_id: Option<verlet_history::SessionEntryId>,
+    ) -> verlet_history::HistoryResult<()> {
         let after = self.start("select_branch").await?;
         Self::finish(
             self.inner.select_branch(coordinates, leaf_entry_id).await,
@@ -262,18 +264,18 @@ impl<S: verlet::RuntimeStore + 'static> verlet::SessionStore for FaultingRuntime
 
     async fn build_context(
         &self,
-        coordinates: &verlet::ThreadCoordinates,
-    ) -> verlet::HistoryResult<verlet::SessionContext> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<verlet_history::SessionContext> {
         let after = self.start("build_context").await?;
         Self::finish(self.inner.build_context(coordinates).await, after).await
     }
 
     async fn clone_branch(
         &self,
-        source_coordinates: &verlet::ThreadCoordinates,
-        source_leaf: Option<verlet::SessionEntryId>,
-        target_coordinates: &verlet::ThreadCoordinates,
-    ) -> verlet::HistoryResult<Option<verlet::SessionEntryId>> {
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        source_leaf: Option<verlet_history::SessionEntryId>,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_history::HistoryResult<Option<verlet_history::SessionEntryId>> {
         let after = self.start("clone_branch").await?;
         Self::finish(
             self.inner
@@ -286,10 +288,10 @@ impl<S: verlet::RuntimeStore + 'static> verlet::SessionStore for FaultingRuntime
 
     async fn fork_by_reference(
         &self,
-        source_coordinates: &verlet::ThreadCoordinates,
-        target_coordinates: &verlet::ThreadCoordinates,
-        base: verlet::ThreadBaseRef,
-    ) -> verlet::HistoryResult<()> {
+        source_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        base: verlet_history::ThreadBaseRef,
+    ) -> verlet_history::HistoryResult<()> {
         let after = self.start("fork_by_reference").await?;
         Self::finish(
             self.inner
@@ -302,22 +304,24 @@ impl<S: verlet::RuntimeStore + 'static> verlet::SessionStore for FaultingRuntime
 }
 
 #[async_trait::async_trait]
-impl<S: verlet::RuntimeStore + 'static> verlet::EventStore for FaultingRuntimeStore<S> {
+impl<S: verlet_history::RuntimeStore + 'static> verlet_history::EventStore
+    for FaultingRuntimeStore<S>
+{
     async fn append_events(
         &self,
-        stream_id: &verlet::EventStreamId,
-        records: Vec<verlet::NewEventRecord>,
-    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let after = self.start("append_events").await?;
         Self::finish(self.inner.append_events(stream_id, records).await, after).await
     }
 
     async fn append_events_fenced(
         &self,
-        stream_id: &verlet::EventStreamId,
-        expected_next_sequence: verlet::EventSequence,
-        records: Vec<verlet::NewEventRecord>,
-    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let after = self.start("append_events_fenced").await?;
         Self::finish(
             self.inner
@@ -330,9 +334,9 @@ impl<S: verlet::RuntimeStore + 'static> verlet::EventStore for FaultingRuntimeSt
 
     async fn read_events(
         &self,
-        stream_id: &verlet::EventStreamId,
-        from_sequence: Option<verlet::EventSequence>,
-    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        from_sequence: Option<verlet_history::EventSequence>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let after = self.start("read_events").await?;
         Self::finish(
             self.inner.read_events(stream_id, from_sequence).await,
@@ -343,9 +347,9 @@ impl<S: verlet::RuntimeStore + 'static> verlet::EventStore for FaultingRuntimeSt
 
     async fn read_events_after_cursor(
         &self,
-        stream_id: &verlet::EventStreamId,
-        cursor: &verlet::StreamCursorV1,
-    ) -> verlet::HistoryResult<Vec<verlet::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        cursor: &verlet_history::StreamCursorV1,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let after = self.start("read_events_after_cursor").await?;
         Self::finish(
             self.inner.read_events_after_cursor(stream_id, cursor).await,
@@ -356,20 +360,22 @@ impl<S: verlet::RuntimeStore + 'static> verlet::EventStore for FaultingRuntimeSt
 }
 
 #[async_trait::async_trait]
-impl<S: verlet::RuntimeStore + 'static> verlet::ObservationStore for FaultingRuntimeStore<S> {
+impl<S: verlet_history::RuntimeStore + 'static> verlet_history::ObservationStore
+    for FaultingRuntimeStore<S>
+{
     async fn append_observation(
         &self,
-        record: verlet::NewObservationRecord,
-    ) -> verlet::HistoryResult<verlet::ObservationRecord> {
+        record: verlet_history::NewObservationRecord,
+    ) -> verlet_history::HistoryResult<verlet_history::ObservationRecord> {
         let after = self.start("append_observation").await?;
         Self::finish(self.inner.append_observation(record).await, after).await
     }
 
     async fn list_observations(
         &self,
-        scope: &verlet::ThreadCoordinates,
+        scope: &verlet_runtime_contracts::ThreadCoordinates,
         kind: Option<&str>,
-    ) -> verlet::HistoryResult<Vec<verlet::ObservationRecord>> {
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::ObservationRecord>> {
         let after = self.start("list_observations").await?;
         Self::finish(self.inner.list_observations(scope, kind).await, after).await
     }
@@ -458,13 +464,13 @@ impl<C> FaultingProviderClient<C> {
     async fn start(
         &self,
         operation: &'static str,
-    ) -> verlet::ProviderResult<Option<AfterAction<ProviderFailure>>> {
+    ) -> verlet_provider::ProviderResult<Option<AfterAction<ProviderFailure>>> {
         match self.faults.next(operation) {
             Some(FaultAction::Fail(ProviderFailure::Http(message))) => {
-                Err(verlet::ProviderError::Http(message))
+                Err(verlet_provider::ProviderError::Http(message))
             }
             Some(FaultAction::Fail(ProviderFailure::Decode(message))) => {
-                Err(verlet::ProviderError::Decode(message))
+                Err(verlet_provider::ProviderError::Decode(message))
             }
             Some(FaultAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
@@ -477,16 +483,16 @@ impl<C> FaultingProviderClient<C> {
     }
 
     async fn finish<T>(
-        result: verlet::ProviderResult<T>,
+        result: verlet_provider::ProviderResult<T>,
         after: Option<AfterAction<ProviderFailure>>,
-    ) -> verlet::ProviderResult<T> {
+    ) -> verlet_provider::ProviderResult<T> {
         let value = result?;
         match after {
             Some(AfterAction::Fail(ProviderFailure::Http(message))) => {
-                Err(verlet::ProviderError::Http(message))
+                Err(verlet_provider::ProviderError::Http(message))
             }
             Some(AfterAction::Fail(ProviderFailure::Decode(message))) => {
-                Err(verlet::ProviderError::Decode(message))
+                Err(verlet_provider::ProviderError::Decode(message))
             }
             Some(AfterAction::Delay(delay)) => {
                 tokio::time::sleep(delay).await;
@@ -498,23 +504,25 @@ impl<C> FaultingProviderClient<C> {
 }
 
 #[async_trait::async_trait]
-impl<C: verlet::ProviderClient + 'static> verlet::ProviderClient for FaultingProviderClient<C> {
-    fn capabilities(&self) -> Option<verlet::ProviderCapabilityRecord> {
+impl<C: verlet_provider::ProviderClient + 'static> verlet_provider::ProviderClient
+    for FaultingProviderClient<C>
+{
+    fn capabilities(&self) -> Option<verlet_provider::ProviderCapabilityRecord> {
         self.inner.capabilities()
     }
 
     async fn complete(
         &self,
-        request: &verlet::ProviderRequest,
-    ) -> verlet::ProviderResult<verlet::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         let after = self.start("complete").await?;
         Self::finish(self.inner.complete(request).await, after).await
     }
 
     async fn stream(
         &self,
-        request: &verlet::ProviderRequest,
-    ) -> verlet::ProviderResult<Vec<verlet::ProviderStreamEvent>> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<Vec<verlet_provider::ProviderStreamEvent>> {
         let after = self.start("stream").await?;
         Self::finish(self.inner.stream(request).await, after).await
     }
@@ -795,33 +803,34 @@ impl crate::support::fault_plan::FaultPlan {
 
 #[cfg(test)]
 mod tests {
-    use verlet::ProviderClient as _;
-    use verlet::SessionStore as _;
+    use verlet_history::SessionStore as _;
     use verlet_io_core::IngressQueueStore as _;
+    use verlet_provider::ProviderClient as _;
 
     #[tokio::test]
     async fn store_append_after_fault_keeps_durable_effect_and_reports_storage_error() {
-        let inner = std::sync::Arc::new(verlet::InMemorySessionStore::new());
+        let inner = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
         let store = crate::support::fault::FaultingRuntimeStore::new(inner.clone()).fail_nth_after(
             "append",
             1,
             "append committed before disconnect",
         );
-        let coordinates = verlet::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
 
         let error = store
             .append(
                 &coordinates,
                 None,
-                verlet::SessionEntryKind::Message {
-                    message: verlet::CanonicalMessage::user_text("durable input"),
+                verlet_history::SessionEntryKind::Message {
+                    message: verlet_history::CanonicalMessage::user_text("durable input"),
                 },
             )
             .await
             .unwrap_err();
 
         assert!(
-            matches!(error, verlet::HistoryError::Storage(message) if message.contains("disconnect"))
+            matches!(error, verlet_history::HistoryError::Storage(message) if message.contains("disconnect"))
         );
         let context = inner.build_context(&coordinates).await.unwrap();
         assert_eq!(context.entries.len(), 1);
@@ -942,22 +951,22 @@ mod tests {
     struct NeverCalledProvider;
 
     #[async_trait::async_trait]
-    impl verlet::ProviderClient for NeverCalledProvider {
-        fn capabilities(&self) -> Option<verlet::ProviderCapabilityRecord> {
+    impl verlet_provider::ProviderClient for NeverCalledProvider {
+        fn capabilities(&self) -> Option<verlet_provider::ProviderCapabilityRecord> {
             None
         }
 
         async fn complete(
             &self,
-            _request: &verlet::ProviderRequest,
-        ) -> verlet::ProviderResult<verlet::ProviderResponse> {
+            _request: &verlet_provider::ProviderRequest,
+        ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
             panic!("planned provider failure should fire before the inner call")
         }
 
         async fn stream(
             &self,
-            _request: &verlet::ProviderRequest,
-        ) -> verlet::ProviderResult<Vec<verlet::ProviderStreamEvent>> {
+            _request: &verlet_provider::ProviderRequest,
+        ) -> verlet_provider::ProviderResult<Vec<verlet_provider::ProviderStreamEvent>> {
             panic!("planned provider failure should fire before the inner call")
         }
     }
@@ -1000,11 +1009,12 @@ mod tests {
             ],
         };
         let applied = plan.apply(
-            std::sync::Arc::new(verlet::InMemorySessionStore::new()),
+            std::sync::Arc::new(verlet_history::InMemorySessionStore::new()),
             std::sync::Arc::new(DurableAckQueue::default()),
             std::sync::Arc::new(NeverCalledProvider),
         );
-        let coordinates = verlet::ThreadCoordinates::new("tenant", "user", "session");
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
 
         assert!(matches!(
             applied
@@ -1012,12 +1022,12 @@ mod tests {
                 .append(
                     &coordinates,
                     None,
-                    verlet::SessionEntryKind::Message {
-                        message: verlet::CanonicalMessage::user_text("blocked")
+                    verlet_history::SessionEntryKind::Message {
+                        message: verlet_history::CanonicalMessage::user_text("blocked")
                     }
                 )
                 .await,
-            Err(verlet::HistoryError::Storage(_))
+            Err(verlet_history::HistoryError::Storage(_))
         ));
         assert!(matches!(
             applied.queue.complete_ingress("message-1").await,
@@ -1026,13 +1036,13 @@ mod tests {
         assert!(matches!(
             applied
                 .provider
-                .complete(&verlet::ProviderRequest::new(
-                    verlet::ProviderApi::Other("test".to_string()),
+                .complete(&verlet_provider::ProviderRequest::new(
+                    verlet_history::ProviderApi::Other("test".to_string()),
                     "test",
                     "model"
                 ))
                 .await,
-            Err(verlet::ProviderError::Http(_))
+            Err(verlet_provider::ProviderError::Http(_))
         ));
         assert_eq!(applied.process_cuts, vec![plan.directives[3].clone()]);
     }

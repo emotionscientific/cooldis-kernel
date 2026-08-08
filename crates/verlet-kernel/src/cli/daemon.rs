@@ -4,7 +4,9 @@ use std::io::Read as _;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn run_daemon(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_daemon(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -25,13 +27,16 @@ pub(super) async fn run_daemon(mut args: Vec<std::ffi::OsString>) -> crate::Verl
     }
 }
 
-pub(super) async fn daemon_run(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn daemon_run(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_daemon_run_args(args)?;
-    let loaded = crate::load_verlet_daemon_config(options.config_path.as_deref())?;
+    let loaded =
+        crate::daemon::daemon_config::load_verlet_daemon_config(options.config_path.as_deref())?;
     let config = daemon_app_server_config_from_loaded(&loaded)?;
     let listen = config.listen.clone();
 
-    let server = crate::VerletAppServer::new_local(config).await?;
+    let server = crate::adapters::app_server::VerletAppServer::new_local(config).await?;
     let _io_tasks = start_daemon_io(
         &loaded.config.io,
         &loaded.config.sync,
@@ -52,8 +57,8 @@ pub(super) async fn daemon_run(args: Vec<std::ffi::OsString>) -> crate::VerletRe
 }
 
 pub(super) fn daemon_app_server_config_from_loaded(
-    loaded: &crate::LoadedVerletDaemonConfig,
-) -> crate::VerletResult<crate::VerletAppServerConfig> {
+    loaded: &crate::daemon::daemon_config::LoadedVerletDaemonConfig,
+) -> crate::kernel::runtime_host::VerletResult<crate::adapters::app_server::VerletAppServerConfig> {
     loaded.config.validate()?;
     let listen = loaded.config.app_server.listen_addr()?;
     let cwd = match loaded.config.runtime.cwd.clone() {
@@ -62,7 +67,7 @@ pub(super) fn daemon_app_server_config_from_loaded(
             crate::cli::usage_error(format!("failed to read current working directory: {err}"))
         })?,
     };
-    let mut config = crate::VerletAppServerConfig::local(listen, cwd);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, cwd);
     config.apply_daemon_identity_config(&loaded.config.identity);
     if let Some(runtime_home) = loaded.config.runtime.runtime_home.clone() {
         config.runtime_home = runtime_home;
@@ -98,7 +103,7 @@ pub(super) fn daemon_app_server_config_from_loaded(
 
 pub(super) fn daemon_app_server_registry_root(
     path: std::path::PathBuf,
-) -> crate::VerletResult<std::path::PathBuf> {
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     if path.is_absolute() {
         return Ok(path);
     }
@@ -111,12 +116,12 @@ pub(super) fn daemon_app_server_registry_root(
 }
 
 pub(super) async fn start_daemon_io(
-    io: &crate::VerletIoConfig,
+    io: &crate::daemon::daemon_config::VerletIoConfig,
     sync: &crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig,
     daemon_config_path: Option<std::path::PathBuf>,
-    server: &crate::VerletAppServer,
-) -> crate::VerletResult<Vec<tokio::task::JoinHandle<()>>> {
-    let bridge = crate::VerletDaemonIoBridge::from_app_server(server);
+    server: &crate::adapters::app_server::VerletAppServer,
+) -> crate::kernel::runtime_host::VerletResult<Vec<tokio::task::JoinHandle<()>>> {
+    let bridge = crate::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(server);
     let mut tasks = Vec::new();
     // App-server construction already completed the startup recovery fold;
     // install settlement workers before external route listeners.
@@ -166,17 +171,17 @@ pub(super) async fn start_daemon_io(
 pub(super) async fn start_daemon_sync(
     config: &crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig,
     daemon_config_path: Option<std::path::PathBuf>,
-    app_server: &crate::VerletAppServer,
+    app_server: &crate::adapters::app_server::VerletAppServer,
     tasks: &mut Vec<tokio::task::JoinHandle<()>>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let Some(listen) = config.listen_addr()? else {
         return Ok(());
     };
-    let store = crate::SqliteSessionStore::open(app_server.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(app_server.session_store_path())
         .await
-        .map_err(|error| crate::VerletError::History(error.to_string()))?;
-    let clock: std::sync::Arc<dyn crate::DaemonClock> =
-        std::sync::Arc::new(crate::SystemDaemonClock);
+        .map_err(|error| crate::kernel::runtime_host::VerletError::History(error.to_string()))?;
+    let clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock> =
+        std::sync::Arc::new(crate::daemon::clock_route::SystemDaemonClock);
     let authority = std::sync::Arc::new(
         crate::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
             store.clone(),
@@ -210,7 +215,7 @@ pub(super) async fn start_daemon_sync(
             daemon_config_path,
             child_root,
             std::env::current_exe().map_err(|error| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to locate executable for remote placement: {error}"
                 ))
             })?,
@@ -231,12 +236,12 @@ pub(super) async fn start_daemon_sync(
     Ok(())
 }
 
-pub(super) async fn remote_child_run() -> crate::VerletResult<()> {
+pub(super) async fn remote_child_run() -> crate::kernel::runtime_host::VerletResult<()> {
     let mut encoded = Vec::new();
     std::io::stdin()
         .read_to_end(&mut encoded)
         .map_err(|error| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "failed to read remote child bootstrap: {error}"
             ))
         })?;
@@ -244,11 +249,13 @@ pub(super) async fn remote_child_run() -> crate::VerletResult<()> {
         crate::daemon::remote_store::process_executor::RemoteChildBootstrapV1,
     >(&encoded)
     .map_err(|error| {
-        crate::VerletError::RuntimeExecution(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
             "failed to decode remote child bootstrap: {error}"
         ))
     })?;
-    let loaded = crate::load_verlet_daemon_config(bootstrap.daemon_config_path.as_deref())?;
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(
+        bootstrap.daemon_config_path.as_deref(),
+    )?;
     let config = daemon_app_server_config_from_loaded(&loaded)?;
     crate::daemon::remote_store::process_executor::run_remote_child(config, bootstrap).await
 }
@@ -257,11 +264,11 @@ pub(super) async fn remote_child_run() -> crate::VerletResult<()> {
 /// policy. Handle outcomes always require the durable queue even when an
 /// operator has explicitly made a protocol route best-effort direct.
 pub(super) async fn start_thread_handle_ingress(
-    ingress: &crate::VerletIngressConfig,
-    server: &crate::VerletAppServer,
-    bridge: &crate::VerletDaemonIoBridge,
+    ingress: &crate::daemon::daemon_config::VerletIngressConfig,
+    server: &crate::adapters::app_server::VerletAppServer,
+    bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
     tasks: &mut Vec<tokio::task::JoinHandle<()>>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let queue_name = ingress
         .persistence
         .queue_name
@@ -275,10 +282,10 @@ pub(super) async fn start_thread_handle_ingress(
             .await
             .map_err(crate::cli::io_error)?,
     );
-    let store = crate::SqliteSessionStore::open(server.session_store_path())
+    let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
-    let worker = crate::VerletDaemonQueueWorker::new(
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+    let worker = crate::daemon::daemon_io::VerletDaemonQueueWorker::new(
         queue.clone(),
         bridge.clone(),
         "thread-handle-outcome-worker",
@@ -298,11 +305,11 @@ pub(super) async fn start_thread_handle_ingress(
 }
 
 pub(super) async fn route_sink_for_ingress(
-    route: &crate::VerletIoRouteConfig,
-    ingress: &crate::VerletIngressConfig,
-    bridge: &crate::VerletDaemonIoBridge,
+    route: &crate::daemon::daemon_config::VerletIoRouteConfig,
+    ingress: &crate::daemon::daemon_config::VerletIngressConfig,
+    bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
     tasks: &mut Vec<tokio::task::JoinHandle<()>>,
-) -> crate::VerletResult<std::sync::Arc<dyn verlet_io_core::IngressSink>> {
+) -> crate::kernel::runtime_host::VerletResult<std::sync::Arc<dyn verlet_io_core::IngressSink>> {
     let inner: std::sync::Arc<dyn verlet_io_core::IngressSink> = match ingress.persistence.mode {
         verlet_io_core::IngressPersistenceMode::BestEffortDirect => bridge.direct_sink(),
         verlet_io_core::IngressPersistenceMode::DurableQueue => {
@@ -319,7 +326,7 @@ pub(super) async fn route_sink_for_ingress(
                     .await
                     .map_err(crate::cli::io_error)?,
             );
-            let worker = crate::VerletDaemonQueueWorker::new(
+            let worker = crate::daemon::daemon_io::VerletDaemonQueueWorker::new(
                 queue.clone(),
                 bridge.clone(),
                 format!("{}-worker", route.id),
@@ -331,24 +338,29 @@ pub(super) async fn route_sink_for_ingress(
     };
     let (tenant_id, principal_id) = bridge.route_identity();
     Ok(std::sync::Arc::new(
-        crate::RouteIngressSink::with_route_identity(inner, route, tenant_id, principal_id),
+        crate::daemon::daemon_io::RouteIngressSink::with_route_identity(
+            inner,
+            route,
+            tenant_id,
+            principal_id,
+        ),
     ))
 }
 
 pub(super) async fn start_clock_route(
-    route: &crate::VerletIoRouteConfig,
+    route: &crate::daemon::daemon_config::VerletIoRouteConfig,
     sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
-    server: &crate::VerletAppServer,
+    server: &crate::adapters::app_server::VerletAppServer,
     tasks: &mut Vec<tokio::task::JoinHandle<()>>,
-) -> crate::VerletResult<()> {
-    let store = crate::SqliteSessionStore::open(server.session_store_path())
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
-    let clock = crate::VerletDaemonClockRoute::new(
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+    let clock = crate::daemon::clock_route::VerletDaemonClockRoute::new(
         route.id.clone(),
         store,
         sink,
-        std::sync::Arc::new(crate::SystemDaemonClock),
+        std::sync::Arc::new(crate::daemon::clock_route::SystemDaemonClock),
     );
     eprintln!(
         "verlet clock route {} polling active mandates every 30s",
@@ -359,12 +371,12 @@ pub(super) async fn start_clock_route(
 }
 
 pub(super) async fn start_telegram_route(
-    route: &crate::VerletIoRouteConfig,
+    route: &crate::daemon::daemon_config::VerletIoRouteConfig,
     sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
-    bridge: &crate::VerletDaemonIoBridge,
+    bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
     egress_state_dsn: String,
     tasks: &mut Vec<tokio::task::JoinHandle<()>>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let telegram = route.telegram.as_ref().ok_or_else(|| {
         crate::cli::usage_error(format!(
             "telegram route {} requires [daemon.io.routes.telegram]",
@@ -409,8 +421,8 @@ pub(super) async fn start_telegram_route(
             route.id
         ))
     })?;
-    let server = crate::TelegramWebhookServer::bind(
-        crate::TelegramWebhookServerConfig {
+    let server = crate::daemon::daemon_io::TelegramWebhookServer::bind(
+        crate::daemon::daemon_io::TelegramWebhookServerConfig {
             route_id: route.id.clone(),
             listen,
             path: telegram.path.clone(),
@@ -432,7 +444,9 @@ pub(super) async fn start_telegram_route(
     Ok(())
 }
 
-pub(super) async fn daemon_config(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn daemon_config(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty() {
         return Err(crate::cli::usage_error(
             "daemon config requires a subcommand",
@@ -442,7 +456,9 @@ pub(super) async fn daemon_config(mut args: Vec<std::ffi::OsString>) -> crate::V
     match subcommand.to_string_lossy().as_ref() {
         "validate" => {
             let options = parse_daemon_config_validate_args(args)?;
-            let loaded = crate::load_verlet_daemon_config(options.config_path.as_deref())?;
+            let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(
+                options.config_path.as_deref(),
+            )?;
             println!("verlet daemon config ok");
             println!(
                 "config {}",
@@ -464,7 +480,9 @@ pub(super) async fn daemon_config(mut args: Vec<std::ffi::OsString>) -> crate::V
     }
 }
 
-pub(super) async fn daemon_service(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn daemon_service(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty() {
         return Err(crate::cli::usage_error(
             "daemon service requires a subcommand",
@@ -477,21 +495,22 @@ pub(super) async fn daemon_service(mut args: Vec<std::ffi::OsString>) -> crate::
             let spec = daemon_service_spec_from_args(&options)?;
             print!(
                 "{}",
-                crate::render_verlet_daemon_service(options.target, &spec)
+                crate::daemon::daemon_config::render_verlet_daemon_service(options.target, &spec)
             );
             Ok(())
         }
         "install" => {
             let options = parse_daemon_service_print_args(args)?;
             let spec = daemon_service_spec_from_args(&options)?;
-            let path = crate::install_verlet_daemon_service(options.target, &spec)?;
+            let path =
+                crate::daemon::daemon_config::install_verlet_daemon_service(options.target, &spec)?;
             println!("installed {}", path.display());
             println!("service was not started automatically");
             match options.target {
-                crate::VerletDaemonServiceTarget::Launchd => {
+                crate::daemon::daemon_config::VerletDaemonServiceTarget::Launchd => {
                     println!("start with: launchctl load {}", path.display());
                 }
-                crate::VerletDaemonServiceTarget::Systemd => {
+                crate::daemon::daemon_config::VerletDaemonServiceTarget::Systemd => {
                     println!("start with: systemctl --user enable --now {}", spec.label);
                 }
             }
@@ -499,7 +518,10 @@ pub(super) async fn daemon_service(mut args: Vec<std::ffi::OsString>) -> crate::
         }
         "uninstall" => {
             let options = parse_daemon_service_uninstall_args(args)?;
-            match crate::uninstall_verlet_daemon_service(options.target, &options.label)? {
+            match crate::daemon::daemon_config::uninstall_verlet_daemon_service(
+                options.target,
+                &options.label,
+            )? {
                 Some(path) => println!("removed {}", path.display()),
                 None => println!("service not installed for label {}", options.label),
             }
@@ -513,9 +535,10 @@ pub(super) async fn daemon_service(mut args: Vec<std::ffi::OsString>) -> crate::
 
 pub(super) fn daemon_service_spec_from_args(
     options: &DaemonServicePrintArgs,
-) -> crate::VerletResult<crate::VerletDaemonServiceSpec> {
-    crate::load_verlet_daemon_config(Some(&options.config_path))?;
-    let mut spec = crate::VerletDaemonServiceSpec::new(
+) -> crate::kernel::runtime_host::VerletResult<crate::daemon::daemon_config::VerletDaemonServiceSpec>
+{
+    crate::daemon::daemon_config::load_verlet_daemon_config(Some(&options.config_path))?;
+    let mut spec = crate::daemon::daemon_config::VerletDaemonServiceSpec::new(
         options.executable.clone(),
         options.config_path.clone(),
     )
@@ -538,7 +561,7 @@ pub(super) struct DaemonConfigValidateArgs {
 
 #[derive(Debug)]
 pub(super) struct DaemonServicePrintArgs {
-    target: crate::VerletDaemonServiceTarget,
+    target: crate::daemon::daemon_config::VerletDaemonServiceTarget,
     config_path: std::path::PathBuf,
     executable: std::path::PathBuf,
     label: String,
@@ -547,13 +570,13 @@ pub(super) struct DaemonServicePrintArgs {
 
 #[derive(Debug)]
 pub(super) struct DaemonServiceUninstallArgs {
-    target: crate::VerletDaemonServiceTarget,
+    target: crate::daemon::daemon_config::VerletDaemonServiceTarget,
     label: String,
 }
 
 pub(super) fn parse_daemon_run_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<DaemonRunArgs> {
+) -> crate::kernel::runtime_host::VerletResult<DaemonRunArgs> {
     let mut config_path = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -575,7 +598,7 @@ pub(super) fn parse_daemon_run_args(
 
 pub(super) fn parse_daemon_config_validate_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<DaemonConfigValidateArgs> {
+) -> crate::kernel::runtime_host::VerletResult<DaemonConfigValidateArgs> {
     let mut config_path = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -597,7 +620,7 @@ pub(super) fn parse_daemon_config_validate_args(
 
 pub(super) fn parse_daemon_service_print_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<DaemonServicePrintArgs> {
+) -> crate::kernel::runtime_host::VerletResult<DaemonServicePrintArgs> {
     let mut target = default_daemon_service_target();
     let mut config_path = None;
     let mut executable = None;
@@ -635,11 +658,13 @@ pub(super) fn parse_daemon_service_print_args(
 
     let config_path = match config_path {
         Some(path) => path,
-        None => crate::discover_verlet_daemon_config_path()?.ok_or_else(|| {
-            crate::cli::usage_error(
-                "daemon service print requires --config when no verlet.toml exists",
-            )
-        })?,
+        None => crate::daemon::daemon_config::discover_verlet_daemon_config_path()?.ok_or_else(
+            || {
+                crate::cli::usage_error(
+                    "daemon service print requires --config when no verlet.toml exists",
+                )
+            },
+        )?,
     };
     let executable = match executable {
         Some(path) => path,
@@ -659,7 +684,7 @@ pub(super) fn parse_daemon_service_print_args(
 
 pub(super) fn parse_daemon_service_uninstall_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<DaemonServiceUninstallArgs> {
+) -> crate::kernel::runtime_host::VerletResult<DaemonServiceUninstallArgs> {
     let mut target = default_daemon_service_target();
     let mut label = "com.verlet.daemon".to_string();
     let mut iter = args.into_iter();
@@ -683,25 +708,28 @@ pub(super) fn parse_daemon_service_uninstall_args(
 
 fn parse_daemon_service_target(
     value: &str,
-) -> crate::VerletResult<crate::VerletDaemonServiceTarget> {
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::daemon::daemon_config::VerletDaemonServiceTarget,
+> {
     value.parse().map_err(|_| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "unknown daemon service target {value:?}; expected launchd or systemd"
         ))
     })
 }
 
-pub(super) fn default_daemon_service_target() -> crate::VerletDaemonServiceTarget {
+pub(super) fn default_daemon_service_target()
+-> crate::daemon::daemon_config::VerletDaemonServiceTarget {
     if cfg!(target_os = "macos") {
-        crate::VerletDaemonServiceTarget::Launchd
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Launchd
     } else {
-        crate::VerletDaemonServiceTarget::Systemd
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Systemd
     }
 }
 
 pub(super) fn load_daemon_provider_config(
-    config: &crate::VerletProviderConfig,
-) -> crate::VerletResult<crate::cli::console::ChatProviderConfig> {
+    config: &crate::daemon::daemon_config::VerletProviderConfig,
+) -> crate::kernel::runtime_host::VerletResult<crate::cli::console::ChatProviderConfig> {
     match config.provider_name() {
         "local" | "local_offline" | "offline" => Ok(crate::cli::console::ChatProviderConfig::Local),
         "bifrost" | "bifrost_openai" => {
@@ -709,12 +737,12 @@ pub(super) fn load_daemon_provider_config(
                 .env_file
                 .clone()
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_DAEMON_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_BIFROST_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -756,7 +784,9 @@ pub(super) fn load_daemon_provider_config(
                 .or_else(|| {
                     crate::cli::console::env_or_file("VERLET_BIFROST_OPENAI_MODEL", &file_env)
                 })
-                .unwrap_or_else(|| crate::APP_SERVER_BIFROST_MODEL.to_string());
+                .unwrap_or_else(|| {
+                    crate::adapters::app_server::APP_SERVER_BIFROST_MODEL.to_string()
+                });
             Ok(crate::cli::console::ChatProviderConfig::BifrostOpenAI {
                 base_url,
                 api_key,
@@ -770,12 +800,12 @@ pub(super) fn load_daemon_provider_config(
                 .env_file
                 .clone()
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_DAEMON_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_ANTHROPIC_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_ANTHROPIC_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -809,7 +839,9 @@ pub(super) fn load_daemon_provider_config(
                 .clone()
                 .or_else(|| crate::cli::console::env_or_file("VERLET_ANTHROPIC_MODEL", &file_env))
                 .or_else(|| crate::cli::console::env_or_file("ANTHROPIC_MODEL", &file_env))
-                .unwrap_or_else(|| crate::APP_SERVER_ANTHROPIC_MODEL.to_string());
+                .unwrap_or_else(|| {
+                    crate::adapters::app_server::APP_SERVER_ANTHROPIC_MODEL.to_string()
+                });
             Ok(crate::cli::console::ChatProviderConfig::AnthropicMessages {
                 base_url,
                 api_key,
@@ -823,17 +855,17 @@ pub(super) fn load_daemon_provider_config(
                 .env_file
                 .clone()
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_DAEMON_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_BEDROCK_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_BEDROCK_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -886,7 +918,9 @@ pub(super) fn load_daemon_provider_config(
                 .or_else(|| {
                     crate::cli::console::env_or_file("ANTHROPIC_DEFAULT_SONNET_MODEL", &file_env)
                 })
-                .unwrap_or_else(|| crate::APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string());
+                .unwrap_or_else(|| {
+                    crate::adapters::app_server::APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string()
+                });
             let stream = config.stream.unwrap_or(true);
             Ok(crate::cli::console::ChatProviderConfig::AnthropicBedrock {
                 region,
@@ -913,21 +947,23 @@ pub(super) fn load_daemon_provider_config(
                 .env_file
                 .clone()
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_DAEMON_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
                     if openai_compatible {
-                        crate::env_compat::var("VERLET_OPENAI_COMPATIBLE_ENV_FILE")
-                            .ok()
-                            .map(std::path::PathBuf::from)
+                        verlet_runtime_contracts::env_compat::var(
+                            "VERLET_OPENAI_COMPATIBLE_ENV_FILE",
+                        )
+                        .ok()
+                        .map(std::path::PathBuf::from)
                     } else {
                         None
                     }
                 })
                 .or_else(|| {
-                    crate::env_compat::var("VERLET_BIFROST_ENV_FILE")
+                    verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -954,7 +990,9 @@ pub(super) fn load_daemon_provider_config(
                     });
                 return Ok(
                     crate::cli::console::ChatProviderConfig::CatalogOpenAIChatCompletions {
-                        provider_id: crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string(),
+                        provider_id:
+                            crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER
+                                .to_string(),
                         model,
                         max_tokens: config.max_tokens.unwrap_or(4096),
                         stream: config.stream.unwrap_or(true),
@@ -1032,7 +1070,9 @@ pub(super) fn load_daemon_provider_config(
                     .or_else(|| {
                         crate::cli::console::env_or_file("OPENAI_COMPATIBLE_MODEL", &file_env)
                     })
-                    .unwrap_or_else(|| crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string())
+                    .unwrap_or_else(|| {
+                        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string()
+                    })
             } else {
                 config
                     .model
@@ -1046,7 +1086,9 @@ pub(super) fn load_daemon_provider_config(
                     .or_else(|| {
                         crate::cli::console::env_or_file("VERLET_BIFROST_OPENAI_MODEL", &file_env)
                     })
-                    .unwrap_or_else(|| crate::APP_SERVER_BIFROST_MODEL.to_string())
+                    .unwrap_or_else(|| {
+                        crate::adapters::app_server::APP_SERVER_BIFROST_MODEL.to_string()
+                    })
             };
             Ok(
                 crate::cli::console::ChatProviderConfig::OpenAIChatCompletions {
@@ -1078,7 +1120,7 @@ pub(super) fn provider_is_openai_compatible(provider: &str) -> bool {
 
 pub(super) fn chat_completions_provider_name(provider: &str) -> String {
     if provider_is_openai_compatible(provider) {
-        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string()
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string()
     } else {
         "openai_chat_completions".to_string()
     }

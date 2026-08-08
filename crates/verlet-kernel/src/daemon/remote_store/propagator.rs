@@ -17,7 +17,7 @@
 //!
 //! [`LeaseFenceDecision::Superseded`]: crate::daemon::remote_store::lease::LeaseFenceDecision::Superseded
 
-use crate::EventStore as _;
+use verlet_history::EventStore as _;
 
 const DEFAULT_PUSH_BATCH_SIZE: usize = 128;
 const MIN_RENEWAL_MARGIN_MS: i64 = 1_000;
@@ -30,10 +30,10 @@ const MIN_RENEWAL_MARGIN_MS: i64 = 1_000;
 /// compares the durable records before adopting the already-applied tail.
 #[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamPropagationState {
-    pub stream_id: crate::EventStreamId,
+    pub stream_id: verlet_history::EventStreamId,
     pub lease: crate::daemon::remote_store::lease::StreamLeaseGrantV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pushed_through: Option<crate::EventSequence>,
+    pub pushed_through: Option<verlet_history::EventSequence>,
 }
 
 impl std::fmt::Debug for StreamPropagationState {
@@ -53,7 +53,7 @@ pub enum PropagationStep {
     Converged,
     /// A batch was accepted; `pushed_through` advanced to the acked tail.
     Advanced {
-        pushed_through: crate::EventSequence,
+        pushed_through: verlet_history::EventSequence,
     },
     /// The endpoint was unreachable or failed transiently; retry with
     /// backoff, keep appending locally.
@@ -70,7 +70,7 @@ pub enum PropagationStep {
     /// the expected position. Terminal and fail-closed: neither tail may be
     /// silently adopted over the other.
     StreamDiverged {
-        actual_next_sequence: crate::EventSequence,
+        actual_next_sequence: verlet_history::EventSequence,
     },
 }
 
@@ -94,7 +94,7 @@ pub trait StreamPropagator: Send + Sync {
     async fn propagate_once(
         &self,
         state: &mut StreamPropagationState,
-    ) -> crate::VerletResult<PropagationStep>;
+    ) -> crate::kernel::runtime_host::VerletResult<PropagationStep>;
 }
 
 /// SQLite persistence for a child's per-stream propagation positions.
@@ -104,7 +104,7 @@ pub trait StreamPropagator: Send + Sync {
 /// before [`PropagationStep::Advanced`] or renewed progress is returned.
 #[derive(Clone)]
 pub struct SqlitePropagationStateStore {
-    store: crate::SqliteSessionStore,
+    store: verlet_history_sqlite::SqliteSessionStore,
 }
 
 impl std::fmt::Debug for SqlitePropagationStateStore {
@@ -115,7 +115,9 @@ impl std::fmt::Debug for SqlitePropagationStateStore {
 }
 
 impl SqlitePropagationStateStore {
-    pub async fn new(store: crate::SqliteSessionStore) -> crate::VerletResult<Self> {
+    pub async fn new(
+        store: verlet_history_sqlite::SqliteSessionStore,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let state_store = Self { store };
         state_store.init_schema().await?;
         Ok(state_store)
@@ -123,8 +125,8 @@ impl SqlitePropagationStateStore {
 
     pub async fn load(
         &self,
-        stream_id: &crate::EventStreamId,
-    ) -> crate::VerletResult<Option<StreamPropagationState>> {
+        stream_id: &verlet_history::EventStreamId,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<StreamPropagationState>> {
         let database = self.store.sqlite_database();
         let connection = database.connect().await.map_err(storage_error)?;
         let mut rows = connection
@@ -140,18 +142,25 @@ impl SqlitePropagationStateStore {
             .map(|row| {
                 let encoded = row.get::<String>(0).map_err(storage_error)?;
                 serde_json::from_str(&encoded).map_err(|error| {
-                    crate::VerletError::History(format!("decode stream propagation state: {error}"))
+                    crate::kernel::runtime_host::VerletError::History(format!(
+                        "decode stream propagation state: {error}"
+                    ))
                 })
             })
             .transpose()
     }
 
-    pub async fn persist(&self, state: &StreamPropagationState) -> crate::VerletResult<()> {
+    pub async fn persist(
+        &self,
+        state: &StreamPropagationState,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let state = state.clone();
         let store = self.store.clone();
         cancellation_safe(async move {
             let encoded = serde_json::to_string(&state).map_err(|error| {
-                crate::VerletError::History(format!("encode stream propagation state: {error}"))
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "encode stream propagation state: {error}"
+                ))
             })?;
             let database = store.sqlite_database();
             let mut connection = database.connect().await.map_err(storage_error)?;
@@ -174,7 +183,7 @@ impl SqlitePropagationStateStore {
         .await
     }
 
-    async fn init_schema(&self) -> crate::VerletResult<()> {
+    async fn init_schema(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         let store = self.store.clone();
         cancellation_safe(async move {
             let database = store.sqlite_database();
@@ -210,13 +219,13 @@ impl SqlitePropagationStateStore {
 /// immediately on [`PropagationStep::LeaseFenced`] or
 /// [`PropagationStep::StreamDiverged`].
 pub struct LocalFirstStreamPropagator {
-    local_store: crate::SqliteSessionStore,
+    local_store: verlet_history_sqlite::SqliteSessionStore,
     push_gate: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncPushGate>,
     pull_source: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncPullSource>,
     lease_renewer: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncLeaseRenewer>,
     state_store: std::sync::Arc<SqlitePropagationStateStore>,
     bearer_token: String,
-    clock: std::sync::Arc<dyn crate::DaemonClock>,
+    clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
     batch_size: usize,
 }
 
@@ -231,13 +240,13 @@ impl std::fmt::Debug for LocalFirstStreamPropagator {
 impl LocalFirstStreamPropagator {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        local_store: crate::SqliteSessionStore,
+        local_store: verlet_history_sqlite::SqliteSessionStore,
         push_gate: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncPushGate>,
         pull_source: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncPullSource>,
         lease_renewer: std::sync::Arc<dyn crate::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store: std::sync::Arc<SqlitePropagationStateStore>,
         bearer_token: String,
-        clock: std::sync::Arc<dyn crate::DaemonClock>,
+        clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
     ) -> Self {
         Self {
             local_store,
@@ -259,7 +268,7 @@ impl LocalFirstStreamPropagator {
     async fn renew_if_due(
         &self,
         state: &mut StreamPropagationState,
-    ) -> crate::VerletResult<Option<PropagationStep>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Option<PropagationStep>> {
         let lease_duration_ms = state
             .lease
             .expires_at_ms
@@ -276,7 +285,7 @@ impl LocalFirstStreamPropagator {
     async fn renew(
         &self,
         state: &mut StreamPropagationState,
-    ) -> crate::VerletResult<Option<PropagationStep>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Option<PropagationStep>> {
         let renewed = match self.lease_renewer.renew_lease(&self.bearer_token).await {
             Ok(renewed) => renewed,
             Err(_) => return Ok(Some(PropagationStep::EndpointUnavailable)),
@@ -295,27 +304,29 @@ impl LocalFirstStreamPropagator {
     async fn reconcile_sequence_conflict(
         &self,
         state: &mut StreamPropagationState,
-        batch: &[crate::StreamRecordEnvelopeV1],
-        actual_next_sequence: crate::EventSequence,
-    ) -> crate::VerletResult<PropagationStep> {
+        batch: &[verlet_history::StreamRecordEnvelopeV1],
+        actual_next_sequence: verlet_history::EventSequence,
+    ) -> crate::kernel::runtime_host::VerletResult<PropagationStep> {
         let expected = batch[0].sequence;
         let cursor = if expected.get() == 1 {
             None
         } else {
-            let previous_sequence = crate::EventSequence::new(expected.get() - 1);
+            let previous_sequence = verlet_history::EventSequence::new(expected.get() - 1);
             let previous = self
                 .local_store
                 .read_events(&state.stream_id, Some(previous_sequence))
                 .await
-                .map_err(|error| crate::VerletError::History(error.to_string()))?
+                .map_err(|error| {
+                    crate::kernel::runtime_host::VerletError::History(error.to_string())
+                })?
                 .into_iter()
                 .next()
                 .ok_or_else(|| {
-                    crate::VerletError::History(
+                    crate::kernel::runtime_host::VerletError::History(
                         "local propagation cursor record is missing".to_string(),
                     )
                 })?;
-            Some(crate::StreamCursorV1::from_event(&previous))
+            Some(verlet_history::StreamCursorV1::from_event(&previous))
         };
         let remote = match self
             .pull_source
@@ -323,10 +334,12 @@ impl LocalFirstStreamPropagator {
             .await
         {
             Ok(remote) => remote,
-            Err(crate::VerletError::History(message)) if message == "sync pull not authorized" => {
+            Err(crate::kernel::runtime_host::VerletError::History(message))
+                if message == "sync pull not authorized" =>
+            {
                 return Ok(PropagationStep::LeaseFenced);
             }
-            Err(crate::VerletError::History(_)) => {
+            Err(crate::kernel::runtime_host::VerletError::History(_)) => {
                 return Ok(PropagationStep::StreamDiverged {
                     actual_next_sequence,
                 });
@@ -343,7 +356,9 @@ impl LocalFirstStreamPropagator {
                 .local_store
                 .read_events(&state.stream_id, Some(expected))
                 .await
-                .map_err(|error| crate::VerletError::History(error.to_string()))?
+                .map_err(|error| {
+                    crate::kernel::runtime_host::VerletError::History(error.to_string())
+                })?
                 .into_iter()
                 .map(|event| event.to_stream_record_v1())
                 .collect::<Vec<_>>();
@@ -368,9 +383,9 @@ impl StreamPropagator for LocalFirstStreamPropagator {
     async fn propagate_once(
         &self,
         state: &mut StreamPropagationState,
-    ) -> crate::VerletResult<PropagationStep> {
+    ) -> crate::kernel::runtime_host::VerletResult<PropagationStep> {
         if !state.lease.scope.authorizes(&state.stream_id) {
-            return Err(crate::VerletError::History(
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "propagation lease scope does not authorize its stream".to_string(),
             ));
         }
@@ -379,12 +394,14 @@ impl StreamPropagator for LocalFirstStreamPropagator {
         }
         let from_sequence = state
             .pushed_through
-            .map(|sequence| crate::EventSequence::new(sequence.get().saturating_add(1)));
+            .map(|sequence| verlet_history::EventSequence::new(sequence.get().saturating_add(1)));
         let local = self
             .local_store
             .read_events(&state.stream_id, from_sequence)
             .await
-            .map_err(|error| crate::VerletError::History(error.to_string()))?;
+            .map_err(|error| {
+                crate::kernel::runtime_host::VerletError::History(error.to_string())
+            })?;
         let batch = local
             .into_iter()
             .take(self.batch_size)
@@ -449,18 +466,20 @@ impl StreamPropagator for LocalFirstStreamPropagator {
     }
 }
 
-fn storage_error(error: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::History(error.to_string())
+fn storage_error(error: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(error.to_string())
 }
 
 async fn cancellation_safe<T>(
-    future: impl std::future::Future<Output = crate::VerletResult<T>> + Send + 'static,
-) -> crate::VerletResult<T>
+    future: impl std::future::Future<Output = crate::kernel::runtime_host::VerletResult<T>>
+    + Send
+    + 'static,
+) -> crate::kernel::runtime_host::VerletResult<T>
 where
     T: Send + 'static,
 {
     tokio::spawn(future).await.map_err(|error| {
-        crate::VerletError::History(format!(
+        crate::kernel::runtime_host::VerletError::History(format!(
             "propagation state transaction task failed: {error}"
         ))
     })?

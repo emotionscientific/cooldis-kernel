@@ -1,22 +1,22 @@
 #[path = "support/test_mount.rs"]
 mod support;
 
-use verlet::EventStore as _;
+use verlet_history::EventStore as _;
 
 #[tokio::test]
 async fn provider_loop_exposes_bash_tool_with_structured_output() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
                 "bash",
                 serde_json::json!({"command": "printf 'VERLET\\n'"}),
             ),
-            crate::support::response_text("bash done"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("bash done"),
+        ]),
+    );
     let factory = provider_factory(std::sync::Arc::clone(&client))
-        .with_bash_tool(verlet::VirtualBashRuntimeConfig::default());
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+        .with_bash_tool(verlet::capabilities::execution::VirtualBashRuntimeConfig::default());
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -27,7 +27,7 @@ async fn provider_loop_exposes_bash_tool_with_structured_output() {
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "bash done").await;
+    let trace = crate::support::event_trace::collect_until_output(&mut events, "bash done").await;
 
     let output = bash_tool_result_json(trace.runtime_events(), "call_1|fc_1");
     assert_eq!(output["stdout"], "VERLET\n");
@@ -37,7 +37,7 @@ async fn provider_loop_exposes_bash_tool_with_structured_output() {
     assert_eq!(output["stderr_truncated"], false);
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ToolLog {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolLog {
             call_id,
             tool_name,
             metadata,
@@ -50,24 +50,24 @@ async fn provider_loop_exposes_bash_tool_with_structured_output() {
 
 #[tokio::test]
 async fn provider_loop_bash_tool_keeps_virtual_filesystem_state_across_calls() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call_with_id(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call_with_id(
                 "call_write",
                 "bash",
                 serde_json::json!({"command": "echo persisted > /workspace/state.txt"}),
             ),
-            crate::support::response_tool_call_with_id(
+            crate::support::scripted_provider::response_tool_call_with_id(
                 "call_read",
                 "bash",
                 serde_json::json!({"command": "cat /workspace/state.txt"}),
             ),
-            crate::support::response_text("state done"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("state done"),
+        ]),
+    );
     let factory = provider_factory(std::sync::Arc::clone(&client))
-        .with_bash_tool(verlet::VirtualBashRuntimeConfig::default());
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+        .with_bash_tool(verlet::capabilities::execution::VirtualBashRuntimeConfig::default());
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -78,7 +78,7 @@ async fn provider_loop_bash_tool_keeps_virtual_filesystem_state_across_calls() {
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "state done").await;
+    let trace = crate::support::event_trace::collect_until_output(&mut events, "state done").await;
 
     let write_output = bash_tool_result_json(trace.runtime_events(), "call_write");
     assert_eq!(write_output["exit_code"], 0);
@@ -98,21 +98,21 @@ async fn provider_loop_bash_tool_can_author_host_file_when_host_route_is_configu
 print("hello from model host author")
 PY
 "#;
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call_with_id(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call_with_id(
                 "call_author",
                 "bash",
                 serde_json::json!({"command": command}),
             ),
-            crate::support::response_text("host author done"),
-        ],
-    ));
-    let bash_config = verlet::VirtualBashRuntimeConfig::default()
-        .with_execution_policy(verlet::BashExecutionPolicy::host_always())
+            crate::support::scripted_provider::response_text("host author done"),
+        ]),
+    );
+    let bash_config = verlet::capabilities::execution::VirtualBashRuntimeConfig::default()
+        .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
         .with_host_bash_executor(&host_root);
     let factory = provider_factory(std::sync::Arc::clone(&client)).with_bash_tool(bash_config);
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -123,7 +123,8 @@ PY
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "host author done").await;
+    let trace =
+        crate::support::event_trace::collect_until_output(&mut events, "host author done").await;
 
     let output = bash_tool_result_json(trace.runtime_events(), "call_author");
     assert_eq!(output["exit_code"], 0);
@@ -144,18 +145,20 @@ async fn interrupting_host_bash_acknowledges_the_call_and_kills_its_process_tree
         uuid::Uuid::now_v7()
     ));
     tokio::fs::create_dir_all(&host_root).await.unwrap();
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![crate::support::response_tool_call(
-            "bash",
-            serde_json::json!({
-                "command": "(trap '' TERM; while :; do sleep 1; done) & echo $! > child.pid; wait"
-            }),
-        )],
-    ));
-    let bash_config = verlet::VirtualBashRuntimeConfig::default()
-        .with_execution_policy(verlet::BashExecutionPolicy::host_always())
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
+                "bash",
+                serde_json::json!({
+                    "command": "(trap '' TERM; while :; do sleep 1; done) & echo $! > child.pid; wait"
+                }),
+            ),
+        ]),
+    );
+    let bash_config = verlet::capabilities::execution::VirtualBashRuntimeConfig::default()
+        .with_execution_policy(verlet_vbash::BashExecutionPolicy::host_always())
         .with_host_bash_executor(&host_root);
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
         provider_factory(std::sync::Arc::clone(&client)).with_bash_tool(bash_config),
     ));
     let thread = start_thread(&host).await;
@@ -185,20 +188,25 @@ async fn interrupting_host_bash_acknowledges_the_call_and_kills_its_process_tree
     host.cancel(coordinates.thread_id, "stop host process")
         .await
         .unwrap();
-    crate::support::collect_until_cancelled(&mut events, "stop host process").await;
+    crate::support::event_trace::collect_until_cancelled(&mut events, "stop host process").await;
     let completion = host
         .runtime_store()
-        .read_events(&verlet::EventStreamId::for_thread(&coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
         .await
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == verlet::EventKind::ToolCallCompleted)
+        .find(|event| event.kind == verlet_history::EventKind::ToolCallCompleted)
         .expect("interrupted host bash did not settle a completion");
-    let completion =
-        serde_json::from_value::<verlet::ToolCallCompletedPayload>(completion.payload).unwrap();
+    let completion = serde_json::from_value::<
+        verlet::kernel::control_decision::ToolCallCompletedPayload,
+    >(completion.payload)
+    .unwrap();
     assert_eq!(
         completion.cancellation,
-        Some(verlet::ToolCallCancellation::CancelledAcknowledged)
+        Some(verlet::kernel::control_decision::ToolCallCancellation::CancelledAcknowledged)
     );
     assert!(!completion.success);
     assert!(
@@ -211,8 +219,9 @@ async fn interrupting_host_bash_acknowledges_the_call_and_kills_its_process_tree
             .any(|message| {
                 matches!(
                     message,
-                    verlet::CanonicalMessage::ToolResult { is_error: true, .. }
-                ) && crate::support::text_from_message(message).contains("host bash exec cancelled")
+                    verlet_history::CanonicalMessage::ToolResult { is_error: true, .. }
+                ) && crate::support::event_trace::text_from_message(message)
+                    .contains("host bash exec cancelled")
             }),
         "the canonical mirror must retain the partial cancelled process result"
     );
@@ -235,43 +244,43 @@ async fn interrupting_host_bash_acknowledges_the_call_and_kills_its_process_tree
 
 #[tokio::test]
 async fn tool_hook_permission_scenario_records_ordered_events_and_history() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
                 "echo_search",
                 serde_json::json!({"input": "original"}),
             ),
-            crate::support::response_text("final reply"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("final reply"),
+        ]),
+    );
     let pre_hook = crate::support::StaticHookHandler::pre_tool(
         "pre-echo",
         "echo_search",
-        verlet::HookHandlerOutput {
+        verlet::agent::hooks::HookHandlerOutput {
             updated_input: Some(serde_json::json!({"input": "rewritten"})),
             additional_context: Some("pre context".to_string()),
-            ..verlet::HookHandlerOutput::default()
+            ..verlet::agent::hooks::HookHandlerOutput::default()
         },
     );
     let post_hook = crate::support::StaticHookHandler::post_tool(
         "post-echo",
         "echo_search",
-        verlet::HookHandlerOutput {
+        verlet::agent::hooks::HookHandlerOutput {
             replacement_output: Some("hook replacement".to_string()),
             additional_context: Some("post context".to_string()),
             feedback: Some("feedback context".to_string()),
-            ..verlet::HookHandlerOutput::default()
+            ..verlet::agent::hooks::HookHandlerOutput::default()
         },
     );
-    let pre_handler: std::sync::Arc<dyn verlet::HookHandler> = pre_hook.clone();
-    let post_handler: std::sync::Arc<dyn verlet::HookHandler> = post_hook.clone();
+    let pre_handler: std::sync::Arc<dyn verlet::agent::hooks::HookHandler> = pre_hook.clone();
+    let post_handler: std::sync::Arc<dyn verlet::agent::hooks::HookHandler> = post_hook.clone();
     let factory = provider_factory(std::sync::Arc::clone(&client))
         .with_tool_router(crate::support::echo_router("echo_search"))
         .with_hook_pipeline(crate::support::hook_pipeline(vec![
             pre_handler,
             post_handler,
         ]));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -282,54 +291,54 @@ async fn tool_hook_permission_scenario_records_ordered_events_and_history() {
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "final reply").await;
+    let trace = crate::support::event_trace::collect_until_output(&mut events, "final reply").await;
 
-    crate::support::assert_event_order(
+    crate::support::event_trace::assert_event_order(
         trace.runtime_events(),
         "tool call started",
-        |event| matches!(event, verlet::RuntimeEventKind::ToolCallStarted { call_id, .. } if call_id == "call_1|fc_1"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted { call_id, .. } if call_id == "call_1|fc_1"),
         "permission decision",
-        |event| matches!(event, verlet::RuntimeEventKind::PermissionDecision { call_id, .. } if call_id == "call_1|fc_1"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::PermissionDecision { call_id, .. } if call_id == "call_1|fc_1"),
     );
-    crate::support::assert_event_order(
+    crate::support::event_trace::assert_event_order(
         trace.runtime_events(),
         "permission decision",
-        |event| matches!(event, verlet::RuntimeEventKind::PermissionDecision { call_id, .. } if call_id == "call_1|fc_1"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::PermissionDecision { call_id, .. } if call_id == "call_1|fc_1"),
         "tool log",
-        |event| matches!(event, verlet::RuntimeEventKind::ToolLog { call_id, .. } if call_id == "call_1|fc_1"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolLog { call_id, .. } if call_id == "call_1|fc_1"),
     );
-    crate::support::assert_event_order(
+    crate::support::event_trace::assert_event_order(
         trace.runtime_events(),
         "tool log",
-        |event| matches!(event, verlet::RuntimeEventKind::ToolLog { call_id, .. } if call_id == "call_1|fc_1"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolLog { call_id, .. } if call_id == "call_1|fc_1"),
         "tool result",
-        |event| matches!(event, verlet::RuntimeEventKind::ToolCallResult { call_id, .. } if call_id == "call_1|fc_1"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult { call_id, .. } if call_id == "call_1|fc_1"),
     );
     assert_eq!(pre_hook.requests().len(), 1);
     assert_eq!(post_hook.requests().len(), 1);
     assert!(matches!(
         &pre_hook.requests()[0],
-        verlet::HookRequest::PreToolUse(request)
+        verlet::agent::hooks::HookRequest::PreToolUse(request)
             if request.arguments == serde_json::json!({"input": "original"})
     ));
     assert!(matches!(
         &post_hook.requests()[0],
-        verlet::HookRequest::PostToolUse(request)
+        verlet::agent::hooks::HookRequest::PostToolUse(request)
             if request.arguments == serde_json::json!({"input": "rewritten"})
                 && request.output == "echo:rewritten"
     ));
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::PermissionDecision {
-            decision: verlet::RuntimePermissionDecision::Allow,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::PermissionDecision {
+            decision: verlet_runtime_contracts::RuntimePermissionDecision::Allow,
             reason: None,
             ..
         }
     )));
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ToolLog {
-            level: verlet::RuntimeToolLogLevel::Info,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolLog {
+            level: verlet_runtime_contracts::RuntimeToolLogLevel::Info,
             metadata,
             ..
         } if metadata.get("success").map(String::as_str) == Some("true")
@@ -337,7 +346,7 @@ async fn tool_hook_permission_scenario_records_ordered_events_and_history() {
     )));
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ToolCallResult {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
             output,
             success: true,
             duration_ms: Some(_),
@@ -360,30 +369,30 @@ async fn tool_hook_permission_scenario_records_ordered_events_and_history() {
 
 #[tokio::test]
 async fn pre_tool_block_scenario_records_failed_tool_result_and_continues() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
                 "echo_search",
                 serde_json::json!({"input": "original"}),
             ),
-            crate::support::response_text("handled block"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("handled block"),
+        ]),
+    );
     let block_hook = crate::support::StaticHookHandler::pre_tool(
         "block-echo",
         "echo_search",
-        verlet::HookHandlerOutput {
+        verlet::agent::hooks::HookHandlerOutput {
             should_block: true,
             block_reason: Some("blocked by scenario".to_string()),
             additional_context: Some("block context".to_string()),
-            ..verlet::HookHandlerOutput::default()
+            ..verlet::agent::hooks::HookHandlerOutput::default()
         },
     );
-    let block_handler: std::sync::Arc<dyn verlet::HookHandler> = block_hook.clone();
+    let block_handler: std::sync::Arc<dyn verlet::agent::hooks::HookHandler> = block_hook.clone();
     let factory = provider_factory(std::sync::Arc::clone(&client))
         .with_tool_router(crate::support::echo_router("echo_search"))
         .with_hook_pipeline(crate::support::hook_pipeline(vec![block_handler]));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -394,28 +403,27 @@ async fn pre_tool_block_scenario_records_failed_tool_result_and_continues() {
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "handled block").await;
+    let trace =
+        crate::support::event_trace::collect_until_output(&mut events, "handled block").await;
 
     assert_eq!(block_hook.requests().len(), 1);
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::HookCompleted {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::HookCompleted {
             hook_id,
-            event_name: verlet::HookEventName::PreToolUse,
-            status: verlet::HookRunStatus::Blocked,
+            event_name: verlet::agent::hooks::HookEventName::PreToolUse,
+            status: verlet::agent::hooks::HookRunStatus::Blocked,
             message: Some(message),
             ..
         } if hook_id == "block-echo" && message == "blocked by scenario"
     )));
-    assert!(
-        !trace
-            .runtime_events()
-            .iter()
-            .any(|event| matches!(event, verlet::RuntimeEventKind::PermissionDecision { .. }))
-    );
+    assert!(!trace.runtime_events().iter().any(|event| matches!(
+        event,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::PermissionDecision { .. }
+    )));
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ToolCallResult {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
             output,
             success: false,
             ..
@@ -435,21 +443,21 @@ async fn pre_tool_block_scenario_records_failed_tool_result_and_continues() {
 
 #[tokio::test]
 async fn permission_deny_scenario_records_failed_tool_result_and_continues() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
                 "echo_search",
                 serde_json::json!({"input": "secret"}),
             ),
-            crate::support::response_text("handled deny"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("handled deny"),
+        ]),
+    );
     let factory = provider_factory(std::sync::Arc::clone(&client))
         .with_tool_router(crate::support::echo_router("echo_search"))
         .with_tool_permission_gate(std::sync::Arc::new(crate::support::DenyGate::new(
             "denied by scenario",
         )));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -460,27 +468,28 @@ async fn permission_deny_scenario_records_failed_tool_result_and_continues() {
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "handled deny").await;
+    let trace =
+        crate::support::event_trace::collect_until_output(&mut events, "handled deny").await;
 
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::PermissionDecision {
-            decision: verlet::RuntimePermissionDecision::Deny,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::PermissionDecision {
+            decision: verlet_runtime_contracts::RuntimePermissionDecision::Deny,
             reason: Some(reason),
             ..
         } if reason == "denied by scenario"
     )));
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ToolLog {
-            level: verlet::RuntimeToolLogLevel::Error,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolLog {
+            level: verlet_runtime_contracts::RuntimeToolLogLevel::Error,
             metadata,
             ..
         } if metadata.get("success").map(String::as_str) == Some("false")
     )));
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ToolCallResult {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
             output,
             success: false,
             ..
@@ -494,15 +503,18 @@ async fn permission_deny_scenario_records_failed_tool_result_and_continues() {
 
 #[tokio::test]
 async fn unknown_tool_scenario_appends_error_result_and_continues() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call("missing_tool", serde_json::json!({})),
-            crate::support::response_text("handled missing"),
-        ],
-    ));
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
+                "missing_tool",
+                serde_json::json!({}),
+            ),
+            crate::support::scripted_provider::response_text("handled missing"),
+        ]),
+    );
     let factory = provider_factory(std::sync::Arc::clone(&client))
         .with_tool_router(crate::support::echo_router("known_echo"));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -513,11 +525,12 @@ async fn unknown_tool_scenario_appends_error_result_and_continues() {
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "handled missing").await;
+    let trace =
+        crate::support::event_trace::collect_until_output(&mut events, "handled missing").await;
 
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ToolCallResult {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
             output,
             success: false,
             ..
@@ -536,30 +549,35 @@ async fn unknown_tool_scenario_appends_error_result_and_continues() {
 
 #[tokio::test]
 async fn provider_failure_scenario_emits_model_failed_without_assistant_history() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_steps(vec![
-        crate::support::ScriptedProviderStep::Error("provider down".to_string()),
-    ]));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(provider_factory(
-        std::sync::Arc::clone(&client),
-    )));
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_steps(vec![
+            crate::support::scripted_provider::ScriptedProviderStep::Error(
+                "provider down".to_string(),
+            ),
+        ]),
+    );
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        provider_factory(std::sync::Arc::clone(&client)),
+    ));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
     host.submit(thread.context().coordinates.thread_id, "turn-fail", "hello")
         .await
         .unwrap();
-    let trace = crate::support::collect_until_failed(&mut events, "provider down").await;
+    let trace =
+        crate::support::event_trace::collect_until_failed(&mut events, "provider down").await;
 
-    crate::support::assert_event_order(
+    crate::support::event_trace::assert_event_order(
         trace.runtime_events(),
         "model request started",
-        |event| matches!(event, verlet::RuntimeEventKind::ModelRequestStarted { turn_id, .. } if turn_id == "turn-fail"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestStarted { turn_id, .. } if turn_id == "turn-fail"),
         "model request failed",
-        |event| matches!(event, verlet::RuntimeEventKind::ModelRequestFailed { turn_id, error, .. } if turn_id == "turn-fail" && error.contains("provider down")),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestFailed { turn_id, error, .. } if turn_id == "turn-fail" && error.contains("provider down")),
     );
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::Failed {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Failed {
             code,
             message
         } if code == "runtime_execution" && message.contains("provider down")
@@ -572,30 +590,31 @@ async fn provider_failure_scenario_emits_model_failed_without_assistant_history(
 
 #[tokio::test]
 async fn streaming_scenario_emits_deltas_usage_and_model_completion() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_stream_events(
-        vec![vec![
-            verlet::ProviderStreamEvent::TextDelta {
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_stream_events(vec![vec![
+            verlet_provider::ProviderStreamEvent::TextDelta {
                 text: "VER".to_string(),
             },
-            verlet::ProviderStreamEvent::TextDelta {
+            verlet_provider::ProviderStreamEvent::TextDelta {
                 text: "LET".to_string(),
             },
-            verlet::ProviderStreamEvent::Usage {
-                usage: verlet::CanonicalUsage {
+            verlet_provider::ProviderStreamEvent::Usage {
+                usage: verlet_history::CanonicalUsage {
                     input_tokens: 5,
                     output_tokens: 6,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 1,
                 },
             },
-            verlet::ProviderStreamEvent::Done {
-                stop_reason: verlet::CanonicalStopReason::EndTurn,
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::EndTurn,
             },
-        ]],
-    ));
-    let provider_client: std::sync::Arc<dyn verlet::ProviderClient> = client.clone();
-    let host =
-        verlet::RuntimeHost::new(crate::support::streaming_provider_factory(provider_client));
+        ]]),
+    );
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(
+        crate::support::scripted_provider::streaming_provider_factory(provider_client),
+    );
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -606,41 +625,41 @@ async fn streaming_scenario_emits_deltas_usage_and_model_completion() {
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "VERLET").await;
+    let trace = crate::support::event_trace::collect_until_output(&mut events, "VERLET").await;
 
-    crate::support::assert_event_order(
+    crate::support::event_trace::assert_event_order(
         trace.runtime_events(),
         "stream model start",
         |event| {
             matches!(
                 event,
-                verlet::RuntimeEventKind::ModelRequestStarted {
-                    mode: verlet::RuntimeModelRequestMode::Stream,
+                verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestStarted {
+                    mode: verlet_runtime_contracts::RuntimeModelRequestMode::Stream,
                     ..
                 }
             )
         },
         "first text delta",
-        |event| matches!(event, verlet::RuntimeEventKind::TextDelta { text } if text == "VER"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta { text } if text == "VER"),
     );
-    crate::support::assert_event_order(
+    crate::support::event_trace::assert_event_order(
         trace.runtime_events(),
         "first text delta",
-        |event| matches!(event, verlet::RuntimeEventKind::TextDelta { text } if text == "VER"),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta { text } if text == "VER"),
         "usage",
-        |event| matches!(event, verlet::RuntimeEventKind::Usage { usage } if usage.input_tokens == 5 && usage.cache_read_input_tokens == 1),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Usage { usage } if usage.input_tokens == 5 && usage.cache_read_input_tokens == 1),
     );
-    crate::support::assert_event_order(
+    crate::support::event_trace::assert_event_order(
         trace.runtime_events(),
         "usage",
-        |event| matches!(event, verlet::RuntimeEventKind::Usage { usage } if usage.input_tokens == 5),
+        |event| matches!(event, verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Usage { usage } if usage.input_tokens == 5),
         "stream model complete",
         |event| {
             matches!(
                 event,
-                verlet::RuntimeEventKind::ModelRequestCompleted {
-                    mode: verlet::RuntimeModelRequestMode::Stream,
-                    stop_reason: verlet::CanonicalStopReason::EndTurn,
+                verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestCompleted {
+                    mode: verlet_runtime_contracts::RuntimeModelRequestMode::Stream,
+                    stop_reason: verlet_history::CanonicalStopReason::EndTurn,
                     ..
                 }
             )
@@ -654,15 +673,17 @@ async fn streaming_scenario_emits_deltas_usage_and_model_completion() {
 
 #[tokio::test]
 async fn cancellation_during_model_request_keeps_thread_reusable() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_steps(vec![
-        crate::support::ScriptedProviderStep::Pending,
-        crate::support::ScriptedProviderStep::Response(crate::support::response_text(
-            "after reply",
-        )),
-    ]));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(provider_factory(
-        std::sync::Arc::clone(&client),
-    )));
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_steps(vec![
+            crate::support::scripted_provider::ScriptedProviderStep::Pending,
+            crate::support::scripted_provider::ScriptedProviderStep::Response(
+                crate::support::scripted_provider::response_text("after reply"),
+            ),
+        ]),
+    );
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        provider_factory(std::sync::Arc::clone(&client)),
+    ));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -673,10 +694,11 @@ async fn cancellation_during_model_request_keeps_thread_reusable() {
     host.cancel(thread.context().coordinates.thread_id, "stop slow")
         .await
         .unwrap();
-    let cancelled = crate::support::collect_until_cancelled(&mut events, "stop slow").await;
+    let cancelled =
+        crate::support::event_trace::collect_until_cancelled(&mut events, "stop slow").await;
     assert!(cancelled.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::Cancelled { reason } if reason == "stop slow"
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Cancelled { reason } if reason == "stop slow"
     )));
 
     host.submit(
@@ -686,7 +708,7 @@ async fn cancellation_during_model_request_keeps_thread_reusable() {
     )
     .await
     .unwrap();
-    crate::support::collect_until_output(&mut events, "after reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "after reply").await;
     assert_eq!(
         session_texts(&thread.session_context().await.unwrap()),
         vec!["slow", "after", "after reply"]
@@ -695,15 +717,17 @@ async fn cancellation_during_model_request_keeps_thread_reusable() {
 
 #[tokio::test]
 async fn queue_mode_waits_for_active_turn_and_runs_after_cancel() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_steps(vec![
-        crate::support::ScriptedProviderStep::Pending,
-        crate::support::ScriptedProviderStep::Response(crate::support::response_text(
-            "queued reply",
-        )),
-    ]));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(provider_factory(
-        std::sync::Arc::clone(&client),
-    )));
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_steps(vec![
+            crate::support::scripted_provider::ScriptedProviderStep::Pending,
+            crate::support::scripted_provider::ScriptedProviderStep::Response(
+                crate::support::scripted_provider::response_text("queued reply"),
+            ),
+        ]),
+    );
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        provider_factory(std::sync::Arc::clone(&client)),
+    ));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -715,7 +739,7 @@ async fn queue_mode_waits_for_active_turn_and_runs_after_cancel() {
         thread.context().coordinates.thread_id,
         "turn-queued",
         "queued",
-        verlet::TurnSubmissionMode::Queue,
+        verlet_runtime_contracts::TurnSubmissionMode::Queue,
     )
     .await
     .unwrap();
@@ -723,15 +747,16 @@ async fn queue_mode_waits_for_active_turn_and_runs_after_cancel() {
     host.cancel(thread.context().coordinates.thread_id, "release slow")
         .await
         .unwrap();
-    let cancelled = crate::support::collect_until_cancelled(&mut events, "release slow").await;
+    let cancelled =
+        crate::support::event_trace::collect_until_cancelled(&mut events, "release slow").await;
     assert!(
         cancelled
             .signals
             .iter()
-            .any(|signal| signal.kind == verlet::ThreadSignalKind::UserQueue)
+            .any(|signal| signal.kind == verlet_runtime_contracts::ThreadSignalKind::UserQueue)
     );
 
-    crate::support::collect_until_output(&mut events, "queued reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "queued reply").await;
     assert_eq!(
         session_texts(&thread.session_context().await.unwrap()),
         vec!["slow", "queued", "queued reply"]
@@ -740,18 +765,20 @@ async fn queue_mode_waits_for_active_turn_and_runs_after_cancel() {
 
 #[tokio::test]
 async fn interrupt_mode_cancels_active_turn_and_front_queues_replacement() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_steps(vec![
-        crate::support::ScriptedProviderStep::Pending,
-        crate::support::ScriptedProviderStep::Response(crate::support::response_text(
-            "replacement reply",
-        )),
-        crate::support::ScriptedProviderStep::Response(crate::support::response_text(
-            "queued reply",
-        )),
-    ]));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(provider_factory(
-        std::sync::Arc::clone(&client),
-    )));
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_steps(vec![
+            crate::support::scripted_provider::ScriptedProviderStep::Pending,
+            crate::support::scripted_provider::ScriptedProviderStep::Response(
+                crate::support::scripted_provider::response_text("replacement reply"),
+            ),
+            crate::support::scripted_provider::ScriptedProviderStep::Response(
+                crate::support::scripted_provider::response_text("queued reply"),
+            ),
+        ]),
+    );
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        provider_factory(std::sync::Arc::clone(&client)),
+    ));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -763,7 +790,7 @@ async fn interrupt_mode_cancels_active_turn_and_front_queues_replacement() {
         thread.context().coordinates.thread_id,
         "turn-queued",
         "queued",
-        verlet::TurnSubmissionMode::Queue,
+        verlet_runtime_contracts::TurnSubmissionMode::Queue,
     )
     .await
     .unwrap();
@@ -771,12 +798,12 @@ async fn interrupt_mode_cancels_active_turn_and_front_queues_replacement() {
         thread.context().coordinates.thread_id,
         "turn-replacement",
         "replacement",
-        verlet::TurnSubmissionMode::Interrupt,
+        verlet_runtime_contracts::TurnSubmissionMode::Interrupt,
     )
     .await
     .unwrap();
 
-    let cancelled = crate::support::collect_until_cancelled(
+    let cancelled = crate::support::event_trace::collect_until_cancelled(
         &mut events,
         "interrupted by turn turn-replacement",
     )
@@ -785,16 +812,16 @@ async fn interrupt_mode_cancels_active_turn_and_front_queues_replacement() {
         cancelled
             .signals
             .iter()
-            .any(|signal| signal.kind == verlet::ThreadSignalKind::UserInterrupt)
+            .any(|signal| signal.kind == verlet_runtime_contracts::ThreadSignalKind::UserInterrupt)
     );
     assert!(
         cancelled
             .signals
             .iter()
-            .any(|signal| signal.kind == verlet::ThreadSignalKind::UserQueue)
+            .any(|signal| signal.kind == verlet_runtime_contracts::ThreadSignalKind::UserQueue)
     );
-    crate::support::collect_until_output(&mut events, "replacement reply").await;
-    crate::support::collect_until_output(&mut events, "queued reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "replacement reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "queued reply").await;
     assert_eq!(
         session_texts(&thread.session_context().await.unwrap()),
         vec![
@@ -810,21 +837,21 @@ async fn interrupt_mode_cancels_active_turn_and_front_queues_replacement() {
 #[tokio::test]
 async fn steer_mode_is_model_visible_inside_active_provider_turn() {
     let client = std::sync::Arc::new(GatedProviderClient::new(vec![
-        crate::support::response_tool_call_with_id(
+        crate::support::scripted_provider::response_tool_call_with_id(
             "call_first",
             "echo_search",
             serde_json::json!({"input": "original"}),
         ),
-        crate::support::response_tool_call_with_id(
+        crate::support::scripted_provider::response_tool_call_with_id(
             "call_second",
             "echo_search",
             serde_json::json!({"input": "follow-up"}),
         ),
-        crate::support::response_text("steered reply"),
+        crate::support::scripted_provider::response_text("steered reply"),
     ]));
     let factory = provider_factory(std::sync::Arc::clone(&client))
         .with_tool_router(crate::support::echo_router("echo_search"));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -836,11 +863,15 @@ async fn steer_mode_is_model_visible_inside_active_provider_turn() {
         thread.context().coordinates.thread_id,
         "turn-steer",
         "please revise with the tool result",
-        verlet::TurnSubmissionMode::Steer,
+        verlet_runtime_contracts::TurnSubmissionMode::Steer,
     )
     .await
     .unwrap();
-    let steer_signal = collect_until_signal(&mut events, verlet::ThreadSignalKind::UserSteer).await;
+    let steer_signal = collect_until_signal(
+        &mut events,
+        verlet_runtime_contracts::ThreadSignalKind::UserSteer,
+    )
+    .await;
     assert_eq!(
         steer_signal
             .metadata
@@ -850,7 +881,7 @@ async fn steer_mode_is_model_visible_inside_active_provider_turn() {
     );
     client.release_first();
 
-    crate::support::collect_until_output(&mut events, "steered reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "steered reply").await;
     wait_for_gated_requests(&client, 3).await;
     let requests = client.requests();
     assert_eq!(
@@ -877,22 +908,24 @@ async fn steer_mode_is_model_visible_inside_active_provider_turn() {
 
 #[tokio::test]
 async fn steer_settling_during_tool_execution_is_folded_at_that_boundary_once() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
                 "boundary_echo",
                 serde_json::json!({"input": "original"}),
             ),
-            crate::support::response_text("boundary reply"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("boundary reply"),
+        ]),
+    );
     let tool = std::sync::Arc::new(GatedToolProvider::new("boundary_echo"));
     let router = std::sync::Arc::new(
-        verlet::AgentToolRouter::new(std::sync::Arc::new(verlet::OperationRegistry::new()))
-            .with_kernel_tool_provider(tool.clone()),
+        verlet::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+            verlet_operations::operation_registry::OperationRegistry::new(),
+        ))
+        .with_kernel_tool_provider(tool.clone()),
     );
     let factory = provider_factory(std::sync::Arc::clone(&client)).with_tool_router(router);
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -904,20 +937,24 @@ async fn steer_settling_during_tool_execution_is_folded_at_that_boundary_once() 
         thread.context().coordinates.thread_id,
         "turn-boundary-steer",
         "arrived while tool results were completing",
-        verlet::TurnSubmissionMode::Steer,
+        verlet_runtime_contracts::TurnSubmissionMode::Steer,
     )
     .await
     .unwrap();
     tool.release();
 
-    collect_until_signal(&mut events, verlet::ThreadSignalKind::UserSteer).await;
+    collect_until_signal(
+        &mut events,
+        verlet_runtime_contracts::ThreadSignalKind::UserSteer,
+    )
+    .await;
     assert!(
         !tool
             .cancellation_observed
             .load(std::sync::atomic::Ordering::SeqCst),
         "a steer must not fire an in-flight tool token"
     );
-    crate::support::collect_until_output(&mut events, "boundary reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "boundary reply").await;
     wait_for_requests(&client, 2).await;
     let requests = client.requests();
     assert_eq!(
@@ -939,7 +976,7 @@ async fn steer_settling_during_tool_execution_is_folded_at_that_boundary_once() 
             .iter()
             .any(|message| matches!(
                 message,
-                verlet::CanonicalMessage::ToolResult { tool_call_id, .. }
+                verlet_history::CanonicalMessage::ToolResult { tool_call_id, .. }
                     if tool_call_id == "call_1|fc_1"
             )),
         "the steer boundary must retain the completed tool result"
@@ -954,22 +991,24 @@ async fn steer_settling_during_tool_execution_is_folded_at_that_boundary_once() 
 
 #[tokio::test]
 async fn cancel_during_tool_execution_cancels_in_flight_batch_and_keeps_thread_reusable() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
                 "cancel_boundary_echo",
                 serde_json::json!({"input": "original"}),
             ),
-            crate::support::response_text("reply after boundary cancel"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("reply after boundary cancel"),
+        ]),
+    );
     let tool = std::sync::Arc::new(GatedToolProvider::new("cancel_boundary_echo"));
     let router = std::sync::Arc::new(
-        verlet::AgentToolRouter::new(std::sync::Arc::new(verlet::OperationRegistry::new()))
-            .with_kernel_tool_provider(tool.clone()),
+        verlet::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+            verlet_operations::operation_registry::OperationRegistry::new(),
+        ))
+        .with_kernel_tool_provider(tool.clone()),
     );
     let factory = provider_factory(std::sync::Arc::clone(&client)).with_tool_router(router);
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -987,12 +1026,15 @@ async fn cancel_during_tool_execution_cancels_in_flight_batch_and_keeps_thread_r
         .expect("turn cancellation should not wait for the in-flight tool")
         .unwrap()
         .unwrap();
-    crate::support::collect_until_cancelled(&mut events, "cancel at boundary").await;
+    crate::support::event_trace::collect_until_cancelled(&mut events, "cancel at boundary").await;
     assert!(
         tool.cancellation_observed
             .load(std::sync::atomic::Ordering::SeqCst)
     );
-    assert_eq!(thread.status(), verlet::ThreadStatus::Idle);
+    assert_eq!(
+        thread.status(),
+        verlet_runtime_contracts::ThreadStatus::Idle
+    );
 
     host.submit(
         thread.context().coordinates.thread_id,
@@ -1001,30 +1043,38 @@ async fn cancel_during_tool_execution_cancels_in_flight_batch_and_keeps_thread_r
     )
     .await
     .unwrap();
-    crate::support::collect_until_output(&mut events, "reply after boundary cancel").await;
+    crate::support::event_trace::collect_until_output(&mut events, "reply after boundary cancel")
+        .await;
 }
 
 #[tokio::test]
 async fn steer_append_failure_at_tool_boundary_fails_the_agent_loop() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![crate::support::response_tool_call(
-            "failed_boundary_echo",
-            serde_json::json!({"input": "original"}),
-        )],
-    ));
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
+                "failed_boundary_echo",
+                serde_json::json!({"input": "original"}),
+            ),
+        ]),
+    );
     let tool = std::sync::Arc::new(GatedToolProvider::new("failed_boundary_echo"));
     let router = std::sync::Arc::new(
-        verlet::AgentToolRouter::new(std::sync::Arc::new(verlet::OperationRegistry::new()))
-            .with_kernel_tool_provider(tool.clone()),
+        verlet::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+            verlet_operations::operation_registry::OperationRegistry::new(),
+        ))
+        .with_kernel_tool_provider(tool.clone()),
     );
     let store = std::sync::Arc::new(
-        crate::support::FaultingRuntimeStore::new(std::sync::Arc::new(
-            verlet::InMemorySessionStore::new(),
+        crate::support::fault::FaultingRuntimeStore::new(std::sync::Arc::new(
+            verlet_history::InMemorySessionStore::new(),
         ))
         .fail_nth("append_turn_input", 2, "boundary steer append failed"),
     );
     let factory = provider_factory(std::sync::Arc::clone(&client)).with_tool_router(router);
-    let host = verlet::RuntimeHost::with_session_store(std::sync::Arc::new(factory), store);
+    let host = verlet::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(factory),
+        store,
+    );
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -1036,14 +1086,18 @@ async fn steer_append_failure_at_tool_boundary_fails_the_agent_loop() {
         thread.context().coordinates.thread_id,
         "turn-failed-steer",
         "cannot persist",
-        verlet::TurnSubmissionMode::Steer,
+        verlet_runtime_contracts::TurnSubmissionMode::Steer,
     )
     .await
     .unwrap();
     tool.release();
 
-    crate::support::collect_until_failed(&mut events, "boundary steer append failed").await;
-    assert_eq!(thread.status(), verlet::ThreadStatus::Failed);
+    crate::support::event_trace::collect_until_failed(&mut events, "boundary steer append failed")
+        .await;
+    assert_eq!(
+        thread.status(),
+        verlet_runtime_contracts::ThreadStatus::Failed
+    );
     assert_eq!(client.requests().len(), 1);
 }
 
@@ -1052,17 +1106,17 @@ async fn steer_after_last_tool_boundary_is_delivered_by_the_next_turn() {
     let client = std::sync::Arc::new(GatedProviderClient::gating_request(
         2,
         vec![
-            crate::support::response_tool_call(
+            crate::support::scripted_provider::response_tool_call(
                 "echo_search",
                 serde_json::json!({"input": "original"}),
             ),
-            crate::support::response_text("root reply"),
-            crate::support::response_text("next reply"),
+            crate::support::scripted_provider::response_text("root reply"),
+            crate::support::scripted_provider::response_text("next reply"),
         ],
     ));
     let factory = provider_factory(std::sync::Arc::clone(&client))
         .with_tool_router(crate::support::echo_router("echo_search"));
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(factory));
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
 
@@ -1081,13 +1135,17 @@ async fn steer_after_last_tool_boundary_is_delivered_by_the_next_turn() {
         thread.context().coordinates.thread_id,
         "turn-late-steer",
         "missed the last boundary",
-        verlet::TurnSubmissionMode::Steer,
+        verlet_runtime_contracts::TurnSubmissionMode::Steer,
     )
     .await
     .unwrap();
-    collect_until_signal(&mut events, verlet::ThreadSignalKind::UserSteer).await;
+    collect_until_signal(
+        &mut events,
+        verlet_runtime_contracts::ThreadSignalKind::UserSteer,
+    )
+    .await;
     client.release_gate();
-    crate::support::collect_until_output(&mut events, "root reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "root reply").await;
 
     host.submit(
         thread.context().coordinates.thread_id,
@@ -1096,7 +1154,7 @@ async fn steer_after_last_tool_boundary_is_delivered_by_the_next_turn() {
     )
     .await
     .unwrap();
-    crate::support::collect_until_output(&mut events, "next reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "next reply").await;
     wait_for_gated_requests(&client, 3).await;
     let next_texts = request_texts(&client.requests()[2]);
     assert_eq!(
@@ -1118,18 +1176,22 @@ async fn steer_after_last_tool_boundary_is_delivered_by_the_next_turn() {
 #[tokio::test]
 async fn replay_after_boundary_request_before_result_persistence_keeps_one_steer() {
     let path = temp_db_path("verlet-intra-turn-steer-replay");
-    let coordinates = verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_steer_replay");
-    let first_client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call(
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
+        "tenant_a",
+        "user_1",
+        "session_steer_replay",
+    );
+    let first_client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
                 "crash_echo",
                 serde_json::json!({"input": "original"}),
             ),
-            crate::support::response_text("lost before persistence"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("lost before persistence"),
+        ]),
+    );
     let faulting_client = std::sync::Arc::new(
-        crate::support::FaultingProviderClient::new(std::sync::Arc::clone(&first_client))
+        crate::support::fault::FaultingProviderClient::new(std::sync::Arc::clone(&first_client))
             .fail_nth_after_http(
                 "complete",
                 2,
@@ -1138,15 +1200,27 @@ async fn replay_after_boundary_request_before_result_persistence_keeps_one_steer
     );
     let tool = std::sync::Arc::new(GatedToolProvider::new("crash_echo"));
     let router = std::sync::Arc::new(
-        verlet::AgentToolRouter::new(std::sync::Arc::new(verlet::OperationRegistry::new()))
-            .with_kernel_tool_provider(tool.clone()),
+        verlet::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+            verlet_operations::operation_registry::OperationRegistry::new(),
+        ))
+        .with_kernel_tool_provider(tool.clone()),
     );
     {
-        let store = std::sync::Arc::new(verlet::SqliteSessionStore::open(&path).await.unwrap());
+        let store = std::sync::Arc::new(
+            verlet_history_sqlite::SqliteSessionStore::open(&path)
+                .await
+                .unwrap(),
+        );
         let factory = provider_factory(faulting_client).with_tool_router(router);
-        let host = verlet::RuntimeHost::with_session_store(std::sync::Arc::new(factory), store);
+        let host = verlet::kernel::runtime_host::RuntimeHost::with_session_store(
+            std::sync::Arc::new(factory),
+            store,
+        );
         let thread = host
-            .start_thread(coordinates.clone(), verlet::ThreadTopology::root())
+            .start_thread(
+                coordinates.clone(),
+                verlet_runtime_contracts::ThreadTopology::root(),
+            )
             .await
             .unwrap();
         let mut events = thread.subscribe_events();
@@ -1159,13 +1233,17 @@ async fn replay_after_boundary_request_before_result_persistence_keeps_one_steer
             thread.context().coordinates.thread_id,
             "turn-crash-steer",
             "survive the delivery window",
-            verlet::TurnSubmissionMode::Steer,
+            verlet_runtime_contracts::TurnSubmissionMode::Steer,
         )
         .await
         .unwrap();
         tool.release();
-        collect_until_signal(&mut events, verlet::ThreadSignalKind::UserSteer).await;
-        crate::support::collect_until_failed(&mut events, "simulated crash").await;
+        collect_until_signal(
+            &mut events,
+            verlet_runtime_contracts::ThreadSignalKind::UserSteer,
+        )
+        .await;
+        crate::support::event_trace::collect_until_failed(&mut events, "simulated crash").await;
 
         let requests = first_client.requests();
         assert_eq!(
@@ -1179,22 +1257,29 @@ async fn replay_after_boundary_request_before_result_persistence_keeps_one_steer
         );
     }
 
-    let reopened = std::sync::Arc::new(verlet::SqliteSessionStore::open(&path).await.unwrap());
+    let reopened = std::sync::Arc::new(
+        verlet_history_sqlite::SqliteSessionStore::open(&path)
+            .await
+            .unwrap(),
+    );
     let persisted_events = reopened
-        .read_events(&verlet::EventStreamId::for_thread(&coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
         .await
         .unwrap();
     let steer_entry_id = persisted_events
         .iter()
         .find(|event| {
-            event.kind == verlet::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event.payload["turn_id"] == "turn-crash-steer"
         })
         .and_then(|event| event.payload["entry_id"].as_str())
         .expect("persisted steer entry must exist before replay");
     assert!(
         persisted_events.iter().any(|event| {
-            event.kind == verlet::EventKind::ContextCompileCompleted
+            event.kind == verlet_history::EventKind::ContextCompileCompleted
                 && event.payload["session_entry_ids"]
                     .as_array()
                     .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(steer_entry_id)))
@@ -1202,16 +1287,20 @@ async fn replay_after_boundary_request_before_result_persistence_keeps_one_steer
         "the steer-bearing request must have a durable context compile witness",
     );
 
-    let replay_client =
-        std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-            vec![crate::support::response_text("replayed reply")],
-        ));
-    let replay_host = verlet::RuntimeHost::with_session_store(
+    let replay_client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_text("replayed reply"),
+        ]),
+    );
+    let replay_host = verlet::kernel::runtime_host::RuntimeHost::with_session_store(
         std::sync::Arc::new(provider_factory(std::sync::Arc::clone(&replay_client))),
         reopened,
     );
     let replayed = replay_host
-        .start_thread(coordinates, verlet::ThreadTopology::root())
+        .start_thread(
+            coordinates,
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
         .await
         .unwrap();
     let mut replay_events = replayed.subscribe_events();
@@ -1223,7 +1312,7 @@ async fn replay_after_boundary_request_before_result_persistence_keeps_one_steer
         )
         .await
         .unwrap();
-    crate::support::collect_until_output(&mut replay_events, "replayed reply").await;
+    crate::support::event_trace::collect_until_output(&mut replay_events, "replayed reply").await;
 
     let replay_texts = request_texts(&replay_client.requests()[0]);
     assert_eq!(
@@ -1246,13 +1335,13 @@ async fn replay_after_boundary_request_before_result_persistence_keeps_one_steer
 
 #[tokio::test]
 async fn steer_mode_rejects_non_steerable_active_runtime() {
-    let config = verlet::VirtualBashRuntimeConfig {
+    let config = verlet::capabilities::execution::VirtualBashRuntimeConfig {
         execution_timeout: std::time::Duration::from_secs(30),
         max_output_bytes: 1024,
-        ..verlet::VirtualBashRuntimeConfig::default()
+        ..verlet::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(
-        verlet::VirtualBashRuntimeFactory::new(config),
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        verlet::capabilities::execution::VirtualBashRuntimeFactory::new(config),
     ));
     let thread = start_thread(&host).await;
     let mut events = thread.subscribe_events();
@@ -1264,7 +1353,7 @@ async fn steer_mode_rejects_non_steerable_active_runtime() {
     )
     .await
     .unwrap();
-    wait_for_status(&thread, verlet::ThreadStatus::Running).await;
+    wait_for_status(&thread, verlet_runtime_contracts::ThreadStatus::Running).await;
     host.steer(
         thread.context().coordinates.thread_id,
         "turn-steer",
@@ -1277,28 +1366,28 @@ async fn steer_mode_rejects_non_steerable_active_runtime() {
     host.cancel(thread.context().coordinates.thread_id, "stop loop")
         .await
         .unwrap();
-    crate::support::collect_until_cancelled(&mut events, "stop loop").await;
+    crate::support::event_trace::collect_until_cancelled(&mut events, "stop loop").await;
 }
 
 #[tokio::test]
 async fn subthread_spawn_scenario_reports_parent_child_events_and_history() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_tool_call(
-                verlet::THREAD_SPAWN_OPERATION,
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_tool_call(
+                verlet::operations::kernel_packages::THREAD_SPAWN_OPERATION,
                 serde_json::json!({
                     "task_name": "worker",
                     "message": "child task",
                 }),
             ),
-            crate::support::response_text("spawned child"),
-        ],
-    ));
+            crate::support::scripted_provider::response_text("spawned child"),
+        ]),
+    );
     let root_factory = std::sync::Arc::new(
         provider_factory(std::sync::Arc::clone(&client))
             .with_tool_router(std::sync::Arc::new(kernel_thread_router().await)),
     );
-    let host = verlet::RuntimeHost::new(std::sync::Arc::new(
+    let host = verlet::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
         crate::support::RootProviderChildEchoFactory::new(root_factory),
     ));
     let thread = start_thread(&host).await;
@@ -1311,17 +1400,16 @@ async fn subthread_spawn_scenario_reports_parent_child_events_and_history() {
     )
     .await
     .unwrap();
-    let trace = crate::support::collect_until_output(&mut events, "spawned child").await;
+    let trace =
+        crate::support::event_trace::collect_until_output(&mut events, "spawned child").await;
 
-    assert!(
-        trace
-            .runtime_events()
-            .iter()
-            .any(|event| matches!(event, verlet::RuntimeEventKind::SubthreadStarted { .. }))
-    );
     assert!(trace.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ToolCallResult {
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::SubthreadStarted { .. }
+    )));
+    assert!(trace.runtime_events().iter().any(|event| matches!(
+        event,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
             output,
             success: true,
             ..
@@ -1343,39 +1431,43 @@ async fn subthread_spawn_scenario_reports_parent_child_events_and_history() {
     host.shutdown_all().await.unwrap();
 }
 
-async fn kernel_thread_router() -> verlet::AgentToolRouter {
-    let registry = std::sync::Arc::new(verlet::OperationRegistry::new());
-    let package = verlet::verlet_threads_kernel_package();
-    let mut registration = verlet::KernelOperationRegistration::new(
-        verlet::VERLET_THREADS_PACKAGE,
+async fn kernel_thread_router() -> verlet::agent::agent_tool_router::AgentToolRouter {
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
+    let package = verlet::operations::kernel_packages::verlet_threads_kernel_package();
+    let mut registration = verlet_operations::operation_registry::KernelOperationRegistration::new(
+        verlet::operations::kernel_packages::VERLET_THREADS_PACKAGE,
         package.manifest.clone(),
     )
     .with_capability_grants(package.capability_grants.clone());
     registration.metadata.insert(
-        verlet::OPERATION_METADATA_RUNTIME_KIND.to_string(),
-        serde_json::Value::String(verlet::KERNEL_RUNTIME_KIND.to_string()),
+        verlet::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        serde_json::Value::String(
+            verlet::operations::kernel_packages::KERNEL_RUNTIME_KIND.to_string(),
+        ),
     );
     registry.register_kernel(registration).await.unwrap();
-    verlet::AgentToolRouter::new(registry)
+    verlet::agent::agent_tool_router::AgentToolRouter::new(registry)
         .with_capability_grants(package.capability_grants)
-        .with_tool_aliases(vec![verlet::OperationToolAlias {
-            tool_name: verlet::THREAD_SPAWN_OPERATION.to_string(),
-            registered_name: verlet::VERLET_THREADS_PACKAGE.to_string(),
-            operation_name: verlet::THREAD_SPAWN_OPERATION.to_string(),
+        .with_tool_aliases(vec![verlet::agent::agent_tool_router::OperationToolAlias {
+            tool_name: verlet::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
+            registered_name: verlet::operations::kernel_packages::VERLET_THREADS_PACKAGE
+                .to_string(),
+            operation_name: verlet::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             grant_expiries: Vec::new(),
         }])
 }
 
 #[tokio::test]
 async fn manual_compaction_checkpoint_resume_scenario_replays_summary() {
-    let client = std::sync::Arc::new(crate::support::ScriptedProviderClient::with_responses(
-        vec![
-            crate::support::response_text("root reply"),
-            crate::support::response_text("model summary"),
-            crate::support::response_text("resumed reply"),
-        ],
-    ));
-    let host = verlet::RuntimeHost::with_session_store(
+    let client = std::sync::Arc::new(
+        crate::support::scripted_provider::ScriptedProviderClient::with_responses(vec![
+            crate::support::scripted_provider::response_text("root reply"),
+            crate::support::scripted_provider::response_text("model summary"),
+            crate::support::scripted_provider::response_text("resumed reply"),
+        ]),
+    );
+    let host = verlet::kernel::runtime_host::RuntimeHost::with_session_store(
         std::sync::Arc::new(provider_factory(std::sync::Arc::clone(&client))),
         crate::support::in_memory_store(),
     );
@@ -1385,22 +1477,23 @@ async fn manual_compaction_checkpoint_resume_scenario_replays_summary() {
     host.submit(thread.context().coordinates.thread_id, "turn-root", "root")
         .await
         .unwrap();
-    crate::support::collect_until_output(&mut events, "root reply").await;
+    crate::support::event_trace::collect_until_output(&mut events, "root reply").await;
     host.compact_thread(thread.context().coordinates.thread_id, "compact-1", None)
         .await
         .unwrap();
-    let compacted = crate::support::collect_until_compaction(&mut events, "model summary").await;
+    let compacted =
+        crate::support::event_trace::collect_until_compaction(&mut events, "model summary").await;
     assert!(compacted.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::ModelRequestStarted {
-            purpose: verlet::RuntimeModelRequestPurpose::Compaction,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestStarted {
+            purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose::Compaction,
             ..
         }
     )));
     assert!(compacted.runtime_events().iter().any(|event| matches!(
         event,
-        verlet::RuntimeEventKind::Compaction {
-            trigger: verlet::CompactionTrigger::Manual,
+        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Compaction {
+            trigger: verlet::kernel::compaction::CompactionTrigger::Manual,
             summary,
         } if summary == "model summary"
     )));
@@ -1429,7 +1522,7 @@ async fn manual_compaction_checkpoint_resume_scenario_replays_summary() {
     )
     .await
     .unwrap();
-    crate::support::collect_until_output(&mut resumed_events, "resumed reply").await;
+    crate::support::event_trace::collect_until_output(&mut resumed_events, "resumed reply").await;
 
     let requests = client.requests();
     assert_eq!(
@@ -1446,43 +1539,52 @@ async fn manual_compaction_checkpoint_resume_scenario_replays_summary() {
     );
 }
 
-fn provider_factory<P>(client: std::sync::Arc<P>) -> verlet::AgentLoopFactory
+fn provider_factory<P>(client: std::sync::Arc<P>) -> verlet::adapters::agent_loop::AgentLoopFactory
 where
-    P: verlet::ProviderClient + 'static,
+    P: verlet_provider::ProviderClient + 'static,
 {
-    let client: std::sync::Arc<dyn verlet::ProviderClient> = client;
-    let mut config =
-        verlet::AgentLoopConfig::new(verlet::ProviderApi::OpenAIResponses, "openai", "gpt-test");
+    let client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
+    let mut config = verlet::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
     config.max_tokens = 128;
-    verlet::AgentLoopFactory::new(config, client)
+    verlet::adapters::agent_loop::AgentLoopFactory::new(config, client)
 }
 
-async fn start_thread(host: &verlet::RuntimeHost) -> verlet::RuntimeThreadHandle {
+async fn start_thread(
+    host: &verlet::kernel::runtime_host::RuntimeHost,
+) -> verlet::kernel::runtime_host::RuntimeThreadHandle {
     host.start_thread(
-        verlet::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
-        verlet::ThreadTopology::root(),
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+        verlet_runtime_contracts::ThreadTopology::root(),
     )
     .await
     .unwrap()
 }
 
-fn session_texts(session: &verlet::SessionContext) -> Vec<String> {
+fn session_texts(session: &verlet_history::SessionContext) -> Vec<String> {
     session
         .messages
         .iter()
-        .map(crate::support::text_from_message)
+        .map(crate::support::event_trace::text_from_message)
         .collect()
 }
 
-fn request_texts(request: &verlet::ProviderRequest) -> Vec<String> {
+fn request_texts(request: &verlet_provider::ProviderRequest) -> Vec<String> {
     request
         .messages
         .iter()
-        .map(crate::support::text_from_message)
+        .map(crate::support::event_trace::text_from_message)
         .collect()
 }
 
-fn steering_injection_count(request: &verlet::ProviderRequest, turn_id: &str, text: &str) -> usize {
+fn steering_injection_count(
+    request: &verlet_provider::ProviderRequest,
+    turn_id: &str,
+    text: &str,
+) -> usize {
     let prefix = format!("Additional user steering for active turn {turn_id}:");
     request_texts(request)
         .iter()
@@ -1490,7 +1592,7 @@ fn steering_injection_count(request: &verlet::ProviderRequest, turn_id: &str, te
         .count()
 }
 
-fn request_text_occurrence_count(request: &verlet::ProviderRequest, text: &str) -> usize {
+fn request_text_occurrence_count(request: &verlet_provider::ProviderRequest, text: &str) -> usize {
     request_texts(request)
         .iter()
         .map(|message| message.matches(text).count())
@@ -1506,14 +1608,16 @@ fn temp_db_path(prefix: &str) -> std::path::PathBuf {
 }
 
 fn bash_tool_result_json(
-    events: &[verlet::RuntimeEventKind],
+    events: &[verlet::kernel::runtime_host::runtime_events::RuntimeEventKind],
     expected_call_id: &str,
 ) -> serde_json::Value {
     let output = events
         .iter()
         .find_map(|event| match event {
-            verlet::RuntimeEventKind::ToolCallResult {
-                call_id, output, ..
+            verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
+                call_id,
+                output,
+                ..
             } if call_id == expected_call_id => Some(output.as_str()),
             _ => None,
         })
@@ -1524,8 +1628,8 @@ fn bash_tool_result_json(
 }
 
 struct GatedProviderClient {
-    requests: std::sync::Mutex<Vec<verlet::ProviderRequest>>,
-    responses: std::sync::Mutex<std::collections::VecDeque<verlet::ProviderResponse>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
+    responses: std::sync::Mutex<std::collections::VecDeque<verlet_provider::ProviderResponse>>,
     gated_request: usize,
     first_released: std::sync::atomic::AtomicBool,
     first_release: tokio::sync::Notify,
@@ -1572,15 +1676,15 @@ impl GatedToolProvider {
 
     fn result(
         &self,
-        call: verlet::AgentKernelToolCall,
+        call: verlet::agent::agent_tool_router::AgentKernelToolCall,
         cancelled: bool,
-    ) -> verlet::CanonicalMessage {
+    ) -> verlet_history::CanonicalMessage {
         let input = call
             .arguments
             .get("input")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        verlet::CanonicalMessage::tool_result(
+        verlet_history::CanonicalMessage::tool_result(
             call.call_id,
             call.tool_name,
             if cancelled {
@@ -1594,9 +1698,9 @@ impl GatedToolProvider {
 }
 
 #[async_trait::async_trait]
-impl verlet::AgentKernelToolProvider for GatedToolProvider {
-    async fn tool_definitions(&self) -> Vec<verlet::ToolDefinition> {
-        vec![verlet::ToolDefinition::new(
+impl verlet::agent::agent_tool_router::AgentKernelToolProvider for GatedToolProvider {
+    async fn tool_definitions(&self) -> Vec<verlet_provider::ToolDefinition> {
+        vec![verlet_provider::ToolDefinition::new(
             self.tool_name.clone(),
             "Wait at the tool-round boundary and echo input.",
             serde_json::json!({
@@ -1610,8 +1714,8 @@ impl verlet::AgentKernelToolProvider for GatedToolProvider {
 
     async fn invoke_tool_call(
         &self,
-        call: verlet::AgentKernelToolCall,
-    ) -> verlet::VerletResult<Option<verlet::CanonicalMessage>> {
+        call: verlet::agent::agent_tool_router::AgentKernelToolCall,
+    ) -> verlet::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
         self.started
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.started_notify.notify_waiters();
@@ -1621,9 +1725,11 @@ impl verlet::AgentKernelToolProvider for GatedToolProvider {
 
     async fn invoke_tool_call_cancellable(
         &self,
-        call: verlet::AgentKernelToolCall,
-        cancellation: verlet::ToolInvocationCancellation,
-    ) -> verlet::VerletResult<verlet::AgentKernelToolOutcome> {
+        call: verlet::agent::agent_tool_router::AgentKernelToolCall,
+        cancellation: verlet::agent::agent_tool_router::ToolInvocationCancellation,
+    ) -> verlet::kernel::runtime_host::VerletResult<
+        verlet::agent::agent_tool_router::AgentKernelToolOutcome,
+    > {
         self.started
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.started_notify.notify_waiters();
@@ -1634,18 +1740,23 @@ impl verlet::AgentKernelToolProvider for GatedToolProvider {
                 true
             }
         };
-        Ok(verlet::AgentKernelToolOutcome::Completed(Some(
-            self.result(call, cancelled),
-        )))
+        Ok(
+            verlet::agent::agent_tool_router::AgentKernelToolOutcome::Completed(Some(
+                self.result(call, cancelled),
+            )),
+        )
     }
 }
 
 impl GatedProviderClient {
-    fn new(responses: Vec<verlet::ProviderResponse>) -> Self {
+    fn new(responses: Vec<verlet_provider::ProviderResponse>) -> Self {
         Self::gating_request(1, responses)
     }
 
-    fn gating_request(gated_request: usize, responses: Vec<verlet::ProviderResponse>) -> Self {
+    fn gating_request(
+        gated_request: usize,
+        responses: Vec<verlet_provider::ProviderResponse>,
+    ) -> Self {
         assert!(gated_request > 0, "gated request index is one-based");
         Self {
             requests: std::sync::Mutex::new(Vec::new()),
@@ -1656,7 +1767,7 @@ impl GatedProviderClient {
         }
     }
 
-    fn requests(&self) -> Vec<verlet::ProviderRequest> {
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 
@@ -1672,11 +1783,11 @@ impl GatedProviderClient {
 }
 
 #[async_trait::async_trait]
-impl verlet::ProviderClient for GatedProviderClient {
+impl verlet_provider::ProviderClient for GatedProviderClient {
     async fn complete(
         &self,
-        request: &verlet::ProviderRequest,
-    ) -> verlet::ProviderResult<verlet::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         let request_index = {
             let mut requests = self.requests.lock().unwrap();
             requests.push(request.clone());
@@ -1699,7 +1810,10 @@ impl verlet::ProviderClient for GatedProviderClient {
     }
 }
 
-async fn wait_for_requests(client: &crate::support::ScriptedProviderClient, expected: usize) {
+async fn wait_for_requests(
+    client: &crate::support::scripted_provider::ScriptedProviderClient,
+    expected: usize,
+) {
     for _ in 0..1_500 {
         if client.requests().len() >= expected {
             return;
@@ -1713,16 +1827,24 @@ async fn wait_for_requests(client: &crate::support::ScriptedProviderClient, expe
 }
 
 async fn collect_until_signal(
-    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
-    expected: verlet::ThreadSignalKind,
-) -> verlet::ThreadSignal {
+    events: &mut tokio::sync::broadcast::Receiver<
+        verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
+    expected: verlet_runtime_contracts::ThreadSignalKind,
+) -> verlet_runtime_contracts::ThreadSignal {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             match events.recv().await {
-                Ok(verlet::ThreadEvent::Signal { signal, .. }) if signal.kind == expected => {
+                Ok(verlet::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                    signal,
+                    ..
+                }) if signal.kind == expected => {
                     return signal;
                 }
-                Ok(verlet::ThreadEvent::Failed { message, .. }) => {
+                Ok(verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                    message,
+                    ..
+                }) => {
                     panic!("thread failed before signal {expected:?}: {message}");
                 }
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -1737,21 +1859,23 @@ async fn collect_until_signal(
 }
 
 async fn collect_until_policy_rejected(
-    events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<
+        verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
     expected_code: &str,
 ) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             match events.recv().await {
-                Ok(verlet::ThreadEvent::Runtime { event, .. }) => {
+                Ok(verlet::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. }) => {
                     if matches!(
                         event.kind,
-                        verlet::RuntimeEventKind::PolicyRejected { ref code, .. } if code == expected_code
+                        verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::PolicyRejected { ref code, .. } if code == expected_code
                     ) {
                         return;
                     }
                 }
-                Ok(verlet::ThreadEvent::Failed { message, .. }) => {
+                Ok(verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed { message, .. }) => {
                     panic!("thread failed before policy rejection {expected_code:?}: {message}");
                 }
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -1765,7 +1889,10 @@ async fn collect_until_policy_rejected(
     .unwrap_or_else(|_| panic!("timed out waiting for policy rejection {expected_code:?}"));
 }
 
-async fn wait_for_status(thread: &verlet::RuntimeThreadHandle, expected: verlet::ThreadStatus) {
+async fn wait_for_status(
+    thread: &verlet::kernel::runtime_host::RuntimeThreadHandle,
+    expected: verlet_runtime_contracts::ThreadStatus,
+) {
     let mut status = thread.subscribe_status();
     for _ in 0..50 {
         if *status.borrow() == expected {

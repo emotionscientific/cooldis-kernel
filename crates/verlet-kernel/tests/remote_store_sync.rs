@@ -1,11 +1,11 @@
 use chrono::TimeZone as _;
 use tokio::io::AsyncBufReadExt as _;
-use verlet::EventStore as _;
 use verlet::daemon::remote_store::endpoint::SyncPullSource as _;
 use verlet::daemon::remote_store::endpoint::SyncPushGate as _;
 use verlet::daemon::remote_store::lease::StreamLeaseAuthority as _;
 use verlet::daemon::remote_store::lease::SyncCredentialAuthority as _;
 use verlet::daemon::remote_store::propagator::StreamPropagator as _;
+use verlet_history::EventStore as _;
 
 const LEASE_RACE_DST_SEED: u64 = 0x4290_0000_0000_0001;
 const OFFLINE_WINDOW_DST_SEED: u64 = 0x4290_0000_0000_0002;
@@ -13,7 +13,7 @@ const OFFLINE_WINDOW_DST_SEED: u64 = 0x4290_0000_0000_0002;
 #[derive(Clone)]
 struct FixedClock(i64);
 
-impl verlet::DaemonClock for FixedClock {
+impl verlet::daemon::clock_route::DaemonClock for FixedClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
         chrono::Utc
             .timestamp_millis_opt(self.0)
@@ -24,7 +24,7 @@ impl verlet::DaemonClock for FixedClock {
 
 struct Fixture {
     parent_path: std::path::PathBuf,
-    parent_store: verlet::SqliteSessionStore,
+    parent_store: verlet_history_sqlite::SqliteSessionStore,
     authority: std::sync::Arc<verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority>,
     endpoint: std::sync::Arc<verlet::daemon::remote_store::endpoint::SqliteSyncEndpoint>,
     clock: std::sync::Arc<FixedClock>,
@@ -33,7 +33,7 @@ struct Fixture {
 impl Fixture {
     async fn new(name: &str) -> Self {
         let parent_path = temp_db_path(&format!("{name}-parent"));
-        let parent_store = verlet::SqliteSessionStore::open(&parent_path)
+        let parent_store = verlet_history_sqlite::SqliteSessionStore::open(&parent_path)
             .await
             .unwrap();
         let clock = std::sync::Arc::new(FixedClock(1_700_000_000_000));
@@ -41,7 +41,8 @@ impl Fixture {
             verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
                 parent_store.clone(),
                 verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default(),
-                std::sync::Arc::clone(&clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+                std::sync::Arc::clone(&clock)
+                    as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
             )
             .await
             .unwrap(),
@@ -50,7 +51,8 @@ impl Fixture {
             verlet::daemon::remote_store::endpoint::SqliteSyncEndpoint::new(
                 parent_store.clone(),
                 std::sync::Arc::clone(&authority),
-                std::sync::Arc::clone(&clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+                std::sync::Arc::clone(&clock)
+                    as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
             )
             .await
             .unwrap(),
@@ -77,7 +79,7 @@ impl Fixture {
             .authority
             .grant_lease(
                 &verlet::daemon::remote_store::lease::StreamPrefixScope::new(scope),
-                &verlet_runtime_contracts::DispatchId::new(dispatch),
+                &verlet_runtime_contracts::handle::DispatchId::new(dispatch),
                 lineage,
             )
             .await
@@ -97,7 +99,7 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let stream_id = verlet::EventStreamId::new("thread:prefix-b");
+    let stream_id = verlet_history::EventStreamId::new("thread:prefix-b");
     let request = request_for(&stream_id, &grant.lease_id, vec![record("outside-scope")]);
 
     let outcome = fixture.endpoint.push(&token, request).await.unwrap();
@@ -126,7 +128,7 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
         .unwrap();
     assert!(matches!(
         fixture.endpoint.pull_after(&token, &stream_id, None).await,
-        Err(verlet::VerletError::History(message)) if message == "sync pull not authorized"
+        Err(verlet::kernel::runtime_host::VerletError::History(message)) if message == "sync pull not authorized"
     ));
 
     let witnessed = fixture
@@ -142,14 +144,15 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
     drop(fixture.endpoint);
     drop(fixture.authority);
     drop(fixture.parent_store);
-    let reopened_store = verlet::SqliteSessionStore::open(&fixture.parent_path)
+    let reopened_store = verlet_history_sqlite::SqliteSessionStore::open(&fixture.parent_path)
         .await
         .unwrap();
     let reopened_authority = std::sync::Arc::new(
         verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
             reopened_store.clone(),
             verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default(),
-            std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+            std::sync::Arc::clone(&fixture.clock)
+                as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
         )
         .await
         .unwrap(),
@@ -157,7 +160,8 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
     let reopened = verlet::daemon::remote_store::endpoint::SqliteSyncEndpoint::new(
         reopened_store,
         reopened_authority,
-        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock)
+            as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
     )
     .await
     .unwrap();
@@ -174,7 +178,7 @@ async fn scope_rejection_is_witnessed_before_return_and_survives_restart_without
 #[tokio::test]
 async fn superseding_propagators_commit_one_batch_and_witness_the_loser() {
     let fixture = Fixture::new(&format!("lease-race-{LEASE_RACE_DST_SEED:016x}")).await;
-    let stream_id = verlet::EventStreamId::new("thread:racing-child");
+    let stream_id = verlet_history::EventStreamId::new("thread:racing-child");
     let (first, first_token) = fixture
         .credential(
             stream_id.as_str(),
@@ -191,7 +195,9 @@ async fn superseding_propagators_commit_one_batch_and_witness_the_loser() {
             },
         )
         .await;
-    let local = verlet::SqliteSessionStore::in_memory().await.unwrap();
+    let local = verlet_history_sqlite::SqliteSessionStore::in_memory()
+        .await
+        .unwrap();
     let event = local
         .append_events(&stream_id, vec![record("raced")])
         .await
@@ -202,7 +208,7 @@ async fn superseding_propagators_commit_one_batch_and_witness_the_loser() {
         schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
         stream_id: stream_id.clone(),
         lease_id: first.lease_id,
-        expected_next_sequence: verlet::EventSequence::new(1),
+        expected_next_sequence: verlet_history::EventSequence::new(1),
         records: vec![event.clone()],
     };
     let winning = verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
@@ -265,9 +271,11 @@ impl verlet::daemon::remote_store::endpoint::SyncPushGate for LoseAcceptedRespon
         &self,
         bearer_token: &str,
         request: verlet::daemon::remote_store::endpoint::SyncPushRequestV1,
-    ) -> verlet::VerletResult<verlet::daemon::remote_store::endpoint::SyncPushOutcome> {
+    ) -> verlet::kernel::runtime_host::VerletResult<
+        verlet::daemon::remote_store::endpoint::SyncPushOutcome,
+    > {
         if self.offline.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(verlet::VerletError::RuntimeExecution(
+            return Err(verlet::kernel::runtime_host::VerletError::RuntimeExecution(
                 "injected endpoint outage".to_string(),
             ));
         }
@@ -279,7 +287,7 @@ impl verlet::daemon::remote_store::endpoint::SyncPushGate for LoseAcceptedRespon
             .lose_once
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(verlet::VerletError::RuntimeExecution(
+            return Err(verlet::kernel::runtime_host::VerletError::RuntimeExecution(
                 "injected lost response after durable ack".to_string(),
             ));
         }
@@ -290,7 +298,7 @@ impl verlet::daemon::remote_store::endpoint::SyncPushGate for LoseAcceptedRespon
 #[tokio::test]
 async fn synthetic_queue_pull_kind_cannot_be_pushed_into_a_real_stream() {
     let fixture = Fixture::new("queue-kind-push-rejected").await;
-    let stream_id = verlet::EventStreamId::new("thread:queue-kind-push-rejected");
+    let stream_id = verlet_history::EventStreamId::new("thread:queue-kind-push-rejected");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
@@ -329,7 +337,7 @@ async fn synthetic_queue_pull_kind_cannot_be_pushed_into_a_real_stream() {
 #[tokio::test]
 async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
     let fixture = Fixture::new(&format!("lost-ack-offline-{OFFLINE_WINDOW_DST_SEED:016x}")).await;
-    let stream_id = verlet::EventStreamId::new("thread:offline-child");
+    let stream_id = verlet_history::EventStreamId::new("thread:offline-child");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
@@ -340,7 +348,9 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
     let child_path = temp_db_path(&format!(
         "lost-ack-offline-child-{OFFLINE_WINDOW_DST_SEED:016x}"
     ));
-    let child_store = verlet::SqliteSessionStore::open(&child_path).await.unwrap();
+    let child_store = verlet_history_sqlite::SqliteSessionStore::open(&child_path)
+        .await
+        .unwrap();
     let state_store = std::sync::Arc::new(
         verlet::daemon::remote_store::propagator::SqlitePropagationStateStore::new(
             child_store.clone(),
@@ -363,7 +373,8 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
             as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store.clone(),
         token.clone(),
-        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock)
+            as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
     );
     let mut state = verlet::daemon::remote_store::propagator::StreamPropagationState {
         stream_id: stream_id.clone(),
@@ -383,7 +394,7 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
         ]
     };
     for (index, cut) in cuts.into_iter().enumerate() {
-        let sequence = verlet::EventSequence::new(index as i64 + 1);
+        let sequence = verlet_history::EventSequence::new(index as i64 + 1);
         child_store
             .append_events(
                 &stream_id,
@@ -455,13 +466,16 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
         propagator.propagate_once(&mut state).await.unwrap(),
         verlet::daemon::remote_store::propagator::PropagationStep::EndpointUnavailable
     );
-    assert_eq!(state.pushed_through, Some(verlet::EventSequence::new(2)));
+    assert_eq!(
+        state.pushed_through,
+        Some(verlet_history::EventSequence::new(2))
+    );
     push.offline
         .store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
         verlet::daemon::remote_store::propagator::PropagationStep::Advanced {
-            pushed_through: verlet::EventSequence::new(3)
+            pushed_through: verlet_history::EventSequence::new(3)
         }
     );
 
@@ -482,7 +496,7 @@ async fn lost_ack_and_offline_window_reconcile_without_duplicate_or_loss() {
 #[tokio::test]
 async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead() {
     let fixture = Fixture::new("remote-matching-ahead").await;
-    let stream_id = verlet::EventStreamId::new("thread:remote-matching-ahead");
+    let stream_id = verlet_history::EventStreamId::new("thread:remote-matching-ahead");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
@@ -490,7 +504,9 @@ async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let child_store = verlet::SqliteSessionStore::in_memory().await.unwrap();
+    let child_store = verlet_history_sqlite::SqliteSessionStore::in_memory()
+        .await
+        .unwrap();
     let local = child_store
         .append_events(
             &stream_id,
@@ -510,7 +526,7 @@ async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead
                     schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
                     stream_id: stream_id.clone(),
                     lease_id: grant.lease_id.clone(),
-                    expected_next_sequence: verlet::EventSequence::new(1),
+                    expected_next_sequence: verlet_history::EventSequence::new(1),
                     records: local,
                 },
             )
@@ -535,7 +551,8 @@ async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead
             as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store,
         token,
-        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock)
+            as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
     )
     .with_batch_size(1);
     let mut state = verlet::daemon::remote_store::propagator::StreamPropagationState {
@@ -548,13 +565,13 @@ async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
         verlet::daemon::remote_store::propagator::PropagationStep::Advanced {
-            pushed_through: verlet::EventSequence::new(1)
+            pushed_through: verlet_history::EventSequence::new(1)
         }
     );
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
         verlet::daemon::remote_store::propagator::PropagationStep::Advanced {
-            pushed_through: verlet::EventSequence::new(2)
+            pushed_through: verlet_history::EventSequence::new(2)
         }
     );
     assert_eq!(
@@ -566,7 +583,7 @@ async fn reconciliation_advances_one_batch_when_remote_matching_history_is_ahead
 #[tokio::test]
 async fn reconciliation_rejects_remote_records_past_the_local_tail() {
     let fixture = Fixture::new("remote-unmatched-ahead").await;
-    let stream_id = verlet::EventStreamId::new("thread:remote-unmatched-ahead");
+    let stream_id = verlet_history::EventStreamId::new("thread:remote-unmatched-ahead");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
@@ -574,7 +591,9 @@ async fn reconciliation_rejects_remote_records_past_the_local_tail() {
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let child_store = verlet::SqliteSessionStore::in_memory().await.unwrap();
+    let child_store = verlet_history_sqlite::SqliteSessionStore::in_memory()
+        .await
+        .unwrap();
     let local = child_store
         .append_events(&stream_id, vec![record("local-only-one")])
         .await
@@ -590,7 +609,7 @@ async fn reconciliation_rejects_remote_records_past_the_local_tail() {
                     schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
                     stream_id: stream_id.clone(),
                     lease_id: grant.lease_id.clone(),
-                    expected_next_sequence: verlet::EventSequence::new(1),
+                    expected_next_sequence: verlet_history::EventSequence::new(1),
                     records: vec![local],
                 },
             )
@@ -620,7 +639,8 @@ async fn reconciliation_rejects_remote_records_past_the_local_tail() {
             as std::sync::Arc<dyn verlet::daemon::remote_store::endpoint::SyncLeaseRenewer>,
         state_store,
         token,
-        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock)
+            as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
     )
     .with_batch_size(1);
     let mut state = verlet::daemon::remote_store::propagator::StreamPropagationState {
@@ -632,7 +652,7 @@ async fn reconciliation_rejects_remote_records_past_the_local_tail() {
     assert_eq!(
         propagator.propagate_once(&mut state).await.unwrap(),
         verlet::daemon::remote_store::propagator::PropagationStep::StreamDiverged {
-            actual_next_sequence: verlet::EventSequence::new(3)
+            actual_next_sequence: verlet_history::EventSequence::new(3)
         }
     );
     assert_eq!(state.pushed_through, None);
@@ -641,7 +661,7 @@ async fn reconciliation_rejects_remote_records_past_the_local_tail() {
 #[tokio::test]
 async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and_socket() {
     let fixture = Fixture::new("http-projection").await;
-    let stream_id = verlet::EventStreamId::new("thread:http-child");
+    let stream_id = verlet_history::EventStreamId::new("thread:http-child");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
@@ -649,7 +669,9 @@ async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let local = verlet::SqliteSessionStore::in_memory().await.unwrap();
+    let local = verlet_history_sqlite::SqliteSessionStore::in_memory()
+        .await
+        .unwrap();
     let event = local
         .append_events(&stream_id, vec![record("over-http")])
         .await
@@ -657,7 +679,7 @@ async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and
         .remove(0)
         .to_stream_record_v1();
     let server = verlet::daemon::remote_store::endpoint_http::DaemonSyncHttpServer::bind(
-        verlet::AppServerListenAddr::parse("ws://127.0.0.1:0").unwrap(),
+        verlet::adapters::app_server::AppServerListenAddr::parse("ws://127.0.0.1:0").unwrap(),
         std::sync::Arc::clone(&fixture.endpoint),
     )
     .await
@@ -675,7 +697,7 @@ async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and
                 schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
                 stream_id: stream_id.clone(),
                 lease_id: grant.lease_id,
-                expected_next_sequence: verlet::EventSequence::new(1),
+                expected_next_sequence: verlet_history::EventSequence::new(1),
                 records: vec![event.clone()],
             },
         )
@@ -700,7 +722,7 @@ async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and
 #[tokio::test]
 async fn unix_http_projection_removes_socket_when_serve_is_cancelled() {
     let fixture = Fixture::new("unix-http-cleanup").await;
-    let stream_id = verlet::EventStreamId::new("thread:unix-child");
+    let stream_id = verlet_history::EventStreamId::new("thread:unix-child");
     let (grant, token) = fixture
         .credential(
             stream_id.as_str(),
@@ -708,7 +730,9 @@ async fn unix_http_projection_removes_socket_when_serve_is_cancelled() {
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await;
-    let local = verlet::SqliteSessionStore::in_memory().await.unwrap();
+    let local = verlet_history_sqlite::SqliteSessionStore::in_memory()
+        .await
+        .unwrap();
     let event = local
         .append_events(&stream_id, vec![record("over-unix-http")])
         .await
@@ -718,7 +742,7 @@ async fn unix_http_projection_removes_socket_when_serve_is_cancelled() {
     let root = temp_root_path("unix-http-cleanup");
     let socket = root.join("run/sync.sock");
     let server = verlet::daemon::remote_store::endpoint_http::DaemonSyncHttpServer::bind(
-        verlet::AppServerListenAddr::Unix(socket.clone()),
+        verlet::adapters::app_server::AppServerListenAddr::Unix(socket.clone()),
         std::sync::Arc::clone(&fixture.endpoint),
     )
     .await
@@ -739,7 +763,7 @@ async fn unix_http_projection_removes_socket_when_serve_is_cancelled() {
                     schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
                     stream_id: stream_id.clone(),
                     lease_id: grant.lease_id,
-                    expected_next_sequence: verlet::EventSequence::new(1),
+                    expected_next_sequence: verlet_history::EventSequence::new(1),
                     records: vec![event.clone()],
                 },
             )
@@ -762,12 +786,12 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
     let daemon_root = temp_root_path("process-daemon");
     let parent_path = daemon_root.join("state/session_history.sqlite3");
     let child_path = temp_db_path("process-child");
-    let stream_id = verlet::EventStreamId::new("thread:process-child");
-    let store = verlet::SqliteSessionStore::open(&parent_path)
+    let stream_id = verlet_history::EventStreamId::new("thread:process-child");
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&parent_path)
         .await
         .unwrap();
-    let clock: std::sync::Arc<dyn verlet::DaemonClock> =
-        std::sync::Arc::new(verlet::SystemDaemonClock);
+    let clock: std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock> =
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock);
     let authority = verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
         store.clone(),
         verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
@@ -781,7 +805,7 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
     let first = authority
         .grant_lease(
             &verlet::daemon::remote_store::lease::StreamPrefixScope::new(stream_id.as_str()),
-            &verlet_runtime_contracts::DispatchId::new("dispatch-process-first"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-process-first"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -863,7 +887,7 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
     assert_eq!(ready, "READY child tail persisted");
     stop_process(&mut parked).await;
 
-    let store = verlet::SqliteSessionStore::open(&parent_path)
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&parent_path)
         .await
         .unwrap();
     let authority = verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
@@ -872,14 +896,14 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
             lease_ttl_secs: 300,
             ..verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default()
         },
-        std::sync::Arc::new(verlet::SystemDaemonClock),
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock),
     )
     .await
     .unwrap();
     let successor = authority
         .grant_lease(
             &verlet::daemon::remote_store::lease::StreamPrefixScope::new(stream_id.as_str()),
-            &verlet_runtime_contracts::DispatchId::new("dispatch-process-successor"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-process-successor"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(first.lease_id.clone()),
             },
@@ -930,10 +954,12 @@ async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
     assert_eq!(final_converged, "STEP converged");
     final_parent.stop().await;
 
-    let parent_store = verlet::SqliteSessionStore::open(&parent_path)
+    let parent_store = verlet_history_sqlite::SqliteSessionStore::open(&parent_path)
         .await
         .unwrap();
-    let child_store = verlet::SqliteSessionStore::open(&child_path).await.unwrap();
+    let child_store = verlet_history_sqlite::SqliteSessionStore::open(&child_path)
+        .await
+        .unwrap();
     let parent = parent_store.read_events(&stream_id, None).await.unwrap();
     let child = child_store.read_events(&stream_id, None).await.unwrap();
     assert_eq!(parent, child);
@@ -969,7 +995,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
     let child_thread_id = verlet_runtime_contracts::ThreadId::parse_str(child_id).unwrap();
     let parent_thread_id = verlet_runtime_contracts::ThreadId::parse_str(&parent.id).unwrap();
     let store_path = root.join("state/session_history.sqlite3");
-    let child_stream = verlet::EventStreamId::new(format!("thread:{child_id}"));
+    let child_stream = verlet_history::EventStreamId::new(format!("thread:{child_id}"));
 
     tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
@@ -1069,7 +1095,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
         .join("state/session_history.sqlite3");
     tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
-            match verlet::SqliteSessionStore::open(&child_store_path).await {
+            match verlet_history_sqlite::SqliteSessionStore::open(&child_store_path).await {
                 Ok(store) => break store,
                 Err(_) => tokio::time::sleep(tokio::time::Duration::from_millis(20)).await,
             }
@@ -1077,12 +1103,14 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
     })
     .await
     .expect("remote child process retained its SQLite lock after daemon shutdown");
-    let store = verlet::SqliteSessionStore::open(&store_path).await.unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&store_path)
+        .await
+        .unwrap();
     let child_events = store.read_events(&child_stream, None).await.unwrap();
     assert_eq!(
         child_events
             .iter()
-            .filter(|event| event.kind == verlet::EventKind::TurnSubmitted)
+            .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
             .count(),
         2,
         "spawn plus one idempotently retried submit must produce two child deliveries"
@@ -1091,7 +1119,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
         child_events
             .iter()
             .filter(|event| {
-                event.kind == verlet::EventKind::TurnSubmitted
+                event.kind == verlet_history::EventKind::TurnSubmitted
                     && event.payload["turn_id"] == "thread-submit-emo-430-submit-dispatch"
             })
             .count(),
@@ -1099,7 +1127,8 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
         "same-dispatch submit retry must fold to one child turn"
     );
     assert!(child_events.iter().any(|event| {
-        event.kind == verlet::EventKind::PlacementDecision && event.payload["placement"] == "remote"
+        event.kind == verlet_history::EventKind::PlacementDecision
+            && event.payload["placement"] == "remote"
     }));
     assert!(
         root.join("state/remote-children")
@@ -1349,15 +1378,15 @@ fn escape_toml(value: &str) -> String {
 
 async fn connect_daemon_client(
     socket: &std::path::Path,
-) -> verlet::CodexTuiTestClient<tokio::net::UnixStream> {
+) -> verlet::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream> {
     let mut last_error = None;
     for _ in 0..1_500 {
         if socket.exists() {
-            match verlet::CodexTuiTestClient::connect_unix(
+            match verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
                 socket,
-                verlet::CodexTuiConnectConfig {
+                verlet::adapters::codex_tui::CodexTuiConnectConfig {
                     client_name: "verlet-remote-placement-e2e".to_string(),
-                    ..verlet::CodexTuiConnectConfig::default()
+                    ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
                 },
             )
             .await
@@ -1392,7 +1421,7 @@ async fn run_sync_child(
     label: Option<&str>,
     endpoint_url: &str,
     token: &str,
-    stream_id: &verlet::EventStreamId,
+    stream_id: &verlet_history::EventStreamId,
     grant: &verlet::daemon::remote_store::lease::StreamLeaseGrantV1,
 ) -> String {
     let output = spawn_sync_child(
@@ -1428,7 +1457,7 @@ fn spawn_sync_child(
     label: Option<&str>,
     endpoint_url: &str,
     token: &str,
-    stream_id: &verlet::EventStreamId,
+    stream_id: &verlet_history::EventStreamId,
     grant: &verlet::daemon::remote_store::lease::StreamLeaseGrantV1,
 ) -> tokio::process::Child {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet-sync-test-peer"));
@@ -1459,17 +1488,17 @@ async fn stop_process(child: &mut tokio::process::Child) {
 }
 
 fn request_for(
-    stream_id: &verlet::EventStreamId,
+    stream_id: &verlet_history::EventStreamId,
     lease_id: &verlet::daemon::remote_store::lease::StreamLeaseId,
-    records: Vec<verlet::NewEventRecord>,
+    records: Vec<verlet_history::NewEventRecord>,
 ) -> verlet::daemon::remote_store::endpoint::SyncPushRequestV1 {
     let envelopes = records
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
-            verlet::EventRecord::from_new(
+            verlet_history::EventRecord::from_new(
                 stream_id.clone(),
-                verlet::EventSequence::new(index as i64 + 1),
+                verlet_history::EventSequence::new(index as i64 + 1),
                 record,
             )
             .to_stream_record_v1()
@@ -1479,15 +1508,15 @@ fn request_for(
         schema: verlet::daemon::remote_store::endpoint::SYNC_PUSH_SCHEMA_V1.to_string(),
         stream_id: stream_id.clone(),
         lease_id: lease_id.clone(),
-        expected_next_sequence: verlet::EventSequence::new(1),
+        expected_next_sequence: verlet_history::EventSequence::new(1),
         records: envelopes,
     }
 }
 
-fn record(entry_id: &str) -> verlet::NewEventRecord {
-    verlet::NewEventRecord::witnessed(
+fn record(entry_id: &str) -> verlet_history::NewEventRecord {
+    verlet_history::NewEventRecord::witnessed(
         verlet_runtime_contracts::ThreadCoordinates::new("tenant-a", "user-a", "session-a"),
-        verlet::EventKind::SessionEntryAppended,
+        verlet_history::EventKind::SessionEntryAppended,
         serde_json::json!({"entry_id": entry_id}),
     )
 }

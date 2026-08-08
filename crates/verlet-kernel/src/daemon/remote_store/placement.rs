@@ -8,27 +8,27 @@
 /// durably witnessed `thread.spawned`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RemoteThreadSpawnRequest {
-    pub child: crate::ThreadContext,
+    pub child: verlet_runtime_contracts::ThreadContext,
     pub task_name: Option<String>,
     pub turn_id: String,
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
-    pub input: crate::TurnInput,
-    pub spawned_event_id: crate::EventRecordId,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
+    pub input: crate::kernel::runtime_host::turn::TurnInput,
+    pub spawned_event_id: verlet_history::EventRecordId,
     pub compile_payload: Option<serde_json::Value>,
     pub bind_payload: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RemoteThreadSubmitRequest {
-    pub target_thread_id: crate::ThreadId,
+    pub target_thread_id: verlet_runtime_contracts::ThreadId,
     pub turn_id: String,
-    pub dispatch_id: verlet_runtime_contracts::DispatchId,
-    pub input: crate::TurnInput,
+    pub dispatch_id: verlet_runtime_contracts::handle::DispatchId,
+    pub input: crate::kernel::runtime_host::turn::TurnInput,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteThreadObservation {
-    pub status: crate::ThreadStatus,
+    pub status: verlet_runtime_contracts::ThreadStatus,
     pub latest_output: Option<String>,
 }
 
@@ -43,23 +43,29 @@ pub trait RemoteThreadExecutor: Send + Sync {
     /// Return the immutable child context for an executor-owned projection.
     /// Kernel callers use it to preserve the same scope and topology checks as
     /// resident local threads before dispatching any operation.
-    async fn context(&self, thread_id: crate::ThreadId) -> Option<crate::ThreadContext>;
+    async fn context(
+        &self,
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> Option<verlet_runtime_contracts::ThreadContext>;
 
-    async fn spawn(&self, request: RemoteThreadSpawnRequest) -> crate::VerletResult<()>;
+    async fn spawn(
+        &self,
+        request: RemoteThreadSpawnRequest,
+    ) -> crate::kernel::runtime_host::VerletResult<()>;
 
     async fn submit(
         &self,
         request: RemoteThreadSubmitRequest,
-    ) -> crate::VerletResult<crate::ThreadStatus>;
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_runtime_contracts::ThreadStatus>;
 
     async fn observe(
         &self,
-        thread_id: crate::ThreadId,
-    ) -> crate::VerletResult<RemoteThreadObservation>;
+        thread_id: verlet_runtime_contracts::ThreadId,
+    ) -> crate::kernel::runtime_host::VerletResult<RemoteThreadObservation>;
 
     async fn wait(
         &self,
-        thread_id: crate::ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
         timeout_ms: Option<u64>,
-    ) -> crate::VerletResult<RemoteThreadWaitObservation>;
+    ) -> crate::kernel::runtime_host::VerletResult<RemoteThreadWaitObservation>;
 }

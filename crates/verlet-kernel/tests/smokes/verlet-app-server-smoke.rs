@@ -120,29 +120,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn start_server(
     root: &std::path::Path,
     socket: &std::path::Path,
-) -> Result<tokio::task::JoinHandle<verlet::VerletResult<()>>, Box<dyn std::error::Error>> {
-    let listen = verlet::AppServerListenAddr::Unix(socket.to_path_buf());
-    let mut config = verlet::VerletAppServerConfig::local(listen.clone(), std::env::current_dir()?);
+) -> Result<
+    tokio::task::JoinHandle<verlet::kernel::runtime_host::VerletResult<()>>,
+    Box<dyn std::error::Error>,
+> {
+    let listen = verlet::adapters::app_server::AppServerListenAddr::Unix(socket.to_path_buf());
+    let mut config = verlet::adapters::app_server::VerletAppServerConfig::local(
+        listen.clone(),
+        std::env::current_dir()?,
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let server = verlet::VerletAppServer::new_local(config).await?;
+    let server = verlet::adapters::app_server::VerletAppServer::new_local(config).await?;
     Ok(tokio::spawn(async move { server.serve(listen).await }))
 }
 
 async fn start_tcp_server(
     root: &std::path::Path,
     addr: std::net::SocketAddr,
-) -> Result<(tokio::task::JoinHandle<verlet::VerletResult<()>>, String), Box<dyn std::error::Error>>
-{
-    let listen = verlet::AppServerListenAddr::WebSocket(addr);
-    let mut config = verlet::VerletAppServerConfig::local(listen.clone(), std::env::current_dir()?);
+) -> Result<
+    (
+        tokio::task::JoinHandle<verlet::kernel::runtime_host::VerletResult<()>>,
+        String,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let listen = verlet::adapters::app_server::AppServerListenAddr::WebSocket(addr);
+    let mut config = verlet::adapters::app_server::VerletAppServerConfig::local(
+        listen.clone(),
+        std::env::current_dir()?,
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
-    let server = verlet::VerletAppServer::new_local(config).await?;
-    let store = verlet::SqliteSessionStore::open(server.session_store_path()).await?;
+    let server = verlet::adapters::app_server::VerletAppServer::new_local(config).await?;
+    let store =
+        verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path()).await?;
     let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(
         store,
-        std::sync::Arc::new(verlet::SystemDaemonClock),
+        std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock),
         None,
     )
     .await?;
@@ -160,14 +175,17 @@ async fn start_tcp_server(
 async fn connect_client(
     socket: &std::path::Path,
     client_name: &str,
-) -> Result<verlet::CodexTuiTestClient<tokio::net::UnixStream>, Box<dyn std::error::Error>> {
+) -> Result<
+    verlet::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>,
+    Box<dyn std::error::Error>,
+> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match verlet::CodexTuiTestClient::connect_unix(
+        match verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
             socket,
-            verlet::CodexTuiConnectConfig {
+            verlet::adapters::codex_tui::CodexTuiConnectConfig {
                 client_name: client_name.to_string(),
-                ..verlet::CodexTuiConnectConfig::default()
+                ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
             },
         )
         .await
@@ -191,15 +209,18 @@ async fn connect_tcp_client(
     url: &str,
     client_name: &str,
     token: &str,
-) -> Result<verlet::CodexTuiTestClient<tokio::net::TcpStream>, Box<dyn std::error::Error>> {
+) -> Result<
+    verlet::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream>,
+    Box<dyn std::error::Error>,
+> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match verlet::CodexTuiTestClient::connect_websocket(
+        match verlet::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
             url,
-            verlet::CodexTuiConnectConfig {
+            verlet::adapters::codex_tui::CodexTuiConnectConfig {
                 client_name: client_name.to_string(),
                 bearer_token: Some(token.to_string()),
-                ..verlet::CodexTuiConnectConfig::default()
+                ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
             },
         )
         .await

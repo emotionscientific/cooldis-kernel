@@ -23,7 +23,8 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub fn subscribe_events(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<crate::kernel::runtime_host::ThreadEvent> {
+    ) -> tokio::sync::broadcast::Receiver<crate::kernel::runtime_host::runtime_api::ThreadEvent>
+    {
         self.thread.event_tx.subscribe()
     }
 
@@ -35,7 +36,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub async fn session_context(
         &self,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionContext> {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::SessionContext> {
         self.thread
             .services
             .build_session_context(&self.thread.context.coordinates)
@@ -47,8 +48,8 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
     ) -> crate::kernel::runtime_host::VerletResult<(
-        crate::kernel::history::EventRecord,
-        crate::kernel::history::EventRecord,
+        verlet_history::EventRecord,
+        verlet_history::EventRecord,
     )> {
         self.record_manifest_receipts_inner(compile_payload, bind_payload, false)
             .await
@@ -63,8 +64,8 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
     ) -> crate::kernel::runtime_host::VerletResult<(
-        crate::kernel::history::EventRecord,
-        crate::kernel::history::EventRecord,
+        verlet_history::EventRecord,
+        verlet_history::EventRecord,
     )> {
         self.record_manifest_receipts_inner(compile_payload, bind_payload, true)
             .await
@@ -76,11 +77,11 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         bind_payload: serde_json::Value,
         remote_execution_authorized: bool,
     ) -> crate::kernel::runtime_host::VerletResult<(
-        crate::kernel::history::EventRecord,
-        crate::kernel::history::EventRecord,
+        verlet_history::EventRecord,
+        verlet_history::EventRecord,
     )> {
         let coordinates = self.thread.context.coordinates.clone();
-        let stream_id = crate::kernel::history::EventStreamId::for_thread(&coordinates);
+        let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
         let mut placement =
             bind_payload
                 .get("placement")
@@ -104,7 +105,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                 false,
             )?;
         }
-        if placement.target != crate::PlacementTarget::Local
+        if placement.target != crate::kernel::control_decision::PlacementTarget::Local
             && bind_payload
                 .get("workspace")
                 .is_some_and(|workspace| !workspace.is_null())
@@ -125,31 +126,31 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                 )
             })?
             .to_string();
-        let compile_event = crate::kernel::history::NewEventRecord::discharged(
+        let compile_event = verlet_history::NewEventRecord::discharged(
             coordinates.clone(),
-            crate::kernel::history::EventKind::ManifestCompileCompleted,
+            verlet_history::EventKind::ManifestCompileCompleted,
             compile_payload,
-            crate::kernel::history::EventProvenance {
+            verlet_history::EventProvenance {
                 source_streams: vec![stream_id.clone()],
                 discharged_by: Some(
                     crate::agent::manifest_bind::MANIFEST_COMPILER_DISCHARGED_BY.to_string(),
                 ),
                 function: Some(crate::agent::manifest_bind::MANIFEST_COMPILER_FUNCTION.to_string()),
-                ..crate::kernel::history::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         );
-        let bind_event = crate::kernel::history::NewEventRecord::discharged(
+        let bind_event = verlet_history::NewEventRecord::discharged(
             coordinates.clone(),
-            crate::kernel::history::EventKind::ManifestBindCompleted,
+            verlet_history::EventKind::ManifestBindCompleted,
             bind_payload,
-            crate::kernel::history::EventProvenance {
+            verlet_history::EventProvenance {
                 source_streams: vec![stream_id.clone()],
                 source_event_ids: vec![compile_event.id],
                 discharged_by: Some(
                     crate::agent::manifest_bind::MANIFEST_BINDER_DISCHARGED_BY.to_string(),
                 ),
                 function: Some(crate::agent::manifest_bind::MANIFEST_BINDER_FUNCTION.to_string()),
-                ..crate::kernel::history::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         );
         let placement_payload =
@@ -165,9 +166,9 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                     "placement decision payload codec failed: {err}"
                 ))
             })?;
-        let placement_event = crate::kernel::history::NewEventRecord::witnessed(
+        let placement_event = verlet_history::NewEventRecord::witnessed(
             coordinates.clone(),
-            crate::kernel::history::EventKind::PlacementDecision,
+            verlet_history::EventKind::PlacementDecision,
             placement_payload,
         );
         // Receipt and witness share one atomic store append. This closes the
@@ -191,8 +192,8 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                 })?;
             let content_hash =
                 crate::agent::manifest_bind::coupling_set_content_hash(&coupling_set)?;
-            let payload = crate::kernel::history::PolicyBoundPayload {
-                policy_kind: crate::kernel::history::PolicyKind::CouplingSet,
+            let payload = verlet_history::PolicyBoundPayload {
+                policy_kind: verlet_history::PolicyKind::CouplingSet,
                 policy_id: format!("coupling_set:{}", coupling_set.snapshot_id),
                 content_hash: content_hash.clone(),
                 valid_from_note: "valid until next policy.bound of same policy_id".to_string(),
@@ -205,16 +206,14 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             if let Some(object) = value.as_object_mut() {
                 object.insert(
                     "schema".to_string(),
-                    serde_json::json!(
-                        crate::kernel::history::EventKind::PolicyBound.payload_schema_id()
-                    ),
+                    serde_json::json!(verlet_history::EventKind::PolicyBound.payload_schema_id()),
                 );
             }
-            records.push(crate::kernel::history::NewEventRecord::discharged(
+            records.push(verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::kernel::history::EventKind::PolicyBound,
+                verlet_history::EventKind::PolicyBound,
                 value,
-                crate::kernel::history::EventProvenance {
+                verlet_history::EventProvenance {
                     source_streams: vec![stream_id.clone()],
                     source_event_ids: vec![records[1].id],
                     discharged_by: Some(
@@ -224,7 +223,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                         crate::agent::manifest_bind::MANIFEST_BINDER_FUNCTION.to_string(),
                     ),
                     config_hash: Some(content_hash),
-                    ..crate::kernel::history::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             ));
         }
@@ -265,7 +264,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub async fn record_thread_start_identity(
         &self,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionEntry> {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::SessionEntry> {
         self.append_runtime_session_entry(
             "thread_started",
             serde_json::json!({
@@ -314,18 +313,18 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
     pub async fn record_tool_universe_discovery_receipts(
         &self,
         payloads: Vec<serde_json::Value>,
-    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
         if payloads.is_empty() {
             return Ok(Vec::new());
         }
         let coordinates = self.thread.context.coordinates.clone();
-        let stream_id = crate::kernel::history::EventStreamId::for_thread(&coordinates);
+        let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
         let records = payloads
             .into_iter()
             .map(|payload| {
-                crate::kernel::history::NewEventRecord::witnessed(
+                verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::kernel::history::EventKind::ToolUniverseDiscoveryCompleted,
+                    verlet_history::EventKind::ToolUniverseDiscoveryCompleted,
                     payload,
                 )
             })
@@ -340,8 +339,8 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub async fn append_control_event(
         &self,
-        record: crate::kernel::history::NewEventRecord,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
+        record: verlet_history::NewEventRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
         self.thread
             .services
             .append_control_event(&self.thread.context.coordinates, record)
@@ -350,8 +349,8 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub async fn read_control_events(
         &self,
-    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
-        let stream_id = crate::kernel::history::EventStreamId::new(format!(
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
+        let stream_id = verlet_history::EventStreamId::new(format!(
             "control:{}",
             self.thread.context.coordinates.thread_id
         ));
@@ -365,10 +364,9 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub async fn read_thread_events(
         &self,
-        from_sequence: Option<crate::kernel::history::EventSequence>,
-    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
-        let stream_id =
-            crate::kernel::history::EventStreamId::for_thread(&self.thread.context.coordinates);
+        from_sequence: Option<verlet_history::EventSequence>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
+        let stream_id = verlet_history::EventStreamId::for_thread(&self.thread.context.coordinates);
         self.thread
             .services
             .runtime_store()
@@ -379,10 +377,9 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub async fn read_thread_events_after_cursor(
         &self,
-        cursor: &crate::kernel::history::StreamCursorV1,
-    ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::kernel::history::EventRecord>> {
-        let stream_id =
-            crate::kernel::history::EventStreamId::for_thread(&self.thread.context.coordinates);
+        cursor: &verlet_history::StreamCursorV1,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
+        let stream_id = verlet_history::EventStreamId::for_thread(&self.thread.context.coordinates);
         self.thread
             .services
             .runtime_store()
@@ -393,10 +390,9 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub async fn append_thread_event_record(
         &self,
-        record: crate::kernel::history::NewEventRecord,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::EventRecord> {
-        let stream_id =
-            crate::kernel::history::EventStreamId::for_thread(&self.thread.context.coordinates);
+        record: verlet_history::NewEventRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
+        let stream_id = verlet_history::EventStreamId::for_thread(&self.thread.context.coordinates);
         self.thread
             .services
             .runtime_store()
@@ -416,13 +412,13 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         &self,
         kind: impl Into<String>,
         payload: serde_json::Value,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionEntry> {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::SessionEntry> {
         self.thread
             .services
             .append_session_entry(
                 &self.thread.context.coordinates,
                 None,
-                crate::kernel::history::SessionEntryKind::Runtime {
+                verlet_history::SessionEntryKind::Runtime {
                     kind: kind.into(),
                     payload,
                 },
@@ -432,7 +428,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 
     pub async fn send(
         &self,
-        command: crate::kernel::runtime_host::ThreadCommand,
+        command: crate::kernel::runtime_host::runtime_api::ThreadCommand,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
         let thread_id = self.thread.context.coordinates.thread_id;
         self.thread
@@ -446,7 +442,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
     pub async fn reserve_command(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<
-        tokio::sync::mpsc::Permit<'_, crate::kernel::runtime_host::ThreadCommand>,
+        tokio::sync::mpsc::Permit<'_, crate::kernel::runtime_host::runtime_api::ThreadCommand>,
     > {
         let thread_id = self.thread.context.coordinates.thread_id;
         self.thread
@@ -459,7 +455,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
     pub(super) fn try_reserve_command(
         &self,
     ) -> Result<
-        tokio::sync::mpsc::Permit<'_, crate::kernel::runtime_host::ThreadCommand>,
+        tokio::sync::mpsc::Permit<'_, crate::kernel::runtime_host::runtime_api::ThreadCommand>,
         tokio::sync::mpsc::error::TrySendError<()>,
     > {
         self.thread.command_tx.try_reserve()
@@ -476,24 +472,25 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         parent_checkpoint_id: Option<verlet_runtime_contracts::ThreadCheckpointId>,
         label: Option<String>,
         metadata: std::collections::BTreeMap<String, String>,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::ThreadCheckpoint>
-    {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+    > {
         let requested = verlet_runtime_contracts::ThreadSignal::new(
             self.thread.context.coordinates.clone(),
             verlet_runtime_contracts::ThreadSignalKind::CheckpointRequested,
         );
         self.record_signal(requested).await;
 
-        let checkpoint = crate::kernel::runtime_host::ThreadCheckpoint {
+        let checkpoint = crate::kernel::runtime_host::runtime_api::ThreadCheckpoint {
             id: verlet_runtime_contracts::ThreadCheckpointId::new(),
             coordinates: self.thread.context.coordinates.clone(),
             lineage: match self.thread.context.parent_thread_id {
                 Some(parent_thread_id) => {
-                    crate::kernel::runtime_host::ThreadCheckpointLineage::Parent {
+                    crate::kernel::runtime_host::runtime_api::ThreadCheckpointLineage::Parent {
                         parent_thread_id,
                     }
                 }
-                None => crate::kernel::runtime_host::ThreadCheckpointLineage::Root,
+                None => crate::kernel::runtime_host::runtime_api::ThreadCheckpointLineage::Root,
             },
             parent_checkpoint_id,
             active_entry_id: None,
@@ -501,7 +498,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             metadata,
             created_at_ms: crate::kernel::runtime_host::runtime_utils::unix_timestamp_ms(),
         };
-        let checkpoint_kind = crate::kernel::history::SessionEntryKind::Runtime {
+        let checkpoint_kind = verlet_history::SessionEntryKind::Runtime {
             kind: "thread_checkpoint".to_string(),
             payload: serde_json::json!({
                 "checkpoint_id": checkpoint.id.to_string(),
@@ -514,7 +511,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         let checkpoint_entry_id = self
             .append_checkpoint_entry_with_reconciliation(checkpoint.id, checkpoint_kind)
             .await?;
-        let checkpoint = crate::kernel::runtime_host::ThreadCheckpoint {
+        let checkpoint = crate::kernel::runtime_host::runtime_api::ThreadCheckpoint {
             active_entry_id: Some(checkpoint_entry_id),
             ..checkpoint
         };
@@ -533,10 +530,12 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         lifecycle.latest_checkpoint_id = Some(checkpoint.id);
         lifecycle.updated_at_ms = checkpoint.created_at_ms;
         drop(lifecycle);
-        self.emit_runtime(crate::kernel::runtime_host::RuntimeEventKind::Checkpoint {
-            checkpoint_id: checkpoint.id,
-            label: checkpoint.label.clone(),
-        });
+        self.emit_runtime(
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Checkpoint {
+                checkpoint_id: checkpoint.id,
+                label: checkpoint.label.clone(),
+            },
+        );
         Ok(checkpoint)
     }
 
@@ -548,8 +547,8 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
     async fn append_checkpoint_entry_with_reconciliation(
         &self,
         checkpoint_id: verlet_runtime_contracts::ThreadCheckpointId,
-        checkpoint_kind: crate::kernel::history::SessionEntryKind,
-    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::history::SessionEntryId> {
+        checkpoint_kind: verlet_history::SessionEntryKind,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::SessionEntryId> {
         let checkpoint_id = checkpoint_id.to_string();
         let mut first_error = None;
         for attempt in 0..2 {
@@ -569,7 +568,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                         reconciliation_read_error("checkpoint append", &error, read_error)
                     })?;
                     if let Some(event) = events.iter().rev().find(|event| {
-                        event.kind == crate::kernel::history::EventKind::SessionEntryAppended
+                        event.kind == verlet_history::EventKind::SessionEntryAppended
                             && event
                                 .payload
                                 .get("runtime_kind")
@@ -593,7 +592,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                             })
                             .and_then(|entry_id| {
                                 uuid::Uuid::parse_str(entry_id)
-                                    .map(crate::kernel::history::SessionEntryId::from_uuid)
+                                    .map(verlet_history::SessionEntryId::from_uuid)
                                     .map_err(|parse_error| {
                                         crate::kernel::runtime_host::VerletError::History(format!(
                                             "checkpoint {checkpoint_id} reconciliation entry_id is invalid: {parse_error}"
@@ -612,7 +611,10 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         unreachable!("checkpoint append reconciliation has exactly two attempts")
     }
 
-    pub fn emit_runtime(&self, kind: crate::kernel::runtime_host::RuntimeEventKind) {
+    pub fn emit_runtime(
+        &self,
+        kind: crate::kernel::runtime_host::runtime_events::RuntimeEventKind,
+    ) {
         crate::kernel::runtime_host::runtime_events::emit_runtime_event(
             &self.thread.event_tx,
             &self.thread.context.coordinates,
@@ -624,9 +626,11 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         &self,
         reason: impl Into<String>,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
-        self.send(crate::kernel::runtime_host::ThreadCommand::Cancel {
-            reason: reason.into(),
-        })
+        self.send(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Cancel {
+                reason: reason.into(),
+            },
+        )
         .await
     }
 
@@ -663,10 +667,10 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
 }
 
 fn thread_start_identity_matches_context(
-    event: &crate::kernel::history::EventRecord,
+    event: &verlet_history::EventRecord,
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> bool {
-    if event.kind != crate::kernel::history::EventKind::SessionEntryAppended
+    if event.kind != verlet_history::EventKind::SessionEntryAppended
         || event
             .payload
             .get("runtime_kind")

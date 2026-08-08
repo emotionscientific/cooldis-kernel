@@ -1,9 +1,9 @@
-use crate::EventStore as _;
 use rusqlite::OptionalExtension as _;
 use sha2::Digest as _;
 use subtle::ConstantTimeEq as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
+use verlet_history::EventStore as _;
 
 const DEFAULT_QUEUE_BATCH: usize = 16;
 const DEFAULT_WORKER_POLL_MS: u64 = 250;
@@ -25,13 +25,15 @@ const INGRESS_DEDUPE_SEEN_FIELD: &str = "dedupe_seen";
 #[derive(Clone, Debug, Default)]
 struct RouteEgressConfig {
     projection_rules: Vec<CompiledEgressProjectionRule>,
-    typing_simulation: Option<crate::VerletTypingSimulationConfig>,
-    retry: crate::VerletEgressRetryConfig,
+    typing_simulation: Option<crate::daemon::daemon_config::VerletTypingSimulationConfig>,
+    retry: crate::daemon::daemon_config::VerletEgressRetryConfig,
     threading: Option<String>,
 }
 
 impl RouteEgressConfig {
-    fn from_route(route: &crate::VerletIoRouteConfig) -> crate::VerletResult<Self> {
+    fn from_route(
+        route: &crate::daemon::daemon_config::VerletIoRouteConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let mut projection_rules = Vec::new();
         for (index, rule) in route.egress_projection.iter().enumerate() {
             projection_rules.push(CompiledEgressProjectionRule::compile(
@@ -154,10 +156,10 @@ impl CompiledEgressProjectionRule {
     fn compile(
         route_id: &str,
         index: usize,
-        rule: &crate::VerletEgressProjectionRuleConfig,
-    ) -> crate::VerletResult<Self> {
+        rule: &crate::daemon::daemon_config::VerletEgressProjectionRuleConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let regex = regex::Regex::new(&rule.pattern).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "io.routes.{route_id}.egress_projection[{index}].pattern invalid regex: {err}"
             ))
         })?;
@@ -188,17 +190,17 @@ struct ProjectedEgress {
 struct BoundEgressThread {
     route_id: String,
     scope_key: String,
-    coordinates: crate::ThreadCoordinates,
+    coordinates: verlet_runtime_contracts::ThreadCoordinates,
 }
 
 #[derive(Debug)]
 enum ThreadHandleResolutionError {
-    Lookup(crate::VerletError),
-    LifecycleLoad(crate::VerletError),
+    Lookup(crate::kernel::runtime_host::VerletError),
+    LifecycleLoad(crate::kernel::runtime_host::VerletError),
 }
 
 impl ThreadHandleResolutionError {
-    fn into_inner(self) -> crate::VerletError {
+    fn into_inner(self) -> crate::kernel::runtime_host::VerletError {
         match self {
             Self::Lookup(err) | Self::LifecycleLoad(err) => err,
         }
@@ -246,7 +248,7 @@ impl DaemonEgressState {
         route_id: &str,
         source_scope: &str,
         scope_key: &str,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> verlet_io_core::IoResult<()> {
         let connection = self.lock_connection()?;
         connection
@@ -282,8 +284,8 @@ impl DaemonEgressState {
         route_id: &str,
         source_scope: &str,
         scope_key: &str,
-        coordinates: &crate::ThreadCoordinates,
-    ) -> verlet_io_core::IoResult<crate::ThreadCoordinates> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> verlet_io_core::IoResult<verlet_runtime_contracts::ThreadCoordinates> {
         let mut connection = self.lock_connection()?;
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -307,16 +309,20 @@ impl DaemonEgressState {
             .optional()
             .map_err(egress_state_error)?;
         let selected = match existing {
-            Some((tenant_id, user_id, session_id, thread_id)) => crate::ThreadCoordinates {
-                tenant_id,
-                user_id,
-                session_id,
-                thread_id: crate::ThreadId::parse_str(&thread_id).map_err(|err| {
-                    verlet_io_core::IoError::Queue(format!(
-                        "invalid ingress binding thread id {thread_id:?}: {err}"
-                    ))
-                })?,
-            },
+            Some((tenant_id, user_id, session_id, thread_id)) => {
+                verlet_runtime_contracts::ThreadCoordinates {
+                    tenant_id,
+                    user_id,
+                    session_id,
+                    thread_id: verlet_runtime_contracts::ThreadId::parse_str(&thread_id).map_err(
+                        |err| {
+                            verlet_io_core::IoError::Queue(format!(
+                                "invalid ingress binding thread id {thread_id:?}: {err}"
+                            ))
+                        },
+                    )?,
+                }
+            }
             None => {
                 tx.execute(
                     "INSERT INTO cooldis_daemon_ingress_bindings (
@@ -362,7 +368,7 @@ impl DaemonEgressState {
         route_id: &str,
         source_scope: &str,
         scope_key: &str,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> verlet_io_core::IoResult<()> {
         let mut connection = self.lock_connection()?;
         let tx = connection
@@ -422,7 +428,7 @@ impl DaemonEgressState {
         route_id: &str,
         source_scope: &str,
         scope_key: &str,
-        thread_id: crate::ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
     ) -> verlet_io_core::IoResult<()> {
         let connection = self.lock_connection()?;
         connection
@@ -467,15 +473,17 @@ impl DaemonEgressState {
             bindings.push(BoundEgressThread {
                 route_id,
                 scope_key,
-                coordinates: crate::ThreadCoordinates {
+                coordinates: verlet_runtime_contracts::ThreadCoordinates {
                     tenant_id,
                     user_id,
                     session_id,
-                    thread_id: crate::ThreadId::parse_str(&thread_id).map_err(|err| {
-                        verlet_io_core::IoError::Queue(format!(
-                            "invalid active ingress thread id {thread_id:?}: {err}"
-                        ))
-                    })?,
+                    thread_id: verlet_runtime_contracts::ThreadId::parse_str(&thread_id).map_err(
+                        |err| {
+                            verlet_io_core::IoError::Queue(format!(
+                                "invalid active ingress thread id {thread_id:?}: {err}"
+                            ))
+                        },
+                    )?,
                 },
             });
         }
@@ -510,15 +518,16 @@ impl DaemonEgressState {
         for row in rows {
             let (route_id, scope_key, tenant_id, user_id, session_id, thread_id) =
                 row.map_err(egress_state_error)?;
-            let thread_id = crate::ThreadId::parse_str(&thread_id).map_err(|err| {
-                verlet_io_core::IoError::Queue(format!(
-                    "invalid egress thread id {thread_id:?}: {err}"
-                ))
-            })?;
+            let thread_id =
+                verlet_runtime_contracts::ThreadId::parse_str(&thread_id).map_err(|err| {
+                    verlet_io_core::IoError::Queue(format!(
+                        "invalid egress thread id {thread_id:?}: {err}"
+                    ))
+                })?;
             bindings.push(BoundEgressThread {
                 route_id,
                 scope_key,
-                coordinates: crate::ThreadCoordinates {
+                coordinates: verlet_runtime_contracts::ThreadCoordinates {
                     tenant_id,
                     user_id,
                     session_id,
@@ -533,7 +542,7 @@ impl DaemonEgressState {
         &self,
         route_id: &str,
         thread_id: &str,
-    ) -> verlet_io_core::IoResult<Option<crate::StreamCursorV1>> {
+    ) -> verlet_io_core::IoResult<Option<verlet_history::StreamCursorV1>> {
         let connection = self.lock_connection()?;
         let cursor_json = connection
             .query_row(
@@ -558,7 +567,7 @@ impl DaemonEgressState {
         &self,
         route_id: &str,
         thread_id: &str,
-        cursor: &crate::StreamCursorV1,
+        cursor: &verlet_history::StreamCursorV1,
     ) -> verlet_io_core::IoResult<()> {
         let connection = self.lock_connection()?;
         let current_json = connection
@@ -572,8 +581,8 @@ impl DaemonEgressState {
             .optional()
             .map_err(egress_state_error)?;
         if let Some(current_json) = current_json {
-            let current: crate::StreamCursorV1 =
-                serde_json::from_str(&current_json).map_err(|err| {
+            let current: verlet_history::StreamCursorV1 = serde_json::from_str(&current_json)
+                .map_err(|err| {
                     verlet_io_core::IoError::Queue(format!("decode egress cursor: {err}"))
                 })?;
             if current.stream_id == cursor.stream_id
@@ -604,7 +613,7 @@ impl DaemonEgressState {
         &self,
         route_id: &str,
         thread_id: &str,
-        cursor: &crate::StreamCursorV1,
+        cursor: &verlet_history::StreamCursorV1,
     ) -> verlet_io_core::IoResult<()> {
         let cursor_json = serde_json::to_string(cursor).map_err(|err| {
             verlet_io_core::IoError::Queue(format!("encode egress cursor: {err}"))
@@ -671,7 +680,7 @@ impl DaemonEgressState {
     fn record_ingress_ownership(
         &self,
         keys: &[IngressOwnershipKey],
-        stream_id: &crate::EventStreamId,
+        stream_id: &verlet_history::EventStreamId,
         attempt: u32,
     ) -> verlet_io_core::IoResult<String> {
         let ownership_id = uuid::Uuid::now_v7().to_string();
@@ -702,7 +711,7 @@ impl DaemonEgressState {
     fn ingress_ownership_streams(
         &self,
         keys: &[IngressOwnershipKey],
-    ) -> verlet_io_core::IoResult<Vec<crate::EventStreamId>> {
+    ) -> verlet_io_core::IoResult<Vec<verlet_history::EventStreamId>> {
         let connection = self.lock_connection()?;
         ingress_ownership_streams_from(&connection, keys)
     }
@@ -752,7 +761,7 @@ struct IngressOwnershipReservation {
     state: std::sync::Arc<DaemonEgressState>,
     ownership_id: String,
     keys: Vec<IngressOwnershipKey>,
-    stream_id: crate::EventStreamId,
+    stream_id: verlet_history::EventStreamId,
 }
 
 struct IngressClaimAdmissionLock {
@@ -763,7 +772,7 @@ impl IngressClaimAdmissionLock {
     fn ownership_streams(
         &self,
         keys: &[IngressOwnershipKey],
-    ) -> verlet_io_core::IoResult<Vec<crate::EventStreamId>> {
+    ) -> verlet_io_core::IoResult<Vec<verlet_history::EventStreamId>> {
         ingress_ownership_streams_from(
             self.connection
                 .as_ref()
@@ -828,7 +837,7 @@ impl IngressClaimAdmissionLock {
     fn prune_to_stream(
         &self,
         keys: &[IngressOwnershipKey],
-        stream_id: &crate::EventStreamId,
+        stream_id: &verlet_history::EventStreamId,
     ) -> verlet_io_core::IoResult<()> {
         let connection = self
             .connection
@@ -875,7 +884,7 @@ impl Drop for IngressClaimAdmissionLock {
 fn ingress_ownership_streams_from(
     connection: &rusqlite::Connection,
     keys: &[IngressOwnershipKey],
-) -> verlet_io_core::IoResult<Vec<crate::EventStreamId>> {
+) -> verlet_io_core::IoResult<Vec<verlet_history::EventStreamId>> {
     let mut streams = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for key in keys {
@@ -894,7 +903,7 @@ fn ingress_ownership_streams_from(
         for row in rows {
             let stream = row.map_err(egress_state_error)?;
             if seen.insert(stream.clone()) {
-                streams.push(crate::EventStreamId::new(stream));
+                streams.push(verlet_history::EventStreamId::new(stream));
             }
         }
     }
@@ -924,12 +933,12 @@ struct IngressReceiptContext {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DrainEgressSource {
-    id: crate::EventRecordId,
-    cursor: crate::StreamCursorV1,
+    id: verlet_history::EventRecordId,
+    cursor: verlet_history::StreamCursorV1,
 }
 
 impl DrainEgressSource {
-    fn from_event(event: &crate::EventRecord) -> Self {
+    fn from_event(event: &verlet_history::EventRecord) -> Self {
         Self {
             id: event.id,
             cursor: event.cursor_v1(),
@@ -983,7 +992,7 @@ impl DrainEgressWork {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DrainIngressContextEvent {
-    Ingress(crate::EventRecordId),
+    Ingress(verlet_history::EventRecordId),
     Session {
         source: DrainEgressSource,
         entry_id: String,
@@ -1000,11 +1009,12 @@ enum DrainIngressContextEvent {
 /// no field is durable, and no full event record is retained here.
 #[derive(Clone, Debug, PartialEq)]
 struct DrainEgressView {
-    fold_position: Option<crate::StreamCursorV1>,
-    observed_delivery_cursor: Option<crate::StreamCursorV1>,
-    effective_delivery_cursor: Option<crate::StreamCursorV1>,
+    fold_position: Option<verlet_history::StreamCursorV1>,
+    observed_delivery_cursor: Option<verlet_history::StreamCursorV1>,
+    effective_delivery_cursor: Option<verlet_history::StreamCursorV1>,
     receipt_dedupe_cursors: std::collections::HashMap<String, ReceiptDedupeCursor>,
-    ingress_contexts: std::collections::HashMap<crate::EventRecordId, IngressReceiptContext>,
+    ingress_contexts:
+        std::collections::HashMap<verlet_history::EventRecordId, IngressReceiptContext>,
     pending_contexts: Vec<IngressReceiptContext>,
     active_context: Option<IngressReceiptContext>,
     context_events: Vec<DrainIngressContextEvent>,
@@ -1015,8 +1025,8 @@ struct DrainEgressView {
 
 impl DrainEgressView {
     fn new(
-        observed_delivery_cursor: Option<crate::StreamCursorV1>,
-        effective_delivery_cursor: Option<crate::StreamCursorV1>,
+        observed_delivery_cursor: Option<verlet_history::StreamCursorV1>,
+        effective_delivery_cursor: Option<verlet_history::StreamCursorV1>,
     ) -> Self {
         Self {
             fold_position: None,
@@ -1035,7 +1045,7 @@ impl DrainEgressView {
 }
 
 enum IngressClaimAppend {
-    Appended(crate::EventRecord),
+    Appended(verlet_history::EventRecord),
     Existing(IngressOutcomeState),
 }
 
@@ -1043,19 +1053,19 @@ enum IngressClaimAppend {
 enum IngressOutcomeState {
     Missing,
     Claimed {
-        claim: crate::EventRecord,
-        payload: crate::IoIngressClaimedPayload,
+        claim: verlet_history::EventRecord,
+        payload: verlet_history::IoIngressClaimedPayload,
     },
     Settled {
-        claim_payload: crate::IoIngressClaimedPayload,
-        settle: crate::EventRecord,
+        claim_payload: verlet_history::IoIngressClaimedPayload,
+        settle: verlet_history::EventRecord,
     },
 }
 
 #[derive(Clone)]
 pub struct VerletDaemonIoBridge {
-    app_server: Option<crate::VerletAppServer>,
-    supervisor: crate::VerletSupervisor,
+    app_server: Option<crate::adapters::app_server::VerletAppServer>,
+    supervisor: crate::kernel::supervisor::VerletSupervisor,
     tenant_id: String,
     user_id: String,
     model: String,
@@ -1063,7 +1073,9 @@ pub struct VerletDaemonIoBridge {
     cwd: std::path::PathBuf,
     session_store_path: Option<std::path::PathBuf>,
     threads: std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<String, crate::ThreadCoordinates>>,
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, verlet_runtime_contracts::ThreadCoordinates>,
+        >,
     >,
     thread_scope_locks: std::sync::Arc<
         tokio::sync::Mutex<
@@ -1072,7 +1084,10 @@ pub struct VerletDaemonIoBridge {
     >,
     thread_load_locks: std::sync::Arc<
         tokio::sync::Mutex<
-            std::collections::HashMap<crate::ThreadId, std::sync::Arc<tokio::sync::Mutex<()>>>,
+            std::collections::HashMap<
+                verlet_runtime_contracts::ThreadId,
+                std::sync::Arc<tokio::sync::Mutex<()>>,
+            >,
         >,
     >,
     active_turns: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
@@ -1117,14 +1132,15 @@ pub struct VerletDaemonIoBridge {
     ingress_binding_barrier:
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>>,
     #[cfg(test)]
-    initial_root_candidates: std::sync::Arc<std::sync::Mutex<Vec<crate::ThreadCoordinates>>>,
+    initial_root_candidates:
+        std::sync::Arc<std::sync::Mutex<Vec<verlet_runtime_contracts::ThreadCoordinates>>>,
     #[cfg(test)]
     fork_claim_scan_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl VerletDaemonIoBridge {
     pub fn new(
-        supervisor: crate::VerletSupervisor,
+        supervisor: crate::kernel::supervisor::VerletSupervisor,
         tenant_id: impl Into<String>,
         user_id: impl Into<String>,
         model_provider: impl Into<String>,
@@ -1195,7 +1211,7 @@ impl VerletDaemonIoBridge {
         }
     }
 
-    pub fn from_app_server(server: &crate::VerletAppServer) -> Self {
+    pub fn from_app_server(server: &crate::adapters::app_server::VerletAppServer) -> Self {
         let mut bridge = Self::new(
             server.supervisor(),
             server.tenant_id().to_string(),
@@ -1262,8 +1278,8 @@ impl VerletDaemonIoBridge {
         &self,
         protocol: impl Into<String>,
         instance_id: impl Into<String>,
-        route: &crate::VerletIoRouteConfig,
-    ) -> crate::VerletResult<()> {
+        route: &crate::daemon::daemon_config::VerletIoRouteConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let protocol = protocol.into();
         let instance_id = instance_id.into();
         let config = RouteEgressConfig::from_route(route)?;
@@ -1276,13 +1292,13 @@ impl VerletDaemonIoBridge {
 
     pub async fn validate_route_agent_ref(
         &self,
-        route: &crate::VerletIoRouteConfig,
-    ) -> crate::VerletResult<()> {
+        route: &crate::daemon::daemon_config::VerletIoRouteConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let Some(agent_ref) = route.agent_ref.as_deref() else {
             return Ok(());
         };
         let app_server = self.app_server.as_ref().ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "io.routes.{}.agent_ref requires daemon IO to be backed by an app-server",
                 route.id
             ))
@@ -1291,7 +1307,7 @@ impl VerletDaemonIoBridge {
             .validate_daemon_route_agent_ref(agent_ref)
             .await
             .map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "io.routes.{}.agent_ref {agent_ref:?} did not bind from agent registry root {}: {err}. Publish the agent with `verlet agent publish --registry-root {}` before starting the daemon.",
                     route.id,
                     app_server.agent_registry_root().display(),
@@ -1340,7 +1356,7 @@ impl VerletDaemonIoBridge {
         &self,
         state: &DaemonEgressState,
         route_id: &str,
-    ) -> verlet_io_core::IoResult<Vec<(String, crate::ThreadCoordinates)>> {
+    ) -> verlet_io_core::IoResult<Vec<(String, verlet_runtime_contracts::ThreadCoordinates)>> {
         Ok(state
             .active_ingress_threads(route_id)?
             .into_iter()
@@ -1424,7 +1440,8 @@ impl VerletDaemonIoBridge {
     async fn bound_thread_handle(
         &self,
         binding: &BoundEgressThread,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         self.get_or_load_thread_handle(&binding.coordinates)
             .await
             .map_err(ThreadHandleResolutionError::into_inner)
@@ -1436,24 +1453,24 @@ impl VerletDaemonIoBridge {
     /// so only a fully initialized winner can be observed through this bridge.
     async fn get_or_load_thread_handle(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-    ) -> Result<crate::RuntimeThreadHandle, ThreadHandleResolutionError> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> Result<crate::kernel::runtime_host::RuntimeThreadHandle, ThreadHandleResolutionError> {
         self.get_or_load_thread_handle_inner(coordinates, std::collections::HashSet::new())
             .await
     }
 
     fn get_or_load_thread_handle_inner<'a>(
         &'a self,
-        coordinates: &'a crate::ThreadCoordinates,
-        mut loading: std::collections::HashSet<crate::ThreadId>,
+        coordinates: &'a verlet_runtime_contracts::ThreadCoordinates,
+        mut loading: std::collections::HashSet<verlet_runtime_contracts::ThreadId>,
     ) -> futures_util::future::BoxFuture<
         'a,
-        Result<crate::RuntimeThreadHandle, ThreadHandleResolutionError>,
+        Result<crate::kernel::runtime_host::RuntimeThreadHandle, ThreadHandleResolutionError>,
     > {
         Box::pin(async move {
             if !loading.insert(coordinates.thread_id) {
                 return Err(ThreadHandleResolutionError::LifecycleLoad(
-                    crate::VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "thread lifecycle topology cycle while lazily loading {}",
                         coordinates.thread_id
                     )),
@@ -1462,7 +1479,7 @@ impl VerletDaemonIoBridge {
             loop {
                 match self.supervisor.get_thread_at(coordinates).await {
                     Ok(handle) => return Ok(handle),
-                    Err(crate::VerletError::ThreadNotFound(_)) => {
+                    Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_)) => {
                         let reconstructed = self
                             .reconstruct_thread_lifecycle(coordinates)
                             .await
@@ -1486,12 +1503,13 @@ impl VerletDaemonIoBridge {
                                 .into_iter()
                                 .filter(|thread_id| seen_related.insert(*thread_id))
                             {
-                                let related_coordinates = crate::ThreadCoordinates {
-                                    tenant_id: coordinates.tenant_id.clone(),
-                                    user_id: coordinates.user_id.clone(),
-                                    session_id: coordinates.session_id.clone(),
-                                    thread_id: related_thread_id,
-                                };
+                                let related_coordinates =
+                                    verlet_runtime_contracts::ThreadCoordinates {
+                                        tenant_id: coordinates.tenant_id.clone(),
+                                        user_id: coordinates.user_id.clone(),
+                                        session_id: coordinates.session_id.clone(),
+                                        thread_id: related_thread_id,
+                                    };
                                 self.get_or_load_thread_handle_inner(
                                     &related_coordinates,
                                     loading.clone(),
@@ -1515,48 +1533,53 @@ impl VerletDaemonIoBridge {
                                 {
                                     Some(_) => continue,
                                     None => {
-                                        let payload = serde_json::to_value(crate::ThreadReloadDegradedPayload {
-                                    thread_id: coordinates.thread_id,
-                                    missing: vec![
-                                        "topology".to_string(),
-                                        "parent_thread_id".to_string(),
-                                        "metadata".to_string(),
-                                    ],
-                                    fallback: "fabricated_root".to_string(),
-                                })
-                                .map_err(|err| {
-                                    ThreadHandleResolutionError::LifecycleLoad(
-                                        crate::VerletError::History(format!(
+                                        let payload =
+                                            serde_json::to_value(
+                                                verlet_history::ThreadReloadDegradedPayload {
+                                                    thread_id: coordinates.thread_id,
+                                                    missing: vec![
+                                                        "topology".to_string(),
+                                                        "parent_thread_id".to_string(),
+                                                        "metadata".to_string(),
+                                                    ],
+                                                    fallback: "fabricated_root".to_string(),
+                                                },
+                                            )
+                                            .map_err(
+                                                |err| {
+                                                    ThreadHandleResolutionError::LifecycleLoad(
+                                        crate::kernel::runtime_host::VerletError::History(format!(
                                             "thread.reload.degraded payload codec failed: {err}"
                                         )),
                                     )
-                                })?;
+                                                },
+                                            )?;
                                         let stream_id =
-                                            crate::EventStreamId::for_thread(coordinates);
+                                            verlet_history::EventStreamId::for_thread(coordinates);
                                         self.supervisor
                                             .runtime_store(&coordinates.tenant_id)
                                             .await
                                             .map_err(ThreadHandleResolutionError::LifecycleLoad)?
                                             .append_events(
                                                 &stream_id,
-                                                vec![crate::NewEventRecord::witnessed(
+                                                vec![verlet_history::NewEventRecord::witnessed(
                                                     coordinates.clone(),
-                                                    crate::EventKind::ThreadReloadDegraded,
+                                                    verlet_history::EventKind::ThreadReloadDegraded,
                                                     payload,
                                                 )],
                                             )
                                             .await
                                             .map_err(|err| {
                                                 ThreadHandleResolutionError::LifecycleLoad(
-                                                    crate::VerletError::History(err.to_string()),
+                                                    crate::kernel::runtime_host::VerletError::History(err.to_string()),
                                                 )
                                             })?;
                                         let now = now_ms();
-                                        crate::ThreadLifecycleRecord {
+                                        verlet_runtime_contracts::ThreadLifecycleRecord {
                                             coordinates: coordinates.clone(),
                                             parent_thread_id: None,
-                                            topology: crate::ThreadTopology::root(),
-                                            status: crate::ThreadLifecycleStatus::Idle,
+                                            topology: verlet_runtime_contracts::ThreadTopology::root(),
+                                            status: verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
                                             latest_signal_id: None,
                                             latest_checkpoint_id: None,
                                             created_at_ms: now,
@@ -1567,7 +1590,7 @@ impl VerletDaemonIoBridge {
                                 }
                             }
                         };
-                        crate::adapters::app_server::recover_unwitnessed_workspace_metadata_as_unbound(
+                        crate::adapters::app_server::threads::recover_unwitnessed_workspace_metadata_as_unbound(
                             &self.supervisor,
                             &mut lifecycle,
                         )
@@ -1575,7 +1598,9 @@ impl VerletDaemonIoBridge {
                         .map_err(ThreadHandleResolutionError::LifecycleLoad)?;
                         match self.supervisor.load_thread_from_lifecycle(lifecycle).await {
                             Ok(handle) => return Ok(handle),
-                            Err(crate::VerletError::ThreadAlreadyExists(_)) => {
+                            Err(crate::kernel::runtime_host::VerletError::ThreadAlreadyExists(
+                                _,
+                            )) => {
                                 self.supervisor
                                     .wait_for_thread_start_reservation(
                                         &coordinates.tenant_id,
@@ -1610,19 +1635,21 @@ impl VerletDaemonIoBridge {
     /// never silent.
     async fn reconstruct_thread_lifecycle(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-    ) -> crate::VerletResult<Option<crate::ThreadLifecycleRecord>> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Option<verlet_runtime_contracts::ThreadLifecycleRecord>,
+    > {
         let store = self
             .supervisor
             .runtime_store(&coordinates.tenant_id)
             .await?;
-        let stream_id = crate::EventStreamId::for_thread(coordinates);
+        let stream_id = verlet_history::EventStreamId::for_thread(coordinates);
         let events = store
             .read_events(&stream_id, None)
             .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         let Some(start) = events.iter().rev().find(|event| {
-            event.kind == crate::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event
                     .payload
                     .get("entry_kind")
@@ -1651,28 +1678,34 @@ impl VerletDaemonIoBridge {
         }
         let parent_thread_id = serde_json::from_value(payload["parent_thread_id"].clone())
             .map_err(|err| {
-                crate::VerletError::History(format!("thread-start parent codec failed: {err}"))
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "thread-start parent codec failed: {err}"
+                ))
             })?;
-        let topology: crate::ThreadTopology = serde_json::from_value(payload["topology"].clone())
-            .map_err(|err| {
-            crate::VerletError::History(format!("thread-start topology codec failed: {err}"))
-        })?;
+        let topology: verlet_runtime_contracts::ThreadTopology =
+            serde_json::from_value(payload["topology"].clone()).map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "thread-start topology codec failed: {err}"
+                ))
+            })?;
         let metadata: std::collections::BTreeMap<String, String> =
             serde_json::from_value(payload["metadata"].clone()).map_err(|err| {
-                crate::VerletError::History(format!("thread-start metadata codec failed: {err}"))
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "thread-start metadata codec failed: {err}"
+                ))
             })?;
         if parent_thread_id != topology.compatibility_parent_thread_id() {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread-start parent does not match topology for {}",
                 coordinates.thread_id
             )));
         }
         let created_at_ms = u64::try_from(start.created_at_ms).unwrap_or_default();
-        Ok(Some(crate::ThreadLifecycleRecord {
+        Ok(Some(verlet_runtime_contracts::ThreadLifecycleRecord {
             coordinates: coordinates.clone(),
             parent_thread_id,
             topology,
-            status: crate::ThreadLifecycleStatus::Idle,
+            status: verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
             latest_signal_id: None,
             latest_checkpoint_id: None,
             created_at_ms,
@@ -1683,7 +1716,7 @@ impl VerletDaemonIoBridge {
 
     async fn thread_load_lock(
         &self,
-        thread_id: crate::ThreadId,
+        thread_id: verlet_runtime_contracts::ThreadId,
     ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.thread_load_locks.lock().await;
         locks
@@ -1697,7 +1730,7 @@ impl VerletDaemonIoBridge {
         protocol: &str,
         instance_id: &str,
         thread_id: &str,
-    ) -> verlet_io_core::IoResult<Option<crate::StreamCursorV1>> {
+    ) -> verlet_io_core::IoResult<Option<verlet_history::StreamCursorV1>> {
         let key = source_scope(protocol, instance_id);
         let state = self.egress_states.read().await.get(&key).cloned();
         let Some(state) = state else {
@@ -1937,7 +1970,8 @@ impl VerletDaemonIoBridge {
                 None => self.decide(&envelope, &target, &state).await?,
             },
         };
-        let ingress_source_stream = crate::control_stream_id(&coordinates);
+        let ingress_source_stream =
+            crate::kernel::control_decision::control_stream_id(&coordinates);
         let admission_event = self
             .record_admission_decided(
                 &coordinates,
@@ -2010,30 +2044,34 @@ impl VerletDaemonIoBridge {
         receipt.thread_id = Some(coordinates.thread_id.to_string());
 
         let timer = clock_tick_payload(envelope)?;
-        let store = crate::SqliteSessionStore::open(store_path)
+        let store = verlet_history_sqlite::SqliteSessionStore::open(store_path)
             .await
             .map_err(verlet_history_error)?;
-        let mandate_is_live = crate::list_active_mandates(&store, &coordinates)
-            .await
-            .map_err(verlet_bridge_error)?
-            .iter()
-            .any(|mandate| mandate.event.id == timer.mandate_event_id);
+        let mandate_is_live =
+            crate::kernel::mandate_lifecycle::list_active_mandates(&store, &coordinates)
+                .await
+                .map_err(verlet_bridge_error)?
+                .iter()
+                .any(|mandate| mandate.event.id == timer.mandate_event_id);
         if !mandate_is_live {
             return Ok(receipt);
         }
-        let stream_id = crate::control_stream_id(&coordinates);
+        let stream_id = crate::kernel::control_decision::control_stream_id(&coordinates);
         let events = store
             .read_events(&stream_id, None)
             .await
             .map_err(verlet_history_error)?;
         for event in &events {
-            if event.kind != crate::EventKind::TimerFired {
+            if event.kind != verlet_history::EventKind::TimerFired {
                 continue;
             }
-            let payload = serde_json::from_value::<crate::TimerFiredPayload>(event.payload.clone())
-                .map_err(|err| {
-                    verlet_io_core::IoError::Bridge(format!("invalid timer.fired payload: {err}"))
-                })?;
+            let payload =
+                serde_json::from_value::<verlet_history::TimerFiredPayload>(event.payload.clone())
+                    .map_err(|err| {
+                        verlet_io_core::IoError::Bridge(format!(
+                            "invalid timer.fired payload: {err}"
+                        ))
+                    })?;
             if payload.mandate_event_id == timer.mandate_event_id
                 && payload.occurrence_index == timer.occurrence_index
             {
@@ -2042,17 +2080,17 @@ impl VerletDaemonIoBridge {
         }
 
         let mandate_event_id = timer.mandate_event_id;
-        let mut record = crate::NewEventRecord::witnessed(
+        let mut record = verlet_history::NewEventRecord::witnessed(
             coordinates,
-            crate::EventKind::TimerFired,
+            verlet_history::EventKind::TimerFired,
             serde_json::to_value(timer).map_err(|err| {
                 verlet_io_core::IoError::Bridge(format!("encode timer.fired payload: {err}"))
             })?,
         );
-        record.provenance = crate::EventProvenance {
+        record.provenance = verlet_history::EventProvenance {
             source_streams: vec![stream_id.clone()],
             source_event_ids: vec![mandate_event_id],
-            ..crate::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         };
         store
             .append_events(&stream_id, vec![record])
@@ -2067,13 +2105,13 @@ impl VerletDaemonIoBridge {
     ) -> verlet_io_core::IoResult<verlet_io_core::ResolvedIoTarget> {
         if matches!(
             &envelope.content,
-            verlet_io_core::IngressContent::Event { kind, .. } if kind == verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND
+            verlet_io_core::IngressContent::Event { kind, .. } if kind == verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND
         ) {
             return self.resolve_handle_dispatch_target(envelope);
         }
         if matches!(
             &envelope.content,
-            verlet_io_core::IngressContent::Event { kind, .. } if kind == verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND
+            verlet_io_core::IngressContent::Event { kind, .. } if kind == verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND
         ) {
             return self.resolve_handle_outcome_target(envelope).await;
         }
@@ -2130,13 +2168,13 @@ impl VerletDaemonIoBridge {
         let verlet_io_core::IngressContent::Event { payload, .. } = &envelope.content else {
             unreachable!("handle dispatch kind was checked above");
         };
-        let dispatch = serde_json::from_value::<verlet_runtime_contracts::HandleDispatchEnvelope>(
-            payload.clone(),
-        )
+        let dispatch = serde_json::from_value::<
+            verlet_runtime_contracts::handle::HandleDispatchEnvelope,
+        >(payload.clone())
         .map_err(|err| {
             verlet_io_core::IoError::Bridge(format!("invalid handle dispatch payload: {err}"))
         })?;
-        if dispatch.handle.kind != verlet_runtime_contracts::HandleKind::Process {
+        if dispatch.handle.kind != verlet_runtime_contracts::handle::HandleKind::Process {
             return Err(verlet_io_core::IoError::Bridge(
                 "handle dispatch ingress currently requires kind process".to_string(),
             ));
@@ -2180,9 +2218,9 @@ impl VerletDaemonIoBridge {
         let verlet_io_core::IngressContent::Event { payload, .. } = &envelope.content else {
             unreachable!("handle outcome kind was checked above");
         };
-        let terminal = serde_json::from_value::<verlet_runtime_contracts::HandleTerminalEnvelope>(
-            payload.clone(),
-        )
+        let terminal = serde_json::from_value::<
+            verlet_runtime_contracts::handle::HandleTerminalEnvelope,
+        >(payload.clone())
         .map_err(|err| {
             verlet_io_core::IoError::Bridge(format!("invalid handle outcome payload: {err}"))
         })?;
@@ -2197,13 +2235,16 @@ impl VerletDaemonIoBridge {
                 continue;
             }
             let events = store
-                .read_events(&crate::control_stream_id(&coordinates), None)
+                .read_events(
+                    &crate::kernel::control_decision::control_stream_id(&coordinates),
+                    None,
+                )
                 .await
                 .map_err(verlet_history_error)?;
             match terminal.handle.kind {
-                verlet_runtime_contracts::HandleKind::Thread => {
+                verlet_runtime_contracts::handle::HandleKind::Thread => {
                     if !events.iter().any(|event| {
-                        event.kind == crate::EventKind::ThreadSpawned
+                        event.kind == verlet_history::EventKind::ThreadSpawned
                             && event
                                 .payload
                                 .get("correlation_id")
@@ -2236,10 +2277,10 @@ impl VerletDaemonIoBridge {
                         resolved = Some(binding.consumer);
                     }
                 }
-                verlet_runtime_contracts::HandleKind::Process => {
+                verlet_runtime_contracts::handle::HandleKind::Process => {
                     for event in events
                         .iter()
-                        .filter(|event| event.kind == crate::EventKind::IoIngressReceived)
+                        .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
                     {
                         if event
                             .payload
@@ -2249,9 +2290,9 @@ impl VerletDaemonIoBridge {
                         {
                             continue;
                         }
-                        let witness = serde_json::from_value::<crate::IoIngressReceivedPayload>(
-                            event.payload.clone(),
-                        )
+                        let witness = serde_json::from_value::<
+                            verlet_history::IoIngressReceivedPayload,
+                        >(event.payload.clone())
                         .map_err(|err| {
                             verlet_io_core::IoError::Bridge(format!(
                                 "invalid ingress witness payload: {err}"
@@ -2271,11 +2312,11 @@ impl VerletDaemonIoBridge {
                         else {
                             continue;
                         };
-                        if kind != verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND {
+                        if kind != verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND {
                             continue;
                         }
                         let binding = serde_json::from_value::<
-                            verlet_runtime_contracts::HandleDispatchEnvelope,
+                            verlet_runtime_contracts::handle::HandleDispatchEnvelope,
                         >(payload)
                         .map_err(|err| {
                             verlet_io_core::IoError::Bridge(format!(
@@ -2330,13 +2371,15 @@ impl VerletDaemonIoBridge {
         Ok(target)
     }
 
-    async fn ingress_event_store(&self) -> verlet_io_core::IoResult<crate::SqliteSessionStore> {
+    async fn ingress_event_store(
+        &self,
+    ) -> verlet_io_core::IoResult<verlet_history_sqlite::SqliteSessionStore> {
         let store_path = self.session_store_path.as_ref().ok_or_else(|| {
             verlet_io_core::IoError::Bridge(
                 "durable ingress outcomes require a daemon session store".to_string(),
             )
         })?;
-        crate::SqliteSessionStore::open(store_path)
+        verlet_history_sqlite::SqliteSessionStore::open(store_path)
             .await
             .map_err(verlet_history_error)
     }
@@ -2344,17 +2387,19 @@ impl VerletDaemonIoBridge {
     async fn resolved_target_coordinates(
         &self,
         target: &verlet_io_core::ResolvedIoTarget,
-    ) -> verlet_io_core::IoResult<Option<crate::ThreadCoordinates>> {
+    ) -> verlet_io_core::IoResult<Option<verlet_runtime_contracts::ThreadCoordinates>> {
         if let Some(thread_id) = target.address.thread_id.as_deref() {
-            return Ok(Some(crate::ThreadCoordinates {
+            return Ok(Some(verlet_runtime_contracts::ThreadCoordinates {
                 tenant_id: target.address.tenant_id.clone(),
                 user_id: target.address.user_id.clone(),
                 session_id: target.address.session_id.clone(),
-                thread_id: crate::ThreadId::parse_str(thread_id).map_err(|err| {
-                    verlet_io_core::IoError::Bridge(format!(
-                        "invalid resolved ingress thread id: {err}"
-                    ))
-                })?,
+                thread_id: verlet_runtime_contracts::ThreadId::parse_str(thread_id).map_err(
+                    |err| {
+                        verlet_io_core::IoError::Bridge(format!(
+                            "invalid resolved ingress thread id: {err}"
+                        ))
+                    },
+                )?,
             }));
         }
         Ok(self
@@ -2393,7 +2438,10 @@ impl VerletDaemonIoBridge {
         let mut resolved_thread = true;
         loop {
             let events = store
-                .read_events(&crate::control_stream_id(&coordinates), None)
+                .read_events(
+                    &crate::kernel::control_decision::control_stream_id(&coordinates),
+                    None,
+                )
                 .await
                 .map_err(verlet_history_error)?;
             let state = ingress_outcome_fold(&events, ingress_envelope_ids)?;
@@ -2417,7 +2465,7 @@ impl VerletDaemonIoBridge {
 
     async fn ingress_outcome_on_streams(
         &self,
-        streams: &[crate::EventStreamId],
+        streams: &[verlet_history::EventStreamId],
         ingress_envelope_ids: &[String],
     ) -> verlet_io_core::IoResult<IngressOutcomeState> {
         if streams.is_empty() {
@@ -2438,7 +2486,7 @@ impl VerletDaemonIoBridge {
 
     async fn await_ingress_outcome_on_streams(
         &self,
-        streams: &[crate::EventStreamId],
+        streams: &[verlet_history::EventStreamId],
         ingress_envelope_ids: &[String],
     ) -> verlet_io_core::IoResult<IngressOutcomeState> {
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -2462,7 +2510,7 @@ impl VerletDaemonIoBridge {
         &self,
         envelope: &verlet_io_core::IngressEnvelope,
         source_envelopes: &[verlet_io_core::IngressEnvelope],
-        stream_id: &crate::EventStreamId,
+        stream_id: &verlet_history::EventStreamId,
         attempt: u32,
     ) -> verlet_io_core::IoResult<Option<IngressOwnershipReservation>> {
         let keys = ingress_ownership_keys(source_envelopes)?;
@@ -2502,15 +2550,15 @@ impl VerletDaemonIoBridge {
 
     async fn append_ingress_claim(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         ingress_envelope_ids: &[String],
-        ingress_witness_event_ids: &[crate::EventRecordId],
-        admission_event_id: crate::EventRecordId,
-        intent: crate::IngressOutcomeIntent,
+        ingress_witness_event_ids: &[verlet_history::EventRecordId],
+        admission_event_id: verlet_history::EventRecordId,
+        intent: verlet_history::IngressOutcomeIntent,
         ownership: Option<&IngressOwnershipReservation>,
     ) -> verlet_io_core::IoResult<IngressClaimAppend> {
         let store = self.ingress_event_store().await?;
-        let stream_id = crate::control_stream_id(coordinates);
+        let stream_id = crate::kernel::control_decision::control_stream_id(coordinates);
         let mut ownership_lock = match ownership {
             Some(ownership) => {
                 let lock = ownership.state.lock_ingress_claim_admission().await?;
@@ -2554,17 +2602,17 @@ impl VerletDaemonIoBridge {
             }
             let expected_next_sequence = events
                 .last()
-                .map(|event| crate::EventSequence::new(event.sequence.get() + 1))
-                .unwrap_or_else(|| crate::EventSequence::new(1));
-            let payload = crate::IoIngressClaimedPayload {
+                .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| verlet_history::EventSequence::new(1));
+            let payload = verlet_history::IoIngressClaimedPayload {
                 ingress_envelope_ids: ingress_envelope_ids.to_vec(),
                 ingress_witness_event_ids: ingress_witness_event_ids.to_vec(),
                 admission_event_id,
                 intent: intent.clone(),
             };
-            let claim = crate::NewEventRecord::discharged(
+            let claim = verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::EventKind::IoIngressClaimed,
+                verlet_history::EventKind::IoIngressClaimed,
                 serde_json::to_value(payload).map_err(|err| {
                     verlet_io_core::IoError::Bridge(format!(
                         "encode io.ingress.claimed payload: {err}"
@@ -2595,7 +2643,7 @@ impl VerletDaemonIoBridge {
                     }
                     return Ok(IngressClaimAppend::Appended(claim));
                 }
-                Err(crate::HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
                 Err(err) => return Err(verlet_history_error(err)),
             }
         }
@@ -2603,15 +2651,15 @@ impl VerletDaemonIoBridge {
 
     async fn append_effect_free_ingress_outcome(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         ingress_envelope_ids: &[String],
-        ingress_witness_event_ids: &[crate::EventRecordId],
-        admission_event_id: crate::EventRecordId,
-        intent: crate::IngressOutcomeIntent,
+        ingress_witness_event_ids: &[verlet_history::EventRecordId],
+        admission_event_id: verlet_history::EventRecordId,
+        intent: verlet_history::IngressOutcomeIntent,
         ownership: Option<&IngressOwnershipReservation>,
     ) -> verlet_io_core::IoResult<IngressClaimAppend> {
         let store = self.ingress_event_store().await?;
-        let stream_id = crate::control_stream_id(coordinates);
+        let stream_id = crate::kernel::control_decision::control_stream_id(coordinates);
         let mut ownership_lock = match ownership {
             Some(ownership) => {
                 let lock = ownership.state.lock_ingress_claim_admission().await?;
@@ -2655,17 +2703,17 @@ impl VerletDaemonIoBridge {
             }
             let expected_next_sequence = events
                 .last()
-                .map(|event| crate::EventSequence::new(event.sequence.get() + 1))
-                .unwrap_or_else(|| crate::EventSequence::new(1));
-            let claim_payload = crate::IoIngressClaimedPayload {
+                .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| verlet_history::EventSequence::new(1));
+            let claim_payload = verlet_history::IoIngressClaimedPayload {
                 ingress_envelope_ids: ingress_envelope_ids.to_vec(),
                 ingress_witness_event_ids: ingress_witness_event_ids.to_vec(),
                 admission_event_id,
                 intent: intent.clone(),
             };
-            let claim = crate::NewEventRecord::discharged(
+            let claim = verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::EventKind::IoIngressClaimed,
+                verlet_history::EventKind::IoIngressClaimed,
                 serde_json::to_value(claim_payload).map_err(|err| {
                     verlet_io_core::IoError::Bridge(format!(
                         "encode io.ingress.claimed payload: {err}"
@@ -2673,15 +2721,15 @@ impl VerletDaemonIoBridge {
                 })?,
                 ingress_claim_provenance(&stream_id, ingress_witness_event_ids, admission_event_id),
             );
-            let settle_payload = crate::IoIngressSettledPayload {
+            let settle_payload = verlet_history::IoIngressSettledPayload {
                 claim_event_id: claim.id,
                 ingress_envelope_ids: ingress_envelope_ids.to_vec(),
                 evidence_event_id: None,
-                settled_by: crate::IngressSettledBy::Execution,
+                settled_by: verlet_history::IngressSettledBy::Execution,
             };
-            let settle = crate::NewEventRecord::discharged(
+            let settle = verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::EventKind::IoIngressSettled,
+                verlet_history::EventKind::IoIngressSettled,
                 serde_json::to_value(settle_payload).map_err(|err| {
                     verlet_io_core::IoError::Bridge(format!(
                         "encode io.ingress.settled payload: {err}"
@@ -2705,7 +2753,7 @@ impl VerletDaemonIoBridge {
                     }
                     return Ok(IngressClaimAppend::Appended(appended.remove(0)));
                 }
-                Err(crate::HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
                 Err(err) => return Err(verlet_history_error(err)),
             }
         }
@@ -2713,14 +2761,14 @@ impl VerletDaemonIoBridge {
 
     async fn append_ingress_settle(
         &self,
-        coordinates: &crate::ThreadCoordinates,
-        claim: &crate::EventRecord,
-        claim_payload: &crate::IoIngressClaimedPayload,
-        evidence_event_id: Option<crate::EventRecordId>,
-        settled_by: crate::IngressSettledBy,
-    ) -> verlet_io_core::IoResult<crate::EventRecord> {
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        claim: &verlet_history::EventRecord,
+        claim_payload: &verlet_history::IoIngressClaimedPayload,
+        evidence_event_id: Option<verlet_history::EventRecordId>,
+        settled_by: verlet_history::IngressSettledBy,
+    ) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
         let store = self.ingress_event_store().await?;
-        let stream_id = crate::control_stream_id(coordinates);
+        let stream_id = crate::kernel::control_decision::control_stream_id(coordinates);
         loop {
             let events = store
                 .read_events(&stream_id, None)
@@ -2739,17 +2787,17 @@ impl VerletDaemonIoBridge {
             }
             let expected_next_sequence = events
                 .last()
-                .map(|event| crate::EventSequence::new(event.sequence.get() + 1))
-                .unwrap_or_else(|| crate::EventSequence::new(1));
-            let payload = crate::IoIngressSettledPayload {
+                .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| verlet_history::EventSequence::new(1));
+            let payload = verlet_history::IoIngressSettledPayload {
                 claim_event_id: claim.id,
                 ingress_envelope_ids: claim_payload.ingress_envelope_ids.clone(),
                 evidence_event_id,
                 settled_by,
             };
-            let settle = crate::NewEventRecord::discharged(
+            let settle = verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::EventKind::IoIngressSettled,
+                verlet_history::EventKind::IoIngressSettled,
                 serde_json::to_value(payload).map_err(|err| {
                     verlet_io_core::IoError::Bridge(format!(
                         "encode io.ingress.settled payload: {err}"
@@ -2768,7 +2816,7 @@ impl VerletDaemonIoBridge {
                         )
                     });
                 }
-                Err(crate::HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
                 Err(err) => return Err(verlet_history_error(err)),
             }
         }
@@ -2776,18 +2824,18 @@ impl VerletDaemonIoBridge {
 
     async fn wait_for_turn_execution_evidence(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         turn_id: &str,
-        submission_mode: crate::TurnSubmissionMode,
-    ) -> verlet_io_core::IoResult<crate::EventRecord> {
+        submission_mode: verlet_runtime_contracts::TurnSubmissionMode,
+    ) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
         let store = self.ingress_event_store().await?;
-        let stream_id = crate::EventStreamId::for_thread(coordinates);
+        let stream_id = verlet_history::EventStreamId::for_thread(coordinates);
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let mut events = store
                 .read_events(&stream_id, None)
                 .await
                 .map_err(verlet_history_error)?;
-            let mut cursor = events.last().map(crate::EventRecord::cursor_v1);
+            let mut cursor = events.last().map(verlet_history::EventRecord::cursor_v1);
             loop {
                 if let Some(evidence) = turn_execution_evidence(&events, turn_id, submission_mode) {
                     return Ok(evidence);
@@ -2799,7 +2847,7 @@ impl VerletDaemonIoBridge {
                         .await
                         .map_err(verlet_history_error)?,
                     None => store
-                        .read_events(&stream_id, Some(crate::EventSequence::new(1)))
+                        .read_events(&stream_id, Some(verlet_history::EventSequence::new(1)))
                         .await
                         .map_err(verlet_history_error)?,
                 };
@@ -2885,7 +2933,7 @@ impl VerletDaemonIoBridge {
 
     async fn ensure_route_policy_bound(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         envelope: &verlet_io_core::IngressEnvelope,
     ) -> verlet_io_core::IoResult<String> {
         let policy_id = admission_route_policy_id(envelope);
@@ -2904,7 +2952,7 @@ impl VerletDaemonIoBridge {
             .map_err(verlet_bridge_error)?;
         let latest = control_events
             .iter()
-            .filter(|event| event.kind == crate::EventKind::PolicyBound)
+            .filter(|event| event.kind == verlet_history::EventKind::PolicyBound)
             .filter(|event| {
                 event
                     .payload
@@ -2922,8 +2970,8 @@ impl VerletDaemonIoBridge {
         {
             return Ok(content_hash);
         }
-        let payload = crate::PolicyBoundPayload {
-            policy_kind: crate::PolicyKind::AdmissionRoute,
+        let payload = verlet_history::PolicyBoundPayload {
+            policy_kind: verlet_history::PolicyKind::AdmissionRoute,
             policy_id,
             content_hash: content_hash.clone(),
             valid_from_note: "valid until next policy.bound of same policy_id".to_string(),
@@ -2934,13 +2982,13 @@ impl VerletDaemonIoBridge {
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "schema".to_string(),
-                serde_json::json!(crate::EventKind::PolicyBound.payload_schema_id()),
+                serde_json::json!(verlet_history::EventKind::PolicyBound.payload_schema_id()),
             );
         }
         handle
-            .append_control_event(crate::NewEventRecord::witnessed(
+            .append_control_event(verlet_history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                crate::EventKind::PolicyBound,
+                verlet_history::EventKind::PolicyBound,
                 value,
             ))
             .await
@@ -2950,10 +2998,10 @@ impl VerletDaemonIoBridge {
 
     async fn record_ingress_received(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         envelope: &verlet_io_core::IngressEnvelope,
         ingress_message_id: Option<&str>,
-    ) -> verlet_io_core::IoResult<crate::EventRecord> {
+    ) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
         let record = ingress_received_control_record(coordinates, envelope, ingress_message_id)?;
         let Some(ingress_message_id) = ingress_message_id else {
             let handle = self
@@ -2967,14 +3015,14 @@ impl VerletDaemonIoBridge {
                 .map_err(verlet_bridge_error);
         };
         let store = self.ingress_event_store().await?;
-        let stream_id = crate::control_stream_id(coordinates);
+        let stream_id = crate::kernel::control_decision::control_stream_id(coordinates);
         loop {
             let events = store
                 .read_events(&stream_id, None)
                 .await
                 .map_err(verlet_history_error)?;
             if let Some(existing) = events.iter().find(|event| {
-                event.kind == crate::EventKind::IoIngressReceived
+                event.kind == verlet_history::EventKind::IoIngressReceived
                     && event
                         .payload
                         .get(INGRESS_MESSAGE_ID_FIELD)
@@ -2991,8 +3039,8 @@ impl VerletDaemonIoBridge {
             }
             let expected_next_sequence = events
                 .last()
-                .map(|event| crate::EventSequence::new(event.sequence.get() + 1))
-                .unwrap_or_else(|| crate::EventSequence::new(1));
+                .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| verlet_history::EventSequence::new(1));
             match store
                 .append_events_fenced(&stream_id, expected_next_sequence, vec![record.clone()])
                 .await
@@ -3004,7 +3052,7 @@ impl VerletDaemonIoBridge {
                         )
                     });
                 }
-                Err(crate::HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
                 Err(err) => return Err(verlet_history_error(err)),
             }
         }
@@ -3012,14 +3060,14 @@ impl VerletDaemonIoBridge {
 
     async fn record_admission_decided(
         &self,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         envelope: &verlet_io_core::IngressEnvelope,
         decision: &verlet_io_core::AdmissionDecision,
         policy_hash: &str,
-        ingress_event_ids: Vec<crate::EventRecordId>,
+        ingress_event_ids: Vec<verlet_history::EventRecordId>,
         coalesced: bool,
         durable: bool,
-    ) -> verlet_io_core::IoResult<crate::EventRecord> {
+    ) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
         let handle = self
             .supervisor
             .get_thread_at(coordinates)
@@ -3030,7 +3078,7 @@ impl VerletDaemonIoBridge {
             route_id,
             policy_hash.to_string(),
             if coalesced {
-                crate::AdmissionDecision::Coalesce
+                verlet_history::AdmissionDecision::Coalesce
             } else {
                 event_admission_decision(decision)
             },
@@ -3045,27 +3093,27 @@ impl VerletDaemonIoBridge {
         let record =
             crate::kernel::admission::admission_decided_record(coordinates.clone(), context)
                 .map_err(verlet_bridge_error)?;
-        let desired: crate::AdmissionDecidedPayload =
+        let desired: verlet_history::AdmissionDecidedPayload =
             serde_json::from_value(record.payload.clone()).map_err(|err| {
                 verlet_io_core::IoError::Bridge(format!("decode admission decision payload: {err}"))
             })?;
         let store = self.ingress_event_store().await?;
-        let stream_id = crate::control_stream_id(coordinates);
+        let stream_id = crate::kernel::control_decision::control_stream_id(coordinates);
         loop {
             let events = store
                 .read_events(&stream_id, None)
                 .await
                 .map_err(verlet_history_error)?;
             if let Some(existing) = events.iter().find(|event| {
-                event.kind == crate::EventKind::AdmissionDecided
-                    && serde_json::from_value::<crate::AdmissionDecidedPayload>(
+                event.kind == verlet_history::EventKind::AdmissionDecided
+                    && serde_json::from_value::<verlet_history::AdmissionDecidedPayload>(
                         event.payload.clone(),
                     )
                     .is_ok_and(|payload| {
                         payload.source_ingress_event_ids == desired.source_ingress_event_ids
                     })
             }) {
-                let existing_payload: crate::AdmissionDecidedPayload =
+                let existing_payload: verlet_history::AdmissionDecidedPayload =
                     serde_json::from_value(existing.payload.clone()).map_err(|err| {
                         verlet_io_core::IoError::Bridge(format!(
                             "decode existing admission decision: {err}"
@@ -3080,8 +3128,8 @@ impl VerletDaemonIoBridge {
             }
             let expected_next_sequence = events
                 .last()
-                .map(|event| crate::EventSequence::new(event.sequence.get() + 1))
-                .unwrap_or_else(|| crate::EventSequence::new(1));
+                .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+                .unwrap_or_else(|| verlet_history::EventSequence::new(1));
             match store
                 .append_events_fenced(&stream_id, expected_next_sequence, vec![record.clone()])
                 .await
@@ -3093,7 +3141,7 @@ impl VerletDaemonIoBridge {
                         )
                     });
                 }
-                Err(crate::HistoryError::AppendFenceConflict { .. }) => continue,
+                Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
                 Err(err) => return Err(verlet_history_error(err)),
             }
         }
@@ -3103,12 +3151,16 @@ impl VerletDaemonIoBridge {
         &self,
         target: &verlet_io_core::ResolvedIoTarget,
         envelope: &verlet_io_core::IngressEnvelope,
-    ) -> verlet_io_core::IoResult<(crate::ThreadCoordinates, crate::RuntimeThreadHandle)> {
+    ) -> verlet_io_core::IoResult<(
+        verlet_runtime_contracts::ThreadCoordinates,
+        crate::kernel::runtime_host::RuntimeThreadHandle,
+    )> {
         if let Some(thread_id) = &target.address.thread_id {
-            let thread_id = crate::ThreadId::parse_str(thread_id).map_err(|err| {
-                verlet_io_core::IoError::Bridge(format!("invalid target thread id: {err}"))
-            })?;
-            let coordinates = crate::ThreadCoordinates {
+            let thread_id =
+                verlet_runtime_contracts::ThreadId::parse_str(thread_id).map_err(|err| {
+                    verlet_io_core::IoError::Bridge(format!("invalid target thread id: {err}"))
+                })?;
+            let coordinates = verlet_runtime_contracts::ThreadCoordinates {
                 tenant_id: target.address.tenant_id.clone(),
                 user_id: target.address.user_id.clone(),
                 session_id: target.address.session_id.clone(),
@@ -3138,7 +3190,10 @@ impl VerletDaemonIoBridge {
                 .await
                 .map_err(verlet_bridge_error)?;
             let events = store
-                .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+                .read_events(
+                    &verlet_history::EventStreamId::for_thread(coordinates),
+                    None,
+                )
                 .await
                 .map_err(verlet_history_error)?;
             if !events.is_empty() {
@@ -3178,20 +3233,20 @@ impl VerletDaemonIoBridge {
         let topology = target
             .parent_thread_id
             .as_deref()
-            .map(crate::ThreadId::parse_str)
+            .map(verlet_runtime_contracts::ThreadId::parse_str)
             .transpose()
             .map_err(|err| {
                 verlet_io_core::IoError::Bridge(format!("invalid parent thread id: {err}"))
             })?
-            .map(crate::ThreadTopology::spawned_from)
-            .unwrap_or_else(crate::ThreadTopology::root);
+            .map(verlet_runtime_contracts::ThreadTopology::spawned_from)
+            .unwrap_or_else(verlet_runtime_contracts::ThreadTopology::root);
         let agent_binding = self.route_agent_binding(target).await?;
         let metadata = agent_binding
             .as_ref()
             .map(|binding| binding.metadata.clone())
             .unwrap_or_default();
 
-        let request = || crate::ThreadStartRequest {
+        let request = || crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: target.address.tenant_id.clone(),
             user_id: target.address.user_id.clone(),
             session_id: target.address.session_id.clone(),
@@ -3199,11 +3254,11 @@ impl VerletDaemonIoBridge {
             metadata: metadata.clone(),
         };
         let (coordinates, handle) = if let Some((route_id, source_scope, state)) = durable_binding {
-            let candidate = crate::ThreadCoordinates {
+            let candidate = verlet_runtime_contracts::ThreadCoordinates {
                 tenant_id: target.address.tenant_id.clone(),
                 user_id: target.address.user_id.clone(),
                 session_id: target.address.session_id.clone(),
-                thread_id: crate::ThreadId::new(),
+                thread_id: verlet_runtime_contracts::ThreadId::new(),
             };
             #[cfg(test)]
             self.initial_root_candidates
@@ -3258,10 +3313,11 @@ impl VerletDaemonIoBridge {
 
     async fn start_thread_with_manifest_witness(
         &self,
-        request: crate::ThreadStartRequest,
-        reserved_thread_id: Option<crate::ThreadId>,
-        agent_binding: Option<crate::KernelThreadSpawnAgentBinding>,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+        request: crate::kernel::supervisor::ThreadStartRequest,
+        reserved_thread_id: Option<verlet_runtime_contracts::ThreadId>,
+        agent_binding: Option<crate::agent::agent_process::KernelThreadSpawnAgentBinding>,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         let supervisor = self.supervisor.clone();
         tokio::spawn(async move {
             let handle = match reserved_thread_id {
@@ -3282,7 +3338,7 @@ impl VerletDaemonIoBridge {
         })
         .await
         .map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "daemon thread manifest witness task failed: {err}"
             ))
         })?
@@ -3290,10 +3346,10 @@ impl VerletDaemonIoBridge {
 
     async fn start_or_adopt_reserved_root(
         &self,
-        request: crate::ThreadStartRequest,
-        coordinates: &crate::ThreadCoordinates,
-        agent_binding: Option<&crate::KernelThreadSpawnAgentBinding>,
-    ) -> verlet_io_core::IoResult<crate::RuntimeThreadHandle> {
+        request: crate::kernel::supervisor::ThreadStartRequest,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        agent_binding: Option<&crate::agent::agent_process::KernelThreadSpawnAgentBinding>,
+    ) -> verlet_io_core::IoResult<crate::kernel::runtime_host::RuntimeThreadHandle> {
         loop {
             let store = self
                 .supervisor
@@ -3301,7 +3357,10 @@ impl VerletDaemonIoBridge {
                 .await
                 .map_err(verlet_bridge_error)?;
             let events = store
-                .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+                .read_events(
+                    &verlet_history::EventStreamId::for_thread(coordinates),
+                    None,
+                )
                 .await
                 .map_err(verlet_history_error)?;
             if !events.is_empty() {
@@ -3319,7 +3378,7 @@ impl VerletDaemonIoBridge {
                 .await
             {
                 Ok(handle) => return Ok(handle),
-                Err(crate::VerletError::ThreadAlreadyExists(existing))
+                Err(crate::kernel::runtime_host::VerletError::ThreadAlreadyExists(existing))
                     if existing == coordinates.thread_id =>
                 {
                     self.supervisor
@@ -3331,7 +3390,9 @@ impl VerletDaemonIoBridge {
                         .map_err(verlet_bridge_error)?;
                     match self.supervisor.get_thread_at(coordinates).await {
                         Ok(handle) => return Ok(handle),
-                        Err(crate::VerletError::ThreadNotFound(_)) => continue,
+                        Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_)) => {
+                            continue;
+                        }
                         Err(err) => return Err(verlet_bridge_error(err)),
                     }
                 }
@@ -3400,7 +3461,8 @@ impl VerletDaemonIoBridge {
     async fn route_agent_binding(
         &self,
         target: &verlet_io_core::ResolvedIoTarget,
-    ) -> verlet_io_core::IoResult<Option<crate::KernelThreadSpawnAgentBinding>> {
+    ) -> verlet_io_core::IoResult<Option<crate::agent::agent_process::KernelThreadSpawnAgentBinding>>
+    {
         let Some(agent_ref) = target
             .metadata
             .get(ROUTE_AGENT_REF_METADATA)
@@ -3421,11 +3483,14 @@ impl VerletDaemonIoBridge {
             .map_err(verlet_bridge_error)
     }
 
-    fn runtime_input(&self, input: &verlet_io_core::IoTurnInput) -> crate::TurnInput {
+    fn runtime_input(
+        &self,
+        input: &verlet_io_core::IoTurnInput,
+    ) -> crate::kernel::runtime_host::turn::TurnInput {
         let policy = input.provider_policy.clone().unwrap_or_else(|| {
             verlet_io_core::ProviderPolicy::new(self.model_provider.clone(), self.model.clone())
         });
-        let mut turn = crate::TurnInput::text(input.text.clone())
+        let mut turn = crate::kernel::runtime_host::turn::TurnInput::text(input.text.clone())
             .with_provider(policy.provider)
             .with_model(policy.model)
             .with_cwd(self.cwd.clone());
@@ -3451,9 +3516,9 @@ impl VerletDaemonIoBridge {
         child_key: &str,
         input: &verlet_io_core::IoTurnInput,
         ingress_message_ids: &[String],
-        ingress_source_stream: Option<&crate::EventStreamId>,
-        source_ingress_event_ids: &[crate::EventRecordId],
-        admission_event_id: Option<crate::EventRecordId>,
+        ingress_source_stream: Option<&verlet_history::EventStreamId>,
+        source_ingress_event_ids: &[verlet_history::EventRecordId],
+        admission_event_id: Option<verlet_history::EventRecordId>,
         ingress_ownership: Option<&IngressOwnershipReservation>,
     ) -> verlet_io_core::IoResult<(verlet_io_core::KernelIoReceipt, Option<String>)> {
         let (parent_coordinates, parent_handle) = self.ensure_thread(target, envelope).await?;
@@ -3472,7 +3537,7 @@ impl VerletDaemonIoBridge {
                     ingress_source_stream,
                     source_ingress_event_ids,
                     None,
-                    crate::ThreadId::new(),
+                    verlet_runtime_contracts::ThreadId::new(),
                     false,
                 )
                 .await?;
@@ -3488,7 +3553,7 @@ impl VerletDaemonIoBridge {
                 "durable ingress claim requires its control stream".to_string(),
             )
         })?;
-        let reserved_child_thread_id = crate::ThreadId::new();
+        let reserved_child_thread_id = verlet_runtime_contracts::ThreadId::new();
         let claim = self
             .append_ingress_claim(
                 &parent_coordinates,
@@ -3519,17 +3584,18 @@ impl VerletDaemonIoBridge {
                 return Ok((receipt, Some(child_key.to_string())));
             }
         };
-        let claim_payload =
-            serde_json::from_value::<crate::IoIngressClaimedPayload>(claim.payload.clone())
-                .map_err(|err| {
-                    verlet_io_core::IoError::Bridge(format!("decode appended ingress claim: {err}"))
-                })?;
+        let claim_payload = serde_json::from_value::<verlet_history::IoIngressClaimedPayload>(
+            claim.payload.clone(),
+        )
+        .map_err(|err| {
+            verlet_io_core::IoError::Bridge(format!("decode appended ingress claim: {err}"))
+        })?;
         let reserved_child_thread_id = match &claim_payload.intent {
-            crate::IngressOutcomeIntent::Fork {
+            verlet_history::IngressOutcomeIntent::Fork {
                 child_thread_id: Some(child_thread_id),
                 ..
             } => *child_thread_id,
-            crate::IngressOutcomeIntent::Fork {
+            verlet_history::IngressOutcomeIntent::Fork {
                 child_thread_id: None,
                 ..
             } => {
@@ -3564,7 +3630,7 @@ impl VerletDaemonIoBridge {
             &claim,
             &claim_payload,
             Some(spawned.id),
-            crate::IngressSettledBy::Execution,
+            verlet_history::IngressSettledBy::Execution,
         )
         .await?;
         Ok((receipt, None))
@@ -3574,16 +3640,17 @@ impl VerletDaemonIoBridge {
         &self,
         envelope: &verlet_io_core::IngressEnvelope,
         target: &verlet_io_core::ResolvedIoTarget,
-        parent_coordinates: &crate::ThreadCoordinates,
-        parent_handle: &crate::RuntimeThreadHandle,
+        parent_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        parent_handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
         child_key: &str,
         input: &verlet_io_core::IoTurnInput,
-        ingress_source_stream: Option<&crate::EventStreamId>,
-        source_ingress_event_ids: &[crate::EventRecordId],
-        claim_event_id: Option<crate::EventRecordId>,
-        reserved_child_thread_id: crate::ThreadId,
+        ingress_source_stream: Option<&verlet_history::EventStreamId>,
+        source_ingress_event_ids: &[verlet_history::EventRecordId],
+        claim_event_id: Option<verlet_history::EventRecordId>,
+        reserved_child_thread_id: verlet_runtime_contracts::ThreadId,
         scan_for_existing_spawn: bool,
-    ) -> verlet_io_core::IoResult<(verlet_io_core::KernelIoReceipt, crate::EventRecord)> {
+    ) -> verlet_io_core::IoResult<(verlet_io_core::KernelIoReceipt, verlet_history::EventRecord)>
+    {
         let existing_spawn = match (claim_event_id, scan_for_existing_spawn) {
             (Some(claim_event_id), true) => {
                 self.fork_spawned_for_claim(parent_coordinates, claim_event_id)
@@ -3599,7 +3666,7 @@ impl VerletDaemonIoBridge {
                         payload.child_thread_id
                     )));
                 }
-                let child_coordinates = crate::ThreadCoordinates {
+                let child_coordinates = verlet_runtime_contracts::ThreadCoordinates {
                     tenant_id: parent_coordinates.tenant_id.clone(),
                     user_id: parent_coordinates.user_id.clone(),
                     session_id: parent_coordinates.session_id.clone(),
@@ -3676,7 +3743,7 @@ impl VerletDaemonIoBridge {
             .await
             .map_err(verlet_bridge_error)?;
         if !child_events.iter().any(|event| {
-            event.kind == crate::EventKind::TurnSubmitted
+            event.kind == verlet_history::EventKind::TurnSubmitted
                 && event
                     .payload
                     .get("turn_id")
@@ -3694,8 +3761,12 @@ impl VerletDaemonIoBridge {
             .await?;
         }
         if !recovering_spawned_child
-            || turn_execution_evidence(&child_events, child_key, crate::TurnSubmissionMode::Queue)
-                .is_none()
+            || turn_execution_evidence(
+                &child_events,
+                child_key,
+                verlet_runtime_contracts::TurnSubmissionMode::Queue,
+            )
+            .is_none()
         {
             self.lock_active_turns()
                 .insert(target.address.scope_key(), child_key.to_string());
@@ -3705,7 +3776,7 @@ impl VerletDaemonIoBridge {
                     &child_coordinates,
                     child_key.to_string(),
                     self.runtime_input(input),
-                    crate::TurnSubmissionMode::Queue,
+                    verlet_runtime_contracts::TurnSubmissionMode::Queue,
                     None,
                 )
                 .await
@@ -3735,7 +3806,7 @@ impl VerletDaemonIoBridge {
 
     async fn inherited_workspace_manifest_receipts(
         &self,
-        parent: &crate::RuntimeThreadHandle,
+        parent: &crate::kernel::runtime_host::RuntimeThreadHandle,
     ) -> verlet_io_core::IoResult<Option<(serde_json::Value, serde_json::Value)>> {
         let Some(raw) = parent
             .context()
@@ -3744,14 +3815,14 @@ impl VerletDaemonIoBridge {
         else {
             return Ok(None);
         };
-        let stored = serde_json::from_str::<crate::AgentManifestResolvedWorkspaceMount>(raw)
-            .map_err(|err| {
-                verlet_io_core::IoError::Bridge(format!(
-                    "parent workspace metadata is invalid: {err}"
-                ))
-            })?;
+        let stored = serde_json::from_str::<
+            crate::agent::manifest_bind::AgentManifestResolvedWorkspaceMount,
+        >(raw)
+        .map_err(|err| {
+            verlet_io_core::IoError::Bridge(format!("parent workspace metadata is invalid: {err}"))
+        })?;
         let (compile_payload, bind_payload) =
-            crate::adapters::app_server::active_manifest_receipt_payloads(parent)
+            crate::adapters::app_server::threads::active_manifest_receipt_payloads(parent)
                 .await
                 .map_err(verlet_bridge_error)?
                 .ok_or_else(|| {
@@ -3763,7 +3834,11 @@ impl VerletDaemonIoBridge {
         let witnessed = bind_payload
             .get("workspace")
             .cloned()
-            .map(serde_json::from_value::<crate::AgentManifestResolvedWorkspaceMount>)
+            .map(
+                serde_json::from_value::<
+                    crate::agent::manifest_bind::AgentManifestResolvedWorkspaceMount,
+                >,
+            )
             .transpose()
             .map_err(|err| {
                 verlet_io_core::IoError::Bridge(format!(
@@ -3781,10 +3856,11 @@ impl VerletDaemonIoBridge {
 
     async fn fork_thread_with_manifest_witness(
         &self,
-        checkpoint: crate::ThreadCheckpoint,
-        child_thread_id: crate::ThreadId,
+        checkpoint: crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+        child_thread_id: verlet_runtime_contracts::ThreadId,
         manifest_receipts: Option<(serde_json::Value, serde_json::Value)>,
-    ) -> crate::VerletResult<crate::RuntimeThreadHandle> {
+    ) -> crate::kernel::runtime_host::VerletResult<crate::kernel::runtime_host::RuntimeThreadHandle>
+    {
         let supervisor = self.supervisor.clone();
         tokio::spawn(async move {
             let child = supervisor
@@ -3804,7 +3880,7 @@ impl VerletDaemonIoBridge {
         })
         .await
         .map_err(|err| {
-            crate::VerletError::RuntimeExecution(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "daemon fork manifest witness task failed: {err}"
             ))
         })?
@@ -3812,28 +3888,35 @@ impl VerletDaemonIoBridge {
 
     async fn fork_spawned_for_claim(
         &self,
-        parent_coordinates: &crate::ThreadCoordinates,
-        claim_event_id: crate::EventRecordId,
-    ) -> verlet_io_core::IoResult<Option<(crate::EventRecord, crate::ThreadSpawnedPayload)>> {
+        parent_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        claim_event_id: verlet_history::EventRecordId,
+    ) -> verlet_io_core::IoResult<
+        Option<(
+            verlet_history::EventRecord,
+            verlet_history::ThreadSpawnedPayload,
+        )>,
+    > {
         #[cfg(test)]
         self.fork_claim_scan_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let store = self.ingress_event_store().await?;
         let events = store
-            .read_events(&crate::control_stream_id(parent_coordinates), None)
+            .read_events(
+                &crate::kernel::control_decision::control_stream_id(parent_coordinates),
+                None,
+            )
             .await
             .map_err(verlet_history_error)?;
         for event in events {
-            if event.kind != crate::EventKind::ThreadSpawned {
+            if event.kind != verlet_history::EventKind::ThreadSpawned {
                 continue;
             }
-            let payload =
-                serde_json::from_value::<crate::ThreadSpawnedPayload>(event.payload.clone())
-                    .map_err(|err| {
-                        verlet_io_core::IoError::Bridge(format!(
-                            "invalid thread.spawned payload: {err}"
-                        ))
-                    })?;
+            let payload = serde_json::from_value::<verlet_history::ThreadSpawnedPayload>(
+                event.payload.clone(),
+            )
+            .map_err(|err| {
+                verlet_io_core::IoError::Bridge(format!("invalid thread.spawned payload: {err}"))
+            })?;
             if payload.fork.as_ref().and_then(|fork| fork.claim_event_id) == Some(claim_event_id) {
                 return Ok(Some((event, payload)));
             }
@@ -3843,12 +3926,12 @@ impl VerletDaemonIoBridge {
 
     async fn fork_source_cut_for_child(
         &self,
-        parent_handle: &crate::RuntimeThreadHandle,
-        child_handle: &crate::RuntimeThreadHandle,
-        attempted_checkpoint: &crate::ThreadCheckpoint,
-    ) -> verlet_io_core::IoResult<crate::ThreadSpawnedForkSourceCutPayload> {
+        parent_handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
+        child_handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
+        attempted_checkpoint: &crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+    ) -> verlet_io_core::IoResult<verlet_history::ThreadSpawnedForkSourceCutPayload> {
         let child_context = child_handle.context();
-        let crate::ThreadLineage::Branch {
+        let verlet_runtime_contracts::ThreadLineage::Branch {
             parent_thread_id,
             checkpoint_id: Some(checkpoint_id),
         } = child_context.topology.lineage
@@ -3881,7 +3964,7 @@ impl VerletDaemonIoBridge {
         let checkpoint_entry = parent_context.entries.iter().rev().find(|entry| {
             matches!(
                 &entry.kind,
-                crate::SessionEntryKind::Runtime { kind, payload }
+                verlet_history::SessionEntryKind::Runtime { kind, payload }
                     if kind == "thread_checkpoint"
                         && payload.get("checkpoint_id").and_then(serde_json::Value::as_str)
                             == Some(checkpoint_id_text.as_str())
@@ -3893,31 +3976,33 @@ impl VerletDaemonIoBridge {
                 child_context.coordinates.thread_id
             ))
         })?;
-        Ok(crate::ThreadSpawnedForkSourceCutPayload {
+        Ok(verlet_history::ThreadSpawnedForkSourceCutPayload {
             thread_id: parent_thread_id,
             checkpoint_id,
             leaf_entry_id: Some(checkpoint_entry.entry_id),
-            stream_id: crate::EventStreamId::for_thread(&parent_handle.context().coordinates),
+            stream_id: verlet_history::EventStreamId::for_thread(
+                &parent_handle.context().coordinates,
+            ),
             stream_to_sequence: None,
         })
     }
 
     async fn append_fork_thread_spawned_event(
         &self,
-        parent_handle: &crate::RuntimeThreadHandle,
-        parent_coordinates: &crate::ThreadCoordinates,
-        child_handle: &crate::RuntimeThreadHandle,
-        source_cut: &crate::ThreadSpawnedForkSourceCutPayload,
-        claim_event_id: Option<crate::EventRecordId>,
-    ) -> verlet_io_core::IoResult<crate::EventRecord> {
+        parent_handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
+        parent_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        child_handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
+        source_cut: &verlet_history::ThreadSpawnedForkSourceCutPayload,
+        claim_event_id: Option<verlet_history::EventRecordId>,
+    ) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
         let child_context = child_handle.context();
         let metadata = &child_context.metadata;
         let child_manifest_hash = metadata
-            .get(crate::THREAD_AGENT_MANIFEST_HASH_METADATA)
+            .get(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
             .cloned()
             .unwrap_or_else(|| "unbound".to_string());
         let granted = metadata
-            .get(crate::THREAD_SPAWN_GRANTED_METADATA)
+            .get(crate::kernel::runtime_host::THREAD_SPAWN_GRANTED_METADATA)
             .map(|raw| {
                 serde_json::from_str::<Vec<String>>(raw).map_err(|err| {
                     verlet_io_core::IoError::Bridge(format!(
@@ -3927,7 +4012,7 @@ impl VerletDaemonIoBridge {
             })
             .transpose()?
             .unwrap_or_default();
-        let fork = crate::ThreadSpawnedForkPayload {
+        let fork = verlet_history::ThreadSpawnedForkPayload {
             mode: "clone".to_string(),
             claim_event_id,
             source_cut: source_cut.clone(),
@@ -3938,7 +4023,7 @@ impl VerletDaemonIoBridge {
         });
         let inputs_hash = crate::agent::manifest_bind::canonical_json_hash(&inputs_context)
             .map_err(verlet_bridge_error)?;
-        let payload = crate::ThreadSpawnedPayload {
+        let payload = verlet_history::ThreadSpawnedPayload {
             parent_thread_id: parent_coordinates.thread_id,
             parent_turn_id: None,
             child_thread_id: child_context.coordinates.thread_id,
@@ -3958,12 +4043,12 @@ impl VerletDaemonIoBridge {
         })?;
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::ThreadSpawned.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::ThreadSpawned.payload_schema_id()),
         );
         parent_handle
-            .append_control_event(crate::NewEventRecord::witnessed(
+            .append_control_event(verlet_history::NewEventRecord::witnessed(
                 parent_coordinates.clone(),
-                crate::EventKind::ThreadSpawned,
+                verlet_history::EventKind::ThreadSpawned,
                 value,
             ))
             .await
@@ -3974,7 +4059,7 @@ impl VerletDaemonIoBridge {
         &self,
         envelope: &verlet_io_core::IngressEnvelope,
         target: &verlet_io_core::ResolvedIoTarget,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> verlet_io_core::IoResult<()> {
         let route_id = route_id_for_ingress(envelope);
         let key = source_scope(&envelope.source.protocol, &route_id);
@@ -3995,7 +4080,7 @@ impl VerletDaemonIoBridge {
         &self,
         envelope: &verlet_io_core::IngressEnvelope,
         target: &verlet_io_core::ResolvedIoTarget,
-        coordinates: &crate::ThreadCoordinates,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> verlet_io_core::IoResult<()> {
         let route_id = route_id_for_ingress(envelope);
         let key = source_scope(&envelope.source.protocol, &route_id);
@@ -4014,20 +4099,20 @@ impl VerletDaemonIoBridge {
 
     async fn append_ingress_turn_submitted_event(
         &self,
-        handle: &crate::RuntimeThreadHandle,
+        handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
         envelope: &verlet_io_core::IngressEnvelope,
         _target: &verlet_io_core::ResolvedIoTarget,
         turn_id: &str,
-        ingress_source_stream: Option<&crate::EventStreamId>,
-        source_ingress_event_ids: &[crate::EventRecordId],
-    ) -> verlet_io_core::IoResult<crate::EventRecord> {
+        ingress_source_stream: Option<&verlet_history::EventStreamId>,
+        source_ingress_event_ids: &[verlet_history::EventRecordId],
+    ) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
         if let Some(existing) = handle
             .read_thread_events(None)
             .await
             .map_err(verlet_bridge_error)?
             .into_iter()
             .find(|event| {
-                event.kind == crate::EventKind::TurnSubmitted
+                event.kind == verlet_history::EventKind::TurnSubmitted
                     && event
                         .payload
                         .get("turn_id")
@@ -4043,7 +4128,7 @@ impl VerletDaemonIoBridge {
             return Ok(existing);
         }
         let route_id = route_id_for_ingress(envelope);
-        let mut payload = serde_json::to_value(crate::IoIngressReceivedPayload {
+        let mut payload = serde_json::to_value(verlet_history::IoIngressReceivedPayload {
             route_id: Some(route_id.clone()),
             dedupe_key: envelope
                 .effective_dedupe_key()
@@ -4068,7 +4153,7 @@ impl VerletDaemonIoBridge {
         })?;
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::TurnSubmitted.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::TurnSubmitted.payload_schema_id()),
         );
         object.insert(
             "turn_id".to_string(),
@@ -4102,22 +4187,22 @@ impl VerletDaemonIoBridge {
 
         let record = || {
             if source_ingress_event_ids.is_empty() {
-                return crate::NewEventRecord::witnessed(
+                return verlet_history::NewEventRecord::witnessed(
                     handle.context().coordinates.clone(),
-                    crate::EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     payload.clone(),
                 );
             }
-            crate::NewEventRecord::discharged(
+            verlet_history::NewEventRecord::discharged(
                 handle.context().coordinates.clone(),
-                crate::EventKind::TurnSubmitted,
+                verlet_history::EventKind::TurnSubmitted,
                 payload.clone(),
-                crate::EventProvenance {
+                verlet_history::EventProvenance {
                     source_streams: ingress_source_stream.cloned().into_iter().collect(),
                     source_event_ids: source_ingress_event_ids.to_vec(),
                     discharged_by: Some("projector:io-ingress-apply".to_string()),
                     function: Some("ingress_turn_submit/v1".to_string()),
-                    ..crate::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             )
         };
@@ -4176,7 +4261,7 @@ impl VerletDaemonIoBridge {
         route_key: &str,
         state: &DaemonEgressState,
         binding: &BoundEgressThread,
-        handle: crate::RuntimeThreadHandle,
+        handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         adapter: Option<&dyn verlet_io_core::EgressAdapter>,
         route_config: &RouteEgressConfig,
     ) -> verlet_io_core::IoResult<usize> {
@@ -4213,7 +4298,7 @@ impl VerletDaemonIoBridge {
                     }
                 },
                 None => handle
-                    .read_thread_events(Some(crate::EventSequence::new(1)))
+                    .read_thread_events(Some(verlet_history::EventSequence::new(1)))
                     .await
                     .map_err(verlet_bridge_error)?,
             }
@@ -4225,7 +4310,7 @@ impl VerletDaemonIoBridge {
         if rebuild {
             let effective_cursor = verified_delivery_cursor(
                 &events,
-                &crate::EventStreamId::for_thread(&binding.coordinates),
+                &verlet_history::EventStreamId::for_thread(&binding.coordinates),
                 persisted_cursor.as_ref(),
             );
             *view_slot = Some(DrainEgressView::new(
@@ -4309,7 +4394,7 @@ impl VerletDaemonIoBridge {
         &self,
         state: &DaemonEgressState,
         binding: &BoundEgressThread,
-        handle: &crate::RuntimeThreadHandle,
+        handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
         adapter: Option<&dyn verlet_io_core::EgressAdapter>,
         route_config: &RouteEgressConfig,
         source_event: &DrainEgressSource,
@@ -4395,12 +4480,12 @@ impl VerletDaemonIoBridge {
         &self,
         state: &DaemonEgressState,
         binding: &BoundEgressThread,
-        handle: &crate::RuntimeThreadHandle,
+        handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
         adapter: Option<&dyn verlet_io_core::EgressAdapter>,
         source_event: &DrainEgressSource,
         envelope_index: usize,
         envelope: verlet_io_core::EgressEnvelope,
-        retry: crate::VerletEgressRetryConfig,
+        retry: crate::daemon::daemon_config::VerletEgressRetryConfig,
         receipt_cursors: &mut std::collections::HashMap<String, ReceiptDedupeCursor>,
     ) -> verlet_io_core::IoResult<EnvelopeDeliveryOutcome> {
         let dedupe_key = egress_dedupe_key(source_event.id, envelope_index);
@@ -4517,27 +4602,27 @@ impl VerletDaemonIoBridge {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SourceDeliveryOutcome {
-    Completed(crate::StreamCursorV1),
+    Completed(verlet_history::StreamCursorV1),
     Blocked,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum EnvelopeDeliveryOutcome {
-    Delivered(crate::StreamCursorV1),
+    Delivered(verlet_history::StreamCursorV1),
     Blocked,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReceiptDedupeCursor {
-    cursor: crate::StreamCursorV1,
+    cursor: verlet_history::StreamCursorV1,
     egress_kind: String,
 }
 
 fn verified_delivery_cursor(
-    events: &[crate::EventRecord],
-    stream_id: &crate::EventStreamId,
-    cursor: Option<&crate::StreamCursorV1>,
-) -> Option<crate::StreamCursorV1> {
+    events: &[verlet_history::EventRecord],
+    stream_id: &verlet_history::EventStreamId,
+    cursor: Option<&verlet_history::StreamCursorV1>,
+) -> Option<verlet_history::StreamCursorV1> {
     let cursor = cursor?;
     if cursor.validate_stream_cursor_v1().is_err() || &cursor.stream_id != stream_id {
         return None;
@@ -4552,7 +4637,7 @@ fn store_drain_delivery_cursor(
     state: &DaemonEgressState,
     binding: &BoundEgressThread,
     view: &mut DrainEgressView,
-    cursor: &crate::StreamCursorV1,
+    cursor: &verlet_history::StreamCursorV1,
 ) -> verlet_io_core::IoResult<()> {
     let thread_id = binding.coordinates.thread_id.to_string();
     if view.observed_delivery_cursor.is_some() && view.effective_delivery_cursor.is_none() {
@@ -4576,8 +4661,8 @@ fn store_drain_delivery_cursor(
 
 fn fold_drain_egress_events(
     view: &mut DrainEgressView,
-    events: &[crate::EventRecord],
-    entries: &[crate::SessionEntry],
+    events: &[verlet_history::EventRecord],
+    entries: &[verlet_history::SessionEntry],
     route_config: &RouteEgressConfig,
 ) -> verlet_io_core::IoResult<()> {
     for event in events {
@@ -4599,7 +4684,7 @@ fn fold_drain_egress_events(
                 .push(DrainIngressContextEvent::Ingress(event.id));
             view.pending_contexts.push(context);
         }
-        if event.kind == crate::EventKind::SessionEntryAppended
+        if event.kind == verlet_history::EventKind::SessionEntryAppended
             && let Some(entry_id) = event
                 .payload
                 .get("entry_id")
@@ -4627,7 +4712,7 @@ fn fold_drain_egress_events(
             }
         }
 
-        let work = if event.kind == crate::EventKind::IoEgressRequested && after_cursor {
+        let work = if event.kind == verlet_history::EventKind::IoEgressRequested && after_cursor {
             match requested_egress_template_from_event(event, &view.ingress_contexts) {
                 Ok(Some(template)) => DrainEgressWork::Requested {
                     source: source.clone(),
@@ -4680,7 +4765,7 @@ fn fold_drain_egress_events(
 
 fn refresh_drain_session_context(
     view: &mut DrainEgressView,
-    entries: &[crate::SessionEntry],
+    entries: &[verlet_history::SessionEntry],
     route_config: &RouteEgressConfig,
 ) {
     let visible_entry_ids = entries
@@ -4694,8 +4779,10 @@ fn refresh_drain_session_context(
     view.pending_contexts.clear();
     view.active_context = None;
     view.unresolved_session_entry_ids.clear();
-    let mut assistants =
-        std::collections::HashMap::<crate::EventRecordId, (IngressReceiptContext, String)>::new();
+    let mut assistants = std::collections::HashMap::<
+        verlet_history::EventRecordId,
+        (IngressReceiptContext, String),
+    >::new();
     for event in &view.context_events {
         match event {
             DrainIngressContextEvent::Ingress(event_id) => {
@@ -4812,7 +4899,7 @@ fn enqueue_drain_egress_work(
 
 fn drain_source_is_after_delivery_cursor(
     source: &DrainEgressSource,
-    cursor: Option<&crate::StreamCursorV1>,
+    cursor: Option<&verlet_history::StreamCursorV1>,
 ) -> bool {
     cursor.is_none_or(|cursor| {
         cursor.stream_id != source.cursor.stream_id
@@ -4821,11 +4908,11 @@ fn drain_source_is_after_delivery_cursor(
 }
 
 fn receipt_dedupe_cursor_from_event(
-    event: &crate::EventRecord,
+    event: &verlet_history::EventRecord,
 ) -> Option<(String, ReceiptDedupeCursor)> {
     if !matches!(
         event.kind,
-        crate::EventKind::IoEgressDelivered | crate::EventKind::IoEgressFailed
+        verlet_history::EventKind::IoEgressDelivered | verlet_history::EventKind::IoEgressFailed
     ) {
         return None;
     }
@@ -4851,8 +4938,8 @@ fn receipt_dedupe_cursor_from_event(
 impl VerletDaemonIoBridge {
     fn ingress_claim_intent(
         decision: &verlet_io_core::AdmissionDecision,
-        reserved_child_thread_id: Option<crate::ThreadId>,
-    ) -> verlet_io_core::IoResult<crate::IngressOutcomeIntent> {
+        reserved_child_thread_id: Option<verlet_runtime_contracts::ThreadId>,
+    ) -> verlet_io_core::IoResult<verlet_history::IngressOutcomeIntent> {
         let input_digest = |input: &verlet_io_core::IoTurnInput| {
             serde_json::to_value(input)
                 .map_err(|err| {
@@ -4865,14 +4952,14 @@ impl VerletDaemonIoBridge {
         };
         match decision {
             verlet_io_core::AdmissionDecision::Queue { turn_id, input } => {
-                Ok(crate::IngressOutcomeIntent::Turn {
+                Ok(verlet_history::IngressOutcomeIntent::Turn {
                     turn_id: turn_id.clone(),
                     submission_mode: "queue".to_string(),
                     input_digest: input_digest(input)?,
                 })
             }
             verlet_io_core::AdmissionDecision::Steer { turn_id, input, .. } => {
-                Ok(crate::IngressOutcomeIntent::Turn {
+                Ok(verlet_history::IngressOutcomeIntent::Turn {
                     turn_id: turn_id.clone(),
                     submission_mode: "steer".to_string(),
                     input_digest: input_digest(input)?,
@@ -4882,7 +4969,7 @@ impl VerletDaemonIoBridge {
                 reason,
                 replacement_turn_id,
                 replacement,
-            } => Ok(crate::IngressOutcomeIntent::Interrupt {
+            } => Ok(verlet_history::IngressOutcomeIntent::Interrupt {
                 replacement_turn_id: replacement_turn_id.clone(),
                 cancel_reason: reason.clone(),
                 input_digest: match replacement {
@@ -4899,19 +4986,19 @@ impl VerletDaemonIoBridge {
                         "fork ingress claim requires a reserved child thread id".to_string(),
                     )
                 })?;
-                Ok(crate::IngressOutcomeIntent::Fork {
+                Ok(verlet_history::IngressOutcomeIntent::Fork {
                     child_key: child_key.clone(),
                     child_thread_id: Some(child_thread_id),
                     input_digest: input_digest(input)?,
                 })
             }
             verlet_io_core::AdmissionDecision::ObserveOnly { reason } => {
-                Ok(crate::IngressOutcomeIntent::Observe {
+                Ok(verlet_history::IngressOutcomeIntent::Observe {
                     reason: reason.clone(),
                 })
             }
             verlet_io_core::AdmissionDecision::Reject { reason, .. } => {
-                Ok(crate::IngressOutcomeIntent::Reject {
+                Ok(verlet_history::IngressOutcomeIntent::Reject {
                     reason: reason.clone(),
                 })
             }
@@ -4921,21 +5008,21 @@ impl VerletDaemonIoBridge {
     fn claimed_decision(
         envelope: &verlet_io_core::IngressEnvelope,
         target: &verlet_io_core::ResolvedIoTarget,
-        intent: &crate::IngressOutcomeIntent,
+        intent: &verlet_history::IngressOutcomeIntent,
     ) -> verlet_io_core::AdmissionDecision {
         let input = || verlet_io_core::IoTurnInput::from_envelope(envelope, target);
         match intent {
-            crate::IngressOutcomeIntent::Turn {
+            verlet_history::IngressOutcomeIntent::Turn {
                 turn_id,
                 submission_mode,
                 ..
             } if submission_mode == "steer" => {
                 verlet_io_core::AdmissionDecision::steer(turn_id.clone(), None, input())
             }
-            crate::IngressOutcomeIntent::Turn { turn_id, .. } => {
+            verlet_history::IngressOutcomeIntent::Turn { turn_id, .. } => {
                 verlet_io_core::AdmissionDecision::queue(turn_id.clone(), input())
             }
-            crate::IngressOutcomeIntent::Interrupt {
+            verlet_history::IngressOutcomeIntent::Interrupt {
                 replacement_turn_id,
                 cancel_reason,
                 ..
@@ -4944,18 +5031,18 @@ impl VerletDaemonIoBridge {
                 replacement_turn_id: replacement_turn_id.clone(),
                 replacement: replacement_turn_id.as_ref().map(|_| input()),
             },
-            crate::IngressOutcomeIntent::Fork { child_key, .. } => {
+            verlet_history::IngressOutcomeIntent::Fork { child_key, .. } => {
                 verlet_io_core::AdmissionDecision::Fork {
                     child_key: child_key.clone(),
                     input: input(),
                 }
             }
-            crate::IngressOutcomeIntent::Observe { reason } => {
+            verlet_history::IngressOutcomeIntent::Observe { reason } => {
                 verlet_io_core::AdmissionDecision::ObserveOnly {
                     reason: reason.clone(),
                 }
             }
-            crate::IngressOutcomeIntent::Reject { reason } => {
+            verlet_history::IngressOutcomeIntent::Reject { reason } => {
                 verlet_io_core::AdmissionDecision::reject(reason.clone())
             }
         }
@@ -4965,16 +5052,16 @@ impl VerletDaemonIoBridge {
         &self,
         envelope: &verlet_io_core::IngressEnvelope,
         target: &verlet_io_core::ResolvedIoTarget,
-        coordinates: &crate::ThreadCoordinates,
-        handle: &crate::RuntimeThreadHandle,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
         decision: &verlet_io_core::AdmissionDecision,
-        claim: &crate::EventRecord,
-        claim_payload: &crate::IoIngressClaimedPayload,
+        claim: &verlet_history::EventRecord,
+        claim_payload: &verlet_history::IoIngressClaimedPayload,
         turn_id: &str,
-        submission_mode: crate::TurnSubmissionMode,
+        submission_mode: verlet_runtime_contracts::TurnSubmissionMode,
         reserved: crate::kernel::runtime_host::ReservedTurnSubmission,
-        ingress_source_stream: &crate::EventStreamId,
-        settled_by: crate::IngressSettledBy,
+        ingress_source_stream: &verlet_history::EventStreamId,
+        settled_by: verlet_history::IngressSettledBy,
     ) -> verlet_io_core::IoResult<verlet_io_core::KernelIoReceipt> {
         self.bind_egress_thread(envelope, target, coordinates)
             .await?;
@@ -5010,11 +5097,11 @@ impl VerletDaemonIoBridge {
         &self,
         envelope: &verlet_io_core::IngressEnvelope,
         target: &verlet_io_core::ResolvedIoTarget,
-        claim: &crate::EventRecord,
-        claim_payload: &crate::IoIngressClaimedPayload,
-        ingress_source_stream: &crate::EventStreamId,
+        claim: &verlet_history::EventRecord,
+        claim_payload: &verlet_history::IoIngressClaimedPayload,
+        ingress_source_stream: &verlet_history::EventStreamId,
     ) -> verlet_io_core::IoResult<verlet_io_core::KernelIoReceipt> {
-        let crate::IngressOutcomeIntent::Fork {
+        let verlet_history::IngressOutcomeIntent::Fork {
             child_key,
             child_thread_id,
             input_digest,
@@ -5067,7 +5154,7 @@ impl VerletDaemonIoBridge {
             claim,
             claim_payload,
             Some(spawned.id),
-            crate::IngressSettledBy::Recovery,
+            verlet_history::IngressSettledBy::Recovery,
         )
         .await?;
         Ok(receipt)
@@ -5091,7 +5178,7 @@ impl VerletDaemonIoBridge {
             .get_or_load_thread_handle(&coordinates)
             .await
             .map_err(|err| verlet_bridge_error(err.into_inner()))?;
-        if handle.status() == crate::ThreadStatus::Failed {
+        if handle.status() == verlet_runtime_contracts::ThreadStatus::Failed {
             self.supervisor
                 .shutdown_thread_at(&coordinates)
                 .await
@@ -5102,9 +5189,9 @@ impl VerletDaemonIoBridge {
                 .map_err(|err| verlet_bridge_error(err.into_inner()))?;
         }
         let decision = Self::claimed_decision(envelope, target, &payload.intent);
-        let source_stream = crate::control_stream_id(&coordinates);
+        let source_stream = crate::kernel::control_decision::control_stream_id(&coordinates);
         match &payload.intent {
-            crate::IngressOutcomeIntent::Turn {
+            verlet_history::IngressOutcomeIntent::Turn {
                 turn_id,
                 submission_mode,
                 input_digest,
@@ -5124,8 +5211,8 @@ impl VerletDaemonIoBridge {
                     ));
                 }
                 let mode = match submission_mode.as_str() {
-                    "queue" => crate::TurnSubmissionMode::Queue,
-                    "steer" => crate::TurnSubmissionMode::Steer,
+                    "queue" => verlet_runtime_contracts::TurnSubmissionMode::Queue,
+                    "steer" => verlet_runtime_contracts::TurnSubmissionMode::Steer,
                     other => {
                         return Err(verlet_io_core::IoError::Bridge(format!(
                             "claimed ingress turn has unknown submission mode {other:?}"
@@ -5142,7 +5229,7 @@ impl VerletDaemonIoBridge {
                         &claim,
                         &payload,
                         Some(evidence.id),
-                        crate::IngressSettledBy::Recovery,
+                        verlet_history::IngressSettledBy::Recovery,
                     )
                     .await?;
                     let mut receipt =
@@ -5173,11 +5260,11 @@ impl VerletDaemonIoBridge {
                     mode,
                     reserved,
                     &source_stream,
-                    crate::IngressSettledBy::Recovery,
+                    verlet_history::IngressSettledBy::Recovery,
                 )
                 .await
             }
-            crate::IngressOutcomeIntent::Interrupt {
+            verlet_history::IngressOutcomeIntent::Interrupt {
                 replacement_turn_id,
                 cancel_reason,
                 input_digest,
@@ -5192,7 +5279,7 @@ impl VerletDaemonIoBridge {
                         &claim,
                         &payload,
                         None,
-                        crate::IngressSettledBy::Recovery,
+                        verlet_history::IngressSettledBy::Recovery,
                     )
                     .await?;
                     let mut receipt =
@@ -5221,14 +5308,14 @@ impl VerletDaemonIoBridge {
                 if let Some(evidence) = turn_execution_evidence(
                     &thread_events,
                     turn_id,
-                    crate::TurnSubmissionMode::Interrupt,
+                    verlet_runtime_contracts::TurnSubmissionMode::Interrupt,
                 ) {
                     self.append_ingress_settle(
                         &coordinates,
                         &claim,
                         &payload,
                         Some(evidence.id),
-                        crate::IngressSettledBy::Recovery,
+                        verlet_history::IngressSettledBy::Recovery,
                     )
                     .await?;
                     let mut receipt =
@@ -5242,7 +5329,7 @@ impl VerletDaemonIoBridge {
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(&input),
-                        crate::TurnSubmissionMode::Interrupt,
+                        verlet_runtime_contracts::TurnSubmissionMode::Interrupt,
                         None,
                     )
                     .await
@@ -5256,23 +5343,28 @@ impl VerletDaemonIoBridge {
                     &claim,
                     &payload,
                     turn_id,
-                    crate::TurnSubmissionMode::Interrupt,
+                    verlet_runtime_contracts::TurnSubmissionMode::Interrupt,
                     reserved,
                     &source_stream,
-                    crate::IngressSettledBy::Recovery,
+                    verlet_history::IngressSettledBy::Recovery,
                 )
                 .await
             }
-            crate::IngressOutcomeIntent::Observe { .. }
-            | crate::IngressOutcomeIntent::Reject { .. } => Err(verlet_io_core::IoError::Bridge(
-                "effect-free ingress claim is missing its atomic settle".to_string(),
-            )),
-            crate::IngressOutcomeIntent::Fork { .. } => {
+            verlet_history::IngressOutcomeIntent::Observe { .. }
+            | verlet_history::IngressOutcomeIntent::Reject { .. } => {
+                Err(verlet_io_core::IoError::Bridge(
+                    "effect-free ingress claim is missing its atomic settle".to_string(),
+                ))
+            }
+            verlet_history::IngressOutcomeIntent::Fork { .. } => {
                 let scope_lock = self.thread_scope_lock(&target.address.scope_key()).await;
                 let _scope_guard = scope_lock.lock().await;
                 let store = self.ingress_event_store().await?;
                 let events = store
-                    .read_events(&crate::control_stream_id(&claim.coordinates), None)
+                    .read_events(
+                        &crate::kernel::control_decision::control_stream_id(&claim.coordinates),
+                        None,
+                    )
                     .await
                     .map_err(verlet_history_error)?;
                 match ingress_outcome_fold(&events, &payload.ingress_envelope_ids)? {
@@ -5285,7 +5377,7 @@ impl VerletDaemonIoBridge {
                             target,
                             &active_claim,
                             &active_payload,
-                            &crate::control_stream_id(&claim.coordinates),
+                            &crate::kernel::control_decision::control_stream_id(&claim.coordinates),
                         )
                         .await
                     }
@@ -5308,9 +5400,9 @@ impl VerletDaemonIoBridge {
         target: &verlet_io_core::ResolvedIoTarget,
         decision: &verlet_io_core::AdmissionDecision,
         ingress_message_ids: &[String],
-        ingress_source_stream: Option<&crate::EventStreamId>,
-        source_ingress_event_ids: &[crate::EventRecordId],
-        admission_event_id: Option<crate::EventRecordId>,
+        ingress_source_stream: Option<&verlet_history::EventStreamId>,
+        source_ingress_event_ids: &[verlet_history::EventRecordId],
+        admission_event_id: Option<verlet_history::EventRecordId>,
         ingress_ownership: Option<&IngressOwnershipReservation>,
     ) -> verlet_io_core::IoResult<(verlet_io_core::KernelIoReceipt, Option<String>)> {
         match decision {
@@ -5322,7 +5414,7 @@ impl VerletDaemonIoBridge {
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
-                        crate::TurnSubmissionMode::Queue,
+                        verlet_runtime_contracts::TurnSubmissionMode::Queue,
                         None,
                     )
                     .await
@@ -5382,12 +5474,14 @@ impl VerletDaemonIoBridge {
                     return Ok((receipt, settled_turn_id));
                 };
                 let claim_payload =
-                    serde_json::from_value::<crate::IoIngressClaimedPayload>(claim.payload.clone())
-                        .map_err(|err| {
-                            verlet_io_core::IoError::Bridge(format!(
-                                "decode appended ingress claim: {err}"
-                            ))
-                        })?;
+                    serde_json::from_value::<verlet_history::IoIngressClaimedPayload>(
+                        claim.payload.clone(),
+                    )
+                    .map_err(|err| {
+                        verlet_io_core::IoError::Bridge(format!(
+                            "decode appended ingress claim: {err}"
+                        ))
+                    })?;
                 let receipt = self
                     .complete_claimed_turn(
                         envelope,
@@ -5398,10 +5492,10 @@ impl VerletDaemonIoBridge {
                         &claim,
                         &claim_payload,
                         turn_id,
-                        crate::TurnSubmissionMode::Queue,
+                        verlet_runtime_contracts::TurnSubmissionMode::Queue,
                         reserved,
                         source_stream,
-                        crate::IngressSettledBy::Execution,
+                        verlet_history::IngressSettledBy::Execution,
                     )
                     .await?;
                 Ok((receipt, None))
@@ -5414,7 +5508,7 @@ impl VerletDaemonIoBridge {
                         &coordinates,
                         turn_id.clone(),
                         self.runtime_input(input),
-                        crate::TurnSubmissionMode::Steer,
+                        verlet_runtime_contracts::TurnSubmissionMode::Steer,
                         None,
                     )
                     .await
@@ -5474,12 +5568,14 @@ impl VerletDaemonIoBridge {
                     return Ok((receipt, settled_turn_id));
                 };
                 let claim_payload =
-                    serde_json::from_value::<crate::IoIngressClaimedPayload>(claim.payload.clone())
-                        .map_err(|err| {
-                            verlet_io_core::IoError::Bridge(format!(
-                                "decode appended ingress claim: {err}"
-                            ))
-                        })?;
+                    serde_json::from_value::<verlet_history::IoIngressClaimedPayload>(
+                        claim.payload.clone(),
+                    )
+                    .map_err(|err| {
+                        verlet_io_core::IoError::Bridge(format!(
+                            "decode appended ingress claim: {err}"
+                        ))
+                    })?;
                 let receipt = self
                     .complete_claimed_turn(
                         envelope,
@@ -5490,10 +5586,10 @@ impl VerletDaemonIoBridge {
                         &claim,
                         &claim_payload,
                         turn_id,
-                        crate::TurnSubmissionMode::Steer,
+                        verlet_runtime_contracts::TurnSubmissionMode::Steer,
                         reserved,
                         source_stream,
-                        crate::IngressSettledBy::Execution,
+                        verlet_history::IngressSettledBy::Execution,
                     )
                     .await?;
                 Ok((receipt, None))
@@ -5512,7 +5608,7 @@ impl VerletDaemonIoBridge {
                                     &coordinates,
                                     turn_id.clone(),
                                     self.runtime_input(input),
-                                    crate::TurnSubmissionMode::Interrupt,
+                                    verlet_runtime_contracts::TurnSubmissionMode::Interrupt,
                                     None,
                                 )
                                 .await
@@ -5582,12 +5678,14 @@ impl VerletDaemonIoBridge {
                     return Ok((receipt, settled_turn_id));
                 };
                 let claim_payload =
-                    serde_json::from_value::<crate::IoIngressClaimedPayload>(claim.payload.clone())
-                        .map_err(|err| {
-                            verlet_io_core::IoError::Bridge(format!(
-                                "decode appended ingress claim: {err}"
-                            ))
-                        })?;
+                    serde_json::from_value::<verlet_history::IoIngressClaimedPayload>(
+                        claim.payload.clone(),
+                    )
+                    .map_err(|err| {
+                        verlet_io_core::IoError::Bridge(format!(
+                            "decode appended ingress claim: {err}"
+                        ))
+                    })?;
                 self.supervisor
                     .cancel_at(&coordinates, reason.clone())
                     .await
@@ -5603,10 +5701,10 @@ impl VerletDaemonIoBridge {
                             &claim,
                             &claim_payload,
                             turn_id,
-                            crate::TurnSubmissionMode::Interrupt,
+                            verlet_runtime_contracts::TurnSubmissionMode::Interrupt,
                             reserved,
                             source_stream,
-                            crate::IngressSettledBy::Execution,
+                            verlet_history::IngressSettledBy::Execution,
                         )
                         .await?;
                     Ok((receipt, None))
@@ -5616,7 +5714,7 @@ impl VerletDaemonIoBridge {
                         &claim,
                         &claim_payload,
                         None,
-                        crate::IngressSettledBy::Execution,
+                        verlet_history::IngressSettledBy::Execution,
                     )
                     .await?;
                     let mut receipt =
@@ -5743,14 +5841,14 @@ pub struct RouteIngressSink {
     content_policies: Option<std::collections::BTreeMap<String, String>>,
     threading: Option<String>,
     agent_ref: Option<String>,
-    coalesce_bursts: Option<crate::VerletCoalesceBurstsConfig>,
+    coalesce_bursts: Option<crate::daemon::daemon_config::VerletCoalesceBurstsConfig>,
     principal: Option<verlet_io_core::IoPrincipal>,
 }
 
 impl RouteIngressSink {
     pub fn new(
         inner: std::sync::Arc<dyn verlet_io_core::IngressSink>,
-        route: &crate::VerletIoRouteConfig,
+        route: &crate::daemon::daemon_config::VerletIoRouteConfig,
     ) -> Self {
         Self {
             inner,
@@ -5766,7 +5864,7 @@ impl RouteIngressSink {
 
     pub fn with_route_identity(
         inner: std::sync::Arc<dyn verlet_io_core::IngressSink>,
-        route: &crate::VerletIoRouteConfig,
+        route: &crate::daemon::daemon_config::VerletIoRouteConfig,
         tenant_id: impl Into<String>,
         principal_id: impl Into<String>,
     ) -> Self {
@@ -6113,17 +6211,19 @@ impl TelegramWebhookServer {
     pub async fn bind(
         config: TelegramWebhookServerConfig,
         sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         if config.secret_token.trim().is_empty() {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "Telegram webhook route {} requires a non-empty secret_token",
-                config.route_id
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "Telegram webhook route {} requires a non-empty secret_token",
+                    config.route_id
+                ),
+            ));
         }
         let listener = tokio::net::TcpListener::bind(&config.listen)
             .await
             .map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to bind Telegram webhook route {} on {}: {err}",
                     config.route_id, config.listen
                 ))
@@ -6137,15 +6237,15 @@ impl TelegramWebhookServer {
         })
     }
 
-    pub fn local_addr(&self) -> crate::VerletResult<std::net::SocketAddr> {
+    pub fn local_addr(&self) -> crate::kernel::runtime_host::VerletResult<std::net::SocketAddr> {
         self.listener.local_addr().map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to read Telegram webhook address: {err}"
             ))
         })
     }
 
-    pub async fn serve(self) -> crate::VerletResult<()> {
+    pub async fn serve(self) -> crate::kernel::runtime_host::VerletResult<()> {
         let adapter = std::sync::Arc::new(verlet_io_telegram::TelegramWebhookAdapter::new(
             self.route_id,
         ));
@@ -6154,7 +6254,7 @@ impl TelegramWebhookServer {
             tokio::select! {
                 accepted = self.listener.accept(), if requests.len() < MAX_TELEGRAM_WEBHOOK_REQUESTS => {
                     let (stream, _) = accepted.map_err(|err| {
-                        crate::VerletError::RuntimeFactory(format!(
+                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                             "failed to accept Telegram webhook connection: {err}"
                         ))
                     })?;
@@ -6182,17 +6282,21 @@ impl TelegramWebhookServer {
 }
 
 async fn telegram_webhook_request_with_timeout(
-    request: impl std::future::Future<Output = crate::VerletResult<()>>,
-) -> crate::VerletResult<()> {
+    request: impl std::future::Future<Output = crate::kernel::runtime_host::VerletResult<()>>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     tokio::time::timeout(TELEGRAM_WEBHOOK_REQUEST_TIMEOUT, request)
         .await
         .map_err(|_| {
-            crate::VerletError::RuntimeFactory("Telegram webhook request timed out".to_string())
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "Telegram webhook request timed out".to_string(),
+            )
         })?
 }
 
 fn report_telegram_webhook_request_completion(
-    completed: Option<Result<crate::VerletResult<()>, tokio::task::JoinError>>,
+    completed: Option<
+        Result<crate::kernel::runtime_host::VerletResult<()>, tokio::task::JoinError>,
+    >,
 ) {
     match completed {
         Some(Ok(Err(err))) => eprintln!("verlet Telegram webhook request failed: {err}"),
@@ -6207,7 +6311,7 @@ async fn handle_telegram_webhook_connection(
     secret_token_hash: [u8; 32],
     adapter: std::sync::Arc<verlet_io_telegram::TelegramWebhookAdapter>,
     sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let request_head = match read_http_request_head(&mut stream).await {
         Ok(request) => request,
         Err(_) => {
@@ -6266,14 +6370,14 @@ async fn handle_telegram_webhook_connection(
 
     let update: verlet_io_telegram::TelegramUpdate =
         serde_json::from_slice(&body).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to decode Telegram update JSON: {err}"
             ))
         })?;
     match adapter
         .submit_update(sink.as_ref(), &update, now_ms())
         .await
-        .map_err(|err| crate::VerletError::RuntimeFactory(err.to_string()))?
+        .map_err(|err| crate::kernel::runtime_host::VerletError::RuntimeFactory(err.to_string()))?
     {
         Some(ack) => {
             write_json_response(
@@ -6302,7 +6406,9 @@ struct HttpRequestHead {
     buffered_body: Vec<u8>,
 }
 
-async fn read_http_request_head<R>(stream: &mut R) -> crate::VerletResult<HttpRequestHead>
+async fn read_http_request_head<R>(
+    stream: &mut R,
+) -> crate::kernel::runtime_host::VerletResult<HttpRequestHead>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -6312,11 +6418,15 @@ where
     )
     .await
     .map_err(|_| {
-        crate::VerletError::RuntimeFactory("Telegram webhook request head timed out".to_string())
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            "Telegram webhook request head timed out".to_string(),
+        )
     })?
 }
 
-async fn read_http_request_head_inner<R>(stream: &mut R) -> crate::VerletResult<HttpRequestHead>
+async fn read_http_request_head_inner<R>(
+    stream: &mut R,
+) -> crate::kernel::runtime_host::VerletResult<HttpRequestHead>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -6325,17 +6435,19 @@ where
     loop {
         let remaining = MAX_HTTP_HEADER_BYTES.saturating_sub(buffer.len());
         if remaining == 0 {
-            return Err(crate::VerletError::RuntimeFactory(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "HTTP headers are too large".to_string(),
             ));
         }
         let mut chunk = [0_u8; 1024];
         let read_len = remaining.min(chunk.len());
         let read = stream.read(&mut chunk[..read_len]).await.map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!("failed to read HTTP request: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "failed to read HTTP request: {err}"
+            ))
         })?;
         if read == 0 {
-            return Err(crate::VerletError::RuntimeFactory(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "connection closed before HTTP headers".to_string(),
             ));
         }
@@ -6347,20 +6459,32 @@ where
     }
 
     let headers_text = std::str::from_utf8(&buffer[..header_end]).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("HTTP headers are not UTF-8: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "HTTP headers are not UTF-8: {err}"
+        ))
     })?;
     let mut lines = headers_text.split("\r\n");
     let request_line = lines.next().ok_or_else(|| {
-        crate::VerletError::RuntimeFactory("missing HTTP request line".to_string())
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            "missing HTTP request line".to_string(),
+        )
     })?;
     let mut request_parts = request_line.split_whitespace();
     let method = request_parts
         .next()
-        .ok_or_else(|| crate::VerletError::RuntimeFactory("missing HTTP method".to_string()))?
+        .ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "missing HTTP method".to_string(),
+            )
+        })?
         .to_string();
     let path = request_parts
         .next()
-        .ok_or_else(|| crate::VerletError::RuntimeFactory("missing HTTP path".to_string()))?
+        .ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "missing HTTP path".to_string(),
+            )
+        })?
         .to_string();
 
     let mut headers = std::collections::HashMap::new();
@@ -6385,13 +6509,13 @@ where
 async fn read_http_request_body(
     stream: &mut tokio::net::TcpStream,
     request: HttpRequestHead,
-) -> crate::VerletResult<Vec<u8>> {
+) -> crate::kernel::runtime_host::VerletResult<Vec<u8>> {
     let content_length = request
         .headers
         .get("content-length")
         .map(|value| {
             value.parse::<usize>().map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "invalid content-length {value:?}: {err}"
                 ))
             })
@@ -6399,7 +6523,7 @@ async fn read_http_request_body(
         .transpose()?
         .unwrap_or(0);
     if content_length > MAX_HTTP_BODY_BYTES {
-        return Err(crate::VerletError::RuntimeFactory(
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "HTTP body is too large".to_string(),
         ));
     }
@@ -6408,10 +6532,12 @@ async fn read_http_request_body(
     while body.len() < content_length {
         let mut chunk = vec![0_u8; content_length - body.len()];
         let read = stream.read(&mut chunk).await.map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!("failed to read HTTP body: {err}"))
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "failed to read HTTP body: {err}"
+            ))
         })?;
         if read == 0 {
-            return Err(crate::VerletError::RuntimeFactory(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "connection closed before HTTP body".to_string(),
             ));
         }
@@ -6424,7 +6550,7 @@ async fn read_http_request_body(
 
 async fn write_telegram_auth_failure(
     stream: &mut tokio::net::TcpStream,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     write_json_response(
         stream,
         401,
@@ -6437,7 +6563,7 @@ async fn write_json_response(
     stream: &mut tokio::net::TcpStream,
     status: u16,
     body: serde_json::Value,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let body = body.to_string();
     let reason = match status {
         200 => "OK",
@@ -6457,10 +6583,14 @@ Connection: close\r\n\
         body.len()
     );
     stream.write_all(response.as_bytes()).await.map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("failed to write HTTP response: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to write HTTP response: {err}"
+        ))
     })?;
     stream.shutdown().await.map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("failed to close HTTP response: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to close HTTP response: {err}"
+        ))
     })?;
     let mut discard = [0_u8; 1024];
     let _ = tokio::time::timeout(HTTP_RESPONSE_DRAIN_TIMEOUT, async {
@@ -6533,7 +6663,7 @@ fn sibling_egress(
 
 fn source_has_partial_projected_receipts(
     route_config: &RouteEgressConfig,
-    source_event_id: crate::EventRecordId,
+    source_event_id: verlet_history::EventRecordId,
     source_context: &IngressReceiptContext,
     text: &str,
     receipt_cursors: &std::collections::HashMap<String, ReceiptDedupeCursor>,
@@ -6588,7 +6718,7 @@ fn source_has_partial_projected_receipts(
 }
 
 fn note_projection_receipt_presence(
-    source_event_id: crate::EventRecordId,
+    source_event_id: verlet_history::EventRecordId,
     envelope_index: usize,
     kind: &verlet_io_core::EgressKind,
     receipt_cursors: &std::collections::HashMap<String, ReceiptDedupeCursor>,
@@ -6615,8 +6745,8 @@ fn matching_receipt_cursor<'a>(
 }
 
 fn retain_newest_cursor(
-    slot: &mut Option<crate::StreamCursorV1>,
-    candidate: crate::StreamCursorV1,
+    slot: &mut Option<verlet_history::StreamCursorV1>,
+    candidate: verlet_history::StreamCursorV1,
 ) {
     if slot
         .as_ref()
@@ -6627,7 +6757,7 @@ fn retain_newest_cursor(
 }
 
 async fn append_egress_delivered_receipt(
-    handle: &crate::RuntimeThreadHandle,
+    handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     binding: &BoundEgressThread,
     source_event: &DrainEgressSource,
     envelope_index: usize,
@@ -6635,12 +6765,12 @@ async fn append_egress_delivered_receipt(
     envelope: &verlet_io_core::EgressEnvelope,
     receipt: &verlet_io_core::DeliveryReceipt,
     attempts: u32,
-) -> verlet_io_core::IoResult<crate::EventRecord> {
+) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
     let payload = egress_delivered_payload(binding, envelope, receipt, attempts)?;
     append_egress_receipt_event(
         handle,
         source_event,
-        crate::EventKind::IoEgressDelivered,
+        verlet_history::EventKind::IoEgressDelivered,
         add_egress_receipt_metadata(
             payload,
             source_event.id,
@@ -6653,7 +6783,7 @@ async fn append_egress_delivered_receipt(
 }
 
 async fn append_egress_failed_receipt(
-    handle: &crate::RuntimeThreadHandle,
+    handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     binding: &BoundEgressThread,
     source_event: &DrainEgressSource,
     envelope_index: usize,
@@ -6661,12 +6791,12 @@ async fn append_egress_failed_receipt(
     envelope: &verlet_io_core::EgressEnvelope,
     attempts: u32,
     error: &str,
-) -> verlet_io_core::IoResult<crate::EventRecord> {
+) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
     let payload = egress_failed_payload(binding, envelope, attempts, error)?;
     append_egress_receipt_event(
         handle,
         source_event,
-        crate::EventKind::IoEgressFailed,
+        verlet_history::EventKind::IoEgressFailed,
         add_egress_receipt_metadata(
             payload,
             source_event.id,
@@ -6679,23 +6809,23 @@ async fn append_egress_failed_receipt(
 }
 
 async fn append_egress_receipt_event(
-    handle: &crate::RuntimeThreadHandle,
+    handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     source_event: &DrainEgressSource,
-    kind: crate::EventKind,
+    kind: verlet_history::EventKind,
     payload: serde_json::Value,
-) -> verlet_io_core::IoResult<crate::EventRecord> {
-    let stream_id = crate::EventStreamId::for_thread(&handle.context().coordinates);
+) -> verlet_io_core::IoResult<verlet_history::EventRecord> {
+    let stream_id = verlet_history::EventStreamId::for_thread(&handle.context().coordinates);
     handle
-        .append_thread_event_record(crate::NewEventRecord::discharged(
+        .append_thread_event_record(verlet_history::NewEventRecord::discharged(
             handle.context().coordinates.clone(),
             kind,
             payload,
-            crate::EventProvenance {
+            verlet_history::EventProvenance {
                 source_streams: vec![stream_id],
                 source_event_ids: vec![source_event.id],
                 discharged_by: Some(IO_EGRESS_PROJECTOR_DISCHARGED_BY.to_string()),
                 function: Some(IO_EGRESS_PROJECTOR_FUNCTION.to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         ))
         .await
@@ -6708,7 +6838,7 @@ fn egress_delivered_payload(
     receipt: &verlet_io_core::DeliveryReceipt,
     attempts: u32,
 ) -> verlet_io_core::IoResult<serde_json::Value> {
-    serde_json::to_value(crate::IoEgressDeliveredPayload {
+    serde_json::to_value(verlet_history::IoEgressDeliveredPayload {
         route_id: binding.route_id.clone(),
         egress_kind: egress_kind_name(&envelope.kind),
         external_message_id: receipt.external_message_id.clone(),
@@ -6725,7 +6855,7 @@ fn egress_failed_payload(
     attempts: u32,
     error: &str,
 ) -> verlet_io_core::IoResult<serde_json::Value> {
-    let mut payload = serde_json::to_value(crate::IoEgressFailedPayload {
+    let mut payload = serde_json::to_value(verlet_history::IoEgressFailedPayload {
         route_id: binding.route_id.clone(),
         egress_kind: egress_kind_name(&envelope.kind),
         attempts,
@@ -6744,7 +6874,7 @@ fn egress_failed_payload(
 
 fn add_egress_receipt_metadata(
     mut payload: serde_json::Value,
-    source_event_id: crate::EventRecordId,
+    source_event_id: verlet_history::EventRecordId,
     envelope_index: usize,
     dedupe_key: &str,
     egress_id: &str,
@@ -6777,8 +6907,10 @@ fn payload_object_mut(
     })
 }
 
-fn ingress_context_from_event(event: &crate::EventRecord) -> Option<IngressReceiptContext> {
-    if event.kind != crate::EventKind::TurnSubmitted {
+fn ingress_context_from_event(
+    event: &verlet_history::EventRecord,
+) -> Option<IngressReceiptContext> {
+    if event.kind != verlet_history::EventKind::TurnSubmitted {
         return None;
     }
     let target = serde_json::from_value(event.payload.get("target")?.clone()).ok()?;
@@ -6810,9 +6942,9 @@ fn ingress_context_from_event(event: &crate::EventRecord) -> Option<IngressRecei
 }
 
 #[cfg(test)]
-async fn await_ingress_outcome_on_store<S: crate::EventStore + ?Sized>(
+async fn await_ingress_outcome_on_store<S: verlet_history::EventStore + ?Sized>(
     store: &S,
-    streams: &[crate::EventStreamId],
+    streams: &[verlet_history::EventStreamId],
     ingress_envelope_ids: &[String],
 ) -> verlet_io_core::IoResult<IngressOutcomeState> {
     tokio::time::timeout(
@@ -6823,9 +6955,9 @@ async fn await_ingress_outcome_on_store<S: crate::EventStore + ?Sized>(
     .map_err(|_| ingress_outcome_timeout_error())?
 }
 
-async fn ingress_outcome_on_store<S: crate::EventStore + ?Sized>(
+async fn ingress_outcome_on_store<S: verlet_history::EventStore + ?Sized>(
     store: &S,
-    streams: &[crate::EventStreamId],
+    streams: &[verlet_history::EventStreamId],
     ingress_envelope_ids: &[String],
 ) -> verlet_io_core::IoResult<IngressOutcomeState> {
     let mut events = Vec::new();
@@ -6835,7 +6967,11 @@ async fn ingress_outcome_on_store<S: crate::EventStore + ?Sized>(
             .read_events(stream, None)
             .await
             .map_err(verlet_history_error)?;
-        cursors.push(stream_events.last().map(crate::EventRecord::cursor_v1));
+        cursors.push(
+            stream_events
+                .last()
+                .map(verlet_history::EventRecord::cursor_v1),
+        );
         events.extend(stream_events);
     }
     loop {
@@ -6851,7 +6987,7 @@ async fn ingress_outcome_on_store<S: crate::EventStore + ?Sized>(
                     .await
                     .map_err(verlet_history_error)?,
                 None => store
-                    .read_events(stream, Some(crate::EventSequence::new(1)))
+                    .read_events(stream, Some(verlet_history::EventSequence::new(1)))
                     .await
                     .map_err(verlet_history_error)?,
             };
@@ -6870,7 +7006,7 @@ fn ingress_outcome_timeout_error() -> verlet_io_core::IoError {
 }
 
 fn ingress_outcome_fold(
-    events: &[crate::EventRecord],
+    events: &[verlet_history::EventRecord],
     ingress_envelope_ids: &[String],
 ) -> verlet_io_core::IoResult<IngressOutcomeState> {
     if ingress_envelope_ids.is_empty() {
@@ -6881,22 +7017,29 @@ fn ingress_outcome_fold(
         .collect::<std::collections::HashSet<_>>();
     let mut owner_by_envelope = std::collections::HashMap::<
         String,
-        (crate::EventRecord, crate::IoIngressClaimedPayload),
+        (
+            verlet_history::EventRecord,
+            verlet_history::IoIngressClaimedPayload,
+        ),
     >::new();
     let mut settles = std::collections::HashMap::<
-        crate::EventRecordId,
-        (crate::EventRecord, crate::IoIngressSettledPayload),
+        verlet_history::EventRecordId,
+        (
+            verlet_history::EventRecord,
+            verlet_history::IoIngressSettledPayload,
+        ),
     >::new();
     for event in events {
         match event.kind {
-            crate::EventKind::IoIngressClaimed => {
-                let payload =
-                    serde_json::from_value::<crate::IoIngressClaimedPayload>(event.payload.clone())
-                        .map_err(|err| {
-                            verlet_io_core::IoError::Bridge(format!(
-                                "invalid io.ingress.claimed payload: {err}"
-                            ))
-                        })?;
+            verlet_history::EventKind::IoIngressClaimed => {
+                let payload = serde_json::from_value::<verlet_history::IoIngressClaimedPayload>(
+                    event.payload.clone(),
+                )
+                .map_err(|err| {
+                    verlet_io_core::IoError::Bridge(format!(
+                        "invalid io.ingress.claimed payload: {err}"
+                    ))
+                })?;
                 for envelope_id in &payload.ingress_envelope_ids {
                     if owner_by_envelope.contains_key(envelope_id) {
                         return Err(verlet_io_core::IoError::Bridge(format!(
@@ -6906,14 +7049,15 @@ fn ingress_outcome_fold(
                     owner_by_envelope.insert(envelope_id.clone(), (event.clone(), payload.clone()));
                 }
             }
-            crate::EventKind::IoIngressSettled => {
-                let payload =
-                    serde_json::from_value::<crate::IoIngressSettledPayload>(event.payload.clone())
-                        .map_err(|err| {
-                            verlet_io_core::IoError::Bridge(format!(
-                                "invalid io.ingress.settled payload: {err}"
-                            ))
-                        })?;
+            verlet_history::EventKind::IoIngressSettled => {
+                let payload = serde_json::from_value::<verlet_history::IoIngressSettledPayload>(
+                    event.payload.clone(),
+                )
+                .map_err(|err| {
+                    verlet_io_core::IoError::Bridge(format!(
+                        "invalid io.ingress.settled payload: {err}"
+                    ))
+                })?;
                 if settles
                     .insert(payload.claim_event_id, (event.clone(), payload))
                     .is_some()
@@ -6964,11 +7108,11 @@ fn ingress_outcome_fold(
 }
 
 fn ingress_claim_provenance(
-    control_stream: &crate::EventStreamId,
-    ingress_witness_event_ids: &[crate::EventRecordId],
-    admission_event_id: crate::EventRecordId,
-) -> crate::EventProvenance {
-    crate::EventProvenance {
+    control_stream: &verlet_history::EventStreamId,
+    ingress_witness_event_ids: &[verlet_history::EventRecordId],
+    admission_event_id: verlet_history::EventRecordId,
+) -> verlet_history::EventProvenance {
+    verlet_history::EventProvenance {
         source_streams: vec![control_stream.clone()],
         source_event_ids: ingress_witness_event_ids
             .iter()
@@ -6977,28 +7121,28 @@ fn ingress_claim_provenance(
             .collect(),
         discharged_by: Some("controller:ingress-outcome".to_string()),
         function: Some("claim/v1".to_string()),
-        ..crate::EventProvenance::default()
+        ..verlet_history::EventProvenance::default()
     }
 }
 
 fn ingress_settle_provenance(
-    control_stream: &crate::EventStreamId,
-    coordinates: &crate::ThreadCoordinates,
-    claim_event_id: crate::EventRecordId,
-    evidence_event_id: Option<crate::EventRecordId>,
-) -> crate::EventProvenance {
+    control_stream: &verlet_history::EventStreamId,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    claim_event_id: verlet_history::EventRecordId,
+    evidence_event_id: Option<verlet_history::EventRecordId>,
+) -> verlet_history::EventProvenance {
     let mut source_streams = vec![control_stream.clone()];
     if evidence_event_id.is_some() {
-        source_streams.push(crate::EventStreamId::for_thread(coordinates));
+        source_streams.push(verlet_history::EventStreamId::for_thread(coordinates));
     }
-    crate::EventProvenance {
+    verlet_history::EventProvenance {
         source_streams,
         source_event_ids: std::iter::once(claim_event_id)
             .chain(evidence_event_id)
             .collect(),
         discharged_by: Some("controller:ingress-outcome".to_string()),
         function: Some("settle/v1".to_string()),
-        ..crate::EventProvenance::default()
+        ..verlet_history::EventProvenance::default()
     }
 }
 
@@ -7048,24 +7192,24 @@ fn ingress_outcome_turn_id(state: &IngressOutcomeState) -> Option<&str> {
         IngressOutcomeState::Settled { claim_payload, .. } => &claim_payload.intent,
     };
     match intent {
-        crate::IngressOutcomeIntent::Turn { turn_id, .. } => Some(turn_id),
-        crate::IngressOutcomeIntent::Interrupt {
+        verlet_history::IngressOutcomeIntent::Turn { turn_id, .. } => Some(turn_id),
+        verlet_history::IngressOutcomeIntent::Interrupt {
             replacement_turn_id,
             ..
         } => replacement_turn_id.as_deref(),
-        crate::IngressOutcomeIntent::Fork { child_key, .. } => Some(child_key),
-        crate::IngressOutcomeIntent::Observe { .. }
-        | crate::IngressOutcomeIntent::Reject { .. } => None,
+        verlet_history::IngressOutcomeIntent::Fork { child_key, .. } => Some(child_key),
+        verlet_history::IngressOutcomeIntent::Observe { .. }
+        | verlet_history::IngressOutcomeIntent::Reject { .. } => None,
     }
 }
 
-fn ingress_outcome_stream_id(state: &IngressOutcomeState) -> crate::EventStreamId {
+fn ingress_outcome_stream_id(state: &IngressOutcomeState) -> verlet_history::EventStreamId {
     let coordinates = match state {
         IngressOutcomeState::Claimed { claim, .. } => &claim.coordinates,
         IngressOutcomeState::Settled { settle, .. } => &settle.coordinates,
         IngressOutcomeState::Missing => unreachable!("missing ingress outcome has no stream"),
     };
-    crate::control_stream_id(coordinates)
+    crate::kernel::control_decision::control_stream_id(coordinates)
 }
 
 fn ingress_outcome_is_fork(state: &IngressOutcomeState) -> bool {
@@ -7074,20 +7218,20 @@ fn ingress_outcome_is_fork(state: &IngressOutcomeState) -> bool {
         IngressOutcomeState::Claimed { payload, .. } => &payload.intent,
         IngressOutcomeState::Settled { claim_payload, .. } => &claim_payload.intent,
     };
-    matches!(intent, crate::IngressOutcomeIntent::Fork { .. })
+    matches!(intent, verlet_history::IngressOutcomeIntent::Fork { .. })
 }
 
 fn turn_execution_evidence(
-    events: &[crate::EventRecord],
+    events: &[verlet_history::EventRecord],
     turn_id: &str,
-    submission_mode: crate::TurnSubmissionMode,
-) -> Option<crate::EventRecord> {
+    submission_mode: verlet_runtime_contracts::TurnSubmissionMode,
+) -> Option<verlet_history::EventRecord> {
     events
         .iter()
         .find(|event| {
-            event.kind != crate::EventKind::TurnSubmitted
-                && (submission_mode == crate::TurnSubmissionMode::Steer
-                    || event.kind != crate::EventKind::SessionEntryAppended)
+            event.kind != verlet_history::EventKind::TurnSubmitted
+                && (submission_mode == verlet_runtime_contracts::TurnSubmissionMode::Steer
+                    || event.kind != verlet_history::EventKind::SessionEntryAppended)
                 && (event
                     .payload
                     .get("turn_id")
@@ -7104,11 +7248,15 @@ fn turn_execution_evidence(
 }
 
 fn requested_egress_template_from_event(
-    event: &crate::EventRecord,
-    ingress_contexts: &std::collections::HashMap<crate::EventRecordId, IngressReceiptContext>,
+    event: &verlet_history::EventRecord,
+    ingress_contexts: &std::collections::HashMap<
+        verlet_history::EventRecordId,
+        IngressReceiptContext,
+    >,
 ) -> verlet_io_core::IoResult<Option<RequestedEgressTemplate>> {
-    let request = serde_json::from_value::<crate::IoEgressRequestedPayload>(event.payload.clone())
-        .map_err(|err| {
+    let request =
+        serde_json::from_value::<verlet_history::IoEgressRequestedPayload>(event.payload.clone())
+            .map_err(|err| {
             verlet_io_core::IoError::Bridge(format!("invalid io.egress.requested payload: {err}"))
         })?;
     let kind = serde_json::from_value::<verlet_io_core::EgressKind>(request.egress_kind).map_err(
@@ -7141,8 +7289,8 @@ fn requested_egress_template_from_event(
 
 #[cfg(test)]
 fn assistant_text_from_session_event(
-    event: &crate::EventRecord,
-    entries: &[crate::SessionEntry],
+    event: &verlet_history::EventRecord,
+    entries: &[verlet_history::SessionEntry],
 ) -> Option<String> {
     let entry = session_entry_for_event(event, entries)?;
     assistant_text_from_entry(entry)
@@ -7150,10 +7298,10 @@ fn assistant_text_from_session_event(
 
 #[cfg(test)]
 fn session_entry_for_event<'a>(
-    event: &crate::EventRecord,
-    entries: &'a [crate::SessionEntry],
-) -> Option<&'a crate::SessionEntry> {
-    if event.kind != crate::EventKind::SessionEntryAppended {
+    event: &verlet_history::EventRecord,
+    entries: &'a [verlet_history::SessionEntry],
+) -> Option<&'a verlet_history::SessionEntry> {
+    if event.kind != verlet_history::EventKind::SessionEntryAppended {
         return None;
     }
     let entry_id = event
@@ -7165,23 +7313,23 @@ fn session_entry_for_event<'a>(
         .find(|entry| entry.entry_id.to_string() == entry_id)
 }
 
-fn session_entry_is_user_authored(entry: &crate::SessionEntry) -> bool {
+fn session_entry_is_user_authored(entry: &verlet_history::SessionEntry) -> bool {
     matches!(
         entry.kind,
-        crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::User { .. },
-        } | crate::SessionEntryKind::CustomContextMessage {
-            message: crate::CanonicalMessage::User { .. },
+        verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::User { .. },
+        } | verlet_history::SessionEntryKind::CustomContextMessage {
+            message: verlet_history::CanonicalMessage::User { .. },
         }
     )
 }
 
-fn assistant_text_from_entry(entry: &crate::SessionEntry) -> Option<String> {
-    let (crate::SessionEntryKind::Message {
-        message: crate::CanonicalMessage::Assistant { content, .. },
+fn assistant_text_from_entry(entry: &verlet_history::SessionEntry) -> Option<String> {
+    let (verlet_history::SessionEntryKind::Message {
+        message: verlet_history::CanonicalMessage::Assistant { content, .. },
     }
-    | crate::SessionEntryKind::CustomContextMessage {
-        message: crate::CanonicalMessage::Assistant { content, .. },
+    | verlet_history::SessionEntryKind::CustomContextMessage {
+        message: verlet_history::CanonicalMessage::Assistant { content, .. },
     }) = &entry.kind
     else {
         return None;
@@ -7190,14 +7338,14 @@ fn assistant_text_from_entry(entry: &crate::SessionEntry) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn text_from_canonical_content(content: &[crate::CanonicalContent]) -> String {
+fn text_from_canonical_content(content: &[verlet_history::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
-            crate::CanonicalContent::Image { .. }
-            | crate::CanonicalContent::Thinking { .. }
-            | crate::CanonicalContent::ToolCall { .. } => None,
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::Thinking { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -7250,7 +7398,10 @@ fn ingress_envelope_digest(
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
-fn egress_dedupe_key(source_event_id: crate::EventRecordId, envelope_index: usize) -> String {
+fn egress_dedupe_key(
+    source_event_id: verlet_history::EventRecordId,
+    envelope_index: usize,
+) -> String {
     format!("{source_event_id}:{envelope_index}")
 }
 
@@ -7446,12 +7597,12 @@ fn merged_coalesce_envelope(
 }
 
 fn fork_source_cut_payload(
-    coordinates: &crate::ThreadCoordinates,
-    checkpoint: &crate::ThreadCheckpoint,
-    stream_to_sequence: Option<crate::EventSequence>,
-) -> crate::ThreadSpawnedForkSourceCutPayload {
-    let stream_id = crate::EventStreamId::for_thread(coordinates);
-    crate::ThreadSpawnedForkSourceCutPayload {
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    checkpoint: &crate::kernel::runtime_host::runtime_api::ThreadCheckpoint,
+    stream_to_sequence: Option<verlet_history::EventSequence>,
+) -> verlet_history::ThreadSpawnedForkSourceCutPayload {
+    let stream_id = verlet_history::EventStreamId::for_thread(coordinates);
+    verlet_history::ThreadSpawnedForkSourceCutPayload {
         thread_id: coordinates.thread_id,
         checkpoint_id: checkpoint.id,
         leaf_entry_id: checkpoint.active_entry_id,
@@ -7521,14 +7672,14 @@ fn external_message_id(envelope: &verlet_io_core::IngressEnvelope) -> Option<Str
 }
 
 fn ingress_received_control_record(
-    coordinates: &crate::ThreadCoordinates,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     envelope: &verlet_io_core::IngressEnvelope,
     ingress_message_id: Option<&str>,
-) -> verlet_io_core::IoResult<crate::NewEventRecord> {
+) -> verlet_io_core::IoResult<verlet_history::NewEventRecord> {
     let envelope_value = serde_json::to_value(envelope).map_err(|err| {
         verlet_io_core::IoError::Bridge(format!("ingress envelope codec failed: {err}"))
     })?;
-    let payload = crate::IoIngressReceivedPayload {
+    let payload = verlet_history::IoIngressReceivedPayload {
         route_id: Some(route_id_for_envelope(envelope)),
         dedupe_key: envelope
             .effective_dedupe_key()
@@ -7554,7 +7705,7 @@ fn ingress_received_control_record(
     })?;
     object.insert(
         "schema".to_string(),
-        serde_json::json!(crate::EventKind::IoIngressReceived.payload_schema_id()),
+        serde_json::json!(verlet_history::EventKind::IoIngressReceived.payload_schema_id()),
     );
     if let Some(message_id) = ingress_message_id {
         object.insert(
@@ -7566,9 +7717,9 @@ fn ingress_received_control_record(
             serde_json::Value::Bool(false),
         );
     }
-    Ok(crate::NewEventRecord::witnessed(
+    Ok(verlet_history::NewEventRecord::witnessed(
         coordinates.clone(),
-        crate::EventKind::IoIngressReceived,
+        verlet_history::EventKind::IoIngressReceived,
         value,
     ))
 }
@@ -7578,7 +7729,7 @@ fn witnessed_ingress_content(
 ) -> verlet_io_core::IoResult<Option<serde_json::Value>> {
     match &envelope.content {
         verlet_io_core::IngressContent::Event { kind, .. }
-            if kind == verlet_runtime_contracts::HANDLE_DISPATCH_CONTENT_KIND =>
+            if kind == verlet_runtime_contracts::handle::HANDLE_DISPATCH_CONTENT_KIND =>
         {
             serde_json::to_value(&envelope.content)
                 .map(Some)
@@ -7594,46 +7745,52 @@ fn witnessed_ingress_content(
 
 fn event_admission_decision(
     decision: &verlet_io_core::AdmissionDecision,
-) -> crate::AdmissionDecision {
+) -> verlet_history::AdmissionDecision {
     match decision {
-        verlet_io_core::AdmissionDecision::Queue { .. } => crate::AdmissionDecision::Queue,
-        verlet_io_core::AdmissionDecision::Steer { .. } => crate::AdmissionDecision::Steer,
-        verlet_io_core::AdmissionDecision::Interrupt { .. } => crate::AdmissionDecision::Interrupt,
-        verlet_io_core::AdmissionDecision::Fork { .. } => crate::AdmissionDecision::Fork,
-        verlet_io_core::AdmissionDecision::ObserveOnly { .. } => crate::AdmissionDecision::Observe,
-        verlet_io_core::AdmissionDecision::Reject { .. } => crate::AdmissionDecision::Reject,
+        verlet_io_core::AdmissionDecision::Queue { .. } => verlet_history::AdmissionDecision::Queue,
+        verlet_io_core::AdmissionDecision::Steer { .. } => verlet_history::AdmissionDecision::Steer,
+        verlet_io_core::AdmissionDecision::Interrupt { .. } => {
+            verlet_history::AdmissionDecision::Interrupt
+        }
+        verlet_io_core::AdmissionDecision::Fork { .. } => verlet_history::AdmissionDecision::Fork,
+        verlet_io_core::AdmissionDecision::ObserveOnly { .. } => {
+            verlet_history::AdmissionDecision::Observe
+        }
+        verlet_io_core::AdmissionDecision::Reject { .. } => {
+            verlet_history::AdmissionDecision::Reject
+        }
     }
 }
 
 fn admissible_decisions_for_envelope(
     envelope: &verlet_io_core::IngressEnvelope,
-) -> Vec<crate::AdmissionDecision> {
+) -> Vec<verlet_history::AdmissionDecision> {
     let mut admissible = match envelope
         .metadata
         .get("cooldis_route_policy")
         .map(String::as_str)
         .unwrap_or("queue_per_conversation")
     {
-        "observe_only" => vec![crate::AdmissionDecision::Observe],
-        "reject" => vec![crate::AdmissionDecision::Reject],
+        "observe_only" => vec![verlet_history::AdmissionDecision::Observe],
+        "reject" => vec![verlet_history::AdmissionDecision::Reject],
         "steer" | "steer_when_active" => {
             vec![
-                crate::AdmissionDecision::Queue,
-                crate::AdmissionDecision::Steer,
+                verlet_history::AdmissionDecision::Queue,
+                verlet_history::AdmissionDecision::Steer,
             ]
         }
-        "interrupt" | "interrupt_on_new_dm" => vec![crate::AdmissionDecision::Interrupt],
-        "fork" | "fork_on_new_dm" => vec![crate::AdmissionDecision::Fork],
+        "interrupt" | "interrupt_on_new_dm" => vec![verlet_history::AdmissionDecision::Interrupt],
+        "fork" | "fork_on_new_dm" => vec![verlet_history::AdmissionDecision::Fork],
         "coalesce_bursts" => vec![
-            crate::AdmissionDecision::Queue,
-            crate::AdmissionDecision::Coalesce,
+            verlet_history::AdmissionDecision::Queue,
+            verlet_history::AdmissionDecision::Coalesce,
         ],
-        _ => vec![crate::AdmissionDecision::Queue],
+        _ => vec![verlet_history::AdmissionDecision::Queue],
     };
     if envelope_declares_coalesce(envelope)
-        && !admissible.contains(&crate::AdmissionDecision::Coalesce)
+        && !admissible.contains(&verlet_history::AdmissionDecision::Coalesce)
     {
-        admissible.push(crate::AdmissionDecision::Coalesce);
+        admissible.push(verlet_history::AdmissionDecision::Coalesce);
     }
     admissible
 }
@@ -7652,46 +7809,49 @@ fn envelope_declares_coalesce(envelope: &verlet_io_core::IngressEnvelope) -> boo
 }
 
 fn is_clock_tick_envelope(envelope: &verlet_io_core::IngressEnvelope) -> bool {
-    envelope.source.protocol == crate::CLOCK_TICK_ROUTE_KIND
+    envelope.source.protocol == crate::daemon::clock_route::CLOCK_TICK_ROUTE_KIND
         && matches!(
             &envelope.content,
-            verlet_io_core::IngressContent::Event { kind, .. } if kind == crate::TIMER_FIRED_ENVELOPE_KIND
+            verlet_io_core::IngressContent::Event { kind, .. } if kind == crate::daemon::clock_route::TIMER_FIRED_ENVELOPE_KIND
         )
 }
 
 fn clock_tick_coordinates(
     envelope: &verlet_io_core::IngressEnvelope,
-) -> verlet_io_core::IoResult<crate::ThreadCoordinates> {
+) -> verlet_io_core::IoResult<verlet_runtime_contracts::ThreadCoordinates> {
     let principal = envelope.principal.as_ref().ok_or_else(|| {
         verlet_io_core::IoError::InvalidEnvelope("principal is required".to_string())
     })?;
-    Ok(crate::ThreadCoordinates {
+    Ok(verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: principal.tenant_id.clone(),
         user_id: principal.principal_id.clone(),
         session_id: required_metadata(envelope, "cooldis_session_id")?.to_string(),
-        thread_id: crate::ThreadId::parse_str(required_metadata(envelope, "verlet_thread_id")?)
-            .map_err(|err| {
-                verlet_io_core::IoError::Bridge(format!("invalid clock.tick thread id: {err}"))
-            })?,
+        thread_id: verlet_runtime_contracts::ThreadId::parse_str(required_metadata(
+            envelope,
+            "verlet_thread_id",
+        )?)
+        .map_err(|err| {
+            verlet_io_core::IoError::Bridge(format!("invalid clock.tick thread id: {err}"))
+        })?,
     })
 }
 
 fn clock_tick_payload(
     envelope: &verlet_io_core::IngressEnvelope,
-) -> verlet_io_core::IoResult<crate::TimerFiredPayload> {
+) -> verlet_io_core::IoResult<verlet_history::TimerFiredPayload> {
     if let verlet_io_core::IngressContent::Event { kind, payload } = &envelope.content
-        && kind == crate::TIMER_FIRED_ENVELOPE_KIND
+        && kind == crate::daemon::clock_route::TIMER_FIRED_ENVELOPE_KIND
     {
-        return serde_json::from_value::<crate::TimerFiredPayload>(payload.clone()).map_err(
-            |err| verlet_io_core::IoError::Bridge(format!("invalid clock.tick payload: {err}")),
-        );
+        return serde_json::from_value::<verlet_history::TimerFiredPayload>(payload.clone())
+            .map_err(|err| {
+                verlet_io_core::IoError::Bridge(format!("invalid clock.tick payload: {err}"))
+            });
     }
 
-    Ok(crate::TimerFiredPayload {
-        mandate_event_id: crate::parse_mandate_event_id(required_metadata(
-            envelope,
-            "cooldis_mandate_event_id",
-        )?)
+    Ok(verlet_history::TimerFiredPayload {
+        mandate_event_id: crate::kernel::mandate_lifecycle::parse_mandate_event_id(
+            required_metadata(envelope, "cooldis_mandate_event_id")?,
+        )
         .map_err(verlet_bridge_error)?,
         scheduled_for: required_metadata(envelope, "cooldis_scheduled_for")?.to_string(),
         occurrence_index: required_metadata(envelope, "verlet_occurrence_index")?
@@ -7860,7 +8020,9 @@ fn init_egress_state_schema(connection: &rusqlite::Connection) -> verlet_io_core
 /// binding in memory or submitting the first turn. The smoke then SIGKILLs the
 /// process. Normal daemon runs do not set the variable and return immediately.
 async fn pause_after_ingress_binding_for_restart_smoke() -> verlet_io_core::IoResult<()> {
-    let Some(marker) = crate::env_compat::var_os("VERLET_TEST_PAUSE_AFTER_INGRESS_BINDING") else {
+    let Some(marker) =
+        verlet_runtime_contracts::env_compat::var_os("VERLET_TEST_PAUSE_AFTER_INGRESS_BINDING")
+    else {
         return Ok(());
     };
     let marker = std::path::PathBuf::from(marker);
@@ -7874,7 +8036,7 @@ async fn pause_after_ingress_binding_for_restart_smoke() -> verlet_io_core::IoRe
     Ok(())
 }
 
-fn verlet_bridge_error(err: crate::VerletError) -> verlet_io_core::IoError {
+fn verlet_bridge_error(err: crate::kernel::runtime_host::VerletError) -> verlet_io_core::IoError {
     verlet_io_core::IoError::Bridge(err.to_string())
 }
 

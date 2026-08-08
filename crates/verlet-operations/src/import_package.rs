@@ -164,11 +164,12 @@ fn resolve_import_package_path(
 fn validate_manifest(
     manifest: &ImportPackageManifest,
 ) -> Result<(), crate::openapi_plan::OpenApiImportError> {
-    let package_name = crate::validate_record_name(&manifest.import.name).map_err(|error| {
-        crate::openapi_plan::OpenApiImportError::InvalidPackageIdentity {
-            message: error.to_string(),
-        }
-    })?;
+    let package_name = crate::operation_store::validate_record_name(&manifest.import.name)
+        .map_err(
+            |error| crate::openapi_plan::OpenApiImportError::InvalidPackageIdentity {
+                message: error.to_string(),
+            },
+        )?;
     if package_name != manifest.import.name {
         return Err(
             crate::openapi_plan::OpenApiImportError::InvalidPackageIdentity {
@@ -184,12 +185,13 @@ fn validate_manifest(
             return Err(crate::openapi_plan::OpenApiImportError::EmptyOperationId);
         }
         if let Some(alias) = &operation.alias {
-            let normalized = crate::validate_record_name(alias).map_err(|error| {
-                crate::openapi_plan::OpenApiImportError::InvalidOperationName {
-                    name: alias.clone(),
-                    message: error.to_string(),
-                }
-            })?;
+            let normalized =
+                crate::operation_store::validate_record_name(alias).map_err(|error| {
+                    crate::openapi_plan::OpenApiImportError::InvalidOperationName {
+                        name: alias.clone(),
+                        message: error.to_string(),
+                    }
+                })?;
             if normalized != *alias {
                 return Err(
                     crate::openapi_plan::OpenApiImportError::InvalidOperationName {
@@ -224,11 +226,12 @@ fn validate_manifest(
                 },
             );
         }
-        let secret = crate::validate_record_name(&auth.secret).map_err(|error| {
-            crate::openapi_plan::OpenApiImportError::InvalidAuthentication {
-                message: format!("invalid secret name {:?}: {error}", auth.secret),
-            }
-        })?;
+        let secret =
+            crate::operation_store::validate_record_name(&auth.secret).map_err(|error| {
+                crate::openapi_plan::OpenApiImportError::InvalidAuthentication {
+                    message: format!("invalid secret name {:?}: {error}", auth.secret),
+                }
+            })?;
         if secret != auth.secret {
             return Err(
                 crate::openapi_plan::OpenApiImportError::InvalidAuthentication {

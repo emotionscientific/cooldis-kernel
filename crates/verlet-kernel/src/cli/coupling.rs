@@ -1,6 +1,8 @@
 //! The `coupling` subcommand family.
 
-pub(super) async fn run_coupling(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_coupling(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -34,7 +36,9 @@ pub(super) async fn run_coupling(mut args: Vec<std::ffi::OsString>) -> crate::Ve
     }
 }
 
-pub(super) async fn coupling_init(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn coupling_init(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_coupling_init_args(args)?;
     if options.help {
         print_coupling_init_help();
@@ -51,7 +55,9 @@ pub(super) async fn coupling_init(args: Vec<std::ffi::OsString>) -> crate::Verle
     Ok(())
 }
 
-pub(super) async fn coupling_run(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn coupling_run(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_coupling_run_args(args)?;
     if options.help {
         print_coupling_run_help();
@@ -88,7 +94,7 @@ pub(super) async fn coupling_run(args: Vec<std::ffi::OsString>) -> crate::Verlet
 
 pub(super) fn load_replay_coupling_set(
     options: &CouplingRunArgs,
-) -> crate::VerletResult<crate::BoundCouplingSet> {
+) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest_bind::BoundCouplingSet> {
     if let Some(path) = &options.coupling_file {
         return load_replay_coupling_set_file(path);
     }
@@ -105,21 +111,27 @@ pub(super) fn load_replay_coupling_set(
 
 pub(super) fn load_replay_coupling_set_file(
     path: &std::path::Path,
-) -> crate::VerletResult<crate::BoundCouplingSet> {
+) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest_bind::BoundCouplingSet> {
     let raw = std::fs::read_to_string(path).map_err(|err| {
         crate::cli::usage_error(format!("failed to read {}: {err}", path.display()))
     })?;
-    if let Ok(set) = serde_json::from_str::<crate::BoundCouplingSet>(&raw) {
+    if let Ok(set) = serde_json::from_str::<crate::agent::manifest_bind::BoundCouplingSet>(&raw) {
         return Ok(set);
     }
-    if let Ok(coupling) = serde_json::from_str::<crate::BoundCoupling>(&raw) {
-        return Ok(crate::BoundCouplingSet::new("replay-file", vec![coupling]));
+    if let Ok(coupling) = serde_json::from_str::<crate::agent::manifest_bind::BoundCoupling>(&raw) {
+        return Ok(crate::agent::manifest_bind::BoundCouplingSet::new(
+            "replay-file",
+            vec![coupling],
+        ));
     }
-    if let Ok(set) = toml::from_str::<crate::BoundCouplingSet>(&raw) {
+    if let Ok(set) = toml::from_str::<crate::agent::manifest_bind::BoundCouplingSet>(&raw) {
         return Ok(set);
     }
-    if let Ok(coupling) = toml::from_str::<crate::BoundCoupling>(&raw) {
-        return Ok(crate::BoundCouplingSet::new("replay-file", vec![coupling]));
+    if let Ok(coupling) = toml::from_str::<crate::agent::manifest_bind::BoundCoupling>(&raw) {
+        return Ok(crate::agent::manifest_bind::BoundCouplingSet::new(
+            "replay-file",
+            vec![coupling],
+        ));
     }
     Err(crate::cli::usage_error(format!(
         "coupling file {} must be a serialized BoundCouplingSet or BoundCoupling",
@@ -129,23 +141,26 @@ pub(super) fn load_replay_coupling_set_file(
 
 pub(super) fn coupling_set_from_export_bundle(
     value: &serde_json::Value,
-) -> crate::VerletResult<Option<crate::BoundCouplingSet>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<crate::agent::manifest_bind::BoundCouplingSet>>
+{
     for pointer in ["/boundCouplingSet", "/couplingSet"] {
         if let Some(candidate) = value.pointer(pointer)
             && !candidate.is_null()
         {
-            return serde_json::from_value::<crate::BoundCouplingSet>(candidate.clone())
-                .map(Some)
-                .map_err(|err| {
-                    crate::cli::usage_error(format!("export bundle {pointer} is invalid: {err}"))
-                });
+            return serde_json::from_value::<crate::agent::manifest_bind::BoundCouplingSet>(
+                candidate.clone(),
+            )
+            .map(Some)
+            .map_err(|err| {
+                crate::cli::usage_error(format!("export bundle {pointer} is invalid: {err}"))
+            });
         }
     }
     if let Some(raw) = value
         .pointer("/thread/metadata/cooldis.agent.bound_coupling_set")
         .and_then(serde_json::Value::as_str)
     {
-        return serde_json::from_str::<crate::BoundCouplingSet>(raw)
+        return serde_json::from_str::<crate::agent::manifest_bind::BoundCouplingSet>(raw)
             .map(Some)
             .map_err(|err| {
                 crate::cli::usage_error(format!(
@@ -157,9 +172,9 @@ pub(super) fn coupling_set_from_export_bundle(
 }
 
 pub(super) fn select_replay_coupling(
-    coupling_set: &crate::BoundCouplingSet,
+    coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
     coupling_id: &str,
-) -> crate::VerletResult<crate::BoundCouplingSet> {
+) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest_bind::BoundCouplingSet> {
     let couplings = coupling_set
         .couplings
         .iter()
@@ -177,11 +192,13 @@ pub(super) fn select_replay_coupling(
         .cloned()
         .map(|expiries| std::collections::BTreeMap::from([(coupling_id.to_string(), expiries)]))
         .unwrap_or_default();
-    Ok(crate::BoundCouplingSet::new_with_grant_expiries(
-        coupling_set.snapshot_id.clone(),
-        couplings,
-        grant_expiries,
-    ))
+    Ok(
+        crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
+            coupling_set.snapshot_id.clone(),
+            couplings,
+            grant_expiries,
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -191,20 +208,20 @@ mod expiry_selection_tests {
     fn selecting_one_replay_coupling_preserves_its_grant_expiries() {
         let selected = replay_coupling("selected");
         let other = replay_coupling("other");
-        let set = crate::BoundCouplingSet::new_with_grant_expiries(
+        let set = crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
             "snapshot-a",
             vec![selected, other],
             std::collections::BTreeMap::from([
                 (
                     "selected".to_string(),
-                    vec![crate::AgentManifestGrantExpiry {
+                    vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
                         capability: "stream.read:thread".to_string(),
                         expires_at: "2050-01-01T00:00:00Z".to_string(),
                     }],
                 ),
                 (
                     "other".to_string(),
-                    vec![crate::AgentManifestGrantExpiry {
+                    vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
                         capability: "stream.write:control".to_string(),
                         expires_at: "2060-01-01T00:00:00Z".to_string(),
                     }],
@@ -222,25 +239,25 @@ mod expiry_selection_tests {
         );
     }
 
-    fn replay_coupling(id: &str) -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn replay_coupling(id: &str) -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: id.to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::TurnCompleted,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::TurnCompleted,
             trigger_match: std::collections::BTreeMap::new(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::TurnCompleted],
+                kinds: vec![verlet_history::EventKind::TurnCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::PlacementDecision],
+                kinds: vec![verlet_history::EventKind::PlacementDecision],
             },
             function_ref: format!("op://{id}/run@sha256:{}", "a".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: id.to_string(),
                 artifact_hash: "a".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -259,12 +276,12 @@ mod expiry_selection_tests {
 pub(super) async fn resolve_replay_artifact(
     artifact: &str,
     registry_root: Option<std::path::PathBuf>,
-    coupling_set: &mut crate::BoundCouplingSet,
-) -> crate::VerletResult<std::path::PathBuf> {
+    coupling_set: &mut crate::agent::manifest_bind::BoundCouplingSet,
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     if artifact.starts_with("op://") {
         let parsed = parse_pinned_operation_ref(artifact)?;
         let root = registry_root.unwrap_or_else(crate::cli::tool::default_registry_root);
-        let record = crate::LocalOperationRegistry::new(&root)
+        let record = verlet_operations::operation_store::LocalOperationRegistry::new(&root)
             .load_version_record(&parsed.name, &parsed.artifact_hash)
             .map_err(|err| {
                 crate::cli::usage_error(format!(
@@ -282,30 +299,32 @@ pub(super) async fn resolve_replay_artifact(
             .join(format!("verlet-coupling-replay-{}", uuid::Uuid::now_v7()))
             .join("operations")
     });
-    let record = crate::LocalOperationRegistry::new(&root)
-        .publish_artifact(crate::PublishOperationRequest {
-            name: "replay-coupling".to_string(),
-            artifact_path: artifact_path.clone(),
-            source: crate::PublishedOperationSource::Wasm {
-                bin_path: artifact_path,
+    let record = verlet_operations::operation_store::LocalOperationRegistry::new(&root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "replay-coupling".to_string(),
+                artifact_path: artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact_path,
+                },
+                interface: None,
+                capability_grants: std::collections::BTreeSet::new(),
+                metadata: std::collections::BTreeMap::from([(
+                    "coupling.replay.local_artifact".to_string(),
+                    serde_json::json!(true),
+                )]),
             },
-            interface: None,
-            capability_grants: std::collections::BTreeSet::new(),
-            metadata: std::collections::BTreeMap::from([(
-                "coupling.replay.local_artifact".to_string(),
-                serde_json::json!(true),
-            )]),
-        })
+        )
         .await?;
     apply_replay_operation_record(coupling_set, &record, None)?;
     Ok(root)
 }
 
 pub(super) fn apply_replay_operation_record(
-    coupling_set: &mut crate::BoundCouplingSet,
-    record: &crate::PublishedOperationRecord,
+    coupling_set: &mut crate::agent::manifest_bind::BoundCouplingSet,
+    record: &verlet_operations::operation_store::PublishedOperationRecord,
     selected_operation: Option<&str>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     for coupling in &mut coupling_set.couplings {
         let operation_name = select_replay_operation_name(
             &coupling.id,
@@ -327,8 +346,8 @@ pub(super) fn apply_replay_operation_record(
 pub(super) fn select_replay_operation_name(
     coupling_id: &str,
     selected_operation: Option<&str>,
-    manifest: &crate::WasmOperationManifest,
-) -> crate::VerletResult<String> {
+    manifest: &verlet_abi::WasmOperationManifest,
+) -> crate::kernel::runtime_host::VerletResult<String> {
     if let Some(operation_name) = selected_operation {
         if manifest.operation(operation_name).is_some() {
             return Ok(operation_name.to_string());
@@ -348,20 +367,20 @@ pub(super) fn select_replay_operation_name(
 pub(super) fn validate_replay_coupling_operation(
     coupling_id: &str,
     operation_name: &str,
-    manifest: &crate::WasmOperationManifest,
-) -> crate::VerletResult<()> {
+    manifest: &verlet_abi::WasmOperationManifest,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let operation = manifest.operation(operation_name).ok_or_else(|| {
         crate::cli::usage_error(format!(
             "replay artifact does not expose operation {operation_name:?} for coupling {coupling_id:?}"
         ))
     })?;
-    if operation.input != crate::WasmOperationValueKind::Json {
+    if operation.input != verlet_abi::WasmOperationValueKind::Json {
         return Err(crate::cli::usage_error(format!(
             "coupling {coupling_id:?} operation {operation_name:?} must declare json input for {COUPLING_INVOCATION_ABI}",
             COUPLING_INVOCATION_ABI = verlet_abi::COUPLING_INVOCATION_ABI
         )));
     }
-    if operation.output != crate::WasmOperationValueKind::Json {
+    if operation.output != verlet_abi::WasmOperationValueKind::Json {
         return Err(crate::cli::usage_error(format!(
             "coupling {coupling_id:?} operation {operation_name:?} must declare json output for {COUPLING_DISCHARGE_ABI}",
             COUPLING_DISCHARGE_ABI = verlet_abi::COUPLING_DISCHARGE_ABI
@@ -377,13 +396,13 @@ pub(super) fn validate_replay_coupling_operation(
 
 pub(super) async fn load_replay_recorded_events(
     options: &CouplingRunArgs,
-) -> crate::VerletResult<Vec<crate::EventRecord>> {
+) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
     match (&options.journal, &options.thread_id, &options.export_bundle) {
         (Some(_), _, Some(_)) => Err(crate::cli::usage_error(
             "coupling run --replay accepts either --journal/--thread-id or --export, not both",
         )),
         (Some(journal), Some(thread_id), None) => {
-            let store = crate::SqliteSessionStore::open_read_only(journal)
+            let store = verlet_history_sqlite::SqliteSessionStore::open_read_only(journal)
                 .await
                 .map_err(|err| {
                     let message = err.to_string();
@@ -420,7 +439,7 @@ pub(super) async fn load_replay_recorded_events(
 
 pub(super) fn load_replay_events_from_export(
     path: &std::path::Path,
-) -> crate::VerletResult<Vec<crate::EventRecord>> {
+) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
     let value = read_json_file(path)?;
     let streams = value
         .get("streams")
@@ -460,15 +479,15 @@ pub(super) fn load_replay_events_from_export(
 
 pub(super) fn event_record_from_export_value(
     value: serde_json::Value,
-) -> crate::VerletResult<crate::EventRecord> {
-    let envelope =
-        serde_json::from_value::<crate::StreamRecordEnvelopeV1>(value).map_err(|err| {
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
+    let envelope = serde_json::from_value::<verlet_history::StreamRecordEnvelopeV1>(value)
+        .map_err(|err| {
             crate::cli::usage_error(format!("export stream record is invalid: {err}"))
         })?;
-    let kind = crate::EventKind::try_from(envelope.kind).map_err(|err| {
+    let kind = verlet_history::EventKind::try_from(envelope.kind).map_err(|err| {
         crate::cli::usage_error(format!("export stream record kind is invalid: {err}"))
     })?;
-    Ok(crate::EventRecord {
+    Ok(verlet_history::EventRecord {
         id: envelope.event_id,
         stream_id: envelope.stream_id,
         sequence: envelope.sequence,
@@ -482,16 +501,19 @@ pub(super) fn event_record_from_export_value(
 }
 
 pub(super) async fn replay_coupling_events(
-    coupling_set: &crate::BoundCouplingSet,
-    recorded_events: Vec<crate::EventRecord>,
+    coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
+    recorded_events: Vec<verlet_history::EventRecord>,
     operation_registry_root: std::path::PathBuf,
-) -> crate::VerletResult<crate::CouplingSchedulerCycleReceipt> {
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingSchedulerCycleReceipt,
+> {
     let replay_store = CouplingReplayEventStore::default();
     let executor = crate::kernel::coupling_executor_registry::CouplingExecutorRegistry::new(Some(
         operation_registry_root,
     ));
-    let scheduler = crate::CouplingScheduler::new(&replay_store, &executor);
-    let mut aggregate = crate::CouplingSchedulerCycleReceipt {
+    let scheduler =
+        crate::kernel::coupling_scheduler::CouplingScheduler::new(&replay_store, &executor);
+    let mut aggregate = crate::kernel::coupling_scheduler::CouplingSchedulerCycleReceipt {
         snapshot_id: coupling_set.snapshot_id.clone(),
         runs: Vec::new(),
         appended_events: Vec::new(),
@@ -499,7 +521,7 @@ pub(super) async fn replay_coupling_events(
     for event in recorded_events {
         let appended = replay_store
             .append_recorded_event(event)
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         if appended.is_empty() {
             continue;
         }
@@ -510,7 +532,9 @@ pub(super) async fn replay_coupling_events(
     Ok(aggregate)
 }
 
-pub(super) fn read_json_file(path: &std::path::Path) -> crate::VerletResult<serde_json::Value> {
+pub(super) fn read_json_file(
+    path: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
     let raw = std::fs::read_to_string(path).map_err(|err| {
         crate::cli::usage_error(format!("failed to read {}: {err}", path.display()))
     })?;
@@ -521,7 +545,7 @@ pub(super) fn read_json_file(path: &std::path::Path) -> crate::VerletResult<serd
 
 pub(super) fn parse_pinned_operation_ref(
     reference: &str,
-) -> crate::VerletResult<ParsedOperationRef> {
+) -> crate::kernel::runtime_host::VerletResult<ParsedOperationRef> {
     let body = reference
         .strip_prefix("op://")
         .ok_or_else(|| crate::cli::usage_error("operation ref must start with op://"))?;
@@ -606,7 +630,7 @@ pub(super) struct CouplingRunArgs {
     coupling_file: Option<std::path::PathBuf>,
     coupling_id: Option<String>,
     journal: Option<std::path::PathBuf>,
-    thread_id: Option<crate::ThreadId>,
+    thread_id: Option<verlet_runtime_contracts::ThreadId>,
     export_bundle: Option<std::path::PathBuf>,
     registry_root: Option<std::path::PathBuf>,
     json: bool,
@@ -622,16 +646,18 @@ pub(super) struct ParsedOperationRef {
 
 #[derive(Default)]
 pub(super) struct CouplingReplayEventStore {
-    streams: std::sync::Mutex<std::collections::BTreeMap<String, Vec<crate::EventRecord>>>,
+    streams: std::sync::Mutex<std::collections::BTreeMap<String, Vec<verlet_history::EventRecord>>>,
 }
 
 impl CouplingReplayEventStore {
     fn append_recorded_event(
         &self,
-        event: crate::EventRecord,
-    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
+        event: verlet_history::EventRecord,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let mut streams = self.streams.lock().map_err(|err| {
-            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+            verlet_history::HistoryError::Storage(format!(
+                "replay event store lock poisoned: {err}"
+            ))
         })?;
         let stream = streams.entry(event.stream_id.to_string()).or_default();
         if stream.iter().any(|existing| existing.id == event.id) {
@@ -647,14 +673,16 @@ impl CouplingReplayEventStore {
 }
 
 #[async_trait::async_trait]
-impl crate::EventStore for CouplingReplayEventStore {
+impl verlet_history::EventStore for CouplingReplayEventStore {
     async fn append_events(
         &self,
-        stream_id: &crate::EventStreamId,
-        records: Vec<crate::NewEventRecord>,
-    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let mut streams = self.streams.lock().map_err(|err| {
-            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+            verlet_history::HistoryError::Storage(format!(
+                "replay event store lock poisoned: {err}"
+            ))
         })?;
         let stream = streams.entry(stream_id.to_string()).or_default();
         let mut next_sequence = stream
@@ -665,9 +693,9 @@ impl crate::EventStore for CouplingReplayEventStore {
             + 1;
         let mut appended = Vec::with_capacity(records.len());
         for record in records {
-            let event = crate::EventRecord::from_new(
+            let event = verlet_history::EventRecord::from_new(
                 stream_id.clone(),
-                crate::EventSequence::new(next_sequence),
+                verlet_history::EventSequence::new(next_sequence),
                 record,
             );
             next_sequence += 1;
@@ -679,11 +707,13 @@ impl crate::EventStore for CouplingReplayEventStore {
 
     async fn read_events(
         &self,
-        stream_id: &crate::EventStreamId,
-        from_sequence: Option<crate::EventSequence>,
-    ) -> crate::HistoryResult<Vec<crate::EventRecord>> {
+        stream_id: &verlet_history::EventStreamId,
+        from_sequence: Option<verlet_history::EventSequence>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
         let streams = self.streams.lock().map_err(|err| {
-            crate::HistoryError::Storage(format!("replay event store lock poisoned: {err}"))
+            verlet_history::HistoryError::Storage(format!(
+                "replay event store lock poisoned: {err}"
+            ))
         })?;
         let events = streams
             .get(&stream_id.to_string())
@@ -714,8 +744,8 @@ pub(super) struct CouplingReplayReport {
 impl CouplingReplayReport {
     fn from_receipt(
         replayed_event_count: usize,
-        coupling_set: &crate::BoundCouplingSet,
-        receipt: crate::CouplingSchedulerCycleReceipt,
+        coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
+        receipt: crate::kernel::coupling_scheduler::CouplingSchedulerCycleReceipt,
     ) -> Self {
         let mut proposal_ids = std::collections::BTreeSet::new();
         let mut proposal_streams = std::collections::BTreeMap::new();
@@ -773,7 +803,7 @@ impl CouplingReplayReport {
 pub(super) struct CouplingReplayRunReport {
     coupling_id: String,
     status: String,
-    scheduler_status: crate::CouplingRunStatus,
+    scheduler_status: crate::kernel::coupling_scheduler::CouplingRunStatus,
     blocked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -783,11 +813,11 @@ pub(super) struct CouplingReplayRunReport {
     depth: u32,
     source_event_ids: Vec<String>,
     proposal_event_count: usize,
-    budget_spent: crate::CouplingBudgetSpent,
+    budget_spent: crate::kernel::coupling_scheduler::CouplingBudgetSpent,
 }
 
 impl CouplingReplayRunReport {
-    fn from_run(run: crate::CouplingRunReceipt) -> Self {
+    fn from_run(run: crate::kernel::coupling_scheduler::CouplingRunReceipt) -> Self {
         let blocked = replay_run_is_blocked(&run);
         Self {
             coupling_id: run.coupling_id,
@@ -821,10 +851,12 @@ pub(super) struct CouplingReplayProposalEvent {
     stream_id: String,
     kind: String,
     payload: serde_json::Value,
-    provenance: crate::EventProvenance,
+    provenance: verlet_history::EventProvenance,
 }
 
-pub(super) fn replay_run_is_blocked(run: &crate::CouplingRunReceipt) -> bool {
+pub(super) fn replay_run_is_blocked(
+    run: &crate::kernel::coupling_scheduler::CouplingRunReceipt,
+) -> bool {
     run.reason.as_deref() == Some("quota_exhausted")
         || run
             .reason
@@ -834,7 +866,7 @@ pub(super) fn replay_run_is_blocked(run: &crate::CouplingRunReceipt) -> bool {
 
 pub(super) fn parse_coupling_init_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<CouplingInitArgs> {
+) -> crate::kernel::runtime_host::VerletResult<CouplingInitArgs> {
     let mut name = None;
     let mut out_path = None;
     let mut force = false;
@@ -870,7 +902,7 @@ pub(super) fn parse_coupling_init_args(
 
 pub(super) fn parse_coupling_run_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<CouplingRunArgs> {
+) -> crate::kernel::runtime_host::VerletResult<CouplingRunArgs> {
     let mut replay = false;
     let mut artifact = None;
     let mut coupling_file = None;
@@ -912,9 +944,11 @@ pub(super) fn parse_coupling_run_args(
             }
             "--thread-id" | "--thread" => {
                 let value = crate::cli::tool::required_string_value(&mut iter, "--thread-id")?;
-                thread_id = Some(crate::ThreadId::parse_str(&value).map_err(|err| {
-                    crate::cli::usage_error(format!("invalid --thread-id: {err}"))
-                })?);
+                thread_id = Some(
+                    verlet_runtime_contracts::ThreadId::parse_str(&value).map_err(|err| {
+                        crate::cli::usage_error(format!("invalid --thread-id: {err}"))
+                    })?,
+                );
             }
             "--export" => {
                 export_bundle = Some(crate::cli::tool::required_path_value(
@@ -958,8 +992,8 @@ pub(super) fn write_coupling_project(
     name: &str,
     root: &std::path::Path,
     force: bool,
-) -> crate::VerletResult<()> {
-    let package_name = crate::validate_record_name(name)?;
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let package_name = verlet_operations::operation_store::validate_record_name(name)?;
     let operation_name = coupling_operation_name(&package_name)?;
     let cargo_toml_path = root.join("Cargo.toml");
     let lib_path = root.join("src/lib.rs");
@@ -1013,7 +1047,9 @@ pub(super) fn write_coupling_project(
     .map_err(crate::cli::io_error)
 }
 
-pub(super) fn render_coupling_cargo_toml(name: &str) -> crate::VerletResult<String> {
+pub(super) fn render_coupling_cargo_toml(
+    name: &str,
+) -> crate::kernel::runtime_host::VerletResult<String> {
     let crate_name = coupling_crate_name(name)?;
     let sdk_path = guest_sdk_dependency_path();
     Ok(format!(
@@ -1143,7 +1179,9 @@ pub(super) fn render_coupling_fixture_expect(name: &str) -> String {
     )
 }
 
-pub(super) fn coupling_operation_name(name: &str) -> crate::VerletResult<String> {
+pub(super) fn coupling_operation_name(
+    name: &str,
+) -> crate::kernel::runtime_host::VerletResult<String> {
     let mut operation = String::new();
     for byte in name.bytes() {
         match byte {
@@ -1160,11 +1198,11 @@ pub(super) fn coupling_operation_name(name: &str) -> crate::VerletResult<String>
     {
         operation.insert_str(0, "coupling_");
     }
-    crate::validate_record_name(&operation)?;
+    verlet_operations::operation_store::validate_record_name(&operation)?;
     Ok(operation)
 }
 
-pub(super) fn coupling_crate_name(name: &str) -> crate::VerletResult<String> {
+pub(super) fn coupling_crate_name(name: &str) -> crate::kernel::runtime_host::VerletResult<String> {
     let mut suffix = String::new();
     for byte in name.bytes() {
         match byte {

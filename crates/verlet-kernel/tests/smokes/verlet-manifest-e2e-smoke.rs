@@ -1,8 +1,8 @@
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
-use verlet::EventStore as _;
-use verlet::SessionStore as _;
-use verlet::ThreadMetadataStore as _;
+use verlet_history::EventStore as _;
+use verlet_history::SessionStore as _;
+use verlet_metadata::provider_store::ThreadMetadataStore as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -218,13 +218,17 @@ async fn run_researcher() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn build_app(
     root: &std::path::Path,
-) -> Result<verlet::VerletAppServer, Box<dyn std::error::Error>> {
-    let listen = verlet::AppServerListenAddr::WebSocket("127.0.0.1:0".parse()?);
-    let mut config = verlet::VerletAppServerConfig::local(listen.clone(), root.join("workspace"));
+) -> Result<verlet::adapters::app_server::VerletAppServer, Box<dyn std::error::Error>> {
+    let listen =
+        verlet::adapters::app_server::AppServerListenAddr::WebSocket("127.0.0.1:0".parse()?);
+    let mut config = verlet::adapters::app_server::VerletAppServerConfig::local(
+        listen.clone(),
+        root.join("workspace"),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
-    Ok(verlet::VerletAppServer::new_local(config).await?)
+    Ok(verlet::adapters::app_server::VerletAppServer::new_local(config).await?)
 }
 
 async fn build_researcher_app(
@@ -233,30 +237,32 @@ async fn build_researcher_app(
     agent_registry_root: &std::path::Path,
     operation_registry_root: &std::path::Path,
     provider_base_url: &str,
-) -> Result<verlet::VerletAppServer, Box<dyn std::error::Error>> {
-    let listen = verlet::AppServerListenAddr::WebSocket("127.0.0.1:0".parse()?);
-    let mut config = verlet::VerletAppServerConfig::local(listen, workspace)
+) -> Result<verlet::adapters::app_server::VerletAppServer, Box<dyn std::error::Error>> {
+    let listen =
+        verlet::adapters::app_server::AppServerListenAddr::WebSocket("127.0.0.1:0".parse()?);
+    let mut config = verlet::adapters::app_server::VerletAppServerConfig::local(listen, workspace)
         .with_openai_chat_completions(
             "openai_compatible",
             provider_base_url,
             "test-key",
-            verlet::OPENAI_COMPATIBLE_DEFAULT_MODEL,
+            verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL,
         )
         // lexicon-allow: capsule - existing app-server operation binding API name
         .with_capsule_bindings(
             // lexicon-allow: capsule - existing app-server operation binding API name
-            verlet::CapsuleBindingsConfig::default().with_registry_root(operation_registry_root),
+            verlet::adapters::app_server::CapsuleBindingsConfig::default()
+                .with_registry_root(operation_registry_root),
         );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.to_path_buf();
-    Ok(verlet::VerletAppServer::new_local(config).await?)
+    Ok(verlet::adapters::app_server::VerletAppServer::new_local(config).await?)
 }
 
 fn publish_manifest(
     root: &std::path::Path,
     agent_registry_root: &std::path::Path,
-) -> Result<verlet::PublishedAgentRecord, Box<dyn std::error::Error>> {
+) -> Result<verlet::agent::manifest::PublishedAgentRecord, Box<dyn std::error::Error>> {
     let manifest_path = root.join("manifest-e2e.verlet.agent.toml");
     std::fs::write(
         &manifest_path,
@@ -278,8 +284,10 @@ default_cwd = "."
 streaming = false
 "#,
     )?;
-    Ok(verlet::LocalAgentRegistry::new(agent_registry_root)
-        .publish_manifest_path(&manifest_path)?)
+    Ok(
+        verlet::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
+            .publish_manifest_path(&manifest_path)?,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -306,54 +314,68 @@ async fn publish_standard_ops(
 async fn publish_tool_package(
     package_path: &std::path::Path,
     registry_root: &std::path::Path,
-) -> Result<verlet::PublishedOperationRecord, Box<dyn std::error::Error>> {
-    let package = verlet::ToolPackageSource::load(package_path)?;
+) -> Result<verlet_operations::operation_store::PublishedOperationRecord, Box<dyn std::error::Error>>
+{
+    let package = verlet_operations::tool_package::ToolPackageSource::load(package_path)?;
     let (artifact_path, source) = build_tool_package_artifact(&package)?;
     let capability_grants = package_capability_requests(&package);
-    let manifest = verlet::WasmRuntimeFactory::new(
-        verlet::WasmRuntimeConfig::new(verlet::WasmRuntimeArtifact::path(artifact_path.clone()))
-            .with_capability_grants(capability_grants.clone()),
+    let manifest = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::path(
+            artifact_path.clone(),
+        ))
+        .with_capability_grants(capability_grants.clone()),
     )?
     .validate_operation_artifact()
     .await?;
-    let registered = verlet::RegisteredOperation {
+    let registered = verlet_operations::RegisteredOperation {
         name: package.manifest.identity.name.clone(),
         manifest: manifest.clone(),
         capability_grants: capability_grants.clone(),
         metadata: std::collections::BTreeMap::new(),
     };
-    let interface = verlet::ToolInterfaceContract::from_package(
+    let interface = verlet_operations::tool_package::ToolInterfaceContract::from_package(
         &package,
         &manifest,
         &registered.projections(),
     )?;
-    Ok(verlet::LocalOperationRegistry::new(registry_root)
-        .publish_artifact(verlet::PublishOperationRequest {
-            name: package.manifest.identity.name.clone(),
-            artifact_path,
-            source,
-            interface: Some(interface),
-            capability_grants,
-            metadata: std::collections::BTreeMap::new(),
-        })
-        .await?)
+    Ok(
+        verlet_operations::operation_store::LocalOperationRegistry::new(registry_root)
+            .publish_artifact(
+                verlet_operations::operation_store::PublishOperationRequest {
+                    name: package.manifest.identity.name.clone(),
+                    artifact_path,
+                    source,
+                    interface: Some(interface),
+                    capability_grants,
+                    metadata: std::collections::BTreeMap::new(),
+                },
+            )
+            .await?,
+    )
 }
 
 fn build_tool_package_artifact(
-    package: &verlet::ToolPackageSource,
-) -> Result<(std::path::PathBuf, verlet::PublishedOperationSource), Box<dyn std::error::Error>> {
+    package: &verlet_operations::tool_package::ToolPackageSource,
+) -> Result<
+    (
+        std::path::PathBuf,
+        verlet_operations::operation_store::PublishedOperationSource,
+    ),
+    Box<dyn std::error::Error>,
+> {
     match (
         package.manifest.runtime.module_path.clone(),
         package.manifest.runtime.bin_path.clone(),
     ) {
         (Some(module_path), None) => {
             let release = package.manifest.runtime.release.unwrap_or(true);
-            let build = verlet::build_rust_wasm_module(
-                verlet::RustWasmBuildOptions::new(&module_path).with_release(release),
+            let build = verlet::operations::operation_builder::build_rust_wasm_module(
+                verlet::operations::operation_builder::RustWasmBuildOptions::new(&module_path)
+                    .with_release(release),
             )?;
             Ok((
                 build.artifact_path,
-                verlet::PublishedOperationSource::Rust {
+                verlet_operations::operation_store::PublishedOperationSource::Rust {
                     module_path,
                     release,
                 },
@@ -361,7 +383,7 @@ fn build_tool_package_artifact(
         }
         (None, Some(bin_path)) => Ok((
             bin_path.clone(),
-            verlet::PublishedOperationSource::Wasm { bin_path },
+            verlet_operations::operation_store::PublishedOperationSource::Wasm { bin_path },
         )),
         (Some(_), Some(_)) => {
             Err("tool package runtime cannot declare both module_path and bin_path".into())
@@ -371,7 +393,7 @@ fn build_tool_package_artifact(
 }
 
 fn package_capability_requests(
-    package: &verlet::ToolPackageSource,
+    package: &verlet_operations::tool_package::ToolPackageSource,
 ) -> std::collections::BTreeSet<String> {
     package
         .manifest
@@ -387,15 +409,20 @@ fn publish_researcher_manifest(
     agent_registry_root: &std::path::Path,
     operation_registry_root: &std::path::Path,
     standard_ops: &StandardOpHashes,
-) -> Result<verlet::PublishedAgentRecord, Box<dyn std::error::Error>> {
+) -> Result<verlet::agent::manifest::PublishedAgentRecord, Box<dyn std::error::Error>> {
     let manifest_path = root.join("researcher.verlet.agent.toml");
     let template = std::fs::read_to_string(
         repo.join("examples/agents/researcher/researcher.verlet.agent.toml.in"),
     )?;
     let rendered = render_researcher_template(&template, standard_ops)?;
     std::fs::write(&manifest_path, rendered)?;
-    Ok(verlet::LocalAgentRegistry::new(agent_registry_root)
-        .publish_manifest_path_with_operation_registry(&manifest_path, operation_registry_root)?)
+    Ok(
+        verlet::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
+            .publish_manifest_path_with_operation_registry(
+                &manifest_path,
+                operation_registry_root,
+            )?,
+    )
 }
 
 fn publish_researcher_exa_manifest(
@@ -404,7 +431,7 @@ fn publish_researcher_exa_manifest(
     agent_registry_root: &std::path::Path,
     operation_registry_root: &std::path::Path,
     standard_ops: &StandardOpHashes,
-) -> Result<verlet::PublishedAgentRecord, Box<dyn std::error::Error>> {
+) -> Result<verlet::agent::manifest::PublishedAgentRecord, Box<dyn std::error::Error>> {
     let manifest_path = root.join("researcher-search.verlet.agent.toml");
     let template = std::fs::read_to_string(
         repo.join("examples/agents/researcher/researcher.verlet.agent.toml.in"),
@@ -422,8 +449,13 @@ include_tools = ["search"]
 grants = []
 "#;
     std::fs::write(&manifest_path, rendered)?;
-    Ok(verlet::LocalAgentRegistry::new(agent_registry_root)
-        .publish_manifest_path_with_operation_registry(&manifest_path, operation_registry_root)?)
+    Ok(
+        verlet::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
+            .publish_manifest_path_with_operation_registry(
+                &manifest_path,
+                operation_registry_root,
+            )?,
+    )
 }
 
 fn render_researcher_template(
@@ -451,7 +483,7 @@ fn render_researcher_template(
             "model_ref = \"model://local/default\"",
             &format!(
                 "model_ref = \"model://openai_compatible/{}\"",
-                verlet::OPENAI_COMPATIBLE_DEFAULT_MODEL
+                verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL
             ),
         );
     if let Some(unresolved) = [
@@ -468,7 +500,7 @@ fn render_researcher_template(
 }
 
 async fn run_turn(
-    app: &verlet::VerletAppServer,
+    app: &verlet::adapters::app_server::VerletAppServer,
     thread_id: &str,
     input: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -476,7 +508,7 @@ async fn run_turn(
 }
 
 async fn run_turn_trace(
-    app: &verlet::VerletAppServer,
+    app: &verlet::adapters::app_server::VerletAppServer,
     thread_id: &str,
     input: &str,
 ) -> Result<TurnTrace, Box<dyn std::error::Error>> {
@@ -484,7 +516,7 @@ async fn run_turn_trace(
 }
 
 async fn run_live_turn_trace(
-    app: &verlet::VerletAppServer,
+    app: &verlet::adapters::app_server::VerletAppServer,
     thread_id: &str,
     input: &str,
 ) -> Result<TurnTrace, Box<dyn std::error::Error>> {
@@ -492,12 +524,12 @@ async fn run_live_turn_trace(
 }
 
 async fn run_turn_trace_with_timeout(
-    app: &verlet::VerletAppServer,
+    app: &verlet::adapters::app_server::VerletAppServer,
     thread_id: &str,
     input: &str,
     timeout: std::time::Duration,
 ) -> Result<TurnTrace, Box<dyn std::error::Error>> {
-    let parsed = verlet::ThreadId::parse_str(thread_id)?;
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(thread_id)?;
     let handle = app.supervisor().get_thread(app.tenant_id(), parsed).await?;
     let mut events = handle.subscribe_events();
     app.local_json_rpc_request(
@@ -524,27 +556,38 @@ async fn run_turn_trace_with_timeout(
                 )
             })??;
         match event {
-            verlet::ThreadEvent::Output { text, .. } => {
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Output { text, .. } => {
                 output.push_str(&text);
             }
-            verlet::ThreadEvent::Runtime { event, .. } => match event.kind {
-                verlet::RuntimeEventKind::Terminal {
-                    state: verlet::RuntimeTerminalState::Completed,
-                } => {
-                    return Ok(TurnTrace {
-                        output,
-                        runtime_events,
-                    });
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. } => {
+                match event.kind {
+                    verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                        state: verlet_runtime_contracts::RuntimeTerminalState::Completed,
+                    } => {
+                        return Ok(TurnTrace {
+                            output,
+                            runtime_events,
+                        });
+                    }
+                    verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                        state,
+                    } => {
+                        return Err(format!("turn ended before completion: {state:?}").into());
+                    }
+                    verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::Failed {
+                        message,
+                        ..
+                    } => return Err(message.into()),
+                    other => runtime_events.push(other),
                 }
-                verlet::RuntimeEventKind::Terminal { state } => {
-                    return Err(format!("turn ended before completion: {state:?}").into());
-                }
-                verlet::RuntimeEventKind::Failed { message, .. } => return Err(message.into()),
-                other => runtime_events.push(other),
-            },
-            verlet::ThreadEvent::Failed { message, .. } => return Err(message.into()),
-            verlet::ThreadEvent::Cancelled { reason, .. } => return Err(reason.into()),
-            verlet::ThreadEvent::Stopped { .. } => {
+            }
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed { message, .. } => {
+                return Err(message.into());
+            }
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
+                reason, ..
+            } => return Err(reason.into()),
+            verlet::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { .. } => {
                 return Err("thread stopped before turn completion".into());
             }
             _ => {}
@@ -554,7 +597,7 @@ async fn run_turn_trace_with_timeout(
 
 struct TurnTrace {
     output: String,
-    runtime_events: Vec<verlet::RuntimeEventKind>,
+    runtime_events: Vec<verlet::kernel::runtime_host::runtime_events::RuntimeEventKind>,
 }
 
 async fn inspect_manifest_events(
@@ -566,16 +609,17 @@ async fn inspect_manifest_events(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
-        verlet::SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
-    let stream_id = verlet::EventStreamId::for_thread(&lifecycle.coordinates);
+        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+            .await?;
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
     let compile_events = events
         .iter()
-        .filter(|event| event.kind == verlet::EventKind::ManifestCompileCompleted)
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestCompileCompleted)
         .collect::<Vec<_>>();
     let bind_events = events
         .iter()
-        .filter(|event| event.kind == verlet::EventKind::ManifestBindCompleted)
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
         .collect::<Vec<_>>();
     if compile_events.len() != expected_bind_count || bind_events.len() != expected_bind_count {
         return Err(format!(
@@ -586,7 +630,7 @@ async fn inspect_manifest_events(
         .into());
     }
     for event in compile_events.iter().chain(bind_events.iter()) {
-        if event.origin != verlet::EventOrigin::Discharged {
+        if event.origin != verlet_history::EventOrigin::Discharged {
             return Err(format!("manifest event {} was not discharged", event.id).into());
         }
         if event.provenance.source_streams.is_empty() {
@@ -615,12 +659,13 @@ async fn inspect_researcher_bind_receipt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
-        verlet::SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
-    let stream_id = verlet::EventStreamId::for_thread(&lifecycle.coordinates);
+        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+            .await?;
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
     let bind = events
         .iter()
-        .find(|event| event.kind == verlet::EventKind::ManifestBindCompleted)
+        .find(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
         .ok_or("researcher bind receipt was not recorded")?;
     let tool_ids = bind.payload["tool_ids"]
         .as_array()
@@ -711,12 +756,12 @@ fn assert_operation_binding_grants(
 }
 
 fn assert_researcher_tool_trace(
-    events: &[verlet::RuntimeEventKind],
+    events: &[verlet::kernel::runtime_host::runtime_events::RuntimeEventKind],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let started_bash = events.iter().any(|event| {
         matches!(
             event,
-            verlet::RuntimeEventKind::ToolCallStarted { call_id, name, .. }
+            verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted { call_id, name, .. }
                 if call_id == "call_researcher_bash" && name == "bash"
         )
     });
@@ -726,7 +771,7 @@ fn assert_researcher_tool_trace(
     if !events.iter().any(|event| {
         matches!(
             event,
-            verlet::RuntimeEventKind::ToolCallResult {
+            verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
                 call_id,
                 output,
                 success,
@@ -739,11 +784,13 @@ fn assert_researcher_tool_trace(
     }) {
         let tool_results = events
             .iter()
-            .filter_map(|event| match event {
-                verlet::RuntimeEventKind::ToolCallResult {
+            .filter_map(|event| {
+                match event {
+                verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
                     output, success, ..
                 } => Some(format!("success={success} output={}", compact(output))),
                 _ => None,
+            }
             })
             .collect::<Vec<_>>()
             .join("; ");
@@ -761,7 +808,8 @@ async fn inspect_history(
 ) -> Result<SmokeInspection, Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
-        verlet::SqliteSessionStore::open(root.join("state/session_history.sqlite3")).await?;
+        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+            .await?;
     let session_context = session_store.build_context(&lifecycle.coordinates).await?;
     let transcript = session_context
         .messages
@@ -791,11 +839,11 @@ async fn inspect_history(
             .into());
         }
     }
-    let stream_id = verlet::EventStreamId::for_thread(&lifecycle.coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
     let bind_count = events
         .iter()
-        .filter(|event| event.kind == verlet::EventKind::ManifestBindCompleted)
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
         .count();
     Ok(SmokeInspection {
         message_count: session_context.messages.len(),
@@ -804,7 +852,7 @@ async fn inspect_history(
 }
 
 async fn inspect_debug_export(
-    app: &verlet::VerletAppServer,
+    app: &verlet::adapters::app_server::VerletAppServer,
     thread_id: &str,
 ) -> Result<DebugExportInspection, Box<dyn std::error::Error>> {
     let export = app
@@ -919,7 +967,7 @@ fn assert_stream_record_v1(
     event: &serde_json::Value,
     thread_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if event["schema"].as_str() != Some(verlet::STREAM_RECORD_SCHEMA_V1) {
+    if event["schema"].as_str() != Some(verlet_history::STREAM_RECORD_SCHEMA_V1) {
         return Err(format!(
             "exported event used the wrong stream schema: {}",
             compact(&event.to_string())
@@ -956,7 +1004,7 @@ fn assert_debug_export_tail_stream_cursor(
         .ok_or("debug export stream had no event for tail cursor assertion")?;
     for field in ["lastExportedStreamCursor", "tailStreamCursor"] {
         let cursor = &stream["range"][field];
-        if cursor["schema"].as_str() != Some(verlet::STREAM_CURSOR_SCHEMA_V1) {
+        if cursor["schema"].as_str() != Some(verlet_history::STREAM_CURSOR_SCHEMA_V1) {
             return Err(format!("debug export range.{field} used the wrong schema").into());
         }
         if cursor["stream_id"].as_str() != stream["streamId"].as_str() {
@@ -1012,10 +1060,12 @@ fn assert_receipt_count(
 async fn lifecycle_record(
     root: &std::path::Path,
     thread_id: &str,
-) -> Result<verlet::ThreadLifecycleRecord, Box<dyn std::error::Error>> {
-    let parsed = verlet::ThreadId::parse_str(thread_id)?;
-    let metadata_store =
-        verlet::SqliteMetadataStore::open(root.join("state/metadata.sqlite3")).await?;
+) -> Result<verlet_runtime_contracts::ThreadLifecycleRecord, Box<dyn std::error::Error>> {
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(thread_id)?;
+    let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        root.join("state/metadata.sqlite3"),
+    )
+    .await?;
     Ok(metadata_store
         .get_thread_lifecycle(parsed)
         .await?
@@ -1292,23 +1342,26 @@ async fn run_researcher_live() -> Result<(), Box<dyn std::error::Error>> {
         &standard_ops,
     )?;
 
-    let listen = verlet::AppServerListenAddr::WebSocket("127.0.0.1:0".parse()?);
-    let mut config_app = verlet::VerletAppServerConfig::local(listen, &workspace)
-        .with_openai_chat_completions(
-            "openai_compatible",
-            &config.base_url,
-            &config.api_key,
-            verlet::OPENAI_COMPATIBLE_DEFAULT_MODEL,
-        )
-        // lexicon-allow: capsule - existing app-server operation binding API name
-        .with_capsule_bindings(
+    let listen =
+        verlet::adapters::app_server::AppServerListenAddr::WebSocket("127.0.0.1:0".parse()?);
+    let mut config_app =
+        verlet::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+            .with_openai_chat_completions(
+                "openai_compatible",
+                &config.base_url,
+                &config.api_key,
+                verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL,
+            )
             // lexicon-allow: capsule - existing app-server operation binding API name
-            verlet::CapsuleBindingsConfig::default().with_registry_root(&operation_registry_root),
-        );
+            .with_capsule_bindings(
+                // lexicon-allow: capsule - existing app-server operation binding API name
+                verlet::adapters::app_server::CapsuleBindingsConfig::default()
+                    .with_registry_root(&operation_registry_root),
+            );
     config_app.runtime_home = root.join("runtime");
     config_app.state_home = root.join("state");
     config_app.agent_registry_root = agent_registry_root.clone();
-    let app = verlet::VerletAppServer::new_local(config_app).await?;
+    let app = verlet::adapters::app_server::VerletAppServer::new_local(config_app).await?;
     let thread_start = app
         .local_json_rpc_request(
             "thread/start",
@@ -1342,7 +1395,7 @@ async fn run_researcher_live() -> Result<(), Box<dyn std::error::Error>> {
     if !live_trace.runtime_events.iter().any(|event| {
         matches!(
             event,
-            verlet::RuntimeEventKind::ToolCallResult {
+            verlet::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
                 output, success, ..
             } if *success && output.contains("\"status\":200")
         )
@@ -1386,39 +1439,42 @@ async fn run_researcher_exa_bind_variant(
         standard_ops,
     )?;
     let mcp_fixture = SearchMcpFixture::start().await?;
-    let listen = verlet::AppServerListenAddr::WebSocket("127.0.0.1:0".parse()?);
-    let mut config_app = verlet::VerletAppServerConfig::local(listen, &workspace)
-        .with_openai_chat_completions(
-            "openai_compatible",
-            &config.base_url,
-            &config.api_key,
-            verlet::OPENAI_COMPATIBLE_DEFAULT_MODEL,
-        )
-        // lexicon-allow: capsule - existing app-server operation binding API name
-        .with_capsule_bindings(
+    let listen =
+        verlet::adapters::app_server::AppServerListenAddr::WebSocket("127.0.0.1:0".parse()?);
+    let mut config_app =
+        verlet::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+            .with_openai_chat_completions(
+                "openai_compatible",
+                &config.base_url,
+                &config.api_key,
+                verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL,
+            )
             // lexicon-allow: capsule - existing app-server operation binding API name
-            verlet::CapsuleBindingsConfig::default().with_registry_root(operation_registry_root),
-        );
+            .with_capsule_bindings(
+                // lexicon-allow: capsule - existing app-server operation binding API name
+                verlet::adapters::app_server::CapsuleBindingsConfig::default()
+                    .with_registry_root(operation_registry_root),
+            );
     config_app.runtime_home = variant_root.join("runtime");
     config_app.state_home = variant_root.join("state");
     config_app.agent_registry_root = agent_registry_root;
     let metadata_path = config_app.state_home.join("metadata.sqlite3");
-    let app = verlet::VerletAppServer::new_local(config_app).await?;
-    verlet::SqliteSecretStore::open(&metadata_path)
+    let app = verlet::adapters::app_server::VerletAppServer::new_local(config_app).await?;
+    verlet_metadata::secret_store::SqliteSecretStore::open(&metadata_path)
         .await?
         .set_secret(
             "EXAMPLE_API_KEY",
             "fixture-token",
-            verlet::SecretSourceKind::Local,
+            verlet_metadata::secret_store::SecretSourceKind::Local,
             Some("researcher-manifest-live".to_string()),
         )
         .await?;
-    verlet::SqliteMcpSourceRegistry::open_async(&metadata_path)
+    verlet::adapters::mcp_client::SqliteMcpSourceRegistry::open_async(&metadata_path)
         .await?
         .upsert_source_async(
-            verlet::McpRemoteServerConfig::new(
+            verlet::adapters::mcp_client::McpRemoteServerConfig::new(
                 "search",
-                verlet::McpRemoteTransport::StreamableHttp,
+                verlet::adapters::mcp_client::McpRemoteTransport::StreamableHttp,
                 mcp_fixture.url().to_string(),
             )?
             .with_bearer_secret("EXAMPLE_API_KEY")?,
@@ -1438,14 +1494,15 @@ async fn run_researcher_exa_bind_variant(
         .to_string();
     inspect_manifest_events(&variant_root, &thread_id, &record.manifest_hash, 1, true).await?;
     let lifecycle = lifecycle_record(&variant_root, &thread_id).await?;
-    let session_store =
-        verlet::SqliteSessionStore::open(variant_root.join("state/session_history.sqlite3"))
-            .await?;
-    let stream_id = verlet::EventStreamId::for_thread(&lifecycle.coordinates);
+    let session_store = verlet_history_sqlite::SqliteSessionStore::open(
+        variant_root.join("state/session_history.sqlite3"),
+    )
+    .await?;
+    let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
     let bind = events
         .iter()
-        .find(|event| event.kind == verlet::EventKind::ManifestBindCompleted)
+        .find(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
         .ok_or("researcher-search bind receipt was not recorded")?;
     if bind.payload["tool_universes"][0]["server_ref"].as_str() != Some("mcp://search") {
         return Err(format!(
@@ -1614,7 +1671,9 @@ impl LiveResearcherConfig {
         let model = verlet_runtime_contracts::env_compat::var("VERLET_OPENAI_COMPATIBLE_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| verlet::OPENAI_COMPATIBLE_DEFAULT_MODEL.to_string());
+            .unwrap_or_else(|| {
+                verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL.to_string()
+            });
         Ok(Self {
             base_url,
             api_key,

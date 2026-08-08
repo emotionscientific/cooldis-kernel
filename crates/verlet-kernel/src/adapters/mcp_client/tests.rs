@@ -1,4 +1,4 @@
-use crate::AgentKernelToolProvider as _;
+use crate::agent::agent_tool_router::AgentKernelToolProvider as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 
@@ -11,8 +11,10 @@ async fn mcp_stdio_provider_imports_and_invokes_tool() {
         )
         .await
         .expect("mcp provider should connect");
-    let router = crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
-        .with_kernel_tool_provider(std::sync::Arc::new(provider));
+    let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+        verlet_operations::operation_registry::OperationRegistry::new(),
+    ))
+    .with_kernel_tool_provider(std::sync::Arc::new(provider));
 
     let tools = router.tool_definitions().await;
     assert!(tools.iter().any(|tool| tool.name == "verlet_mcp_echo"));
@@ -27,13 +29,13 @@ async fn mcp_stdio_provider_imports_and_invokes_tool() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
         } if content.iter().any(|item| matches!(
             item,
-            crate::CanonicalContent::Text { text, .. }
+            verlet_history::CanonicalContent::Text { text, .. }
                 if text.contains("VERLET_MCP_ECHO_OK hello from test")
         ))
     ));
@@ -95,7 +97,9 @@ async fn remote_mcp_provider_fails_closed_when_bearer_secret_is_missing() {
     let err = match crate::adapters::mcp_client::McpRemoteToolProvider::connect(
         config,
         Some(std::sync::Arc::new(
-            crate::SqliteSecretStore::in_memory().await.unwrap(),
+            verlet_metadata::secret_store::SqliteSecretStore::in_memory()
+                .await
+                .unwrap(),
         )),
     )
     .await
@@ -112,12 +116,14 @@ async fn remote_mcp_provider_discovers_and_invokes_streamable_http_tool() {
     let seen_authorization = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (url, server) =
         spawn_mcp_http_fixture("application/json", seen_authorization.clone()).await;
-    let secret_store = crate::SqliteSecretStore::in_memory().await.unwrap();
+    let secret_store = verlet_metadata::secret_store::SqliteSecretStore::in_memory()
+        .await
+        .unwrap();
     secret_store
         .set_secret(
             "ARCADE_API_KEY",
             "fixture-token",
-            crate::SecretSourceKind::Local,
+            verlet_metadata::secret_store::SecretSourceKind::Local,
             None,
         )
         .await
@@ -138,8 +144,10 @@ async fn remote_mcp_provider_discovers_and_invokes_streamable_http_tool() {
     )
     .await
     .unwrap();
-    let router = crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
-        .with_kernel_tool_provider(std::sync::Arc::new(provider));
+    let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+        verlet_operations::operation_registry::OperationRegistry::new(),
+    ))
+    .with_kernel_tool_provider(std::sync::Arc::new(provider));
 
     assert_eq!(router.tool_definitions().await[0].name, "remote_echo");
     let result = router
@@ -151,13 +159,13 @@ async fn remote_mcp_provider_discovers_and_invokes_streamable_http_tool() {
         .await;
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
         } if content.iter().any(|item| matches!(
             item,
-            crate::CanonicalContent::Text { text, .. }
+            verlet_history::CanonicalContent::Text { text, .. }
                 if text.contains("REMOTE_MCP_OK hello")
         ))
     ));
@@ -181,7 +189,7 @@ async fn remote_mcp_provider_accepts_sse_response_bodies() {
         .await
         .unwrap();
     let result = provider
-        .invoke_tool_call(crate::AgentKernelToolCall {
+        .invoke_tool_call(crate::agent::agent_tool_router::AgentKernelToolCall {
             call_id: "call_sse".to_string(),
             tool_name: "remote_echo".to_string(),
             arguments: serde_json::json!({"message": "stream"}),
@@ -192,13 +200,13 @@ async fn remote_mcp_provider_accepts_sse_response_bodies() {
         .unwrap();
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
         } if content.iter().any(|item| matches!(
             item,
-            crate::CanonicalContent::Text { text, .. }
+            verlet_history::CanonicalContent::Text { text, .. }
                 if text.contains("REMOTE_MCP_OK stream")
         ))
     ));
@@ -262,10 +270,12 @@ async fn router_imports_and_invokes_three_remote_mcp_sources() {
     )
     .await
     .unwrap();
-    let router = crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
-        .with_kernel_tool_provider(std::sync::Arc::new(search))
-        .with_kernel_tool_provider(std::sync::Arc::new(crm))
-        .with_kernel_tool_provider(std::sync::Arc::new(ticket));
+    let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+        verlet_operations::operation_registry::OperationRegistry::new(),
+    ))
+    .with_kernel_tool_provider(std::sync::Arc::new(search))
+    .with_kernel_tool_provider(std::sync::Arc::new(crm))
+    .with_kernel_tool_provider(std::sync::Arc::new(ticket));
 
     let tool_names = router
         .tool_definitions()
@@ -291,13 +301,13 @@ async fn router_imports_and_invokes_three_remote_mcp_sources() {
             .await;
         assert!(matches!(
             result,
-            crate::CanonicalMessage::ToolResult {
+            verlet_history::CanonicalMessage::ToolResult {
                 is_error: false,
                 content,
                 ..
             } if content.iter().any(|item| matches!(
                 item,
-                crate::CanonicalContent::Text { text, .. }
+                verlet_history::CanonicalContent::Text { text, .. }
                     if text.contains(marker) && text.contains(tool)
             ))
         ));

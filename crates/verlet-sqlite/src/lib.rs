@@ -22,6 +22,11 @@
 //! - The DST seam is [`Db::open_with_io`]: scenario harnesses drive the
 //!   engine through simulated, fault-injectable, deterministic IO.
 
+// The two re-export blocks below are the workspace's only exception to the
+// no-`pub use` rule. ADR 0005 makes this crate the single engine dependency:
+// store crates name `verlet_sqlite`, never `turso`. Spelling the engine at
+// every call site would put a second direct engine dependency in three crates
+// and end that ownership.
 pub use turso::{
     params, transaction::TransactionBehavior, Connection, IntoParams, Row, Rows, Statement, Value,
 };

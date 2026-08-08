@@ -63,28 +63,30 @@ impl std::fmt::Debug for DaemonSyncHttpServer {
 
 impl DaemonSyncHttpServer {
     pub async fn bind(
-        listen: crate::AppServerListenAddr,
+        listen: crate::adapters::app_server::AppServerListenAddr,
         endpoint: std::sync::Arc<crate::daemon::remote_store::endpoint::SqliteSyncEndpoint>,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let listener = match listen {
-            crate::AppServerListenAddr::WebSocket(addr) => {
+            crate::adapters::app_server::AppServerListenAddr::WebSocket(addr) => {
                 if !addr.ip().is_loopback() {
-                    return Err(crate::VerletError::RuntimeFactory(format!(
-                        "daemon sync listen address {addr} is not loopback; terminate authenticated TLS at a local proxy before exposing it"
-                    )));
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                        format!(
+                            "daemon sync listen address {addr} is not loopback; terminate authenticated TLS at a local proxy before exposing it"
+                        ),
+                    ));
                 }
                 SyncListener::Tcp(tokio::net::TcpListener::bind(addr).await.map_err(|error| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to bind daemon sync endpoint {addr}: {error}"
                     ))
                 })?)
             }
-            crate::AppServerListenAddr::Unix(path) => {
+            crate::adapters::app_server::AppServerListenAddr::Unix(path) => {
                 #[cfg(unix)]
                 {
                     prepare_unix_socket_path(&path)?;
                     let listener = tokio::net::UnixListener::bind(&path).map_err(|error| {
-                        crate::VerletError::RuntimeFactory(format!(
+                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                             "failed to bind daemon sync socket {}: {error}",
                             path.display()
                         ))
@@ -94,7 +96,7 @@ impl DaemonSyncHttpServer {
                 #[cfg(not(unix))]
                 {
                     let _ = path;
-                    return Err(crate::VerletError::RuntimeFactory(
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                         "unix daemon sync sockets are only supported on Unix platforms".to_string(),
                     ));
                 }
@@ -103,10 +105,12 @@ impl DaemonSyncHttpServer {
         Ok(Self { listener, endpoint })
     }
 
-    pub fn local_addr(&self) -> crate::VerletResult<Option<std::net::SocketAddr>> {
+    pub fn local_addr(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<std::net::SocketAddr>> {
         match &self.listener {
             SyncListener::Tcp(listener) => listener.local_addr().map(Some).map_err(|error| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to inspect daemon sync endpoint address: {error}"
                 ))
             }),
@@ -115,13 +119,13 @@ impl DaemonSyncHttpServer {
         }
     }
 
-    pub fn display_addr(&self) -> crate::VerletResult<String> {
+    pub fn display_addr(&self) -> crate::kernel::runtime_host::VerletResult<String> {
         match &self.listener {
             SyncListener::Tcp(listener) => listener
                 .local_addr()
                 .map(|addr| format!("http://{addr}"))
                 .map_err(|error| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to inspect daemon sync endpoint address: {error}"
                     ))
                 }),
@@ -130,7 +134,7 @@ impl DaemonSyncHttpServer {
         }
     }
 
-    pub async fn serve(self) -> crate::VerletResult<()> {
+    pub async fn serve(self) -> crate::kernel::runtime_host::VerletResult<()> {
         match self.listener {
             SyncListener::Tcp(listener) => serve_tcp(listener, self.endpoint).await,
             #[cfg(unix)]
@@ -142,7 +146,7 @@ impl DaemonSyncHttpServer {
 async fn serve_tcp(
     listener: tokio::net::TcpListener,
     endpoint: std::sync::Arc<crate::daemon::remote_store::endpoint::SqliteSyncEndpoint>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let mut requests = tokio::task::JoinSet::new();
     let mut accept_retry = ACCEPT_RETRY_MIN;
     loop {
@@ -174,7 +178,7 @@ async fn serve_tcp(
 async fn serve_unix(
     state: UnixListenerState,
     endpoint: std::sync::Arc<crate::daemon::remote_store::endpoint::SqliteSyncEndpoint>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let mut requests = tokio::task::JoinSet::new();
     let mut accept_retry = ACCEPT_RETRY_MIN;
     loop {
@@ -203,7 +207,7 @@ async fn serve_unix(
 }
 
 fn spawn_request<S>(
-    requests: &mut tokio::task::JoinSet<crate::VerletResult<()>>,
+    requests: &mut tokio::task::JoinSet<crate::kernel::runtime_host::VerletResult<()>>,
     stream: S,
     endpoint: std::sync::Arc<crate::daemon::remote_store::endpoint::SqliteSyncEndpoint>,
 ) where
@@ -221,15 +225,17 @@ fn next_accept_retry(current: std::time::Duration) -> std::time::Duration {
 
 async fn request_with_timeout<T>(
     deadline: std::time::Duration,
-    future: impl std::future::Future<Output = crate::VerletResult<T>>,
-) -> crate::VerletResult<T> {
+    future: impl std::future::Future<Output = crate::kernel::runtime_host::VerletResult<T>>,
+) -> crate::kernel::runtime_host::VerletResult<T> {
     tokio::time::timeout(deadline, future)
         .await
         .map_err(|_| protocol_error("sync request timed out"))?
 }
 
 fn report_request_completion(
-    completed: Option<Result<crate::VerletResult<()>, tokio::task::JoinError>>,
+    completed: Option<
+        Result<crate::kernel::runtime_host::VerletResult<()>, tokio::task::JoinError>,
+    >,
 ) {
     match completed {
         Some(Ok(Err(error))) => eprintln!("verlet daemon sync request failed: {error}"),
@@ -241,7 +247,7 @@ fn report_request_completion(
 async fn handle_connection<S>(
     mut stream: S,
     endpoint: std::sync::Arc<crate::daemon::remote_store::endpoint::SqliteSyncEndpoint>,
-) -> crate::VerletResult<()>
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -336,7 +342,7 @@ where
                     )
                     .await?;
                 }
-                Err(crate::VerletError::History(message))
+                Err(crate::kernel::runtime_host::VerletError::History(message))
                     if message == "sync pull not authorized" =>
                 {
                     write_json(
@@ -346,7 +352,7 @@ where
                     )
                     .await?;
                 }
-                Err(crate::VerletError::History(_)) => {
+                Err(crate::kernel::runtime_host::VerletError::History(_)) => {
                     write_json(
                         &mut stream,
                         409,
@@ -404,7 +410,7 @@ where
                     )
                     .await?
                 }
-                Err(crate::VerletError::History(message))
+                Err(crate::kernel::runtime_host::VerletError::History(message))
                     if message == "sync pull not authorized" =>
                 {
                     write_json(
@@ -467,7 +473,7 @@ impl HttpRequest {
     }
 }
 
-async fn read_request<S>(stream: &mut S) -> crate::VerletResult<HttpRequest>
+async fn read_request<S>(stream: &mut S) -> crate::kernel::runtime_host::VerletResult<HttpRequest>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
@@ -585,7 +591,11 @@ where
     })
 }
 
-async fn write_json<S, T>(stream: &mut S, status: u16, value: &T) -> crate::VerletResult<()>
+async fn write_json<S, T>(
+    stream: &mut S,
+    status: u16,
+    value: &T,
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
     T: serde::Serialize + ?Sized,
@@ -627,11 +637,13 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 #[cfg(unix)]
-fn prepare_unix_socket_path(path: &std::path::Path) -> crate::VerletResult<()> {
+fn prepare_unix_socket_path(
+    path: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if let Some(parent) = path.parent() {
         let parent_existed = parent.exists();
         std::fs::create_dir_all(parent).map_err(|error| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to create daemon sync socket directory {}: {error}",
                 parent.display()
             ))
@@ -639,7 +651,7 @@ fn prepare_unix_socket_path(path: &std::path::Path) -> crate::VerletResult<()> {
         if !parent_existed {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
                 |error| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to secure daemon sync socket directory {}: {error}",
                         parent.display()
                     ))
@@ -649,19 +661,21 @@ fn prepare_unix_socket_path(path: &std::path::Path) -> crate::VerletResult<()> {
     }
     if path.exists() {
         let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to inspect existing daemon sync socket {}: {error}",
                 path.display()
             ))
         })?;
         if metadata.file_type().is_file() || metadata.file_type().is_dir() {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "refusing to replace non-socket daemon sync path {}",
-                path.display()
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "refusing to replace non-socket daemon sync path {}",
+                    path.display()
+                ),
+            ));
         }
         std::fs::remove_file(path).map_err(|error| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to remove stale daemon sync socket {}: {error}",
                 path.display()
             ))
@@ -670,8 +684,8 @@ fn prepare_unix_socket_path(path: &std::path::Path) -> crate::VerletResult<()> {
     Ok(())
 }
 
-fn protocol_error(message: impl Into<String>) -> crate::VerletError {
-    crate::VerletError::RuntimeExecution(message.into())
+fn protocol_error(message: impl Into<String>) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeExecution(message.into())
 }
 
 /// Child-side projection of the daemon sync endpoint. TCP/TLS origins use
@@ -701,12 +715,12 @@ impl std::fmt::Debug for HttpSyncClient {
 }
 
 impl HttpSyncClient {
-    pub fn new(base_url: impl Into<String>) -> crate::VerletResult<Self> {
+    pub fn new(base_url: impl Into<String>) -> crate::kernel::runtime_host::VerletResult<Self> {
         let base_url = base_url.into();
         #[cfg(unix)]
         if let Some(path) = base_url.strip_prefix("unix://") {
             if path.is_empty() {
-                return Err(crate::VerletError::RuntimeFactory(
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "sync endpoint Unix URL requires a path".to_string(),
                 ));
             }
@@ -717,10 +731,12 @@ impl HttpSyncClient {
             });
         }
         let parsed = reqwest::Url::parse(&base_url).map_err(|_| {
-            crate::VerletError::RuntimeFactory("sync endpoint URL is invalid".to_string())
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "sync endpoint URL is invalid".to_string(),
+            )
         })?;
         if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(crate::VerletError::RuntimeFactory(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "sync endpoint URL must use http:// or https://".to_string(),
             ));
         }
@@ -730,7 +746,7 @@ impl HttpSyncClient {
             || parsed.query().is_some()
             || parsed.fragment().is_some()
         {
-            return Err(crate::VerletError::RuntimeFactory(
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "sync endpoint URL must be an origin without credentials, a path, a query, or a fragment"
                     .to_string(),
             ));
@@ -757,7 +773,7 @@ impl HttpSyncClient {
         path: &str,
         bearer_token: &str,
         body: &T,
-    ) -> crate::VerletResult<(reqwest::StatusCode, Vec<u8>)> {
+    ) -> crate::kernel::runtime_host::VerletResult<(reqwest::StatusCode, Vec<u8>)> {
         match &self.transport {
             SyncClientTransport::Network { client, base_url } => {
                 let response = client
@@ -781,7 +797,9 @@ impl HttpSyncClient {
         }
     }
 
-    fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> crate::VerletResult<T> {
+    fn decode<T: serde::de::DeserializeOwned>(
+        bytes: &[u8],
+    ) -> crate::kernel::runtime_host::VerletResult<T> {
         serde_json::from_slice(bytes).map_err(|_| transport_error("response decode"))
     }
 }
@@ -792,7 +810,7 @@ async fn send_unix_request<T: serde::Serialize + ?Sized>(
     path: &str,
     bearer_token: &str,
     body: &T,
-) -> crate::VerletResult<(reqwest::StatusCode, Vec<u8>)> {
+) -> crate::kernel::runtime_host::VerletResult<(reqwest::StatusCode, Vec<u8>)> {
     let body = serde_json::to_vec(body).map_err(|_| transport_error("request encode"))?;
     let head = format!(
         "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {bearer_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -822,7 +840,9 @@ async fn send_unix_request<T: serde::Serialize + ?Sized>(
 }
 
 #[cfg(unix)]
-fn decode_unix_response(response: &[u8]) -> crate::VerletResult<(reqwest::StatusCode, Vec<u8>)> {
+fn decode_unix_response(
+    response: &[u8],
+) -> crate::kernel::runtime_host::VerletResult<(reqwest::StatusCode, Vec<u8>)> {
     let header_end = find_bytes(response, b"\r\n\r\n")
         .map(|index| index + 4)
         .ok_or_else(|| transport_error("response headers"))?;
@@ -855,7 +875,9 @@ impl crate::daemon::remote_store::endpoint::SyncPushGate for HttpSyncClient {
         &self,
         bearer_token: &str,
         request: crate::daemon::remote_store::endpoint::SyncPushRequestV1,
-    ) -> crate::VerletResult<crate::daemon::remote_store::endpoint::SyncPushOutcome> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::daemon::remote_store::endpoint::SyncPushOutcome,
+    > {
         let (status, body) = self.send(PUSH_PATH, bearer_token, &request).await?;
         let outcome =
             Self::decode::<crate::daemon::remote_store::endpoint::SyncPushOutcome>(&body)?;
@@ -871,9 +893,10 @@ impl crate::daemon::remote_store::endpoint::SyncPullSource for HttpSyncClient {
     async fn pull_after(
         &self,
         bearer_token: &str,
-        stream_id: &crate::EventStreamId,
-        cursor: Option<crate::StreamCursorV1>,
-    ) -> crate::VerletResult<Vec<crate::StreamRecordEnvelopeV1>> {
+        stream_id: &verlet_history::EventStreamId,
+        cursor: Option<verlet_history::StreamCursorV1>,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::StreamRecordEnvelopeV1>>
+    {
         let request = crate::daemon::remote_store::endpoint::SyncPullRequestV1 {
             schema: crate::daemon::remote_store::endpoint::SYNC_PULL_SCHEMA_V1.to_string(),
             stream_id: stream_id.clone(),
@@ -881,13 +904,15 @@ impl crate::daemon::remote_store::endpoint::SyncPullSource for HttpSyncClient {
         };
         let (status, body) = self.send(PULL_PATH, bearer_token, &request).await?;
         if status == reqwest::StatusCode::FORBIDDEN {
-            return Err(crate::VerletError::History(
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "sync pull not authorized".to_string(),
             ));
         }
         if !status.is_success() {
             return Err(if status == reqwest::StatusCode::CONFLICT {
-                crate::VerletError::History("sync pull cursor conflict".to_string())
+                crate::kernel::runtime_host::VerletError::History(
+                    "sync pull cursor conflict".to_string(),
+                )
             } else {
                 transport_error("pull")
             });
@@ -907,10 +932,10 @@ impl crate::daemon::remote_store::endpoint::SyncIngressQueueAcknowledger for Htt
         &self,
         bearer_token: &str,
         request: crate::daemon::remote_store::endpoint::SyncIngressQueueAckRequestV1,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let (status, body) = self.send(INGRESS_ACK_PATH, bearer_token, &request).await?;
         if status == reqwest::StatusCode::FORBIDDEN {
-            return Err(crate::VerletError::History(
+            return Err(crate::kernel::runtime_host::VerletError::History(
                 "sync pull not authorized".to_string(),
             ));
         }
@@ -934,7 +959,9 @@ impl crate::daemon::remote_store::endpoint::SyncLeaseRenewer for HttpSyncClient 
     async fn renew_lease(
         &self,
         bearer_token: &str,
-    ) -> crate::VerletResult<Option<crate::daemon::remote_store::lease::StreamLeaseGrantV1>> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Option<crate::daemon::remote_store::lease::StreamLeaseGrantV1>,
+    > {
         let (status, body) = self
             .send(RENEW_PATH, bearer_token, &serde_json::json!({}))
             .await?;
@@ -954,8 +981,10 @@ impl crate::daemon::remote_store::endpoint::SyncLeaseRenewer for HttpSyncClient 
     }
 }
 
-fn transport_error(operation: &str) -> crate::VerletError {
-    crate::VerletError::RuntimeExecution(format!("sync endpoint {operation} failed"))
+fn transport_error(operation: &str) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+        "sync endpoint {operation} failed"
+    ))
 }
 
 #[cfg(test)]
@@ -983,12 +1012,12 @@ mod tests {
         // tight-timeout: paused time exercises the configured request deadline itself
         let result = crate::daemon::remote_store::endpoint_http::request_with_timeout(
             std::time::Duration::from_millis(5),
-            std::future::pending::<crate::VerletResult<()>>(),
+            std::future::pending::<crate::kernel::runtime_host::VerletResult<()>>(),
         )
         .await;
         assert!(matches!(
             result,
-            Err(crate::VerletError::RuntimeExecution(message)) if message == "sync request timed out"
+            Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(message)) if message == "sync request timed out"
         ));
     }
 

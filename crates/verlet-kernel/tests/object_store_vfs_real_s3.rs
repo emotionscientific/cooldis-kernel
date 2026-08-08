@@ -5,15 +5,17 @@ use object_store::ObjectStoreExt as _;
 async fn virtual_bash_mount_round_trips_real_s3_or_r2() {
     let live = live_s3_config("verlet-smoke");
 
-    let config = verlet::VirtualBashRuntimeConfig {
+    let config = verlet::capabilities::execution::VirtualBashRuntimeConfig {
         cwd: std::path::PathBuf::from("/s3"),
-        mounts: vec![verlet::VirtualMount::object_store(
+        mounts: vec![verlet_vbash::VirtualMount::object_store(
             "/s3",
-            verlet::ObjectStoreMountConfig::s3(live.config.clone(), &live.prefix),
+            verlet_vfs::ObjectStoreMountConfig::s3(live.config.clone(), &live.prefix),
         )],
-        ..verlet::VirtualBashRuntimeConfig::default()
+        ..verlet::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let mut writer = verlet::BashkitExecutionHarness::new(config).await.unwrap();
+    let mut writer = verlet_vbash::harness::BashkitExecutionHarness::new(config)
+        .await
+        .unwrap();
     let output = writer
         .execute(
             "mkdir -p roundtrip && echo alpha > roundtrip/a.txt && echo beta >> roundtrip/a.txt",
@@ -22,15 +24,17 @@ async fn virtual_bash_mount_round_trips_real_s3_or_r2() {
         .unwrap();
     assert!(output.success(), "{output:?}");
 
-    let reload = verlet::VirtualBashRuntimeConfig {
+    let reload = verlet::capabilities::execution::VirtualBashRuntimeConfig {
         cwd: std::path::PathBuf::from("/s3"),
-        mounts: vec![verlet::VirtualMount::object_store(
+        mounts: vec![verlet_vbash::VirtualMount::object_store(
             "/s3",
-            verlet::ObjectStoreMountConfig::s3(live.config, &live.prefix),
+            verlet_vfs::ObjectStoreMountConfig::s3(live.config, &live.prefix),
         )],
-        ..verlet::VirtualBashRuntimeConfig::default()
+        ..verlet::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let mut reader = verlet::BashkitExecutionHarness::new(reload).await.unwrap();
+    let mut reader = verlet_vbash::harness::BashkitExecutionHarness::new(reload)
+        .await
+        .unwrap();
     let output = reader
         .execute("cat roundtrip/a.txt && rm -r roundtrip && test ! -e roundtrip/a.txt")
         .await
@@ -46,33 +50,35 @@ async fn verlet_agent_thread_creates_file_on_real_s3_or_r2() {
     let object_key = format!("{}/agent-created.txt", live.prefix.trim_end_matches('/'));
     let verifier = live.build_object_store();
 
-    let config = verlet::VirtualBashRuntimeConfig {
+    let config = verlet::capabilities::execution::VirtualBashRuntimeConfig {
         cwd: std::path::PathBuf::from("/r2"),
-        mounts: vec![verlet::VirtualMount::object_store(
+        mounts: vec![verlet_vbash::VirtualMount::object_store(
             "/r2",
-            verlet::ObjectStoreMountConfig::s3(live.config, &live.prefix),
+            verlet_vfs::ObjectStoreMountConfig::s3(live.config, &live.prefix),
         )],
-        ..verlet::VirtualBashRuntimeConfig::default()
+        ..verlet::capabilities::execution::VirtualBashRuntimeConfig::default()
     };
-    let supervisor = verlet::VerletSupervisor::new();
+    let supervisor = verlet::kernel::supervisor::VerletSupervisor::new();
     supervisor
-        .register_tenant(verlet::TenantRegistration {
-            context: verlet::TenantRuntimeContext::local(
+        .register_tenant(verlet::kernel::supervisor::TenantRegistration {
+            context: verlet::kernel::supervisor::TenantRuntimeContext::local(
                 "tenant-r2-agent",
                 "/tmp/verlet-r2-agent-runtime",
                 "/tmp/verlet-r2-agent-state",
             ),
-            runtime_factory: std::sync::Arc::new(verlet::VirtualBashRuntimeFactory::new(config)),
+            runtime_factory: std::sync::Arc::new(
+                verlet::capabilities::execution::VirtualBashRuntimeFactory::new(config),
+            ),
         })
         .await
         .unwrap();
 
     let thread = supervisor
-        .start_thread(verlet::ThreadStartRequest {
+        .start_thread(verlet::kernel::supervisor::ThreadStartRequest {
             tenant_id: "tenant-r2-agent".to_string(),
             user_id: "user-r2".to_string(),
             session_id: "session-r2".to_string(),
-            topology: verlet::ThreadTopology::root(),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
             metadata: Default::default(),
         })
         .await
@@ -108,7 +114,7 @@ async fn verlet_agent_thread_creates_file_on_real_s3_or_r2() {
 
 #[derive(Clone)]
 struct LiveS3Config {
-    config: verlet::S3ObjectStoreConfig,
+    config: verlet_vfs::S3ObjectStoreConfig,
     prefix: String,
 }
 
@@ -150,7 +156,7 @@ fn live_s3_config(default_prefix: &str) -> LiveS3Config {
     let prefix = verlet_runtime_contracts::env_compat::var("VERLET_S3_PREFIX")
         .unwrap_or_else(|_| format!("{default_prefix}/{}", uuid::Uuid::now_v7()));
 
-    let mut config = verlet::S3ObjectStoreConfig::new(bucket, region)
+    let mut config = verlet_vfs::S3ObjectStoreConfig::new(bucket, region)
         .with_credentials(access_key_id, secret_access_key);
     if let Ok(endpoint) = verlet_runtime_contracts::env_compat::var("VERLET_S3_ENDPOINT") {
         config = config.with_endpoint(endpoint);
@@ -167,12 +173,20 @@ fn live_s3_config(default_prefix: &str) -> LiveS3Config {
     LiveS3Config { config, prefix }
 }
 
-async fn next_output(events: &mut tokio::sync::broadcast::Receiver<verlet::ThreadEvent>) -> String {
+async fn next_output(
+    events: &mut tokio::sync::broadcast::Receiver<
+        verlet::kernel::runtime_host::runtime_api::ThreadEvent,
+    >,
+) -> String {
     tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             match events.recv().await.unwrap() {
-                verlet::ThreadEvent::Output { text, .. } => break text,
-                verlet::ThreadEvent::Failed { message, .. } => panic!("thread failed: {message}"),
+                verlet::kernel::runtime_host::runtime_api::ThreadEvent::Output { text, .. } => {
+                    break text;
+                }
+                verlet::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                    message, ..
+                } => panic!("thread failed: {message}"),
                 _ => {}
             }
         }

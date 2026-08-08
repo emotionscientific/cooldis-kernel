@@ -3,7 +3,9 @@
 use crate::daemon::identity::IdentityAuthority as _;
 
 /// Dispatch an offline identity-store command.
-pub(super) async fn run_identity(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_identity(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -46,7 +48,9 @@ pub(super) async fn run_identity(mut args: Vec<std::ffi::OsString>) -> crate::Ve
 }
 
 /// Declare the first operator and print its credential once.
-pub(super) async fn identity_bootstrap(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn identity_bootstrap(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_bootstrap_args(args)?;
     if options.help {
         print_identity_bootstrap_help();
@@ -74,7 +78,9 @@ pub(super) async fn identity_bootstrap(args: Vec<std::ffi::OsString>) -> crate::
 }
 
 /// Declare an adapter principal in the offline identity store.
-pub(super) async fn identity_declare(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn identity_declare(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_declare_args(args)?;
     if options.help {
         print_identity_declare_help();
@@ -107,7 +113,9 @@ pub(super) async fn identity_declare(args: Vec<std::ffi::OsString>) -> crate::Ve
 }
 
 /// Mint and print one credential for an active principal.
-pub(super) async fn identity_mint(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn identity_mint(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_mint_args(args)?;
     if options.help {
         print_identity_mint_help();
@@ -137,7 +145,7 @@ pub(super) async fn identity_mint(args: Vec<std::ffi::OsString>) -> crate::Verle
 /// Revoke one credential in the offline identity store.
 pub(super) async fn identity_revoke_credential(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_revoke_args(args, "identity revoke-credential")?;
     if options.help {
         print_identity_revoke_credential_help();
@@ -164,7 +172,7 @@ pub(super) async fn identity_revoke_credential(
 /// Revoke one principal in the offline identity store.
 pub(super) async fn identity_revoke_principal(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_revoke_args(args, "identity revoke-principal")?;
     if options.help {
         print_identity_revoke_principal_help();
@@ -189,7 +197,9 @@ pub(super) async fn identity_revoke_principal(
 }
 
 /// Print redacted principal and credential records from the identity store.
-pub(super) async fn identity_list(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn identity_list(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_list_args(args)?;
     if options.help {
         print_identity_list_help();
@@ -237,7 +247,9 @@ pub(super) async fn identity_list(args: Vec<std::ffi::OsString>) -> crate::Verle
             "credentials": credentials,
         }))
         .map_err(|error| {
-            crate::VerletError::RuntimeFactory(format!("failed to encode identity list: {error}"))
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "failed to encode identity list: {error}"
+            ))
         })?
     );
     Ok(())
@@ -286,7 +298,7 @@ struct IdentityListArgs {
 
 fn parse_identity_bootstrap_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<IdentityBootstrapArgs> {
+) -> crate::kernel::runtime_host::VerletResult<IdentityBootstrapArgs> {
     let mut principal_id = None;
     let mut display = None;
     let mut state_home = None;
@@ -320,7 +332,7 @@ fn parse_identity_bootstrap_args(
 
 fn parse_identity_declare_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<IdentityDeclareArgs> {
+) -> crate::kernel::runtime_host::VerletResult<IdentityDeclareArgs> {
     let mut principal_id = None;
     let mut kind = None;
     let mut display = None;
@@ -365,7 +377,7 @@ fn parse_identity_declare_args(
 
 fn parse_identity_mint_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<IdentityMintArgs> {
+) -> crate::kernel::runtime_host::VerletResult<IdentityMintArgs> {
     let mut principal_id = None;
     let mut minted_by = None;
     let mut expires_at_ms = None;
@@ -408,7 +420,7 @@ fn parse_identity_mint_args(
 fn parse_identity_revoke_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
-) -> crate::VerletResult<IdentityRevokeArgs> {
+) -> crate::kernel::runtime_host::VerletResult<IdentityRevokeArgs> {
     let mut subject_id = None;
     let mut revoked_by = None;
     let mut state_home = None;
@@ -442,7 +454,7 @@ fn parse_identity_revoke_args(
 
 fn parse_identity_list_args(
     args: Vec<std::ffi::OsString>,
-) -> crate::VerletResult<IdentityListArgs> {
+) -> crate::kernel::runtime_host::VerletResult<IdentityListArgs> {
     let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
@@ -469,7 +481,7 @@ fn set_identity_subject(
     subject: &mut Option<String>,
     value: std::ffi::OsString,
     command: &str,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if subject.is_some() {
         return Err(crate::cli::usage_error(format!(
             "{command} accepts exactly one positional id"
@@ -482,7 +494,7 @@ fn set_identity_subject(
 fn required_string_value(
     iter: &mut impl Iterator<Item = std::ffi::OsString>,
     option: &str,
-) -> crate::VerletResult<String> {
+) -> crate::kernel::runtime_host::VerletResult<String> {
     iter.next()
         .map(|value| value.to_string_lossy().to_string())
         .ok_or_else(|| crate::cli::usage_error(format!("{option} requires a value")))
@@ -490,7 +502,7 @@ fn required_string_value(
 
 fn parse_declarable_cli_kind(
     value: &str,
-) -> crate::VerletResult<crate::daemon::identity::PrincipalKind> {
+) -> crate::kernel::runtime_host::VerletResult<crate::daemon::identity::PrincipalKind> {
     match value {
         "adapter" => Ok(crate::daemon::identity::PrincipalKind::Adapter),
         "member" => Err(crate::cli::usage_error(
@@ -507,27 +519,30 @@ fn parse_declarable_cli_kind(
 
 async fn open_identity_authority(
     state_home: Option<std::path::PathBuf>,
-) -> crate::VerletResult<crate::daemon::identity::SqliteIdentityAuthority> {
+) -> crate::kernel::runtime_host::VerletResult<crate::daemon::identity::SqliteIdentityAuthority> {
     let state_home = match state_home {
         Some(state_home) => state_home,
         None => crate::cli::secret::default_user_state_home()?,
     };
-    let store = crate::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
-        .await
-        .map_err(identity_cli_error)?;
-    let clock: std::sync::Arc<dyn crate::DaemonClock> =
-        std::sync::Arc::new(crate::SystemDaemonClock);
+    let store =
+        verlet_history_sqlite::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+            .await
+            .map_err(identity_cli_error)?;
+    let clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock> =
+        std::sync::Arc::new(crate::daemon::clock_route::SystemDaemonClock);
     crate::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
         .await
         .map_err(identity_cli_error)
 }
 
-fn identity_cli_error(error: impl std::fmt::Display) -> crate::VerletError {
+fn identity_cli_error(error: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
     let message = error.to_string();
     if crate::cli::secret::turso_cross_process_lock_error(&message) {
         crate::cli::secret::cross_process_database_guidance("stop the daemon and retry")
     } else {
-        crate::VerletError::RuntimeFactory(format!("identity store failed: {message}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "identity store failed: {message}"
+        ))
     }
 }
 

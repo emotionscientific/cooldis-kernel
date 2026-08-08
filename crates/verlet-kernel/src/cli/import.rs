@@ -6,7 +6,9 @@ use std::os::unix::fs::DirBuilderExt as _;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 
-pub(super) async fn run_import(mut args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn run_import(
+    mut args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
             .first()
@@ -40,7 +42,9 @@ pub(super) async fn run_import(mut args: Vec<std::ffi::OsString>) -> crate::Verl
     }
 }
 
-pub(super) async fn import_build(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn import_build(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_import_args(args, "import build")?;
     if options.help {
         print_import_build_help();
@@ -59,7 +63,9 @@ pub(super) async fn import_build(args: Vec<std::ffi::OsString>) -> crate::Verlet
     Ok(())
 }
 
-pub(super) async fn import_publish(args: Vec<std::ffi::OsString>) -> crate::VerletResult<()> {
+pub(super) async fn import_publish(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_import_args(args, "import publish")?;
     if options.help {
         print_import_publish_help();
@@ -70,23 +76,25 @@ pub(super) async fn import_publish(args: Vec<std::ffi::OsString>) -> crate::Verl
         .ok_or_else(|| crate::cli::usage_error("import publish requires --package <path>"))?;
     let build = build_import_package(&package_path).await?;
     print_import_package_build(&build);
-    let registry = crate::LocalOperationRegistry::new(
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(
         options
             .registry_root
             .unwrap_or_else(crate::cli::tool::default_registry_root),
     );
     let record = registry
-        .publish_artifact(crate::PublishOperationRequest {
-            name: build.plan.name.clone(),
-            artifact_path: build.artifact_path.clone(),
-            source: crate::PublishedOperationSource::Import {
-                manifest_path: build.package.manifest_path.clone(),
-                spec_sha256: build.package.spec_sha256.clone(),
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: build.plan.name.clone(),
+                artifact_path: build.artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Import {
+                    manifest_path: build.package.manifest_path.clone(),
+                    spec_sha256: build.package.spec_sha256.clone(),
+                },
+                interface: Some(build.interface.clone()),
+                capability_grants: build.plan.capability_requests(),
+                metadata: std::collections::BTreeMap::new(),
             },
-            interface: Some(build.interface.clone()),
-            capability_grants: build.plan.capability_requests(),
-            metadata: std::collections::BTreeMap::new(),
-        })
+        )
         .await?;
     println!("published {}", record.name);
     println!("artifact {}", record.active_artifact_hash);
@@ -99,28 +107,30 @@ pub(super) async fn import_publish(args: Vec<std::ffi::OsString>) -> crate::Verl
 
 #[derive(Debug)]
 pub(super) struct BuiltImportPackage {
-    package: crate::ImportPackageSource,
-    plan: crate::OperationImportPlan,
+    package: verlet_operations::import_package::ImportPackageSource,
+    plan: verlet_operations::openapi_plan::OperationImportPlan,
     artifact_path: std::path::PathBuf,
-    manifest: crate::WasmOperationManifest,
-    interface: crate::ToolInterfaceContract,
-    receipt: crate::ImportBuildReceipt,
+    manifest: verlet_abi::WasmOperationManifest,
+    interface: verlet_operations::tool_package::ToolInterfaceContract,
+    receipt: verlet_operations::import_package::ImportBuildReceipt,
 }
 
 pub(super) async fn build_import_package(
     package_path: &std::path::Path,
-) -> crate::VerletResult<BuiltImportPackage> {
-    let package = crate::ImportPackageSource::load(package_path).map_err(import_error)?;
-    let plan = crate::OperationImportPlan::from_package(&package).map_err(import_error)?;
-    let artifact = crate::render_openapi_import_artifact(&plan)?;
-    let artifact_hash = crate::wasm_sha256(&artifact);
+) -> crate::kernel::runtime_host::VerletResult<BuiltImportPackage> {
+    let package = verlet_operations::import_package::ImportPackageSource::load(package_path)
+        .map_err(import_error)?;
+    let plan = verlet_operations::openapi_plan::OperationImportPlan::from_package(&package)
+        .map_err(import_error)?;
+    let artifact = crate::operations::openapi_import::render_openapi_import_artifact(&plan)?;
+    let artifact_hash = verlet_operations::operation_store::wasm_sha256(&artifact);
     let output_dir =
         std::env::temp_dir().join(format!("verlet-import-build-{}", uuid::Uuid::now_v7()));
     let mut output_dir_builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     output_dir_builder.mode(0o700);
     output_dir_builder.create(&output_dir).map_err(|error| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to create import build directory {}: {error}",
             output_dir.display()
         ))
@@ -132,19 +142,19 @@ pub(super) async fn build_import_package(
         #[cfg(unix)]
         artifact_options.mode(0o600);
         let mut file = artifact_options.open(&artifact_path).map_err(|error| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to create import artifact {}: {error}",
                 artifact_path.display()
             ))
         })?;
         file.write_all(&artifact).map_err(|error| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to write import artifact {}: {error}",
                 artifact_path.display()
             ))
         })?;
         file.sync_all().map_err(|error| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to sync import artifact {}: {error}",
                 artifact_path.display()
             ))
@@ -154,7 +164,7 @@ pub(super) async fn build_import_package(
     let manifest =
         crate::cli::tool::validate_wasm_artifact(artifact_path.clone(), capabilities.clone())
             .await?;
-    let runtime = crate::ToolRuntimeContract {
+    let runtime = verlet_operations::tool_package::ToolRuntimeContract {
         kind: "wasm32-unknown-unknown".to_string(),
         state: Some("stateless".to_string()),
         module_path: None,
@@ -164,7 +174,7 @@ pub(super) async fn build_import_package(
         max_input_bytes: None,
         max_output_bytes: None,
     };
-    let identity = crate::ToolPackageIdentity {
+    let identity = verlet_operations::tool_package::ToolPackageIdentity {
         name: plan.name.clone(),
         version: plan.version.clone(),
         description: plan.description.clone(),
@@ -179,19 +189,19 @@ pub(super) async fn build_import_package(
                 .description
                 .clone()
                 .unwrap_or_else(|| format!("Run imported operation {}.", operation.name));
-            crate::ToolOperationInterface {
+            verlet_operations::tool_package::ToolOperationInterface {
                 name: operation.name.clone(),
                 description: operation.description.clone(),
                 input_schema: operation.input_schema.clone(),
                 output_schema: operation.output_schema.clone(),
                 required_capabilities: required_capabilities.clone(),
-                command: Some(crate::ToolCommandContract {
+                command: Some(verlet_operations::tool_package::ToolCommandContract {
                     name: operation.name.clone(),
                     stdin: Some("json".to_string()),
                     stdout: Some("json".to_string()),
                 }),
                 mcp: None,
-                manual: Some(crate::ToolOperationManual {
+                manual: Some(verlet_operations::tool_package::ToolOperationManual {
                     schema_version: 0,
                     tool_name: plan.name.clone(),
                     operation_name: operation.name.clone(),
@@ -211,14 +221,14 @@ pub(super) async fn build_import_package(
             }
         })
         .collect::<Vec<_>>();
-    let interface = crate::ToolInterfaceContract {
+    let interface = verlet_operations::tool_package::ToolInterfaceContract {
         schema_version: 0,
         identity,
         runtime,
         operations,
         fixtures: Vec::new(),
     };
-    let registered = crate::RegisteredOperation {
+    let registered = verlet_operations::RegisteredOperation {
         name: plan.name.clone(),
         manifest: manifest.clone(),
         capability_grants: capabilities.clone(),
@@ -229,9 +239,9 @@ pub(super) async fn build_import_package(
         &manifest,
         &registered.projections(),
     )?;
-    let receipt = crate::ImportBuildReceipt {
-        kind: crate::IMPORT_BUILD_RECEIPT_KIND.to_string(),
-        schema_version: crate::IMPORT_BUILD_RECEIPT_SCHEMA_VERSION,
+    let receipt = verlet_operations::import_package::ImportBuildReceipt {
+        kind: verlet_operations::import_package::IMPORT_BUILD_RECEIPT_KIND.to_string(),
+        schema_version: verlet_operations::import_package::IMPORT_BUILD_RECEIPT_SCHEMA_VERSION,
         name: plan.name.clone(),
         source_hash: package.source_hash.clone(),
         spec_sha256: package.spec_sha256.clone(),
@@ -239,11 +249,13 @@ pub(super) async fn build_import_package(
         operations: plan
             .operations
             .iter()
-            .map(|operation| crate::ImportOperationBuild {
-                name: operation.name.clone(),
-                input_schema: operation.input_schema.clone(),
-                output_schema: operation.output_schema.clone(),
-            })
+            .map(
+                |operation| verlet_operations::import_package::ImportOperationBuild {
+                    name: operation.name.clone(),
+                    input_schema: operation.input_schema.clone(),
+                    output_schema: operation.output_schema.clone(),
+                },
+            )
             .collect(),
         capabilities,
         artifact_path: Some(artifact_path.clone()),
@@ -278,8 +290,10 @@ pub(super) fn print_import_package_build(build: &BuiltImportPackage) {
     }
 }
 
-pub(super) fn import_error(error: crate::OpenApiImportError) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(error.to_string())
+pub(super) fn import_error(
+    error: verlet_operations::openapi_plan::OpenApiImportError,
+) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(error.to_string())
 }
 
 #[derive(Debug)]
@@ -292,7 +306,7 @@ pub(super) struct ImportArgs {
 pub(super) fn parse_import_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
-) -> crate::VerletResult<ImportArgs> {
+) -> crate::kernel::runtime_host::VerletResult<ImportArgs> {
     let mut package_path = None;
     let mut registry_root = None;
     let mut help = false;

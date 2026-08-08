@@ -25,23 +25,19 @@ pub(super) async fn wait_until_thread_settled(
     }
 }
 
-pub(super) fn latest_message_text(
-    messages: &[crate::kernel::history::CanonicalMessage],
-) -> Option<String> {
+pub(super) fn latest_message_text(messages: &[verlet_history::CanonicalMessage]) -> Option<String> {
     messages.iter().rev().find_map(|message| {
         let text = match message {
-            crate::kernel::history::CanonicalMessage::Assistant { content, .. }
-            | crate::kernel::history::CanonicalMessage::ToolResult { content, .. } => content
+            verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => content
                 .iter()
                 .filter_map(|content| match content {
-                    crate::kernel::history::CanonicalContent::Text { text, .. } => {
-                        Some(text.as_str())
-                    }
+                    verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
                 .join(""),
-            crate::kernel::history::CanonicalMessage::User { .. } => String::new(),
+            verlet_history::CanonicalMessage::User { .. } => String::new(),
         };
         if text.is_empty() { None } else { Some(text) }
     })
@@ -74,7 +70,7 @@ pub(super) fn emit_thread_interaction(
     metadata: std::collections::BTreeMap<String, String>,
 ) {
     thread.emit_runtime(
-        crate::kernel::runtime_host::RuntimeEventKind::ThreadInteraction {
+        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ThreadInteraction {
             interaction_id,
             kind,
             source_thread_id,

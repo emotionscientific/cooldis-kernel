@@ -1,6 +1,6 @@
 use tokio::io::AsyncBufReadExt as _;
-use verlet::EventStore as _;
 use verlet::daemon::identity::IdentityAuthority as _;
+use verlet_history::EventStore as _;
 
 static RPC_PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -227,19 +227,21 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         resumed_stdout.contains("second debug rpc turn"),
         "resumed turn output did not include prompt: {resumed_stdout:?}"
     );
-    let store = verlet::SqliteSessionStore::open(root.path().join("state/session_history.sqlite3"))
-        .await
-        .unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(
+        root.path().join("state/session_history.sqlite3"),
+    )
+    .await
+    .unwrap();
     let control_events = store
         .read_events(
-            &verlet::EventStreamId::new(format!("control:{thread_id}")),
+            &verlet_history::EventStreamId::new(format!("control:{thread_id}")),
             None,
         )
         .await
         .unwrap();
     let thread_events = store
         .read_events(
-            &verlet::EventStreamId::new(format!("thread:{thread_id}")),
+            &verlet_history::EventStreamId::new(format!("thread:{thread_id}")),
             None,
         )
         .await
@@ -327,21 +329,21 @@ async fn debug_rpc_cli_renders_rpc_client_errors_without_internal_names() {
 }
 
 fn assert_admission_precedes_execution(
-    control_events: &[verlet::EventRecord],
-    thread_events: &[verlet::EventRecord],
+    control_events: &[verlet_history::EventRecord],
+    thread_events: &[verlet_history::EventRecord],
     route_id: &str,
 ) {
     let admission = control_events
         .iter()
         .find(|event| {
-            event.kind == verlet::EventKind::AdmissionDecided
+            event.kind == verlet_history::EventKind::AdmissionDecided
                 && event.payload["route_id"] == route_id
         })
         .expect("control stream missing expected admission.decided");
     let executed = thread_events
         .iter()
         .find(|event| {
-            event.kind == verlet::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event.payload["runtime_kind"] != "thread_started"
         })
         .expect("thread stream missing executed turn session entry");
@@ -365,24 +367,27 @@ struct DebugRpcServer {
     addr: std::net::SocketAddr,
     token: String,
     adapter_token: String,
-    task: Option<tokio::task::JoinHandle<verlet::VerletResult<()>>>,
+    task: Option<tokio::task::JoinHandle<verlet::kernel::runtime_host::VerletResult<()>>>,
 }
 
 impl DebugRpcServer {
     async fn start(root: &std::path::Path, workspace: &std::path::Path) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let listen = verlet::AppServerListenAddr::WebSocket(addr);
-        let mut config = verlet::VerletAppServerConfig::local(listen, workspace);
+        let listen = verlet::adapters::app_server::AppServerListenAddr::WebSocket(addr);
+        let mut config =
+            verlet::adapters::app_server::VerletAppServerConfig::local(listen, workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
-        let app = verlet::VerletAppServer::new_local(config).await.unwrap();
-        let store = verlet::SqliteSessionStore::open(app.session_store_path())
+        let app = verlet::adapters::app_server::VerletAppServer::new_local(config)
+            .await
+            .unwrap();
+        let store = verlet_history_sqlite::SqliteSessionStore::open(app.session_store_path())
             .await
             .unwrap();
         let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(
             store,
-            std::sync::Arc::new(verlet::SystemDaemonClock),
+            std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock),
             None,
         )
         .await
@@ -466,12 +471,12 @@ fn unused_loopback_addr() -> std::net::SocketAddr {
 async fn wait_for_websocket(url: &str, token: &str) {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match verlet::CodexTuiTestClient::connect_websocket(
+        match verlet::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
             url,
-            verlet::CodexTuiConnectConfig {
+            verlet::adapters::codex_tui::CodexTuiConnectConfig {
                 client_name: "verlet-debug-rpc-test-wait".to_string(),
                 bearer_token: Some(token.to_string()),
-                ..verlet::CodexTuiConnectConfig::default()
+                ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
             },
         )
         .await

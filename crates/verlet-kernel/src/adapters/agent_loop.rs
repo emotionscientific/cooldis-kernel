@@ -32,18 +32,18 @@ const HOOK_MUTATION_WITNESS_OBSERVATION_SCHEMA_V1: &str =
     "cooldis.observation.host_hook_mutation/1";
 
 fn reattach_late_tool_result_entries(
-    entries: Vec<crate::SessionEntry>,
-) -> Vec<crate::SessionEntry> {
+    entries: Vec<verlet_history::SessionEntry>,
+) -> Vec<verlet_history::SessionEntry> {
     let mut issuer_by_call_id = std::collections::HashMap::<String, Option<usize>>::new();
     for (index, entry) in entries.iter().enumerate() {
-        let crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::Assistant { content, .. },
+        let verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::Assistant { content, .. },
         } = &entry.kind
         else {
             continue;
         };
         for block in content {
-            let crate::CanonicalContent::ToolCall { id, .. } = block else {
+            let verlet_history::CanonicalContent::ToolCall { id, .. } = block else {
                 continue;
             };
             issuer_by_call_id
@@ -56,8 +56,8 @@ fn reattach_late_tool_result_entries(
     let mut results_before = std::collections::BTreeMap::<usize, Vec<usize>>::new();
     let mut moved = std::collections::HashSet::new();
     for (result_index, entry) in entries.iter().enumerate() {
-        let crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::ToolResult { tool_call_id, .. },
+        let verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::ToolResult { tool_call_id, .. },
         } = &entry.kind
         else {
             continue;
@@ -66,9 +66,12 @@ fn reattach_late_tool_result_entries(
             continue;
         };
         if issuer_index >= result_index
-            || entries[issuer_index + 1..result_index]
-                .iter()
-                .any(|entry| matches!(&entry.kind, crate::SessionEntryKind::Compaction { .. }))
+            || entries[issuer_index + 1..result_index].iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    verlet_history::SessionEntryKind::Compaction { .. }
+                )
+            })
         {
             continue;
         }
@@ -76,8 +79,8 @@ fn reattach_late_tool_result_entries(
             entries[index].turn_id.is_some()
                 && matches!(
                     &entries[index].kind,
-                    crate::SessionEntryKind::Message {
-                        message: crate::CanonicalMessage::User { .. }
+                    verlet_history::SessionEntryKind::Message {
+                        message: verlet_history::CanonicalMessage::User { .. }
                     }
                 )
         }) else {
@@ -114,24 +117,24 @@ fn default_process_dispatcher_cwd() -> std::path::PathBuf {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentLoopConfig {
     pub provider: String,
-    pub api: crate::ProviderApi,
+    pub api: verlet_history::ProviderApi,
     pub model: String,
     #[serde(default)]
-    pub system: Vec<crate::SystemBlock>,
+    pub system: Vec<verlet_provider::SystemBlock>,
     #[serde(default)]
-    pub tools: Vec<crate::ToolDefinition>,
+    pub tools: Vec<verlet_provider::ToolDefinition>,
     pub max_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<crate::ThinkingConfig>,
+    pub thinking: Option<verlet_provider::ThinkingConfig>,
     #[serde(default)]
     pub stream: bool,
 }
 
 impl AgentLoopConfig {
     pub fn new(
-        api: crate::ProviderApi,
+        api: verlet_history::ProviderApi,
         provider: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
@@ -150,9 +153,9 @@ impl AgentLoopConfig {
 
     fn request_from_messages(
         &self,
-        messages: Vec<crate::CanonicalMessage>,
-    ) -> crate::ProviderRequest {
-        crate::ProviderRequest {
+        messages: Vec<verlet_history::CanonicalMessage>,
+    ) -> verlet_provider::ProviderRequest {
+        verlet_provider::ProviderRequest {
             api: self.api.clone(),
             provider: self.provider.clone(),
             model: self.model.clone(),
@@ -219,27 +222,31 @@ impl Default for ModelRequestRetryPolicy {
 #[derive(Clone)]
 struct ModelRequestEndpoint {
     config: AgentLoopConfig,
-    client: std::sync::Arc<dyn crate::ProviderClient>,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
 }
 
 #[derive(Clone)]
 pub struct AgentLoopFactory {
     config: AgentLoopConfig,
-    client: std::sync::Arc<dyn crate::ProviderClient>,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     model_request_retry_policy: ModelRequestRetryPolicy,
     model_request_fallbacks: Vec<ModelRequestEndpoint>,
-    tool_router: Option<std::sync::Arc<crate::AgentToolRouter>>,
-    bash_tool_config: Option<crate::VirtualBashRuntimeConfig>,
-    thread_spawn_agent_resolver: Option<std::sync::Arc<dyn crate::KernelThreadSpawnAgentResolver>>,
-    hook_pipeline: Option<std::sync::Arc<crate::HookPipeline>>,
-    tool_permission_gate: std::sync::Arc<dyn crate::ToolPermissionGate>,
-    context_compile_policy: crate::AgentContextCompilePolicy,
-    compaction_policy: crate::CompactionPolicy,
+    tool_router: Option<std::sync::Arc<crate::agent::agent_tool_router::AgentToolRouter>>,
+    bash_tool_config: Option<crate::capabilities::execution::VirtualBashRuntimeConfig>,
+    thread_spawn_agent_resolver:
+        Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
+    hook_pipeline: Option<std::sync::Arc<crate::agent::hooks::HookPipeline>>,
+    tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
+    context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
+    compaction_policy: crate::kernel::compaction::CompactionPolicy,
     max_tool_rounds: Option<usize>,
 }
 
 impl AgentLoopFactory {
-    pub fn new(config: AgentLoopConfig, client: std::sync::Arc<dyn crate::ProviderClient>) -> Self {
+    pub fn new(
+        config: AgentLoopConfig,
+        client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+    ) -> Self {
         Self {
             config,
             client,
@@ -249,9 +256,12 @@ impl AgentLoopFactory {
             bash_tool_config: None,
             thread_spawn_agent_resolver: None,
             hook_pipeline: None,
-            tool_permission_gate: std::sync::Arc::new(crate::AllowAllToolPermissionGate),
-            context_compile_policy: crate::AgentContextCompilePolicy::unbounded(),
-            compaction_policy: crate::CompactionPolicy::disabled(),
+            tool_permission_gate: std::sync::Arc::new(
+                crate::agent::tool_interceptor::AllowAllToolPermissionGate,
+            ),
+            context_compile_policy:
+                crate::kernel::context_compiler::AgentContextCompilePolicy::unbounded(),
+            compaction_policy: crate::kernel::compaction::CompactionPolicy::disabled(),
             max_tool_rounds: Some(MAX_TOOL_ROUTER_ROUNDS),
         }
     }
@@ -264,36 +274,44 @@ impl AgentLoopFactory {
     pub fn with_model_request_fallback(
         mut self,
         config: AgentLoopConfig,
-        client: std::sync::Arc<dyn crate::ProviderClient>,
+        client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     ) -> Self {
         self.model_request_fallbacks
             .push(ModelRequestEndpoint { config, client });
         self
     }
 
-    pub fn with_tool_router(mut self, tool_router: std::sync::Arc<crate::AgentToolRouter>) -> Self {
+    pub fn with_tool_router(
+        mut self,
+        tool_router: std::sync::Arc<crate::agent::agent_tool_router::AgentToolRouter>,
+    ) -> Self {
         self.tool_router = Some(tool_router);
         self
     }
 
     pub fn with_operation_registry(
         mut self,
-        operation_registry: std::sync::Arc<crate::OperationRegistry>,
+        operation_registry: std::sync::Arc<
+            verlet_operations::operation_registry::OperationRegistry,
+        >,
     ) -> Self {
-        self.tool_router = Some(std::sync::Arc::new(crate::AgentToolRouter::new(
-            operation_registry,
-        )));
+        self.tool_router = Some(std::sync::Arc::new(
+            crate::agent::agent_tool_router::AgentToolRouter::new(operation_registry),
+        ));
         self
     }
 
-    pub fn with_bash_tool(mut self, config: crate::VirtualBashRuntimeConfig) -> Self {
+    pub fn with_bash_tool(
+        mut self,
+        config: crate::capabilities::execution::VirtualBashRuntimeConfig,
+    ) -> Self {
         self.bash_tool_config = Some(config);
         self
     }
 
     pub fn with_thread_spawn_agent_resolver(
         mut self,
-        resolver: std::sync::Arc<dyn crate::KernelThreadSpawnAgentResolver>,
+        resolver: std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>,
     ) -> Self {
         self.thread_spawn_agent_resolver = Some(resolver);
         self
@@ -302,7 +320,7 @@ impl AgentLoopFactory {
     // lexicon-allow: hook - existing host debug hook API name retained for compatibility.
     pub fn with_hook_pipeline(
         mut self,
-        hook_pipeline: std::sync::Arc<crate::HookPipeline>,
+        hook_pipeline: std::sync::Arc<crate::agent::hooks::HookPipeline>,
     ) -> Self {
         self.hook_pipeline = Some(hook_pipeline);
         self
@@ -310,29 +328,39 @@ impl AgentLoopFactory {
 
     pub fn with_tool_permission_gate(
         mut self,
-        tool_permission_gate: std::sync::Arc<dyn crate::ToolPermissionGate>,
+        tool_permission_gate: std::sync::Arc<
+            dyn crate::agent::tool_interceptor::ToolPermissionGate,
+        >,
     ) -> Self {
         self.tool_permission_gate = tool_permission_gate;
         self
     }
 
-    pub fn with_context_compile_policy(mut self, policy: crate::AgentContextCompilePolicy) -> Self {
+    pub fn with_context_compile_policy(
+        mut self,
+        policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
+    ) -> Self {
         self.context_compile_policy = policy;
         self
     }
 
-    pub fn with_compaction_policy(mut self, policy: crate::CompactionPolicy) -> Self {
+    pub fn with_compaction_policy(
+        mut self,
+        policy: crate::kernel::compaction::CompactionPolicy,
+    ) -> Self {
         self.compaction_policy = policy;
         self
     }
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntimeFactory for AgentLoopFactory {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for AgentLoopFactory {
     async fn build(
         &self,
-        context: &crate::ThreadContext,
-    ) -> crate::VerletResult<Box<dyn crate::AgentRuntime>> {
+        context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
         let max_tool_rounds = match context
             .metadata
             .get(THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA)
@@ -340,12 +368,12 @@ impl crate::AgentRuntimeFactory for AgentLoopFactory {
             Some(value) if value == "unlimited" => None,
             Some(value) => {
                 let rounds = value.parse::<usize>().map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "manifest runtime max_tool_rounds metadata is invalid: {err}"
                     ))
                 })?;
                 if rounds == 0 {
-                    return Err(crate::VerletError::RuntimeFactory(
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                         "manifest runtime max_tool_rounds metadata must be > 0 or \"unlimited\""
                             .to_string(),
                     ));
@@ -375,47 +403,54 @@ impl crate::AgentRuntimeFactory for AgentLoopFactory {
 
 struct AgentLoop {
     config: AgentLoopConfig,
-    client: std::sync::Arc<dyn crate::ProviderClient>,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     model_request_retry_policy: ModelRequestRetryPolicy,
     model_request_fallbacks: Vec<ModelRequestEndpoint>,
-    tool_router: Option<std::sync::Arc<crate::AgentToolRouter>>,
-    bash_tool_config: Option<crate::VirtualBashRuntimeConfig>,
-    thread_spawn_agent_resolver: Option<std::sync::Arc<dyn crate::KernelThreadSpawnAgentResolver>>,
-    hook_pipeline: Option<std::sync::Arc<crate::HookPipeline>>,
-    tool_permission_gate: std::sync::Arc<dyn crate::ToolPermissionGate>,
-    context_compile_policy: crate::AgentContextCompilePolicy,
-    compaction_policy: crate::CompactionPolicy,
+    tool_router: Option<std::sync::Arc<crate::agent::agent_tool_router::AgentToolRouter>>,
+    bash_tool_config: Option<crate::capabilities::execution::VirtualBashRuntimeConfig>,
+    thread_spawn_agent_resolver:
+        Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
+    hook_pipeline: Option<std::sync::Arc<crate::agent::hooks::HookPipeline>>,
+    tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
+    context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
+    compaction_policy: crate::kernel::compaction::CompactionPolicy,
     max_tool_rounds: Option<usize>,
     strict_tool_router_unknowns: bool,
 }
 
 #[async_trait::async_trait]
-impl crate::AgentRuntime for AgentLoop {
+impl crate::kernel::runtime_host::runtime_api::AgentRuntime for AgentLoop {
     async fn run(
         self: Box<Self>,
-        context: crate::ThreadContext,
-        services: crate::RuntimeServices,
-        mut commands: tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
-        events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-        status: tokio::sync::watch::Sender<crate::ThreadStatus>,
+        context: verlet_runtime_contracts::ThreadContext,
+        services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<
+            crate::kernel::runtime_host::runtime_api::ThreadCommand,
+        >,
+        events: tokio::sync::broadcast::Sender<
+            crate::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
+        status: tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
         cancellation: tokio_util::sync::CancellationToken,
     ) {
         let mut runtime = *self;
         runtime.mount_agent_process_tools(&context, &services).await;
         let thread_id = context.coordinates.thread_id;
         let coordinates = context.coordinates.clone();
-        crate::emit_runtime_event(
+        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
             &events,
             &coordinates,
-            crate::RuntimeEventKind::ThreadStarted {
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ThreadStarted {
                 parent_thread_id: context.parent_thread_id,
                 topology: context.topology.clone(),
                 metadata: context.metadata.clone(),
             },
         );
-        let _ = events.send(crate::ThreadEvent::Started {
-            context: context.clone(),
-        });
+        let _ = events.send(
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::Started {
+                context: context.clone(),
+            },
+        );
         if let Err(err) =
             sweep_cancelled_turn_tool_calls(&runtime, &context, &services, thread_id, &events).await
         {
@@ -435,15 +470,19 @@ impl crate::AgentRuntime for AgentLoop {
         {
             Ok(should_stop) => {
                 if should_stop {
-                    crate::emit_runtime_event(
+                    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         &events,
                         &coordinates,
-                        crate::RuntimeEventKind::Terminal {
-                            state: crate::RuntimeTerminalState::Stopped,
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                            state: verlet_runtime_contracts::RuntimeTerminalState::Stopped,
                         },
                     );
-                    let _ = status.send(crate::ThreadStatus::Stopped);
-                    let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+                    let _ = events.send(
+                        crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped {
+                            thread_id,
+                        },
+                    );
                     return;
                 }
             }
@@ -459,7 +498,7 @@ impl crate::AgentRuntime for AgentLoop {
                 return;
             }
         }
-        let _ = status.send(crate::ThreadStatus::Idle);
+        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
         let mut pending_commands = std::collections::VecDeque::new();
 
         loop {
@@ -486,32 +525,32 @@ impl crate::AgentRuntime for AgentLoop {
 
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    crate::emit_runtime_event(
+                    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         &events,
                         &coordinates,
-                        crate::RuntimeEventKind::Terminal {
-                            state: crate::RuntimeTerminalState::Stopped,
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                            state: verlet_runtime_contracts::RuntimeTerminalState::Stopped,
                         },
                     );
-                    let _ = status.send(crate::ThreadStatus::Stopped);
-                    let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+                    let _ = events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { thread_id });
                     break;
                 }
                 command = commands.recv() => {
                     let Some(command) = command else {
-                        let _ = events.send(crate::ThreadEvent::Signal {
+                        let _ = events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
                             thread_id,
-                            signal: crate::ThreadSignal::shutdown(&coordinates),
+                            signal: verlet_runtime_contracts::ThreadSignal::shutdown(&coordinates),
                         });
-                        crate::emit_runtime_event(
+                        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                             &events,
                             &coordinates,
-                            crate::RuntimeEventKind::Terminal {
-                                state: crate::RuntimeTerminalState::Stopped,
+                            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                                state: verlet_runtime_contracts::RuntimeTerminalState::Stopped,
                             },
                         );
-                        let _ = status.send(crate::ThreadStatus::Stopped);
-                        let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+                        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+                        let _ = events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { thread_id });
                         break;
                     };
                     if run_idle_provider_command(
@@ -540,8 +579,8 @@ impl crate::AgentRuntime for AgentLoop {
 impl AgentLoop {
     async fn mount_agent_process_tools(
         &mut self,
-        context: &crate::ThreadContext,
-        services: &crate::RuntimeServices,
+        context: &verlet_runtime_contracts::ThreadContext,
+        services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
     ) {
         let control = services.kernel_control();
         if self.tool_router.is_none() && self.bash_tool_config.is_none() {
@@ -553,23 +592,28 @@ impl AgentLoop {
             .as_ref()
             .map(|router| router.as_ref().clone())
             .unwrap_or_else(|| {
-                crate::AgentToolRouter::new(std::sync::Arc::new(crate::OperationRegistry::new()))
+                crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+                    verlet_operations::operation_registry::OperationRegistry::new(),
+                ))
             });
         if !had_explicit_router && self.bash_tool_config.is_none() {
             self.strict_tool_router_unknowns = false;
         }
         if let Some(control) = control.clone() {
-            let mut provider =
-                crate::KernelThreadOperationProvider::new(control.clone(), context.clone());
+            let mut provider = crate::agent::agent_process::KernelThreadOperationProvider::new(
+                control.clone(),
+                context.clone(),
+            );
             if let Some(resolver) = &self.thread_spawn_agent_resolver {
                 provider = provider.with_agent_resolver(std::sync::Arc::clone(resolver));
             }
-            let dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> =
-                std::sync::Arc::new(provider);
+            let dispatcher: std::sync::Arc<
+                dyn verlet_operations::operation_registry::KernelOperationDispatcher,
+            > = std::sync::Arc::new(provider);
             let _ = router
                 .operation_registry()
                 .set_kernel_dispatcher(
-                    crate::VERLET_THREADS_PACKAGE,
+                    crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
                     std::sync::Arc::clone(&dispatcher),
                 )
                 .await;
@@ -578,20 +622,23 @@ impl AgentLoop {
             {
                 let _ = registry
                     .set_kernel_dispatcher(
-                        crate::VERLET_THREADS_PACKAGE,
+                        crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
                         std::sync::Arc::clone(&dispatcher),
                     )
                     .await;
             }
-            let schedule_dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> =
-                std::sync::Arc::new(crate::KernelScheduleOperationProvider::new(
+            let schedule_dispatcher: std::sync::Arc<
+                dyn verlet_operations::operation_registry::KernelOperationDispatcher,
+            > = std::sync::Arc::new(
+                crate::agent::agent_process::KernelScheduleOperationProvider::new(
                     control.clone(),
                     context.clone(),
-                ));
+                ),
+            );
             let _ = router
                 .operation_registry()
                 .set_kernel_dispatcher(
-                    crate::VERLET_SCHEDULE_PACKAGE,
+                    crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
                     std::sync::Arc::clone(&schedule_dispatcher),
                 )
                 .await;
@@ -600,7 +647,7 @@ impl AgentLoop {
             {
                 let _ = registry
                     .set_kernel_dispatcher(
-                        crate::VERLET_SCHEDULE_PACKAGE,
+                        crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
                         std::sync::Arc::clone(&schedule_dispatcher),
                     )
                     .await;
@@ -619,17 +666,20 @@ impl AgentLoop {
                 )
             })
         });
-        let mut process_provider =
-            crate::KernelProcessOperationProvider::new(context.clone(), process_cwd);
+        let mut process_provider = crate::agent::agent_process::KernelProcessOperationProvider::new(
+            context.clone(),
+            process_cwd,
+        );
         if let Some(dispatcher) = process_handle_dispatcher.clone() {
             process_provider = process_provider.with_process_dispatcher(dispatcher);
         }
-        let process_dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> =
-            std::sync::Arc::new(process_provider);
+        let process_dispatcher: std::sync::Arc<
+            dyn verlet_operations::operation_registry::KernelOperationDispatcher,
+        > = std::sync::Arc::new(process_provider);
         let _ = router
             .operation_registry()
             .set_kernel_dispatcher(
-                crate::VERLET_PROCESS_PACKAGE,
+                crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE,
                 std::sync::Arc::clone(&process_dispatcher),
             )
             .await;
@@ -638,17 +688,18 @@ impl AgentLoop {
         {
             let _ = registry
                 .set_kernel_dispatcher(
-                    crate::VERLET_PROCESS_PACKAGE,
+                    crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE,
                     std::sync::Arc::clone(&process_dispatcher),
                 )
                 .await;
         }
-        let notify_dispatcher: std::sync::Arc<dyn crate::KernelOperationDispatcher> =
-            std::sync::Arc::new(crate::KernelNotifyOperationProvider);
+        let notify_dispatcher: std::sync::Arc<
+            dyn verlet_operations::operation_registry::KernelOperationDispatcher,
+        > = std::sync::Arc::new(crate::agent::agent_process::KernelNotifyOperationProvider);
         let _ = router
             .operation_registry()
             .set_kernel_dispatcher(
-                crate::VERLET_NOTIFY_PACKAGE,
+                crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE,
                 std::sync::Arc::clone(&notify_dispatcher),
             )
             .await;
@@ -657,13 +708,14 @@ impl AgentLoop {
         {
             let _ = registry
                 .set_kernel_dispatcher(
-                    crate::VERLET_NOTIFY_PACKAGE,
+                    crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE,
                     std::sync::Arc::clone(&notify_dispatcher),
                 )
                 .await;
         }
         if let Some(config) = &self.bash_tool_config {
-            let mut provider = crate::BashToolProvider::new(config.clone());
+            let mut provider =
+                crate::capabilities::execution::BashToolProvider::new(config.clone());
             if let Some(dispatcher) = process_handle_dispatcher {
                 provider = provider.with_process_dispatcher(dispatcher);
             }
@@ -674,18 +726,20 @@ impl AgentLoop {
 
     async fn run_session_start_hooks(
         &self,
-        context: &crate::ThreadContext,
-        services: &crate::RuntimeServices,
-        thread_id: crate::ThreadId,
-        events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    ) -> crate::VerletResult<bool> {
+        context: &verlet_runtime_contracts::ThreadContext,
+        services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+        thread_id: verlet_runtime_contracts::ThreadId,
+        events: &tokio::sync::broadcast::Sender<
+            crate::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
+    ) -> crate::kernel::runtime_host::VerletResult<bool> {
         let Some(hook_pipeline) = &self.hook_pipeline else {
             return Ok(false);
         };
         let coordinates = &context.coordinates;
         let outcome = hook_pipeline
             .run_session_start(
-                crate::SessionStartHookRequest {
+                crate::agent::hooks::SessionStartHookRequest {
                     coordinates: coordinates.clone(),
                     parent_thread_id: context.parent_thread_id,
                     source: "startup".to_string(),
@@ -712,32 +766,39 @@ impl AgentLoop {
 
     fn turn_context(
         &self,
-        thread_context: &crate::ThreadContext,
+        thread_context: &verlet_runtime_contracts::ThreadContext,
         turn_id: String,
-        input: &crate::TurnInput,
+        input: &crate::kernel::runtime_host::turn::TurnInput,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> crate::TurnContext {
-        crate::TurnContext::new(thread_context.clone(), turn_id, input, cancellation)
-            .with_effective_model_provider(self.config.provider.clone(), self.config.model.clone())
-            .with_budget(crate::TurnBudget {
-                max_tool_rounds: self.max_tool_rounds,
-                max_output_tokens: Some(self.config.max_tokens),
-                max_context_text_bytes: self
-                    .client
-                    .capabilities()
-                    .and_then(|capabilities| capabilities.context_policy.max_text_bytes),
-            })
+    ) -> crate::kernel::runtime_host::turn::TurnContext {
+        crate::kernel::runtime_host::turn::TurnContext::new(
+            thread_context.clone(),
+            turn_id,
+            input,
+            cancellation,
+        )
+        .with_effective_model_provider(self.config.provider.clone(), self.config.model.clone())
+        .with_budget(verlet_runtime_contracts::TurnBudget {
+            max_tool_rounds: self.max_tool_rounds,
+            max_output_tokens: Some(self.config.max_tokens),
+            max_context_text_bytes: self
+                .client
+                .capabilities()
+                .and_then(|capabilities| capabilities.context_policy.max_text_bytes),
+        })
     }
 
     async fn run_turn(
         &self,
-        turn_context: &crate::TurnContext,
-        turn_delivery_start_sequence: crate::EventSequence,
+        turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+        turn_delivery_start_sequence: verlet_history::EventSequence,
         turn_anchor_timestamp_ms: i64,
-        services: &crate::RuntimeServices,
-        events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+        services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+        events: &tokio::sync::broadcast::Sender<
+            crate::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
         fold_intra_turn_steers: bool,
-    ) -> crate::VerletResult<crate::CanonicalMessage> {
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::CanonicalMessage> {
         let coordinates = turn_context.coordinates();
         let context = services.build_session_context(coordinates).await?;
         let source_cuts = context.source_cuts.clone();
@@ -779,8 +840,8 @@ impl AgentLoop {
             .chain(memory_contexts)
             .chain(instruction_contexts)
             .collect::<Vec<_>>();
-        let compiled_context =
-            crate::AgentContextCompiler::compile(crate::AgentContextCompileInput {
+        let compiled_context = crate::kernel::context_compiler::AgentContextCompiler::compile(
+            crate::kernel::context_compiler::AgentContextCompileInput {
                 system: self.config.system.clone(),
                 static_system_sources: static_context_segments.clone(),
                 session_entries: assembly_session_entries,
@@ -794,7 +855,8 @@ impl AgentLoop {
                 attachments: Vec::new(),
                 tools: self.tool_definitions().await,
                 policy: self.context_compile_policy.clone(),
-            });
+            },
+        );
         let mut request = self
             .config
             .request_from_messages(compiled_context.messages.clone());
@@ -803,7 +865,7 @@ impl AgentLoop {
         if let Some(thinking) = &turn_context.thinking {
             request.thinking = Some(thinking.clone());
         }
-        let transformed = crate::normalize_history_for_target(
+        let transformed = verlet_provider::provider_transform::normalize_history_for_target(
             std::mem::take(&mut request.messages),
             &request.api,
             &request.provider,
@@ -815,15 +877,18 @@ impl AgentLoop {
         let mut provider_truncated_text_bytes = 0;
         let mut provider_retained_text_bytes = agent_diagnostics.retained_text_bytes;
         let mode = if self.config.stream {
-            crate::ProviderRequestMode::Stream
+            verlet_provider::ProviderRequestMode::Stream
         } else {
-            crate::ProviderRequestMode::Complete
+            verlet_provider::ProviderRequestMode::Complete
         };
         if let Some(capabilities) = self.client.capabilities() {
             let (compiled, provider_compilation) =
-                crate::compile_provider_request_context(request, &capabilities.context_policy);
+                verlet_provider::compile_provider_request_context(
+                    request,
+                    &capabilities.context_policy,
+                );
             request = compiled;
-            let transformed = crate::normalize_history_for_target(
+            let transformed = verlet_provider::provider_transform::normalize_history_for_target(
                 std::mem::take(&mut request.messages),
                 &request.api,
                 &request.provider,
@@ -853,10 +918,10 @@ impl AgentLoop {
                 receipt_payload,
             )
             .await?;
-        crate::emit_runtime_event(
+        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
             events,
             coordinates,
-            crate::RuntimeEventKind::ContextCompiled {
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ContextCompiled {
                 diagnostics: agent_diagnostics,
                 provider_dropped_messages,
                 provider_truncated_text_bytes,
@@ -869,12 +934,12 @@ impl AgentLoop {
             coordinates,
             &request,
             mode,
-            crate::RuntimeModelRequestPurpose::Turn,
+            verlet_runtime_contracts::RuntimeModelRequestPurpose::Turn,
             events,
         )
         .await?;
         let response = executed.response;
-        Ok(crate::CanonicalMessage::assistant_with_usage(
+        Ok(verlet_history::CanonicalMessage::assistant_with_usage(
             executed.request.provider,
             executed.request.api,
             executed.request.model,
@@ -884,7 +949,7 @@ impl AgentLoop {
         ))
     }
 
-    async fn tool_definitions(&self) -> Vec<crate::ToolDefinition> {
+    async fn tool_definitions(&self) -> Vec<verlet_provider::ToolDefinition> {
         let mut tools = self.config.tools.clone();
         let Some(tool_router) = &self.tool_router else {
             return tools;
@@ -909,23 +974,26 @@ impl AgentLoop {
 /// terminal `thread.joined` is included and is never overwritten by recovery.
 async fn sweep_cancelled_turn_tool_calls(
     runtime: &AgentLoop,
-    thread_context: &crate::ThreadContext,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-) -> crate::VerletResult<()> {
+    thread_context: &verlet_runtime_contracts::ThreadContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let Some(parent_thread_id) = thread_context.parent_thread_id else {
         return Ok(());
     };
     let coordinates = &thread_context.coordinates;
     let thread_events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let submitted_turns = thread_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::TurnSubmitted)
+        .filter(|event| event.kind == verlet_history::EventKind::TurnSubmitted)
         .filter_map(|event| {
             event
                 .payload
@@ -939,14 +1007,17 @@ async fn sweep_cancelled_turn_tool_calls(
     parent_coordinates.thread_id = parent_thread_id;
     let parent_events = services
         .runtime_store()
-        .read_events(&crate::control_stream_id(&parent_coordinates), None)
+        .read_events(
+            &crate::kernel::control_decision::control_stream_id(&parent_coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut cancelled_turns = std::collections::BTreeSet::new();
     let child_thread_id = coordinates.thread_id.to_string();
     for event in parent_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ThreadJoined)
+        .filter(|event| event.kind == verlet_history::EventKind::ThreadJoined)
     {
         if event
             .payload
@@ -972,14 +1043,14 @@ async fn sweep_cancelled_turn_tool_calls(
     }
 
     let mut completed = std::collections::BTreeMap::<
-        crate::ToolCallSubject,
-        Vec<crate::ToolCallCompletedPayload>,
+        crate::kernel::control_decision::ToolCallSubject,
+        Vec<crate::kernel::control_decision::ToolCallCompletedPayload>,
     >::new();
     let mut next_finish_order = std::collections::HashMap::<String, u64>::new();
     let mut requests = std::collections::BTreeMap::new();
     for event in &thread_events {
         match event.kind {
-            crate::EventKind::ToolCallCompleted => {
+            verlet_history::EventKind::ToolCallCompleted => {
                 let Some(turn_id) = event
                     .payload
                     .get("subject")
@@ -991,11 +1062,11 @@ async fn sweep_cancelled_turn_tool_calls(
                 if !cancelled_turns.contains(turn_id) {
                     continue;
                 }
-                let payload = serde_json::from_value::<crate::ToolCallCompletedPayload>(
+                let payload = serde_json::from_value::<crate::kernel::control_decision::ToolCallCompletedPayload>(
                     event.payload.clone(),
                 )
                 .map_err(|err| {
-                    crate::VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "tool.call.completed {} payload is invalid during cancellation recovery: {err}",
                         event.id
                     ))
@@ -1011,7 +1082,7 @@ async fn sweep_cancelled_turn_tool_calls(
                     .or_default()
                     .push(payload);
             }
-            crate::EventKind::ToolCallRequested => {
+            verlet_history::EventKind::ToolCallRequested => {
                 let Some(turn_id) = event
                     .payload
                     .get("subject")
@@ -1023,11 +1094,11 @@ async fn sweep_cancelled_turn_tool_calls(
                 if !cancelled_turns.contains(turn_id) {
                     continue;
                 }
-                let payload = serde_json::from_value::<crate::ToolCallRequestedPayload>(
+                let payload = serde_json::from_value::<crate::kernel::control_decision::ToolCallRequestedPayload>(
                     event.payload.clone(),
                 )
                 .map_err(|err| {
-                    crate::VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "tool.call.requested {} payload is invalid during cancellation recovery: {err}",
                         event.id
                     ))
@@ -1066,7 +1137,7 @@ async fn sweep_cancelled_turn_tool_calls(
                 .map(serde_json::from_value)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|err| {
-                    crate::VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "tool hold payload is invalid during cancellation recovery: {err}"
                     ))
                 })?,
@@ -1077,14 +1148,14 @@ async fn sweep_cancelled_turn_tool_calls(
         let turn_context = runtime.turn_context(
             thread_context,
             request.subject.turn_id.clone(),
-            &crate::TurnInput::text(""),
+            &crate::kernel::runtime_host::turn::TurnInput::text(""),
             tokio_util::sync::CancellationToken::new(),
         );
         let current_finish_order = *finish_order;
         let outcome = cancelled_tool_call_outcome(
             &witness,
             current_finish_order,
-            crate::ToolCallCancellation::CancelledExceededGrace,
+            crate::kernel::control_decision::ToolCallCancellation::CancelledExceededGrace,
             "tool call was abandoned by an interrupt before daemon shutdown",
         );
         *finish_order = finish_order.saturating_add(1);
@@ -1100,7 +1171,7 @@ async fn sweep_cancelled_turn_tool_calls(
         {
             let success = matches!(
                 result,
-                crate::CanonicalMessage::ToolResult {
+                verlet_history::CanonicalMessage::ToolResult {
                     is_error: false,
                     ..
                 }
@@ -1116,7 +1187,7 @@ async fn sweep_cancelled_turn_tool_calls(
                 success,
                 Some(0),
                 Some(current_finish_order),
-                Some(crate::ToolCallCancellation::CancelledExceededGrace),
+                Some(crate::kernel::control_decision::ToolCallCancellation::CancelledExceededGrace),
             )
             .await?;
         } else {
@@ -1135,52 +1206,58 @@ async fn sweep_cancelled_turn_tool_calls(
 
 async fn run_idle_provider_command(
     runtime: &AgentLoop,
-    thread_context: &crate::ThreadContext,
-    command: crate::ThreadCommand,
-    coordinates: &crate::ThreadCoordinates,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    status: &tokio::sync::watch::Sender<crate::ThreadStatus>,
-    commands: &mut tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+    thread_context: &verlet_runtime_contracts::ThreadContext,
+    command: crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    status: &tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
+    commands: &mut tokio::sync::mpsc::Receiver<
+        crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    >,
     runtime_cancellation: &tokio_util::sync::CancellationToken,
-    pending_commands: &mut std::collections::VecDeque<crate::ThreadCommand>,
+    pending_commands: &mut std::collections::VecDeque<
+        crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    >,
 ) -> bool {
     match command {
-        crate::ThreadCommand::Submit {
+        crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
             turn_id,
             input,
             mode,
         } => {
-            if mode == crate::TurnSubmissionMode::Steer {
+            if mode == verlet_runtime_contracts::TurnSubmissionMode::Steer {
                 match services
                     .append_user_turn_input(coordinates, &turn_id, &input)
                     .await
                 {
                     Ok(entry) => {
                         let _ =
-                            events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
+                            events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror { thread_id, entry });
                     }
                     Err(err) => {
-                        let _ = status.send(crate::ThreadStatus::Failed);
-                        let _ = events.send(crate::ThreadEvent::Failed {
-                            thread_id,
-                            message: err.to_string(),
-                        });
+                        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Failed);
+                        let _ = events.send(
+                            crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                                thread_id,
+                                message: err.to_string(),
+                            },
+                        );
                         return true;
                     }
                 }
-                crate::emit_runtime_event(
+                crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                     events,
                     coordinates,
-                    crate::RuntimeEventKind::PolicyRejected {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::PolicyRejected {
                         code: "no_active_turn".to_string(),
                         message: "steer input requires an active provider turn".to_string(),
                     },
                 );
                 return false;
             }
-            let _ = status.send(crate::ThreadStatus::Running);
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
             if let Err(err) = run_auto_compaction_if_needed(
                 runtime,
                 thread_context,
@@ -1218,24 +1295,28 @@ async fn run_idle_provider_command(
                         {
                             Ok(submitted) => submitted,
                             Err(err) => {
-                                let _ = status.send(crate::ThreadStatus::Failed);
-                                let _ = events.send(crate::ThreadEvent::Failed {
-                                    thread_id,
-                                    message: err.to_string(),
-                                });
+                                let _ = status.send(verlet_runtime_contracts::ThreadStatus::Failed);
+                                let _ = events.send(
+                                    crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                                        thread_id,
+                                        message: err.to_string(),
+                                    },
+                                );
                                 return true;
                             }
                         };
                         let _ =
-                            events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
+                            events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror { thread_id, entry });
                         (submitted.id, submitted.sequence, submitted.created_at_ms)
                     }
                     Err(err) => {
-                        let _ = status.send(crate::ThreadStatus::Failed);
-                        let _ = events.send(crate::ThreadEvent::Failed {
-                            thread_id,
-                            message: err.to_string(),
-                        });
+                        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Failed);
+                        let _ = events.send(
+                            crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
+                                thread_id,
+                                message: err.to_string(),
+                            },
+                        );
                         return true;
                     }
                 };
@@ -1258,12 +1339,12 @@ async fn run_idle_provider_command(
             )
             .await
         }
-        crate::ThreadCommand::Compact {
+        crate::kernel::runtime_host::runtime_api::ThreadCommand::Compact {
             turn_id,
             trigger,
             summary,
         } => {
-            let _ = status.send(crate::ThreadStatus::Running);
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
             match run_compaction(
                 runtime,
                 thread_context,
@@ -1277,7 +1358,7 @@ async fn run_idle_provider_command(
             .await
             {
                 Ok(()) => {
-                    let _ = status.send(crate::ThreadStatus::Idle);
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     false
                 }
                 Err(err) => {
@@ -1293,8 +1374,11 @@ async fn run_idle_provider_command(
                 }
             }
         }
-        crate::ThreadCommand::ResumeToolCall { turn_id, call_id } => {
-            let _ = status.send(crate::ThreadStatus::Running);
+        crate::kernel::runtime_host::runtime_api::ThreadCommand::ResumeToolCall {
+            turn_id,
+            call_id,
+        } => {
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
             match resume_pending_tool_call(
                 runtime,
                 thread_context,
@@ -1315,7 +1399,7 @@ async fn run_idle_provider_command(
                         runtime,
                         thread_context,
                         turn_id,
-                        crate::TurnInput::text(""),
+                        crate::kernel::runtime_host::turn::TurnInput::text(""),
                         source_event_id,
                         turn_delivery_start_sequence,
                         turn_anchor_timestamp_ms,
@@ -1331,7 +1415,7 @@ async fn run_idle_provider_command(
                     .await
                 }
                 Ok(ToolResumeOutcome::StillWaiting | ToolResumeOutcome::AlreadyCompleted) => {
-                    let _ = status.send(crate::ThreadStatus::Idle);
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     false
                 }
                 Err(err) => {
@@ -1347,31 +1431,44 @@ async fn run_idle_provider_command(
                 }
             }
         }
-        crate::ThreadCommand::Cancel { reason } => {
-            let _ = status.send(crate::ThreadStatus::Cancelling);
-            let _ = events.send(crate::ThreadEvent::Signal {
-                thread_id,
-                signal: crate::ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
-            });
-            let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
-            let _ = status.send(crate::ThreadStatus::Idle);
-            false
-        }
-        crate::ThreadCommand::CancelTurn { .. } => false,
-        crate::ThreadCommand::Shutdown => {
-            let _ = events.send(crate::ThreadEvent::Signal {
-                thread_id,
-                signal: crate::ThreadSignal::shutdown(coordinates),
-            });
-            crate::emit_runtime_event(
-                events,
-                coordinates,
-                crate::RuntimeEventKind::Terminal {
-                    state: crate::RuntimeTerminalState::Stopped,
+        crate::kernel::runtime_host::runtime_api::ThreadCommand::Cancel { reason } => {
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Cancelling);
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                    thread_id,
+                    signal: verlet_runtime_contracts::ThreadSignal::interrupt_cancel(
+                        coordinates,
+                        reason.clone(),
+                    ),
                 },
             );
-            let _ = status.send(crate::ThreadStatus::Stopped);
-            let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
+                    thread_id,
+                    reason,
+                },
+            );
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
+            false
+        }
+        crate::kernel::runtime_host::runtime_api::ThreadCommand::CancelTurn { .. } => false,
+        crate::kernel::runtime_host::runtime_api::ThreadCommand::Shutdown => {
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                    thread_id,
+                    signal: verlet_runtime_contracts::ThreadSignal::shutdown(coordinates),
+                },
+            );
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
+                events,
+                coordinates,
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                    state: verlet_runtime_contracts::RuntimeTerminalState::Stopped,
+                },
+            );
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+            let _ = events
+                .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { thread_id });
             true
         }
     }
@@ -1379,13 +1476,13 @@ async fn run_idle_provider_command(
 
 async fn run_auto_compaction_if_needed(
     runtime: &AgentLoop,
-    thread_context: &crate::ThreadContext,
+    thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: String,
-    coordinates: &crate::ThreadCoordinates,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-) -> crate::VerletResult<()> {
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let Some(max_text_bytes) = runtime.compaction_policy.auto_max_context_text_bytes else {
         return Ok(());
     };
@@ -1411,25 +1508,27 @@ async fn run_auto_compaction_if_needed(
     } else {
         persisted_thread_anchor_timestamp_ms(services, coordinates).await?
     };
-    let compiled_context = crate::AgentContextCompiler::compile(crate::AgentContextCompileInput {
-        system: runtime.config.system.clone(),
-        static_system_sources: static_context_segments,
-        session_entries: context.entries,
-        turn_anchor_timestamp_ms,
-        turn_context: runtime
-            .turn_context(
-                thread_context,
-                turn_id.clone(),
-                &crate::TurnInput::text(""),
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .snapshot(),
-        hook_contexts: Vec::new(),
-        environment_contexts,
-        attachments: Vec::new(),
-        tools: Vec::new(),
-        policy: crate::AgentContextCompilePolicy::unbounded(),
-    });
+    let compiled_context = crate::kernel::context_compiler::AgentContextCompiler::compile(
+        crate::kernel::context_compiler::AgentContextCompileInput {
+            system: runtime.config.system.clone(),
+            static_system_sources: static_context_segments,
+            session_entries: context.entries,
+            turn_anchor_timestamp_ms,
+            turn_context: runtime
+                .turn_context(
+                    thread_context,
+                    turn_id.clone(),
+                    &crate::kernel::runtime_host::turn::TurnInput::text(""),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .snapshot(),
+            hook_contexts: Vec::new(),
+            environment_contexts,
+            attachments: Vec::new(),
+            tools: Vec::new(),
+            policy: crate::kernel::context_compiler::AgentContextCompilePolicy::unbounded(),
+        },
+    );
     if compiled_context.diagnostics.retained_text_bytes <= max_text_bytes {
         return Ok(());
     }
@@ -1437,7 +1536,7 @@ async fn run_auto_compaction_if_needed(
         runtime,
         thread_context,
         turn_id,
-        crate::CompactionTrigger::Auto,
+        crate::kernel::compaction::CompactionTrigger::Auto,
         None,
         services,
         thread_id,
@@ -1447,19 +1546,22 @@ async fn run_auto_compaction_if_needed(
 }
 
 async fn persisted_thread_anchor_timestamp_ms(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
-) -> crate::VerletResult<i64> {
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> crate::kernel::runtime_host::VerletResult<i64> {
     services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
         .into_iter()
         .min_by_key(|event| event.sequence.get())
         .map(|event| event.created_at_ms)
         .ok_or_else(|| {
-            crate::VerletError::History(format!(
+            crate::kernel::runtime_host::VerletError::History(format!(
                 "thread {} has no persisted context timestamp anchor",
                 coordinates.thread_id
             ))
@@ -1468,15 +1570,15 @@ async fn persisted_thread_anchor_timestamp_ms(
 
 async fn run_compaction(
     runtime: &AgentLoop,
-    thread_context: &crate::ThreadContext,
+    thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: String,
-    trigger: crate::CompactionTrigger,
+    trigger: crate::kernel::compaction::CompactionTrigger,
     requested_summary: Option<String>,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-) -> crate::VerletResult<()> {
-    let input = crate::TurnInput::text("");
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let input = crate::kernel::runtime_host::turn::TurnInput::text("");
     let turn_context = runtime.turn_context(
         thread_context,
         turn_id,
@@ -1486,7 +1588,7 @@ async fn run_compaction(
     if let Some(hook_pipeline) = &runtime.hook_pipeline {
         let outcome = hook_pipeline
             .run_pre_compact(
-                crate::PreCompactHookRequest {
+                crate::agent::hooks::PreCompactHookRequest {
                     turn_context: turn_context.snapshot(),
                     trigger,
                     requested_summary: requested_summary.clone(),
@@ -1502,10 +1604,10 @@ async fn run_compaction(
         )
         .await?;
         if outcome.should_stop {
-            crate::emit_runtime_event(
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 events,
                 turn_context.coordinates(),
-                crate::RuntimeEventKind::PolicyRejected {
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::PolicyRejected {
                     code: "pre_compact_hook".to_string(),
                     message: outcome
                         .stop_reason
@@ -1535,23 +1637,27 @@ async fn run_compaction(
         .append_session_entry_with_provenance(
             turn_context.coordinates(),
             None,
-            crate::SessionEntryKind::Compaction {
+            verlet_history::SessionEntryKind::Compaction {
                 summary: summary.clone(),
             },
-            crate::EventProvenance {
-                source_streams: vec![crate::EventStreamId::for_thread(turn_context.coordinates())],
+            verlet_history::EventProvenance {
+                source_streams: vec![verlet_history::EventStreamId::for_thread(
+                    turn_context.coordinates(),
+                )],
                 source_event_ids: vec![summary_event.id],
                 discharged_by: Some("projection:context-summarizer".to_string()),
                 function: Some("session_entry_compaction/v1".to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         )
         .await?;
-    let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
-    crate::emit_runtime_event(
+    let _ = events.send(
+        crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror { thread_id, entry },
+    );
+    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
         events,
         turn_context.coordinates(),
-        crate::RuntimeEventKind::Compaction {
+        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Compaction {
             trigger,
             summary: summary.clone(),
         },
@@ -1560,7 +1666,7 @@ async fn run_compaction(
     if let Some(hook_pipeline) = &runtime.hook_pipeline {
         let outcome = hook_pipeline
             .run_post_compact(
-                crate::PostCompactHookRequest {
+                crate::agent::hooks::PostCompactHookRequest {
                     turn_context: turn_context.snapshot(),
                     trigger,
                     summary,
@@ -1576,10 +1682,10 @@ async fn run_compaction(
         )
         .await?;
         if outcome.should_stop {
-            crate::emit_runtime_event(
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 events,
                 turn_context.coordinates(),
-                crate::RuntimeEventKind::PolicyRejected {
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::PolicyRejected {
                     code: "post_compact_hook".to_string(),
                     message: outcome
                         .stop_reason
@@ -1593,29 +1699,29 @@ async fn run_compaction(
 
 async fn generate_compaction_summary(
     runtime: &AgentLoop,
-    turn_context: &crate::TurnContext,
-    services: &crate::RuntimeServices,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-) -> crate::VerletResult<String> {
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+) -> crate::kernel::runtime_host::VerletResult<String> {
     let context = services
         .build_session_context(turn_context.coordinates())
         .await?;
     let mut messages = Vec::new();
-    crate::kernel::history::append_model_visible_messages(
+    verlet_history::append_model_visible_messages(
         &reattach_late_tool_result_entries(context.entries),
         &mut messages,
     );
-    let fallback = crate::deterministic_compaction_summary(&messages);
+    let fallback = crate::kernel::compaction::deterministic_compaction_summary(&messages);
     if messages.is_empty() {
         return Ok(fallback);
     }
-    let normalized = crate::normalize_history_for_target(
+    let normalized = verlet_provider::provider_transform::normalize_history_for_target(
         messages,
         &runtime.config.api,
         &runtime.config.provider,
     );
     let mut request = runtime.config.request_from_messages(normalized.messages);
-    request.system.push(crate::SystemBlock::text(
+    request.system.push(verlet_provider::SystemBlock::text(
         "Summarize the conversation so far for continuation. Preserve decisions, open tasks, tool results, and constraints. Return only the summary.",
     ));
     request.tools = Vec::new();
@@ -1626,8 +1732,8 @@ async fn generate_compaction_summary(
         turn_context,
         turn_context.coordinates(),
         &request,
-        crate::ProviderRequestMode::Complete,
-        crate::RuntimeModelRequestPurpose::Compaction,
+        verlet_provider::ProviderRequestMode::Complete,
+        verlet_runtime_contracts::RuntimeModelRequestPurpose::Compaction,
         events,
     )
     .await?;
@@ -1641,13 +1747,13 @@ async fn generate_compaction_summary(
 }
 
 struct ExecutedProviderResponse {
-    request: crate::ProviderRequest,
-    response: crate::ProviderResponse,
+    request: verlet_provider::ProviderRequest,
+    response: verlet_provider::ProviderResponse,
 }
 
 #[derive(Clone, Debug)]
 struct ModelRequestAttemptError {
-    class: crate::RuntimeModelRequestErrorClass,
+    class: verlet_runtime_contracts::RuntimeModelRequestErrorClass,
     message: String,
 }
 
@@ -1655,30 +1761,30 @@ impl ModelRequestAttemptError {
     fn retryable(&self) -> bool {
         matches!(
             self.class,
-            crate::RuntimeModelRequestErrorClass::Retryable
-                | crate::RuntimeModelRequestErrorClass::RateLimited
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable
+                | verlet_runtime_contracts::RuntimeModelRequestErrorClass::RateLimited
         )
     }
 
     fn fallback_eligible(&self) -> bool {
         matches!(
             self.class,
-            crate::RuntimeModelRequestErrorClass::Retryable
-                | crate::RuntimeModelRequestErrorClass::RateLimited
-                | crate::RuntimeModelRequestErrorClass::UnsupportedCapability
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable
+                | verlet_runtime_contracts::RuntimeModelRequestErrorClass::RateLimited
+                | verlet_runtime_contracts::RuntimeModelRequestErrorClass::UnsupportedCapability
         )
     }
 }
 
 async fn execute_provider_request(
     runtime: &AgentLoop,
-    turn_context: &crate::TurnContext,
-    coordinates: &crate::ThreadCoordinates,
-    request: &crate::ProviderRequest,
-    mode: crate::ProviderRequestMode,
-    purpose: crate::RuntimeModelRequestPurpose,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-) -> crate::VerletResult<ExecutedProviderResponse> {
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    request: &verlet_provider::ProviderRequest,
+    mode: verlet_provider::ProviderRequestMode,
+    purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+) -> crate::kernel::runtime_host::VerletResult<ExecutedProviderResponse> {
     let request_mode = mode;
     let mode = runtime_request_mode(mode);
     let mut endpoints = Vec::with_capacity(runtime.model_request_fallbacks.len() + 1);
@@ -1702,10 +1808,10 @@ async fn execute_provider_request(
                 endpoint_index,
                 attempt,
             );
-            crate::emit_runtime_event(
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 events,
                 coordinates,
-                crate::RuntimeEventKind::ModelRequestStarted {
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestStarted {
                     request_id: request_id.clone(),
                     turn_id: turn_context.turn_id.clone(),
                     provider: request.provider.clone(),
@@ -1733,10 +1839,10 @@ async fn execute_provider_request(
             let duration_ms = elapsed_ms(started_at);
             match result {
                 Ok(response) => {
-                    crate::emit_runtime_event(
+                    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
-                        crate::RuntimeEventKind::ModelRequestCompleted {
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestCompleted {
                             request_id,
                             turn_id: turn_context.turn_id.clone(),
                             provider: request.provider.clone(),
@@ -1752,10 +1858,10 @@ async fn execute_provider_request(
                     return Ok(ExecutedProviderResponse { request, response });
                 }
                 Err(error) => {
-                    crate::emit_runtime_event(
+                    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
-                        crate::RuntimeEventKind::ModelRequestFailed {
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestFailed {
                             request_id: request_id.clone(),
                             turn_id: turn_context.turn_id.clone(),
                             provider: request.provider.clone(),
@@ -1783,10 +1889,10 @@ async fn execute_provider_request(
                             next_attempt,
                         );
                         let delay_ms = retry_policy.delay_ms(attempt);
-                        crate::emit_runtime_event(
+                        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                             events,
                             coordinates,
-                            crate::RuntimeEventKind::ModelRequestRetryScheduled {
+                            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestRetryScheduled {
                                 request_id,
                                 next_request_id,
                                 turn_id: turn_context.turn_id.clone(),
@@ -1806,8 +1912,8 @@ async fn execute_provider_request(
                             tokio::select! {
                                 _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
                                 _ = turn_context.cancellation.cancelled() => {
-                                    return Err(crate::VerletError::RuntimeExecution(
-                                        crate::ProviderError::Cancelled.to_string(),
+                                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                                        verlet_provider::ProviderError::Cancelled.to_string(),
                                     ));
                                 }
                             }
@@ -1821,10 +1927,10 @@ async fn execute_provider_request(
                     {
                         let next_request =
                             request_for_endpoint(&request, &endpoints[endpoint_index + 1].config);
-                        crate::emit_runtime_event(
+                        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                             events,
                             coordinates,
-                            crate::RuntimeEventKind::ModelRequestFallbackSelected {
+                            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestFallbackSelected {
                                 request_id,
                                 turn_id: turn_context.turn_id.clone(),
                                 from_provider: request.provider.clone(),
@@ -1843,13 +1949,15 @@ async fn execute_provider_request(
                         continue 'endpoints;
                     }
 
-                    return Err(crate::VerletError::RuntimeExecution(error.message));
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                        error.message,
+                    ));
                 }
             }
         }
     }
 
-    Err(crate::VerletError::RuntimeExecution(
+    Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
         last_error
             .map(|error| error.message)
             .unwrap_or_else(|| "provider request did not run".to_string()),
@@ -1858,25 +1966,25 @@ async fn execute_provider_request(
 
 async fn execute_provider_request_attempt(
     endpoint: &ModelRequestEndpoint,
-    turn_context: &crate::TurnContext,
-    coordinates: &crate::ThreadCoordinates,
-    request: &crate::ProviderRequest,
-    request_mode: crate::ProviderRequestMode,
-    mode: crate::RuntimeModelRequestMode,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-) -> Result<crate::ProviderResponse, ModelRequestAttemptError> {
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    request: &verlet_provider::ProviderRequest,
+    request_mode: verlet_provider::ProviderRequestMode,
+    mode: verlet_runtime_contracts::RuntimeModelRequestMode,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+) -> Result<verlet_provider::ProviderResponse, ModelRequestAttemptError> {
     if let Some(capabilities) = endpoint.client.capabilities() {
         capabilities
             .validate_request(request, request_mode)
             .map_err(classify_provider_error)?;
     }
     match mode {
-        crate::RuntimeModelRequestMode::Complete => endpoint
+        verlet_runtime_contracts::RuntimeModelRequestMode::Complete => endpoint
             .client
             .complete_cancellable(request, turn_context.cancellation.clone())
             .await
             .map_err(classify_provider_error),
-        crate::RuntimeModelRequestMode::Stream => {
+        verlet_runtime_contracts::RuntimeModelRequestMode::Stream => {
             let stream_events = endpoint
                 .client
                 .stream_cancellable(request, turn_context.cancellation.clone())
@@ -1888,9 +1996,9 @@ async fn execute_provider_request_attempt(
 }
 
 fn request_for_endpoint(
-    request: &crate::ProviderRequest,
+    request: &verlet_provider::ProviderRequest,
     config: &AgentLoopConfig,
-) -> crate::ProviderRequest {
+) -> verlet_provider::ProviderRequest {
     let mut request = request.clone();
     request.api = config.api.clone();
     request.provider = config.provider.clone();
@@ -1899,9 +2007,9 @@ fn request_for_endpoint(
 }
 
 fn model_request_id(
-    turn_context: &crate::TurnContext,
-    purpose: crate::RuntimeModelRequestPurpose,
-    mode: crate::RuntimeModelRequestMode,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
+    mode: verlet_runtime_contracts::RuntimeModelRequestMode,
     message_count: usize,
     endpoint_index: usize,
     attempt: u32,
@@ -1916,25 +2024,30 @@ fn model_request_id(
     )
 }
 
-fn classify_provider_error(error: crate::ProviderError) -> ModelRequestAttemptError {
+fn classify_provider_error(error: verlet_provider::ProviderError) -> ModelRequestAttemptError {
     let message = error.to_string();
     let class = match error {
-        crate::ProviderError::Cancelled => crate::RuntimeModelRequestErrorClass::Cancelled,
-        crate::ProviderError::UnsupportedCapability { .. }
-        | crate::ProviderError::ApiMismatch { .. } => {
-            crate::RuntimeModelRequestErrorClass::UnsupportedCapability
+        verlet_provider::ProviderError::Cancelled => {
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Cancelled
         }
-        crate::ProviderError::Http(_) => crate::RuntimeModelRequestErrorClass::Retryable,
-        crate::ProviderError::HttpStatus { status, .. } if status.as_u16() == 429 => {
-            crate::RuntimeModelRequestErrorClass::RateLimited
+        verlet_provider::ProviderError::UnsupportedCapability { .. }
+        | verlet_provider::ProviderError::ApiMismatch { .. } => {
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::UnsupportedCapability
         }
-        crate::ProviderError::HttpStatus { status, .. }
+        verlet_provider::ProviderError::Http(_) => {
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable
+        }
+        verlet_provider::ProviderError::HttpStatus { status, .. } if status.as_u16() == 429 => {
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::RateLimited
+        }
+        verlet_provider::ProviderError::HttpStatus { status, .. }
             if status.is_server_error() || matches!(status.as_u16(), 408 | 409 | 425) =>
         {
-            crate::RuntimeModelRequestErrorClass::Retryable
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable
         }
-        crate::ProviderError::Decode(_) | crate::ProviderError::HttpStatus { .. } => {
-            crate::RuntimeModelRequestErrorClass::Fatal
+        verlet_provider::ProviderError::Decode(_)
+        | verlet_provider::ProviderError::HttpStatus { .. } => {
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Fatal
         }
     };
     ModelRequestAttemptError { class, message }
@@ -1942,29 +2055,37 @@ fn classify_provider_error(error: crate::ProviderError) -> ModelRequestAttemptEr
 
 fn stream_assembly_error(message: impl Into<String>) -> ModelRequestAttemptError {
     ModelRequestAttemptError {
-        class: crate::RuntimeModelRequestErrorClass::StreamAssembly,
+        class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::StreamAssembly,
         message: message.into(),
     }
 }
 
-fn runtime_request_mode(mode: crate::ProviderRequestMode) -> crate::RuntimeModelRequestMode {
+fn runtime_request_mode(
+    mode: verlet_provider::ProviderRequestMode,
+) -> verlet_runtime_contracts::RuntimeModelRequestMode {
     match mode {
-        crate::ProviderRequestMode::Complete => crate::RuntimeModelRequestMode::Complete,
-        crate::ProviderRequestMode::Stream => crate::RuntimeModelRequestMode::Stream,
+        verlet_provider::ProviderRequestMode::Complete => {
+            verlet_runtime_contracts::RuntimeModelRequestMode::Complete
+        }
+        verlet_provider::ProviderRequestMode::Stream => {
+            verlet_runtime_contracts::RuntimeModelRequestMode::Stream
+        }
     }
 }
 
-fn provider_api_event_label(api: &crate::ProviderApi) -> String {
+fn provider_api_event_label(api: &verlet_history::ProviderApi) -> String {
     match api {
-        crate::ProviderApi::OpenAIResponses => "openai_responses".to_string(),
-        crate::ProviderApi::OpenAIChatCompletions => "openai_chat_completions".to_string(),
-        crate::ProviderApi::AnthropicMessages => "anthropic_messages".to_string(),
-        crate::ProviderApi::Other(provider_family) => provider_family.clone(),
+        verlet_history::ProviderApi::OpenAIResponses => "openai_responses".to_string(),
+        verlet_history::ProviderApi::OpenAIChatCompletions => "openai_chat_completions".to_string(),
+        verlet_history::ProviderApi::AnthropicMessages => "anthropic_messages".to_string(),
+        verlet_history::ProviderApi::Other(provider_family) => provider_family.clone(),
     }
 }
 
-fn runtime_usage_from_canonical(usage: &crate::CanonicalUsage) -> crate::RuntimeUsage {
-    crate::RuntimeUsage {
+fn runtime_usage_from_canonical(
+    usage: &verlet_history::CanonicalUsage,
+) -> verlet_runtime_contracts::RuntimeUsage {
+    verlet_runtime_contracts::RuntimeUsage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
@@ -1983,15 +2104,14 @@ fn exhausted_tool_round_budget(
     max_tool_rounds.filter(|max_tool_rounds| completed_rounds >= *max_tool_rounds)
 }
 
-fn response_content_text(content: &[crate::CanonicalContent]) -> String {
+fn response_content_text(content: &[verlet_history::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. }
-            | crate::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
-            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {
-                None
-            }
+            verlet_history::CanonicalContent::Text { text, .. }
+            | verlet_history::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -1999,20 +2119,24 @@ fn response_content_text(content: &[crate::CanonicalContent]) -> String {
 
 async fn run_provider_turn(
     runtime: &AgentLoop,
-    thread_context: &crate::ThreadContext,
+    thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: String,
-    turn_input: crate::TurnInput,
-    turn_source_event_id: crate::EventRecordId,
-    turn_delivery_start_sequence: crate::EventSequence,
+    turn_input: crate::kernel::runtime_host::turn::TurnInput,
+    turn_source_event_id: verlet_history::EventRecordId,
+    turn_delivery_start_sequence: verlet_history::EventSequence,
     turn_anchor_timestamp_ms: i64,
-    coordinates: &crate::ThreadCoordinates,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    status: &tokio::sync::watch::Sender<crate::ThreadStatus>,
-    commands: &mut tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    status: &tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
+    commands: &mut tokio::sync::mpsc::Receiver<
+        crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    >,
     runtime_cancellation: &tokio_util::sync::CancellationToken,
-    pending_commands: &mut std::collections::VecDeque<crate::ThreadCommand>,
+    pending_commands: &mut std::collections::VecDeque<
+        crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    >,
 ) -> bool {
     let mut tool_rounds = match persisted_tool_rounds_for_turn(
         services,
@@ -2036,15 +2160,18 @@ async fn run_provider_turn(
         }
     };
     let tool_cancellation_grace =
-        match crate::active_manifest_bind_receipt(services.runtime_store().as_ref(), coordinates)
-            .await
+        match crate::kernel::control_decision::active_manifest_bind_receipt(
+            services.runtime_store().as_ref(),
+            coordinates,
+        )
+        .await
         {
             Ok(Some((_, receipt))) => receipt
                 .effective_runtime
                 .cancellation_grace_ms
                 .map(std::time::Duration::from_millis)
-                .unwrap_or(crate::DEFAULT_TOOL_CANCELLATION_GRACE),
-            Ok(None) => crate::DEFAULT_TOOL_CANCELLATION_GRACE,
+                .unwrap_or(crate::agent::agent_tool_router::DEFAULT_TOOL_CANCELLATION_GRACE),
+            Ok(None) => crate::agent::agent_tool_router::DEFAULT_TOOL_CANCELLATION_GRACE,
             Err(err) => {
                 fail_provider_turn(
                     coordinates,
@@ -2067,7 +2194,7 @@ async fn run_provider_turn(
     if let Some(hook_pipeline) = &runtime.hook_pipeline {
         let outcome = hook_pipeline
             .run_user_prompt_submit(
-                crate::UserPromptSubmitHookRequest {
+                crate::agent::hooks::UserPromptSubmitHookRequest {
                     turn_context: turn_context.snapshot(),
                     prompt: turn_input.text_projection(),
                 },
@@ -2108,43 +2235,45 @@ async fn run_provider_turn(
             return true;
         }
         if outcome.should_stop {
-            crate::emit_runtime_event(
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 events,
                 coordinates,
-                crate::RuntimeEventKind::Terminal {
-                    state: crate::RuntimeTerminalState::Stopped,
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                    state: verlet_runtime_contracts::RuntimeTerminalState::Stopped,
                 },
             );
-            let _ = status.send(crate::ThreadStatus::Stopped);
-            let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+            let _ = events
+                .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { thread_id });
             return true;
         }
     }
     if tool_rounds > 0 {
-        let pending_suspensions = match crate::list_pending_tool_call_suspensions(
-            services.runtime_store().as_ref(),
-            coordinates,
-        )
-        .await
-        {
-            Ok(pending) => pending,
-            Err(err) => {
-                fail_provider_turn(
-                    coordinates,
-                    thread_id,
-                    events,
-                    status,
-                    "history",
-                    err.to_string(),
-                );
-                return true;
-            }
-        };
+        let pending_suspensions =
+            match crate::kernel::control_decision::list_pending_tool_call_suspensions(
+                services.runtime_store().as_ref(),
+                coordinates,
+            )
+            .await
+            {
+                Ok(pending) => pending,
+                Err(err) => {
+                    fail_provider_turn(
+                        coordinates,
+                        thread_id,
+                        events,
+                        status,
+                        "history",
+                        err.to_string(),
+                    );
+                    return true;
+                }
+            };
         if pending_suspensions
             .iter()
             .any(|pending| pending.subject.turn_id == turn_id)
         {
-            let _ = status.send(crate::ThreadStatus::Idle);
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
             return false;
         }
         let pending_batch =
@@ -2183,7 +2312,7 @@ async fn run_provider_turn(
             .await
             {
                 ToolBatchAwaitOutcome::Completed(Ok(ToolAppendOutcome::Suspended)) => {
-                    let _ = status.send(crate::ThreadStatus::Idle);
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     return false;
                 }
                 ToolBatchAwaitOutcome::Completed(Ok(_)) => {}
@@ -2199,27 +2328,36 @@ async fn run_provider_turn(
                     return true;
                 }
                 ToolBatchAwaitOutcome::Cancelled { reason } => {
-                    crate::emit_runtime_event(
+                    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
-                        crate::RuntimeEventKind::Cancelled {
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Cancelled {
                             reason: reason.clone(),
                         },
                     );
-                    crate::emit_runtime_event(
+                    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
-                        crate::RuntimeEventKind::Terminal {
-                            state: crate::RuntimeTerminalState::Cancelled,
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                            state: verlet_runtime_contracts::RuntimeTerminalState::Cancelled,
                         },
                     );
-                    let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
-                    let _ = status.send(crate::ThreadStatus::Idle);
+                    let _ = events.send(
+                        crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
+                            thread_id,
+                            reason,
+                        },
+                    );
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     return false;
                 }
                 ToolBatchAwaitOutcome::Shutdown => {
-                    let _ = status.send(crate::ThreadStatus::Stopped);
-                    let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+                    let _ = events.send(
+                        crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped {
+                            thread_id,
+                        },
+                    );
                     return true;
                 }
                 ToolBatchAwaitOutcome::Failed { code, reason } => {
@@ -2279,34 +2417,43 @@ async fn run_provider_turn(
                 {
                     ActiveProviderCommandOutcome::Continue => {}
                     ActiveProviderCommandOutcome::Cancelled { reason } => {
-                        crate::emit_runtime_event(
+                        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                             events,
                             coordinates,
-                            crate::RuntimeEventKind::Cancelled {
+                            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Cancelled {
                                 reason: reason.clone(),
                             },
                         );
-                        crate::emit_runtime_event(
+                        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                             events,
                             coordinates,
-                            crate::RuntimeEventKind::Terminal {
-                                state: crate::RuntimeTerminalState::Cancelled,
+                            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                                state: verlet_runtime_contracts::RuntimeTerminalState::Cancelled,
                             },
                         );
-                        let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
-                        let _ = status.send(crate::ThreadStatus::Idle);
+                        let _ = events.send(
+                            crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
+                                thread_id,
+                                reason,
+                            },
+                        );
+                        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                         return false;
                     }
                     ActiveProviderCommandOutcome::Shutdown => {
-                        crate::emit_runtime_event(
+                        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                             events,
                             coordinates,
-                            crate::RuntimeEventKind::Terminal {
-                                state: crate::RuntimeTerminalState::Stopped,
+                            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                                state: verlet_runtime_contracts::RuntimeTerminalState::Stopped,
                             },
                         );
-                        let _ = status.send(crate::ThreadStatus::Stopped);
-                        let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+                        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+                        let _ = events.send(
+                            crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped {
+                                thread_id,
+                            },
+                        );
                         return true;
                     }
                     ActiveProviderCommandOutcome::Failed { code, reason } => {
@@ -2338,7 +2485,7 @@ async fn run_provider_turn(
                     append_terminal_join_until_recorded(
                         services,
                         &turn_context.thread,
-                        crate::ThreadTerminalState::Cancelled,
+                        verlet_history::ThreadTerminalState::Cancelled,
                         Some(reason.clone()),
                         Some(turn_source_event_id),
                     )
@@ -2388,28 +2535,33 @@ async fn run_provider_turn(
                 append_terminal_join_until_recorded(
                     services,
                     &turn_context.thread,
-                    crate::ThreadTerminalState::Cancelled,
+                    verlet_history::ThreadTerminalState::Cancelled,
                     Some(reason.clone()),
                     Some(turn_source_event_id),
                 )
                 .await;
             }
-            crate::emit_runtime_event(
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 events,
                 coordinates,
-                crate::RuntimeEventKind::Cancelled {
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Cancelled {
                     reason: reason.clone(),
                 },
             );
-            crate::emit_runtime_event(
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 events,
                 coordinates,
-                crate::RuntimeEventKind::Terminal {
-                    state: crate::RuntimeTerminalState::Cancelled,
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                    state: verlet_runtime_contracts::RuntimeTerminalState::Cancelled,
                 },
             );
-            let _ = events.send(crate::ThreadEvent::Cancelled { thread_id, reason });
-            let _ = status.send(crate::ThreadStatus::Idle);
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
+                    thread_id,
+                    reason,
+                },
+            );
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
             return false;
         } else if !failed {
             match result {
@@ -2420,18 +2572,20 @@ async fn run_provider_turn(
                     if !runtime.config.stream
                         && let Some(usage) = usage_from_message(&message)
                     {
-                        crate::emit_runtime_event(
+                        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                             events,
                             coordinates,
-                            crate::RuntimeEventKind::Usage { usage },
+                            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Usage {
+                                usage,
+                            },
                         );
                     }
                     if !runtime.config.stream {
                         for tool_call in &tool_calls {
-                            crate::emit_runtime_event(
+                            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                                 events,
                                 coordinates,
-                                crate::RuntimeEventKind::ToolCallStarted {
+                                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
                                     call_id: tool_call.id.clone(),
                                     name: tool_call.name.clone(),
                                     input: tool_call.arguments.clone(),
@@ -2443,7 +2597,7 @@ async fn run_provider_turn(
                         .append_agent_loop_session_entry(
                             coordinates,
                             None,
-                            crate::SessionEntryKind::Message {
+                            verlet_history::SessionEntryKind::Message {
                                 message: message.clone(),
                             },
                             vec![turn_source_event_id],
@@ -2453,12 +2607,17 @@ async fn run_provider_turn(
                         Ok(entry) => {
                             let assistant_entry_id = entry.entry_id;
                             let _ = events
-                                .send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
+                                .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror { thread_id, entry });
                             if !runtime.config.stream {
                                 emit_non_stream_content_events(events, coordinates, &message);
                             }
                             if !text.is_empty() {
-                                let _ = events.send(crate::ThreadEvent::Output { thread_id, text });
+                                let _ = events.send(
+                                    crate::kernel::runtime_host::runtime_api::ThreadEvent::Output {
+                                        thread_id,
+                                        text,
+                                    },
+                                );
                             }
                             if runtime.tool_router.is_some() && !tool_calls.is_empty() {
                                 if let Some(max_tool_rounds) = exhausted_tool_round_budget(
@@ -2508,31 +2667,34 @@ async fn run_provider_turn(
                                             failure_reason = Some(err.to_string());
                                         }
                                         ToolBatchAwaitOutcome::Cancelled { reason } => {
-                                            crate::emit_runtime_event(
+                                            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                                                 events,
                                                 coordinates,
-                                                crate::RuntimeEventKind::Cancelled {
+                                                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Cancelled {
                                                     reason: reason.clone(),
                                                 },
                                             );
-                                            crate::emit_runtime_event(
+                                            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                                                 events,
                                                 coordinates,
-                                                crate::RuntimeEventKind::Terminal {
-                                                    state: crate::RuntimeTerminalState::Cancelled,
+                                                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                                                    state: verlet_runtime_contracts::RuntimeTerminalState::Cancelled,
                                                 },
                                             );
-                                            let _ = events.send(crate::ThreadEvent::Cancelled {
+                                            let _ = events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Cancelled {
                                                 thread_id,
                                                 reason,
                                             });
-                                            let _ = status.send(crate::ThreadStatus::Idle);
+                                            let _ = status
+                                                .send(verlet_runtime_contracts::ThreadStatus::Idle);
                                             return false;
                                         }
                                         ToolBatchAwaitOutcome::Shutdown => {
-                                            let _ = status.send(crate::ThreadStatus::Stopped);
+                                            let _ = status.send(
+                                                verlet_runtime_contracts::ThreadStatus::Stopped,
+                                            );
                                             let _ = events
-                                                .send(crate::ThreadEvent::Stopped { thread_id });
+                                                .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { thread_id });
                                             return true;
                                         }
                                         ToolBatchAwaitOutcome::Failed { code, reason } => {
@@ -2565,7 +2727,7 @@ async fn run_provider_turn(
                     append_terminal_join_until_recorded(
                         services,
                         &turn_context.thread,
-                        crate::ThreadTerminalState::Failed,
+                        verlet_history::ThreadTerminalState::Failed,
                         failure_reason.clone(),
                         Some(turn_source_event_id),
                     )
@@ -2576,15 +2738,16 @@ async fn run_provider_turn(
         }
 
         if shutdown_after_turn {
-            crate::emit_runtime_event(
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 events,
                 coordinates,
-                crate::RuntimeEventKind::Terminal {
-                    state: crate::RuntimeTerminalState::Stopped,
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                    state: verlet_runtime_contracts::RuntimeTerminalState::Stopped,
                 },
             );
-            let _ = status.send(crate::ThreadStatus::Stopped);
-            let _ = events.send(crate::ThreadEvent::Stopped { thread_id });
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+            let _ = events
+                .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Stopped { thread_id });
             return true;
         }
         if failed {
@@ -2594,17 +2757,22 @@ async fn run_provider_turn(
                 append_terminal_join_until_recorded(
                     services,
                     &turn_context.thread,
-                    crate::ThreadTerminalState::Failed,
+                    verlet_history::ThreadTerminalState::Failed,
                     Some(reason.clone()),
                     Some(turn_source_event_id),
                 )
                 .await;
             }
             if emit_failure_signal {
-                let _ = events.send(crate::ThreadEvent::Signal {
-                    thread_id,
-                    signal: crate::ThreadSignal::failed(coordinates, reason.clone()),
-                });
+                let _ = events.send(
+                    crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                        thread_id,
+                        signal: verlet_runtime_contracts::ThreadSignal::failed(
+                            coordinates,
+                            reason.clone(),
+                        ),
+                    },
+                );
             }
             fail_provider_turn(
                 coordinates,
@@ -2617,7 +2785,7 @@ async fn run_provider_turn(
             return true;
         }
         if suspended_after_tools {
-            let _ = status.send(crate::ThreadStatus::Idle);
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
             return false;
         }
         if continue_after_tools {
@@ -2637,7 +2805,7 @@ async fn run_provider_turn(
             append_terminal_join_until_recorded(
                 services,
                 &turn_context.thread,
-                crate::ThreadTerminalState::Failed,
+                verlet_history::ThreadTerminalState::Failed,
                 Some(reason.clone()),
                 Some(turn_source_event_id),
             )
@@ -2659,7 +2827,7 @@ async fn run_provider_turn(
             append_terminal_join_until_recorded(
                 services,
                 &turn_context.thread,
-                crate::ThreadTerminalState::Failed,
+                verlet_history::ThreadTerminalState::Failed,
                 Some(reason.clone()),
                 Some(turn_source_event_id),
             )
@@ -2667,41 +2835,41 @@ async fn run_provider_turn(
             fail_provider_turn(coordinates, thread_id, events, status, "history", reason);
             return true;
         }
-        crate::emit_runtime_event(
+        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
             events,
             coordinates,
-            crate::RuntimeEventKind::Terminal {
-                state: crate::RuntimeTerminalState::Completed,
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                state: verlet_runtime_contracts::RuntimeTerminalState::Completed,
             },
         );
-        let _ = status.send(crate::ThreadStatus::Idle);
+        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
         return false;
     }
 }
 
 async fn persisted_tool_rounds_for_turn(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
-    turn_delivery_start_sequence: crate::EventSequence,
-) -> crate::VerletResult<usize> {
+    turn_delivery_start_sequence: verlet_history::EventSequence,
+) -> crate::kernel::runtime_host::VerletResult<usize> {
     let events = services
         .runtime_store()
         .read_events(
-            &crate::EventStreamId::for_thread(coordinates),
+            &verlet_history::EventStreamId::for_thread(coordinates),
             Some(turn_delivery_start_sequence),
         )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let session_entry_event_ids = events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::SessionEntryAppended)
+        .filter(|event| event.kind == verlet_history::EventKind::SessionEntryAppended)
         .map(|event| event.id)
         .collect::<std::collections::HashSet<_>>();
     let mut assistant_batches = std::collections::HashSet::new();
     for event in events
         .into_iter()
-        .filter(|event| event.kind == crate::EventKind::ToolCallRequested)
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallRequested)
     {
         if event
             .payload
@@ -2712,13 +2880,13 @@ async fn persisted_tool_rounds_for_turn(
         {
             let assistant_event_id =
                 event.provenance.source_event_ids.first().ok_or_else(|| {
-                    crate::VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "tool.call.requested {} for turn {turn_id} has no assistant source event",
                         event.id
                     ))
                 })?;
             if !session_entry_event_ids.contains(assistant_event_id) {
-                return Err(crate::VerletError::History(format!(
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
                     "tool.call.requested {} for turn {turn_id} references assistant source event {} outside the active turn",
                     event.id, assistant_event_id
                 )));
@@ -2730,19 +2898,24 @@ async fn persisted_tool_rounds_for_turn(
 }
 
 async fn pending_witnessed_tool_batch_for_turn(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
-) -> crate::VerletResult<Option<(Vec<ProviderToolCall>, crate::SessionEntryId)>> {
+) -> crate::kernel::runtime_host::VerletResult<
+    Option<(Vec<ProviderToolCall>, verlet_history::SessionEntryId)>,
+> {
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let Some(latest_request) = events
         .iter()
         .filter(|event| {
-            event.kind == crate::EventKind::ToolCallRequested
+            event.kind == verlet_history::EventKind::ToolCallRequested
                 && event.payload["subject"]["turn_id"] == turn_id
         })
         .max_by_key(|event| event.sequence.get())
@@ -2755,27 +2928,32 @@ async fn pending_witnessed_tool_batch_for_turn(
         .first()
         .copied()
         .ok_or_else(|| {
-            crate::VerletError::History(format!(
+            crate::kernel::runtime_host::VerletError::History(format!(
                 "tool.call.requested {} for turn {turn_id} has no assistant source event",
                 latest_request.id
             ))
         })?;
     let mut requests = std::collections::BTreeMap::<
         String,
-        (i64, crate::EventRecordId, crate::ToolCallRequestedPayload),
+        (
+            i64,
+            verlet_history::EventRecordId,
+            crate::kernel::control_decision::ToolCallRequestedPayload,
+        ),
     >::new();
     for event in events.iter().filter(|event| {
-        event.kind == crate::EventKind::ToolCallRequested
+        event.kind == verlet_history::EventKind::ToolCallRequested
             && event.provenance.source_event_ids.first() == Some(&assistant_source_event_id)
     }) {
-        let request =
-            serde_json::from_value::<crate::ToolCallRequestedPayload>(event.payload.clone())
-                .map_err(|err| {
-                    crate::VerletError::History(format!(
-                        "tool.call.requested {} payload is invalid during turn replay: {err}",
-                        event.id
-                    ))
-                })?;
+        let request = serde_json::from_value::<
+            crate::kernel::control_decision::ToolCallRequestedPayload,
+        >(event.payload.clone())
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "tool.call.requested {} payload is invalid during turn replay: {err}",
+                event.id
+            ))
+        })?;
         if request.subject.turn_id == turn_id {
             let replace = requests
                 .get(&request.subject.call_id)
@@ -2790,17 +2968,19 @@ async fn pending_witnessed_tool_batch_for_turn(
     }
     let mut completions = Vec::new();
     for event in events.iter().filter(|event| {
-        event.kind == crate::EventKind::ToolCallCompleted
+        event.kind == verlet_history::EventKind::ToolCallCompleted
             && event.payload["subject"]["turn_id"] == turn_id
     }) {
         completions.push(
-            serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload.clone())
-                .map_err(|err| {
-                    crate::VerletError::History(format!(
-                        "tool.call.completed {} payload is invalid during turn replay: {err}",
-                        event.id
-                    ))
-                })?,
+            serde_json::from_value::<crate::kernel::control_decision::ToolCallCompletedPayload>(
+                event.payload.clone(),
+            )
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "tool.call.completed {} payload is invalid during turn replay: {err}",
+                    event.id
+                ))
+            })?,
         );
     }
     let mut incomplete = false;
@@ -2828,10 +3008,10 @@ async fn pending_witnessed_tool_batch_for_turn(
     let assistant_event = events
         .iter()
         .find(|event| {
-            event.id == assistant_source_event_id && event.kind == crate::EventKind::SessionEntryAppended
+            event.id == assistant_source_event_id && event.kind == verlet_history::EventKind::SessionEntryAppended
         })
         .ok_or_else(|| {
-            crate::VerletError::History(format!(
+            crate::kernel::runtime_host::VerletError::History(format!(
                 "tool request batch source {assistant_source_event_id} is not an assistant session entry"
             ))
         })?;
@@ -2840,7 +3020,7 @@ async fn pending_witnessed_tool_batch_for_turn(
         .get("entry_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            crate::VerletError::History(format!(
+            crate::kernel::runtime_host::VerletError::History(format!(
                 "assistant session event {assistant_source_event_id} has no entry_id"
             ))
         })?;
@@ -2850,12 +3030,12 @@ async fn pending_witnessed_tool_batch_for_turn(
         .iter()
         .find(|entry| entry.entry_id.to_string() == assistant_entry_id)
         .ok_or_else(|| {
-            crate::VerletError::History(format!(
+            crate::kernel::runtime_host::VerletError::History(format!(
                 "assistant session entry {assistant_entry_id} is missing during turn replay"
             ))
         })?;
-    let crate::SessionEntryKind::Message { message } = &assistant_entry.kind else {
-        return Err(crate::VerletError::History(format!(
+    let verlet_history::SessionEntryKind::Message { message } = &assistant_entry.kind else {
+        return Err(crate::kernel::runtime_host::VerletError::History(format!(
             "tool request batch source {assistant_entry_id} is not a canonical message"
         )));
     };
@@ -2865,7 +3045,7 @@ async fn pending_witnessed_tool_batch_for_turn(
             .iter()
             .find(|call| call.id == request.subject.call_id)
             .ok_or_else(|| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "witnessed assistant batch {assistant_entry_id} lost tool call {}",
                     request.subject.call_id
                 ))
@@ -2879,7 +3059,7 @@ async fn pending_witnessed_tool_batch_for_turn(
                 .as_deref()
                 .is_some_and(|fingerprint| fingerprint != replayed_fingerprint)
         {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "witnessed assistant batch {assistant_entry_id} disagrees with tool request {}",
                 request.subject.call_id
             )));
@@ -2897,27 +3077,34 @@ enum ActiveProviderCommandOutcome {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_active_provider_command(
-    command: Option<crate::ThreadCommand>,
-    turn_input: &crate::TurnInput,
-    turn_context: &crate::TurnContext,
-    turn_source_event_id: crate::EventRecordId,
-    coordinates: &crate::ThreadCoordinates,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    status: &tokio::sync::watch::Sender<crate::ThreadStatus>,
-    pending_commands: &mut std::collections::VecDeque<crate::ThreadCommand>,
+    command: Option<crate::kernel::runtime_host::runtime_api::ThreadCommand>,
+    turn_input: &crate::kernel::runtime_host::turn::TurnInput,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    turn_source_event_id: verlet_history::EventRecordId,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    status: &tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
+    pending_commands: &mut std::collections::VecDeque<
+        crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    >,
     turn_cancellation: &tokio_util::sync::CancellationToken,
     already_cancelled: bool,
     defer_cancel_terminal: bool,
 ) -> ActiveProviderCommandOutcome {
     match command {
-        Some(crate::ThreadCommand::Cancel { reason }) => {
-            let _ = status.send(crate::ThreadStatus::Cancelling);
-            let _ = events.send(crate::ThreadEvent::Signal {
-                thread_id,
-                signal: crate::ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
-            });
+        Some(crate::kernel::runtime_host::runtime_api::ThreadCommand::Cancel { reason }) => {
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Cancelling);
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                    thread_id,
+                    signal: verlet_runtime_contracts::ThreadSignal::interrupt_cancel(
+                        coordinates,
+                        reason.clone(),
+                    ),
+                },
+            );
             turn_cancellation.cancel();
             if already_cancelled {
                 return ActiveProviderCommandOutcome::Continue;
@@ -2926,7 +3113,7 @@ async fn handle_active_provider_command(
                 append_terminal_join_until_recorded(
                     services,
                     &turn_context.thread,
-                    crate::ThreadTerminalState::Cancelled,
+                    verlet_history::ThreadTerminalState::Cancelled,
                     Some(reason.clone()),
                     Some(turn_source_event_id),
                 )
@@ -2934,18 +3121,23 @@ async fn handle_active_provider_command(
             }
             ActiveProviderCommandOutcome::Cancelled { reason }
         }
-        Some(crate::ThreadCommand::CancelTurn {
+        Some(crate::kernel::runtime_host::runtime_api::ThreadCommand::CancelTurn {
             watchdog_token_id,
             reason,
         }) => {
             if turn_input.turn_watchdog_id() != Some(watchdog_token_id) {
                 return ActiveProviderCommandOutcome::Continue;
             }
-            let _ = status.send(crate::ThreadStatus::Cancelling);
-            let _ = events.send(crate::ThreadEvent::Signal {
-                thread_id,
-                signal: crate::ThreadSignal::interrupt_cancel(coordinates, reason.clone()),
-            });
+            let _ = status.send(verlet_runtime_contracts::ThreadStatus::Cancelling);
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                    thread_id,
+                    signal: verlet_runtime_contracts::ThreadSignal::interrupt_cancel(
+                        coordinates,
+                        reason.clone(),
+                    ),
+                },
+            );
             turn_cancellation.cancel();
             if already_cancelled {
                 return ActiveProviderCommandOutcome::Continue;
@@ -2954,7 +3146,7 @@ async fn handle_active_provider_command(
                 append_terminal_join_until_recorded(
                     services,
                     &turn_context.thread,
-                    crate::ThreadTerminalState::Cancelled,
+                    verlet_history::ThreadTerminalState::Cancelled,
                     Some(reason.clone()),
                     Some(turn_source_event_id),
                 )
@@ -2962,46 +3154,55 @@ async fn handle_active_provider_command(
             }
             ActiveProviderCommandOutcome::Cancelled { reason }
         }
-        Some(crate::ThreadCommand::Shutdown) | None => {
-            let _ = events.send(crate::ThreadEvent::Signal {
-                thread_id,
-                signal: crate::ThreadSignal::shutdown(coordinates),
-            });
-            crate::emit_runtime_event(
+        Some(crate::kernel::runtime_host::runtime_api::ThreadCommand::Shutdown) | None => {
+            let _ = events.send(
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                    thread_id,
+                    signal: verlet_runtime_contracts::ThreadSignal::shutdown(coordinates),
+                },
+            );
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 events,
                 coordinates,
-                crate::RuntimeEventKind::Terminal {
-                    state: crate::RuntimeTerminalState::Stopped,
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Terminal {
+                    state: verlet_runtime_contracts::RuntimeTerminalState::Stopped,
                 },
             );
             turn_cancellation.cancel();
             ActiveProviderCommandOutcome::Shutdown
         }
-        Some(crate::ThreadCommand::Submit {
+        Some(crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
             turn_id,
             input,
             mode,
         }) => match mode {
-            crate::TurnSubmissionMode::Queue => {
-                let _ = events.send(crate::ThreadEvent::Signal {
-                    thread_id,
-                    signal: crate::ThreadSignal::user_queue(coordinates, turn_id.clone()),
-                });
-                pending_commands.push_back(crate::ThreadCommand::Submit {
-                    turn_id,
-                    input,
-                    mode,
-                });
+            verlet_runtime_contracts::TurnSubmissionMode::Queue => {
+                let _ = events.send(
+                    crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                        thread_id,
+                        signal: verlet_runtime_contracts::ThreadSignal::user_queue(
+                            coordinates,
+                            turn_id.clone(),
+                        ),
+                    },
+                );
+                pending_commands.push_back(
+                    crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                        turn_id,
+                        input,
+                        mode,
+                    },
+                );
                 ActiveProviderCommandOutcome::Continue
             }
-            crate::TurnSubmissionMode::Steer => {
+            verlet_runtime_contracts::TurnSubmissionMode::Steer => {
                 match services
                     .append_user_turn_input(coordinates, &turn_id, &input)
                     .await
                 {
                     Ok(entry) => {
                         let _ =
-                            events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
+                            events.send(crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror { thread_id, entry });
                     }
                     Err(err) => {
                         let reason = err.to_string();
@@ -3010,7 +3211,7 @@ async fn handle_active_provider_command(
                             append_terminal_join_until_recorded(
                                 services,
                                 &turn_context.thread,
-                                crate::ThreadTerminalState::Failed,
+                                verlet_history::ThreadTerminalState::Failed,
                                 Some(reason.clone()),
                                 Some(turn_source_event_id),
                             )
@@ -3022,30 +3223,41 @@ async fn handle_active_provider_command(
                         };
                     }
                 }
-                let _ = events.send(crate::ThreadEvent::Signal {
-                    thread_id,
-                    signal: crate::ThreadSignal::user_steer(coordinates, turn_id).with_metadata(
-                        std::collections::BTreeMap::from([(
+                let _ = events.send(
+                    crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                        thread_id,
+                        signal: verlet_runtime_contracts::ThreadSignal::user_steer(
+                            coordinates,
+                            turn_id,
+                        )
+                        .with_metadata(std::collections::BTreeMap::from([(
                             "active_turn_id".to_string(),
                             turn_context.turn_id.clone(),
-                        )]),
-                    ),
-                });
+                        )])),
+                    },
+                );
                 ActiveProviderCommandOutcome::Continue
             }
-            crate::TurnSubmissionMode::Interrupt => {
+            verlet_runtime_contracts::TurnSubmissionMode::Interrupt => {
                 let reason = format!("interrupted by turn {turn_id}");
-                let _ = status.send(crate::ThreadStatus::Cancelling);
-                let _ = events.send(crate::ThreadEvent::Signal {
-                    thread_id,
-                    signal: crate::ThreadSignal::user_interrupt(coordinates, turn_id.clone()),
-                });
+                let _ = status.send(verlet_runtime_contracts::ThreadStatus::Cancelling);
+                let _ = events.send(
+                    crate::kernel::runtime_host::runtime_api::ThreadEvent::Signal {
+                        thread_id,
+                        signal: verlet_runtime_contracts::ThreadSignal::user_interrupt(
+                            coordinates,
+                            turn_id.clone(),
+                        ),
+                    },
+                );
                 turn_cancellation.cancel();
-                pending_commands.push_front(crate::ThreadCommand::Submit {
-                    turn_id,
-                    input,
-                    mode: crate::TurnSubmissionMode::Queue,
-                });
+                pending_commands.push_front(
+                    crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                        turn_id,
+                        input,
+                        mode: verlet_runtime_contracts::TurnSubmissionMode::Queue,
+                    },
+                );
                 if already_cancelled {
                     return ActiveProviderCommandOutcome::Continue;
                 }
@@ -3053,7 +3265,7 @@ async fn handle_active_provider_command(
                     append_terminal_join_until_recorded(
                         services,
                         &turn_context.thread,
-                        crate::ThreadTerminalState::Cancelled,
+                        verlet_history::ThreadTerminalState::Cancelled,
                         Some(reason.clone()),
                         Some(turn_source_event_id),
                     )
@@ -3062,8 +3274,12 @@ async fn handle_active_provider_command(
                 ActiveProviderCommandOutcome::Cancelled { reason }
             }
         },
-        Some(command @ crate::ThreadCommand::Compact { .. })
-        | Some(command @ crate::ThreadCommand::ResumeToolCall { .. }) => {
+        Some(command @ crate::kernel::runtime_host::runtime_api::ThreadCommand::Compact { .. })
+        | Some(
+            command @ crate::kernel::runtime_host::runtime_api::ThreadCommand::ResumeToolCall {
+                ..
+            },
+        ) => {
             pending_commands.push_back(command);
             ActiveProviderCommandOutcome::Continue
         }
@@ -3071,31 +3287,32 @@ async fn handle_active_provider_command(
 }
 
 fn fail_provider_turn(
-    coordinates: &crate::ThreadCoordinates,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    status: &tokio::sync::watch::Sender<crate::ThreadStatus>,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    status: &tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
     code: impl Into<String>,
     message: String,
 ) {
-    let _ = status.send(crate::ThreadStatus::Failed);
-    crate::emit_runtime_event(
+    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Failed);
+    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
         events,
         coordinates,
-        crate::RuntimeEventKind::Failed {
+        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Failed {
             code: code.into(),
             message: message.clone(),
         },
     );
-    let _ = events.send(crate::ThreadEvent::Failed { thread_id, message });
+    let _ = events
+        .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed { thread_id, message });
 }
 
 async fn append_terminal_join_until_recorded(
-    services: &crate::RuntimeServices,
-    context: &crate::ThreadContext,
-    terminal_state: crate::ThreadTerminalState,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    context: &verlet_runtime_contracts::ThreadContext,
+    terminal_state: verlet_history::ThreadTerminalState,
     reason: Option<String>,
-    source_event_id: Option<crate::EventRecordId>,
+    source_event_id: Option<verlet_history::EventRecordId>,
 ) {
     loop {
         match services
@@ -3136,8 +3353,8 @@ enum ToolAppendOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolResumeOutcome {
     Resumed {
-        source_event_id: crate::EventRecordId,
-        turn_delivery_start_sequence: crate::EventSequence,
+        source_event_id: verlet_history::EventRecordId,
+        turn_delivery_start_sequence: verlet_history::EventSequence,
         turn_anchor_timestamp_ms: i64,
     },
     StillWaiting,
@@ -3146,9 +3363,9 @@ enum ToolResumeOutcome {
 
 #[derive(Clone, Debug)]
 struct PendingToolCallRequest {
-    request_event_id: crate::EventRecordId,
-    assistant_source_event_id: crate::EventRecordId,
-    subject: crate::ToolCallSubject,
+    request_event_id: verlet_history::EventRecordId,
+    assistant_source_event_id: verlet_history::EventRecordId,
+    subject: crate::kernel::control_decision::ToolCallSubject,
     snapshot_id: String,
     tool_name: String,
     arguments: serde_json::Value,
@@ -3166,10 +3383,10 @@ struct WitnessedToolCall {
     tool_call: ProviderToolCall,
     snapshot_id: String,
     args_fingerprint: Option<String>,
-    request_event_id: crate::EventRecordId,
+    request_event_id: verlet_history::EventRecordId,
     holds: Vec<tool_holds::ToolHold>,
     recovery_action: ToolRecoveryAction,
-    recovery_source_event_id: Option<crate::EventRecordId>,
+    recovery_source_event_id: Option<verlet_history::EventRecordId>,
     recovery_fingerprint_mismatch: bool,
 }
 
@@ -3183,13 +3400,13 @@ enum ToolRecoveryAction {
 /// Recovery honors the effect class; a recorded outcome is reused only under
 /// a matching fingerprint within the same snapshot.
 fn tool_recovery_action(
-    effect_class: crate::EffectClass,
+    effect_class: verlet_agent::manifest_schema::EffectClass,
     outcome_exists: bool,
     fingerprint_matches: bool,
 ) -> ToolRecoveryAction {
     if outcome_exists && fingerprint_matches {
         ToolRecoveryAction::Reuse
-    } else if effect_class == crate::EffectClass::AtMostOnce {
+    } else if effect_class == verlet_agent::manifest_schema::EffectClass::AtMostOnce {
         ToolRecoveryAction::ConservativeFailure
     } else {
         ToolRecoveryAction::Reexecute
@@ -3197,10 +3414,10 @@ fn tool_recovery_action(
 }
 
 fn effect_class_from_bind_receipt(
-    receipt: &crate::AgentManifestBindReceipt,
+    receipt: &crate::agent::manifest_bind::AgentManifestBindReceipt,
     tool_name: &str,
     arguments: &serde_json::Value,
-) -> crate::EffectClass {
+) -> verlet_agent::manifest_schema::EffectClass {
     if let Some(effect_class) = receipt
         .operation_bindings
         .iter()
@@ -3219,7 +3436,7 @@ fn effect_class_from_bind_receipt(
     {
         return effect_class;
     }
-    let operation_name = if tool_name == crate::BASH_TOOL {
+    let operation_name = if tool_name == verlet_vbash::BASH_TOOL {
         arguments
             .get("command")
             .and_then(serde_json::Value::as_str)
@@ -3264,26 +3481,28 @@ fn exact_single_bash_operation_name(command: &str) -> Option<&str> {
 }
 
 pub(crate) fn effect_class_for_request(
-    events: &[crate::EventRecord],
-    request: &crate::ToolCallRequestedPayload,
-) -> crate::VerletResult<crate::EffectClass> {
+    events: &[verlet_history::EventRecord],
+    request: &crate::kernel::control_decision::ToolCallRequestedPayload,
+) -> crate::kernel::runtime_host::VerletResult<verlet_agent::manifest_schema::EffectClass> {
     let Some(event) = events.iter().rev().find(|event| {
-        event.kind == crate::EventKind::ManifestBindCompleted
+        event.kind == verlet_history::EventKind::ManifestBindCompleted
             && event
                 .payload
                 .get("manifest_hash")
                 .and_then(serde_json::Value::as_str)
                 == Some(request.snapshot_id.as_str())
     }) else {
-        return Ok(crate::EffectClass::AtMostOnce);
+        return Ok(verlet_agent::manifest_schema::EffectClass::AtMostOnce);
     };
-    let receipt = serde_json::from_value::<crate::AgentManifestBindReceipt>(event.payload.clone())
-        .map_err(|err| {
-            crate::VerletError::History(format!(
-                "manifest.bind.completed {} payload is invalid: {err}",
-                event.id
-            ))
-        })?;
+    let receipt = serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
+        event.payload.clone(),
+    )
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "manifest.bind.completed {} payload is invalid: {err}",
+            event.id
+        ))
+    })?;
     Ok(effect_class_from_bind_receipt(
         &receipt,
         &request.tool_name,
@@ -3292,19 +3511,22 @@ pub(crate) fn effect_class_for_request(
 }
 
 async fn apply_tool_recovery_actions(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
     calls: &mut [WitnessedToolCall],
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let has_prior_request = calls.iter().any(|call| {
         events.iter().any(|event| {
-            event.kind == crate::EventKind::ToolCallRequested
+            event.kind == verlet_history::EventKind::ToolCallRequested
                 && event.id != call.request_event_id
                 && event.payload["subject"]["turn_id"] == turn_id
                 && event.payload["subject"]["call_id"] == call.tool_call.id
@@ -3317,7 +3539,7 @@ async fn apply_tool_recovery_actions(
         let prior_request = events
             .iter()
             .filter(|event| {
-                event.kind == crate::EventKind::ToolCallRequested
+                event.kind == verlet_history::EventKind::ToolCallRequested
                     && event.id != call.request_event_id
                     && event.payload["subject"]["turn_id"] == turn_id
                     && event.payload["subject"]["call_id"] == call.tool_call.id
@@ -3326,11 +3548,11 @@ async fn apply_tool_recovery_actions(
         let Some(prior_request) = prior_request else {
             continue;
         };
-        let request = serde_json::from_value::<crate::ToolCallRequestedPayload>(
-            prior_request.payload.clone(),
-        )
+        let request = serde_json::from_value::<
+            crate::kernel::control_decision::ToolCallRequestedPayload,
+        >(prior_request.payload.clone())
         .map_err(|err| {
-            crate::VerletError::History(format!(
+            crate::kernel::runtime_host::VerletError::History(format!(
                 "tool.call.requested {} payload is invalid during recovery: {err}",
                 prior_request.id
             ))
@@ -3352,12 +3574,12 @@ async fn apply_tool_recovery_actions(
                 call.args_fingerprint.as_deref(),
             );
         let mut effect_class = effect_class_for_request(&events, &request)?;
-        if effect_class != crate::EffectClass::AtMostOnce
-            && request.tool_name == crate::BASH_TOOL
+        if effect_class != verlet_agent::manifest_schema::EffectClass::AtMostOnce
+            && request.tool_name == verlet_vbash::BASH_TOOL
             && matches!(
-                crate::decide_tool_call(
+                crate::kernel::control_decision::decide_tool_call(
                     services.runtime_store().as_ref(),
-                    crate::ToolDecisionRequest {
+                    crate::kernel::control_decision::ToolDecisionRequest {
                         coordinates: coordinates.clone(),
                         subject: request.subject.clone(),
                         snapshot_id: request.snapshot_id.clone(),
@@ -3365,14 +3587,14 @@ async fn apply_tool_recovery_actions(
                     },
                 )
                 .await?,
-                crate::ToolCallDecision::Rewrite { .. }
+                crate::kernel::control_decision::ToolCallDecision::Rewrite { .. }
             )
         {
             // The request fingerprint and class describe the original bash
             // script, not a controller-rewritten script. Without a witnessed
             // class for the rewritten command, automatic replay must fail
             // closed even when the original operation was retryable.
-            effect_class = crate::EffectClass::AtMostOnce;
+            effect_class = verlet_agent::manifest_schema::EffectClass::AtMostOnce;
         }
         // The canonical result is the reusable durable outcome and is appended
         // before tool.call.completed. A completion without that result is an
@@ -3393,24 +3615,24 @@ enum PreparedToolCallOutcome {
         tool_name: String,
         snapshot_id: String,
         args_fingerprint: Option<String>,
-        source_event_id: crate::EventRecordId,
+        source_event_id: verlet_history::EventRecordId,
         finish_order: u64,
-        cancellation: Option<crate::ToolCallCancellation>,
-        outcome: Box<crate::ToolExecutionOutcome>,
+        cancellation: Option<crate::kernel::control_decision::ToolCallCancellation>,
+        outcome: Box<crate::agent::tool_interceptor::ToolExecutionOutcome>,
     },
     Denied {
         call_id: String,
         tool_name: String,
         snapshot_id: String,
         args_fingerprint: Option<String>,
-        source_event_id: crate::EventRecordId,
+        source_event_id: verlet_history::EventRecordId,
         finish_order: u64,
         reason: String,
     },
     Suspended {
         call_id: String,
         snapshot_id: String,
-        waiting_on_event_id: crate::EventRecordId,
+        waiting_on_event_id: verlet_history::EventRecordId,
         approval_id: Option<String>,
         reason: Option<String>,
     },
@@ -3418,21 +3640,21 @@ enum PreparedToolCallOutcome {
 }
 
 enum ToolCallMonitorOutcome {
-    Settled(crate::VerletResult<PreparedToolCallOutcome>),
+    Settled(crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome>),
     Abandoned,
 }
 
 enum PreparedToolBatch {
     NoTools,
-    Outcomes(Vec<crate::VerletResult<PreparedToolCallOutcome>>),
+    Outcomes(Vec<crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome>>),
 }
 
-fn tool_calls_from_message(message: &crate::CanonicalMessage) -> Vec<ProviderToolCall> {
+fn tool_calls_from_message(message: &verlet_history::CanonicalMessage) -> Vec<ProviderToolCall> {
     match message {
-        crate::CanonicalMessage::Assistant { content, .. } => content
+        verlet_history::CanonicalMessage::Assistant { content, .. } => content
             .iter()
             .filter_map(|content| match content {
-                crate::CanonicalContent::ToolCall {
+                verlet_history::CanonicalContent::ToolCall {
                     id,
                     name,
                     arguments,
@@ -3444,70 +3666,81 @@ fn tool_calls_from_message(message: &crate::CanonicalMessage) -> Vec<ProviderToo
                 _ => None,
             })
             .collect(),
-        crate::CanonicalMessage::User { .. } | crate::CanonicalMessage::ToolResult { .. } => {
-            Vec::new()
-        }
+        verlet_history::CanonicalMessage::User { .. }
+        | verlet_history::CanonicalMessage::ToolResult { .. } => Vec::new(),
     }
 }
 
 fn skill_context_segments_from_thread(
-    thread: &crate::ThreadContext,
-) -> crate::VerletResult<Vec<crate::AgentManifestStaticContextSegment>> {
+    thread: &verlet_runtime_contracts::ThreadContext,
+) -> crate::kernel::runtime_host::VerletResult<
+    Vec<crate::agent::manifest_bind::AgentManifestStaticContextSegment>,
+> {
     let Some(raw) = thread
         .metadata
-        .get(crate::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
+        .get(crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
     else {
         return Ok(Vec::new());
     };
-    let segments = serde_json::from_str::<Vec<crate::AgentManifestStaticContextSegment>>(raw)
-        .map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
-                "thread manifest skill context segments are invalid: {err}"
-            ))
-        })?;
+    let segments = serde_json::from_str::<
+        Vec<crate::agent::manifest_bind::AgentManifestStaticContextSegment>,
+    >(raw)
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "thread manifest skill context segments are invalid: {err}"
+        ))
+    })?;
     for segment in &segments {
-        let expected = crate::agent::contracts::sha256_hex(segment.content.as_bytes());
+        let expected = verlet_agent::contracts::sha256_hex(segment.content.as_bytes());
         if segment.content_sha256 != expected {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "thread manifest skill context segment {:?} content hash mismatch: expected {}, got {}",
-                segment.id, expected, segment.content_sha256
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "thread manifest skill context segment {:?} content hash mismatch: expected {}, got {}",
+                    segment.id, expected, segment.content_sha256
+                ),
+            ));
         }
     }
     Ok(segments)
 }
 
 fn static_context_segments_from_thread(
-    thread: &crate::ThreadContext,
-) -> crate::VerletResult<Vec<crate::AgentManifestStaticContextSegment>> {
+    thread: &verlet_runtime_contracts::ThreadContext,
+) -> crate::kernel::runtime_host::VerletResult<
+    Vec<crate::agent::manifest_bind::AgentManifestStaticContextSegment>,
+> {
     let Some(raw) = thread
         .metadata
-        .get(crate::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
+        .get(crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA)
     else {
         return Ok(Vec::new());
     };
-    let segments = serde_json::from_str::<Vec<crate::AgentManifestStaticContextSegment>>(raw)
-        .map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
-                "thread manifest static context segments are invalid: {err}"
-            ))
-        })?;
+    let segments = serde_json::from_str::<
+        Vec<crate::agent::manifest_bind::AgentManifestStaticContextSegment>,
+    >(raw)
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "thread manifest static context segments are invalid: {err}"
+        ))
+    })?;
     for segment in &segments {
-        let expected = crate::agent::contracts::sha256_hex(segment.content.as_bytes());
+        let expected = verlet_agent::contracts::sha256_hex(segment.content.as_bytes());
         if segment.content_sha256 != expected {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "thread manifest static context segment {:?} content hash mismatch: expected {}, got {}",
-                segment.id, expected, segment.content_sha256
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "thread manifest static context segment {:?} content hash mismatch: expected {}, got {}",
+                    segment.id, expected, segment.content_sha256
+                ),
+            ));
         }
     }
     Ok(segments)
 }
 
 fn context_receipt_static_segments(
-    static_context_segments: &[crate::AgentManifestStaticContextSegment],
-    skill_context_segments: &[crate::AgentManifestStaticContextSegment],
-) -> Vec<crate::AgentManifestStaticContextSegment> {
+    static_context_segments: &[crate::agent::manifest_bind::AgentManifestStaticContextSegment],
+    skill_context_segments: &[crate::agent::manifest_bind::AgentManifestStaticContextSegment],
+) -> Vec<crate::agent::manifest_bind::AgentManifestStaticContextSegment> {
     static_context_segments
         .iter()
         .chain(skill_context_segments)
@@ -3517,23 +3750,29 @@ fn context_receipt_static_segments(
 
 fn context_compile_receipt_payload(
     turn_id: &str,
-    session_entries: &[crate::SessionEntry],
-    compiled_context: &crate::CompiledAgentContext,
-    static_context_segments: &[crate::AgentManifestStaticContextSegment],
-    diagnostics: &crate::AgentContextCompilationDiagnostics,
-    replay_transform: &crate::ReplayTransformCounts,
+    session_entries: &[verlet_history::SessionEntry],
+    compiled_context: &crate::kernel::context_compiler::CompiledAgentContext,
+    static_context_segments: &[crate::agent::manifest_bind::AgentManifestStaticContextSegment],
+    diagnostics: &crate::kernel::context_compiler::AgentContextCompilationDiagnostics,
+    replay_transform: &verlet_provider::provider_transform::ReplayTransformCounts,
     provider_dropped_messages: usize,
     provider_truncated_text_bytes: usize,
     provider_retained_text_bytes: usize,
-) -> crate::VerletResult<serde_json::Value> {
+) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
     let encoded_messages = serde_json::to_vec(&compiled_context.messages).map_err(|err| {
-        crate::VerletError::History(format!("context receipt codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "context receipt codec failed: {err}"
+        ))
     })?;
     let diagnostics = serde_json::to_value(diagnostics).map_err(|err| {
-        crate::VerletError::History(format!("context receipt codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "context receipt codec failed: {err}"
+        ))
     })?;
     let replay_transform = serde_json::to_value(replay_transform).map_err(|err| {
-        crate::VerletError::History(format!("context receipt codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "context receipt codec failed: {err}"
+        ))
     })?;
     let static_context_segments = static_context_segments
         .iter()
@@ -3567,30 +3806,30 @@ fn context_compile_receipt_payload(
         "provider_dropped_messages": provider_dropped_messages,
         "provider_truncated_text_bytes": provider_truncated_text_bytes,
         "provider_retained_text_bytes": provider_retained_text_bytes,
-        "output_hash": crate::agent::contracts::sha256_hex(&encoded_messages),
+        "output_hash": verlet_agent::contracts::sha256_hex(&encoded_messages),
     }))
 }
 
 async fn resume_pending_tool_call(
     runtime: &AgentLoop,
-    thread_context: &crate::ThreadContext,
+    thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: &str,
     call_id: &str,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-) -> crate::VerletResult<ToolResumeOutcome> {
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+) -> crate::kernel::runtime_host::VerletResult<ToolResumeOutcome> {
     let Some(tool_router) = &runtime.tool_router else {
-        return Err(crate::VerletError::RuntimeExecution(
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
             "tool resume requires a tool router".to_string(),
         ));
     };
     let Some(request) =
         pending_tool_call_request(services, &thread_context.coordinates, turn_id, call_id).await?
     else {
-        return Err(crate::VerletError::RuntimeExecution(format!(
-            "missing tool.call.requested for pending call {turn_id}/{call_id}"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!("missing tool.call.requested for pending call {turn_id}/{call_id}"),
+        ));
     };
     if matching_tool_call_completed_exists(
         services,
@@ -3606,23 +3845,23 @@ async fn resume_pending_tool_call(
     }
     if !tool_call_suspension_exists(services, &thread_context.coordinates, turn_id, call_id).await?
     {
-        return Err(crate::VerletError::RuntimeExecution(format!(
-            "no pending suspended tool call {turn_id}/{call_id}"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!("no pending suspended tool call {turn_id}/{call_id}"),
+        ));
     }
     let turn_submitted =
         existing_turn_submitted_event(services, &thread_context.coordinates, turn_id)
             .await?
             .ok_or_else(|| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "turn {turn_id} has no persisted context timestamp anchor"
                 ))
             })?;
     let turn_anchor_timestamp_ms = turn_submitted.created_at_ms;
     let turn_delivery_start_sequence = turn_submitted.sequence;
-    let decision = crate::decide_tool_call(
+    let decision = crate::kernel::control_decision::decide_tool_call(
         services.runtime_store().as_ref(),
-        crate::ToolDecisionRequest {
+        crate::kernel::control_decision::ToolDecisionRequest {
             coordinates: thread_context.coordinates.clone(),
             subject: request.subject.clone(),
             snapshot_id: request.snapshot_id.clone(),
@@ -3631,18 +3870,19 @@ async fn resume_pending_tool_call(
     )
     .await?;
     let (consumed_fact_id, action) = match decision {
-        crate::ToolCallDecision::NoDecision | crate::ToolCallDecision::Wait { .. } => {
+        crate::kernel::control_decision::ToolCallDecision::NoDecision
+        | crate::kernel::control_decision::ToolCallDecision::Wait { .. } => {
             return Ok(ToolResumeOutcome::StillWaiting);
         }
-        crate::ToolCallDecision::Allow { consumed_fact_id } => (
+        crate::kernel::control_decision::ToolCallDecision::Allow { consumed_fact_id } => (
             consumed_fact_id,
             ResumedToolCallAction::Execute(request.arguments),
         ),
-        crate::ToolCallDecision::Rewrite {
+        crate::kernel::control_decision::ToolCallDecision::Rewrite {
             consumed_fact_id,
             arguments,
         } => (consumed_fact_id, ResumedToolCallAction::Execute(arguments)),
-        crate::ToolCallDecision::Deny {
+        crate::kernel::control_decision::ToolCallDecision::Deny {
             consumed_fact_id,
             reason,
             ..
@@ -3661,15 +3901,16 @@ async fn resume_pending_tool_call(
     let turn_context = runtime.turn_context(
         thread_context,
         turn_id.to_string(),
-        &crate::TurnInput::text(""),
+        &crate::kernel::runtime_host::turn::TurnInput::text(""),
         tokio_util::sync::CancellationToken::new(),
     );
     match action {
         ResumedToolCallAction::Execute(arguments) => {
-            let interceptor =
-                crate::ToolExecutionInterceptor::new(std::sync::Arc::clone(tool_router))
-                    .with_hook_pipeline(runtime.hook_pipeline.clone())
-                    .with_permission_gate(std::sync::Arc::clone(&runtime.tool_permission_gate));
+            let interceptor = crate::agent::tool_interceptor::ToolExecutionInterceptor::new(
+                std::sync::Arc::clone(tool_router),
+            )
+            .with_hook_pipeline(runtime.hook_pipeline.clone())
+            .with_permission_gate(std::sync::Arc::clone(&runtime.tool_permission_gate));
             execute_resumed_tool_call_with_interceptor(
                 &interceptor,
                 services,
@@ -3722,35 +3963,41 @@ async fn resume_pending_tool_call(
 }
 
 enum ToolBatchAwaitOutcome {
-    Completed(crate::VerletResult<ToolAppendOutcome>),
+    Completed(crate::kernel::runtime_host::VerletResult<ToolAppendOutcome>),
     Cancelled { reason: String },
     Shutdown,
     Failed { code: &'static str, reason: String },
 }
 
-fn tool_batch_command_must_wait_for_commit(command: &Option<crate::ThreadCommand>) -> bool {
+fn tool_batch_command_must_wait_for_commit(
+    command: &Option<crate::kernel::runtime_host::runtime_api::ThreadCommand>,
+) -> bool {
     !matches!(
         command,
-        Some(crate::ThreadCommand::Submit {
-            mode: crate::TurnSubmissionMode::Queue,
-            ..
-        }) | Some(crate::ThreadCommand::Compact { .. })
-            | Some(crate::ThreadCommand::ResumeToolCall { .. })
+        Some(
+            crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
+                mode: verlet_runtime_contracts::TurnSubmissionMode::Queue,
+                ..
+            }
+        ) | Some(crate::kernel::runtime_host::runtime_api::ThreadCommand::Compact { .. })
+            | Some(crate::kernel::runtime_host::runtime_api::ThreadCommand::ResumeToolCall { .. })
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_tool_batch_command(
-    command: Option<crate::ThreadCommand>,
-    turn_input: &crate::TurnInput,
-    turn_context: &crate::TurnContext,
-    turn_source_event_id: crate::EventRecordId,
-    coordinates: &crate::ThreadCoordinates,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    status: &tokio::sync::watch::Sender<crate::ThreadStatus>,
-    pending_commands: &mut std::collections::VecDeque<crate::ThreadCommand>,
+    command: Option<crate::kernel::runtime_host::runtime_api::ThreadCommand>,
+    turn_input: &crate::kernel::runtime_host::turn::TurnInput,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    turn_source_event_id: verlet_history::EventRecordId,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    status: &tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
+    pending_commands: &mut std::collections::VecDeque<
+        crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    >,
     defer_cancel_terminal: bool,
 ) -> Option<ToolBatchAwaitOutcome> {
     match handle_active_provider_command(
@@ -3783,17 +4030,19 @@ async fn handle_tool_batch_command(
 
 async fn append_deferred_tool_batch_terminal(
     outcome: &ToolBatchAwaitOutcome,
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    turn_source_event_id: crate::EventRecordId,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    turn_source_event_id: verlet_history::EventRecordId,
 ) {
     let (terminal_state, reason) = match outcome {
-        ToolBatchAwaitOutcome::Cancelled { reason } => {
-            (crate::ThreadTerminalState::Cancelled, Some(reason.clone()))
-        }
-        ToolBatchAwaitOutcome::Failed { reason, .. } => {
-            (crate::ThreadTerminalState::Failed, Some(reason.clone()))
-        }
+        ToolBatchAwaitOutcome::Cancelled { reason } => (
+            verlet_history::ThreadTerminalState::Cancelled,
+            Some(reason.clone()),
+        ),
+        ToolBatchAwaitOutcome::Failed { reason, .. } => (
+            verlet_history::ThreadTerminalState::Failed,
+            Some(reason.clone()),
+        ),
         ToolBatchAwaitOutcome::Shutdown | ToolBatchAwaitOutcome::Completed(_) => return,
     };
     append_terminal_join_until_recorded(
@@ -3809,19 +4058,23 @@ async fn append_deferred_tool_batch_terminal(
 #[allow(clippy::too_many_arguments)]
 async fn append_tool_results_while_handling_commands(
     runtime: &AgentLoop,
-    turn_context: &crate::TurnContext,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     tool_calls: Vec<ProviderToolCall>,
-    assistant_entry_id: crate::SessionEntryId,
-    turn_input: &crate::TurnInput,
-    turn_source_event_id: crate::EventRecordId,
-    coordinates: &crate::ThreadCoordinates,
-    status: &tokio::sync::watch::Sender<crate::ThreadStatus>,
-    commands: &mut tokio::sync::mpsc::Receiver<crate::ThreadCommand>,
+    assistant_entry_id: verlet_history::SessionEntryId,
+    turn_input: &crate::kernel::runtime_host::turn::TurnInput,
+    turn_source_event_id: verlet_history::EventRecordId,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    status: &tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
+    commands: &mut tokio::sync::mpsc::Receiver<
+        crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    >,
     runtime_cancellation: &tokio_util::sync::CancellationToken,
-    pending_commands: &mut std::collections::VecDeque<crate::ThreadCommand>,
+    pending_commands: &mut std::collections::VecDeque<
+        crate::kernel::runtime_host::runtime_api::ThreadCommand,
+    >,
     cancellation_grace: std::time::Duration,
 ) -> ToolBatchAwaitOutcome {
     let preparation = prepare_tool_results(
@@ -3858,7 +4111,7 @@ async fn append_tool_results_while_handling_commands(
                 append_terminal_join_until_recorded(
                     services,
                     &turn_context.thread,
-                    crate::ThreadTerminalState::Cancelled,
+                    verlet_history::ThreadTerminalState::Cancelled,
                     Some(reason.clone()),
                     Some(turn_source_event_id),
                 )
@@ -3928,7 +4181,7 @@ async fn append_tool_results_while_handling_commands(
                 append_terminal_join_until_recorded(
                     services,
                     &turn_context.thread,
-                    crate::ThreadTerminalState::Cancelled,
+                    verlet_history::ThreadTerminalState::Cancelled,
                     Some(reason.clone()),
                     Some(turn_source_event_id),
                 )
@@ -3986,23 +4239,25 @@ async fn append_tool_results_while_handling_commands(
 
 async fn prepare_tool_results(
     runtime: &AgentLoop,
-    turn_context: &crate::TurnContext,
-    services: &crate::RuntimeServices,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     tool_calls: Vec<ProviderToolCall>,
-    assistant_entry_id: crate::SessionEntryId,
+    assistant_entry_id: verlet_history::SessionEntryId,
     cancellation_grace: std::time::Duration,
-) -> crate::VerletResult<PreparedToolBatch> {
+) -> crate::kernel::runtime_host::VerletResult<PreparedToolBatch> {
     let Some(tool_router) = &runtime.tool_router else {
         return Ok(PreparedToolBatch::NoTools);
     };
     let mut call_ids = std::collections::HashSet::new();
     for tool_call in &tool_calls {
         if !call_ids.insert(tool_call.id.as_str()) {
-            return Err(crate::VerletError::RuntimeExecution(format!(
-                "duplicate tool call id {:?} in one assistant batch",
-                tool_call.id
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!(
+                    "duplicate tool call id {:?} in one assistant batch",
+                    tool_call.id
+                ),
+            ));
         }
     }
     let tool_calls = if runtime.strict_tool_router_unknowns {
@@ -4023,10 +4278,12 @@ async fn prepare_tool_results(
         return Ok(PreparedToolBatch::NoTools);
     }
     let planned_wait_edges = tool_holds::plan_tool_call_batch(&tool_calls);
-    let interceptor = crate::ToolExecutionInterceptor::new(std::sync::Arc::clone(tool_router))
-        .with_hook_pipeline(runtime.hook_pipeline.clone())
-        .with_permission_gate(std::sync::Arc::clone(&runtime.tool_permission_gate));
-    let active_snapshot_id = crate::active_manifest_bind_receipt(
+    let interceptor = crate::agent::tool_interceptor::ToolExecutionInterceptor::new(
+        std::sync::Arc::clone(tool_router),
+    )
+    .with_hook_pipeline(runtime.hook_pipeline.clone())
+    .with_permission_gate(std::sync::Arc::clone(&runtime.tool_permission_gate));
+    let active_snapshot_id = crate::kernel::control_decision::active_manifest_bind_receipt(
         services.runtime_store().as_ref(),
         turn_context.coordinates(),
     )
@@ -4049,11 +4306,13 @@ async fn prepare_tool_results(
         calls_with_snapshots.into_iter().zip(request_events)
     {
         let holds = decode_witnessed_tool_holds(&request_event)?;
-        let request_payload = serde_json::from_value::<crate::ToolCallRequestedPayload>(
-            request_event.payload.clone(),
-        )
+        let request_payload = serde_json::from_value::<
+            crate::kernel::control_decision::ToolCallRequestedPayload,
+        >(request_event.payload.clone())
         .map_err(|err| {
-            crate::VerletError::History(format!("tool.call.requested payload is invalid: {err}"))
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "tool.call.requested payload is invalid: {err}"
+            ))
         })?;
         witnessed_calls.push(WitnessedToolCall {
             tool_call,
@@ -4080,7 +4339,7 @@ async fn prepare_tool_results(
             .collect::<Vec<_>>(),
     );
     if witnessed_wait_edges != planned_wait_edges {
-        return Err(crate::VerletError::History(
+        return Err(crate::kernel::runtime_host::VerletError::History(
             "witnessed tool holds disagree with the planned batch schedule".to_string(),
         ));
     }
@@ -4100,12 +4359,12 @@ async fn prepare_tool_results(
 }
 
 async fn append_tool_results(
-    turn_context: &crate::TurnContext,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     batch: PreparedToolBatch,
-) -> crate::VerletResult<ToolAppendOutcome> {
+) -> crate::kernel::runtime_host::VerletResult<ToolAppendOutcome> {
     let PreparedToolBatch::Outcomes(outcomes) = batch else {
         return Ok(ToolAppendOutcome::NoTools);
     };
@@ -4207,8 +4466,8 @@ async fn append_tool_results(
 }
 
 fn decode_witnessed_tool_holds(
-    request_event: &crate::EventRecord,
-) -> crate::VerletResult<Vec<tool_holds::ToolHold>> {
+    request_event: &verlet_history::EventRecord,
+) -> crate::kernel::runtime_host::VerletResult<Vec<tool_holds::ToolHold>> {
     serde_json::from_value(
         request_event
             .payload
@@ -4216,21 +4475,28 @@ fn decode_witnessed_tool_holds(
             .cloned()
             .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
     )
-    .map_err(|err| crate::VerletError::History(format!("tool hold payload is invalid: {err}")))
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "tool hold payload is invalid: {err}"
+        ))
+    })
 }
 
-type ToolInvocationTaskOutput = (crate::VerletResult<PreparedToolCallOutcome>, bool);
+type ToolInvocationTaskOutput = (
+    crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome>,
+    bool,
+);
 
 #[allow(clippy::too_many_arguments)]
 async fn run_owned_tool_invocation(
-    interceptor: crate::ToolExecutionInterceptor,
-    services: crate::RuntimeServices,
-    turn_context: crate::TurnContext,
-    events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    interceptor: crate::agent::tool_interceptor::ToolExecutionInterceptor,
+    services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: crate::kernel::runtime_host::turn::TurnContext,
+    events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     call: WitnessedToolCall,
     witness: WitnessedToolCall,
     finish_order: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    cancellation: crate::ToolInvocationCancellation,
+    cancellation: crate::agent::agent_tool_router::ToolInvocationCancellation,
     settlement: std::sync::Arc<std::sync::atomic::AtomicU8>,
 ) -> ToolInvocationTaskOutput {
     let thread_id = turn_context.coordinates().thread_id;
@@ -4268,7 +4534,7 @@ async fn run_owned_tool_invocation(
                 outcome,
                 &witness,
                 &finish_order,
-                crate::ToolCallCancellation::CancelledExceededGrace,
+                crate::kernel::control_decision::ToolCallCancellation::CancelledExceededGrace,
             );
             append_detached_tool_call_outcome_until_recorded(
                 &services,
@@ -4281,9 +4547,9 @@ async fn run_owned_tool_invocation(
             (Ok(PreparedToolCallOutcome::Abandoned), true)
         }
         Err(state) => (
-            Err(crate::VerletError::RuntimeExecution(format!(
-                "tool invocation entered unexpected settlement state {state}"
-            ))),
+            Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!("tool invocation entered unexpected settlement state {state}"),
+            )),
             cancelled_at_settlement,
         ),
     }
@@ -4293,10 +4559,10 @@ async fn settled_tool_invocation(
     joined: Result<ToolInvocationTaskOutput, tokio::task::JoinError>,
     witness: &WitnessedToolCall,
     finish_order: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-    cancellation: &crate::ToolInvocationCancellation,
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    cancellation: &crate::agent::agent_tool_router::ToolInvocationCancellation,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
 ) -> ToolCallMonitorOutcome {
     let cancellation_observed = cancellation.is_cancelled();
     let outcome = match joined {
@@ -4307,19 +4573,19 @@ async fn settled_tool_invocation(
                 outcome,
                 witness,
                 finish_order,
-                crate::ToolCallCancellation::CancelledAcknowledged,
+                crate::kernel::control_decision::ToolCallCancellation::CancelledAcknowledged,
             )
         }
         Ok((outcome, _)) => outcome,
         Err(err) if cancellation_observed => Ok(cancelled_tool_call_outcome(
             witness,
             finish_order.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-            crate::ToolCallCancellation::CancelledAcknowledged,
+            crate::kernel::control_decision::ToolCallCancellation::CancelledAcknowledged,
             &format!("cancelled tool invocation task failed: {err}"),
         )),
-        Err(err) => Err(crate::VerletError::RuntimeExecution(format!(
-            "tool invocation task failed: {err}"
-        ))),
+        Err(err) => Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+            format!("tool invocation task failed: {err}"),
+        )),
     };
     if cancellation_observed {
         append_detached_tool_call_outcome_until_recorded(
@@ -4340,11 +4606,11 @@ async fn monitor_owned_tool_invocation_inner(
     mut invocation: tokio::task::JoinHandle<ToolInvocationTaskOutput>,
     witness: WitnessedToolCall,
     finish_order: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    cancellation: crate::ToolInvocationCancellation,
+    cancellation: crate::agent::agent_tool_router::ToolInvocationCancellation,
     settlement: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    services: crate::RuntimeServices,
-    turn_context: crate::TurnContext,
-    events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: crate::kernel::runtime_host::turn::TurnContext,
+    events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
 ) -> (usize, ToolCallMonitorOutcome) {
     let outcome = tokio::select! {
         joined = &mut invocation => {
@@ -4378,7 +4644,7 @@ async fn monitor_owned_tool_invocation_inner(
                     ).await
                 },
                 Err(state) => ToolCallMonitorOutcome::Settled(Err(
-                    crate::VerletError::RuntimeExecution(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                         "tool invocation monitor entered unexpected settlement state {state}"
                     )),
                 )),
@@ -4394,11 +4660,11 @@ async fn monitor_owned_tool_invocation(
     invocation: tokio::task::JoinHandle<ToolInvocationTaskOutput>,
     witness: WitnessedToolCall,
     finish_order: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    cancellation: crate::ToolInvocationCancellation,
+    cancellation: crate::agent::agent_tool_router::ToolInvocationCancellation,
     settlement: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    services: crate::RuntimeServices,
-    turn_context: crate::TurnContext,
-    events: tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: crate::kernel::runtime_host::turn::TurnContext,
+    events: tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
 ) -> (usize, ToolCallMonitorOutcome) {
     let recovery_witness = witness.clone();
     let recovery_finish_order = std::sync::Arc::clone(&finish_order);
@@ -4424,10 +4690,10 @@ async fn monitor_owned_tool_invocation(
         Ok(outcome) => outcome,
         Err(panic) => {
             let message = panic_payload_message(&panic);
-            crate::emit_runtime_event(
+            crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                 &recovery_events,
                 recovery_turn_context.coordinates(),
-                crate::RuntimeEventKind::Recovery {
+                crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
                     action: "recover_tool_invocation_monitor_panic".to_string(),
                     reason: format!(
                         "{}/{}: {message}",
@@ -4451,7 +4717,7 @@ async fn monitor_owned_tool_invocation(
                         cancelled_tool_call_outcome(
                             &recovery_witness,
                             recovery_finish_order.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                            crate::ToolCallCancellation::CancelledAcknowledged,
+                            crate::kernel::control_decision::ToolCallCancellation::CancelledAcknowledged,
                             "cancelled tool invocation monitor panicked",
                         )
                     } else {
@@ -4485,14 +4751,14 @@ async fn monitor_owned_tool_invocation(
 /// handles. Dropping the batch future therefore cannot cancel an invocation in
 /// the middle of its own completion write.
 async fn execute_tool_call_batch(
-    interceptor: &crate::ToolExecutionInterceptor,
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    interceptor: &crate::agent::tool_interceptor::ToolExecutionInterceptor,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     calls: Vec<WitnessedToolCall>,
     wait_edges: Vec<Vec<usize>>,
     cancellation_grace: std::time::Duration,
-) -> Vec<crate::VerletResult<PreparedToolCallOutcome>> {
+) -> Vec<crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome>> {
     let call_count = calls.len();
     let witnesses = calls.clone();
     let mut calls = calls.into_iter().map(Some).collect::<Vec<_>>();
@@ -4515,7 +4781,7 @@ async fn execute_tool_call_batch(
                 outcomes[index] = Some(Ok(cancelled_tool_call_outcome(
                     &witnesses[index],
                     finish_order.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                    crate::ToolCallCancellation::CancelledAcknowledged,
+                    crate::kernel::control_decision::ToolCallCancellation::CancelledAcknowledged,
                     "tool call was cancelled before its hold dependencies released",
                 )));
             }
@@ -4533,16 +4799,19 @@ async fn execute_tool_call_batch(
             let Some(call) = calls[index].take() else {
                 completed[index] = true;
                 completed_count += 1;
-                outcomes[index] = Some(Err(crate::VerletError::RuntimeExecution(format!(
-                    "tool batch scheduler lost call {index} before launch"
-                ))));
+                outcomes[index] = Some(Err(
+                    crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+                        "tool batch scheduler lost call {index} before launch"
+                    )),
+                ));
                 continue;
             };
             let witness = witnesses[index].clone();
-            let invocation_cancellation = crate::ToolInvocationCancellation::new(
-                turn_context.cancellation.child_token(),
-                cancellation_grace,
-            );
+            let invocation_cancellation =
+                crate::agent::agent_tool_router::ToolInvocationCancellation::new(
+                    turn_context.cancellation.child_token(),
+                    cancellation_grace,
+                );
             let settlement =
                 std::sync::Arc::new(std::sync::atomic::AtomicU8::new(TOOL_INVOCATION_AWAITED));
             let invocation = tokio::spawn(run_owned_tool_invocation(
@@ -4582,13 +4851,13 @@ async fn execute_tool_call_batch(
                         if completed[index] {
                             match outcomes[index].take() {
                                 Some(outcome) => outcome,
-                                None => Err(crate::VerletError::RuntimeExecution(format!(
+                                None => Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                                     "tool batch scheduler lost the completed outcome for {}/{}",
                                     witness.tool_call.id, witness.tool_call.name,
                                 ))),
                             }
                         } else {
-                            Err(crate::VerletError::RuntimeExecution(format!(
+                            Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                                 "tool invocation monitor failed for {}/{}: {err}",
                                 witness.tool_call.id, witness.tool_call.name,
                             )))
@@ -4610,27 +4879,27 @@ async fn execute_tool_call_batch(
         .enumerate()
         .map(|(index, outcome)| {
             outcome.unwrap_or_else(|| {
-                Err(crate::VerletError::RuntimeExecution(format!(
-                    "tool batch scheduler did not execute call {index}"
-                )))
+                Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                    format!("tool batch scheduler did not execute call {index}"),
+                ))
             })
         })
         .collect()
 }
 
 async fn prepare_tool_call(
-    interceptor: &crate::ToolExecutionInterceptor,
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    interceptor: &crate::agent::tool_interceptor::ToolExecutionInterceptor,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     call: WitnessedToolCall,
     finish_counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    cancellation: crate::ToolInvocationCancellation,
-) -> crate::VerletResult<PreparedToolCallOutcome> {
+    cancellation: crate::agent::agent_tool_router::ToolInvocationCancellation,
+) -> crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome> {
     match call.recovery_action {
         ToolRecoveryAction::Reuse => {
             let source_event_id = call.recovery_source_event_id.ok_or_else(|| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "recorded tool outcome for {}/{} has no reusable canonical result",
                     turn_context.turn_id, call.tool_call.id
                 ))
@@ -4645,7 +4914,7 @@ async fn prepare_tool_call(
             )
             .await?
             .ok_or_else(|| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "recorded tool outcome for {}/{} lost its canonical result",
                     turn_context.turn_id, call.tool_call.id
                 ))
@@ -4658,7 +4927,7 @@ async fn prepare_tool_call(
                 source_event_id: call.request_event_id,
                 finish_order: finish_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
                 cancellation: None,
-                outcome: Box::new(crate::ToolExecutionOutcome {
+                outcome: Box::new(crate::agent::tool_interceptor::ToolExecutionOutcome {
                     result,
                     hook_records: Vec::new(),
                     pre_model_contexts: Vec::new(),
@@ -4686,18 +4955,18 @@ async fn prepare_tool_call(
     let tool_name = call.tool_call.name;
     let mut arguments = call.tool_call.arguments;
     let args_fingerprint = call.args_fingerprint;
-    let controller = crate::active_tool_controller_for_request(
+    let controller = crate::kernel::control_decision::active_tool_controller_for_request(
         services.runtime_store().as_ref(),
         turn_context.coordinates(),
         &tool_name,
     )
     .await?;
     if let Some(controller) = controller {
-        match crate::decide_tool_call(
+        match crate::kernel::control_decision::decide_tool_call(
             services.runtime_store().as_ref(),
-            crate::ToolDecisionRequest {
+            crate::kernel::control_decision::ToolDecisionRequest {
                 coordinates: turn_context.coordinates().clone(),
-                subject: crate::ToolCallSubject {
+                subject: crate::kernel::control_decision::ToolCallSubject {
                     turn_id: turn_context.turn_id.clone(),
                     call_id: call_id.clone(),
                 },
@@ -4707,7 +4976,7 @@ async fn prepare_tool_call(
         )
         .await?
         {
-            crate::ToolCallDecision::NoDecision => {
+            crate::kernel::control_decision::ToolCallDecision::NoDecision => {
                 return Ok(PreparedToolCallOutcome::Denied {
                     call_id,
                     tool_name,
@@ -4718,12 +4987,12 @@ async fn prepare_tool_call(
                     reason: "tool controller did not emit a terminal decision".to_string(),
                 });
             }
-            crate::ToolCallDecision::Allow { .. } => {}
-            crate::ToolCallDecision::Rewrite {
+            crate::kernel::control_decision::ToolCallDecision::Allow { .. } => {}
+            crate::kernel::control_decision::ToolCallDecision::Rewrite {
                 arguments: rewritten,
                 ..
             } => arguments = rewritten,
-            crate::ToolCallDecision::Deny { reason, .. } => {
+            crate::kernel::control_decision::ToolCallDecision::Deny { reason, .. } => {
                 return Ok(PreparedToolCallOutcome::Denied {
                     call_id,
                     tool_name,
@@ -4734,7 +5003,7 @@ async fn prepare_tool_call(
                     reason,
                 });
             }
-            crate::ToolCallDecision::Wait {
+            crate::kernel::control_decision::ToolCallDecision::Wait {
                 consumed_fact_id,
                 approval_id,
                 reason,
@@ -4774,11 +5043,11 @@ async fn prepare_tool_call(
 }
 
 fn settle_prepared_for_cancellation(
-    outcome: crate::VerletResult<PreparedToolCallOutcome>,
+    outcome: crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome>,
     witness: &WitnessedToolCall,
     finish_counter: &std::sync::atomic::AtomicU64,
-    cancellation: crate::ToolCallCancellation,
-) -> crate::VerletResult<PreparedToolCallOutcome> {
+    cancellation: crate::kernel::control_decision::ToolCallCancellation,
+) -> crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome> {
     match outcome {
         Ok(PreparedToolCallOutcome::Completed {
             call_id,
@@ -4830,7 +5099,7 @@ fn settle_prepared_for_cancellation(
 fn cancelled_tool_call_outcome(
     witness: &WitnessedToolCall,
     finish_order: u64,
-    cancellation: crate::ToolCallCancellation,
+    cancellation: crate::kernel::control_decision::ToolCallCancellation,
     reason: &str,
 ) -> PreparedToolCallOutcome {
     PreparedToolCallOutcome::Completed {
@@ -4841,8 +5110,8 @@ fn cancelled_tool_call_outcome(
         source_event_id: witness.request_event_id,
         finish_order,
         cancellation: Some(cancellation),
-        outcome: Box::new(crate::ToolExecutionOutcome {
-            result: crate::CanonicalMessage::tool_result(
+        outcome: Box::new(crate::agent::tool_interceptor::ToolExecutionOutcome {
+            result: verlet_history::CanonicalMessage::tool_result(
                 witness.tool_call.id.clone(),
                 witness.tool_call.name.clone(),
                 reason,
@@ -4865,7 +5134,7 @@ fn failed_tool_call_outcome(
     let mut outcome = cancelled_tool_call_outcome(
         witness,
         finish_order,
-        crate::ToolCallCancellation::CancelledAcknowledged,
+        crate::kernel::control_decision::ToolCallCancellation::CancelledAcknowledged,
         reason,
     );
     if let PreparedToolCallOutcome::Completed { cancellation, .. } = &mut outcome {
@@ -4887,12 +5156,12 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// Appends the completion from inside an invocation that outlived its grace.
 /// All witnessing inputs are captured before the batch monitor can abandon it.
 async fn append_detached_tool_call_outcome(
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    outcome: crate::VerletResult<PreparedToolCallOutcome>,
-) -> crate::VerletResult<()> {
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    outcome: crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let PreparedToolCallOutcome::Completed {
         call_id,
         tool_name,
@@ -4925,11 +5194,11 @@ async fn append_detached_tool_call_outcome(
 }
 
 async fn append_detached_tool_call_outcome_until_recorded(
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    outcome: crate::VerletResult<PreparedToolCallOutcome>,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    outcome: crate::kernel::runtime_host::VerletResult<PreparedToolCallOutcome>,
 ) {
     let prepared = match outcome {
         Ok(prepared @ PreparedToolCallOutcome::Completed { .. }) => prepared,
@@ -4999,16 +5268,16 @@ async fn append_detached_tool_call_outcome_until_recorded(
 }
 
 fn report_detached_completion_retry(
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    coordinates: &crate::ThreadCoordinates,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     call_id: &str,
     tool_name: &str,
-    error: &crate::VerletError,
+    error: &crate::kernel::runtime_host::VerletError,
 ) {
-    crate::emit_runtime_event(
+    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
         events,
         coordinates,
-        crate::RuntimeEventKind::Recovery {
+        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Recovery {
             action: "retry_detached_tool_completion".to_string(),
             reason: format!("{call_id}/{tool_name}: {error}"),
         },
@@ -5018,22 +5287,22 @@ fn report_detached_completion_retry(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_resumed_tool_call_with_interceptor(
-    interceptor: &crate::ToolExecutionInterceptor,
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    interceptor: &crate::agent::tool_interceptor::ToolExecutionInterceptor,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     call_id: String,
     tool_name: String,
     arguments: serde_json::Value,
     holds: Vec<tool_holds::ToolHold>,
     snapshot_id: String,
     args_fingerprint: Option<String>,
-    source_event_id: crate::EventRecordId,
-) -> crate::VerletResult<()> {
+    source_event_id: verlet_history::EventRecordId,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let wait_edges = tool_holds::batch_wait_edges(&[holds]);
     if wait_edges != [Vec::<usize>::new()] {
-        return Err(crate::VerletError::RuntimeExecution(
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
             "single resumed tool call produced an invalid hold schedule".to_string(),
         ));
     }
@@ -5045,7 +5314,7 @@ async fn execute_resumed_tool_call_with_interceptor(
         &call_id,
         &tool_name,
         arguments,
-        crate::ToolInvocationCancellation::never(),
+        crate::agent::agent_tool_router::ToolInvocationCancellation::never(),
     )
     .await?;
     append_tool_execution_outcome(
@@ -5068,19 +5337,20 @@ async fn execute_resumed_tool_call_with_interceptor(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_call_with_interceptor(
-    interceptor: &crate::ToolExecutionInterceptor,
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    interceptor: &crate::agent::tool_interceptor::ToolExecutionInterceptor,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     call_id: &str,
     tool_name: &str,
     arguments: serde_json::Value,
-    cancellation: crate::ToolInvocationCancellation,
-) -> crate::VerletResult<crate::ToolExecutionOutcome> {
+    cancellation: crate::agent::agent_tool_router::ToolInvocationCancellation,
+) -> crate::kernel::runtime_host::VerletResult<crate::agent::tool_interceptor::ToolExecutionOutcome>
+{
     let witness_coordinates = turn_context.coordinates().clone();
     interceptor
         .execute_with_witnessing_cancellable(
-            crate::ToolExecutionRequest {
+            crate::agent::tool_interceptor::ToolExecutionRequest {
                 turn_context,
                 call_id: call_id.to_string(),
                 tool_name: tool_name.to_string(),
@@ -5100,32 +5370,36 @@ async fn execute_tool_call_with_interceptor(
 
 #[allow(clippy::too_many_arguments)]
 async fn append_tool_execution_outcome(
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     call_id: String,
     tool_name: String,
     snapshot_id: String,
     args_fingerprint: Option<String>,
-    source_event_id: crate::EventRecordId,
+    source_event_id: verlet_history::EventRecordId,
     finish_order: Option<u64>,
-    cancellation: Option<crate::ToolCallCancellation>,
-    outcome: crate::ToolExecutionOutcome,
+    cancellation: Option<crate::kernel::control_decision::ToolCallCancellation>,
+    outcome: crate::agent::tool_interceptor::ToolExecutionOutcome,
     idempotent_result_append: bool,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     emit_hook_records(events, turn_context.coordinates(), &outcome.hook_records);
     if let Some(permission_decision) = &outcome.permission_decision {
         let (decision, reason) = match permission_decision {
-            crate::ToolPermissionDecision::Allow => (crate::RuntimePermissionDecision::Allow, None),
-            crate::ToolPermissionDecision::Deny { reason } => {
-                (crate::RuntimePermissionDecision::Deny, Some(reason.clone()))
-            }
+            crate::agent::tool_interceptor::ToolPermissionDecision::Allow => (
+                verlet_runtime_contracts::RuntimePermissionDecision::Allow,
+                None,
+            ),
+            crate::agent::tool_interceptor::ToolPermissionDecision::Deny { reason } => (
+                verlet_runtime_contracts::RuntimePermissionDecision::Deny,
+                Some(reason.clone()),
+            ),
         };
-        crate::emit_runtime_event(
+        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
             events,
             turn_context.coordinates(),
-            crate::RuntimeEventKind::PermissionDecision {
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::PermissionDecision {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
                 decision,
@@ -5143,21 +5417,21 @@ async fn append_tool_execution_outcome(
     .await?;
     let tool_success = matches!(
         &outcome.result,
-        crate::CanonicalMessage::ToolResult {
+        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             ..
         }
     );
-    crate::emit_runtime_event(
+    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
         events,
         turn_context.coordinates(),
-        crate::RuntimeEventKind::ToolLog {
+        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolLog {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
             level: if tool_success {
-                crate::RuntimeToolLogLevel::Info
+                verlet_runtime_contracts::RuntimeToolLogLevel::Info
             } else {
-                crate::RuntimeToolLogLevel::Error
+                verlet_runtime_contracts::RuntimeToolLogLevel::Error
             },
             message: if tool_success {
                 "tool completed".to_string()
@@ -5199,20 +5473,20 @@ async fn append_tool_execution_outcome(
 }
 
 async fn append_turn_submitted_event(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
-    entry: &crate::SessionEntry,
-) -> crate::VerletResult<crate::EventRecord> {
+    entry: &verlet_history::SessionEntry,
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     if let Some(existing) = existing_turn_submitted_event(services, coordinates, turn_id).await? {
         return Ok(existing);
     }
     services
         .append_thread_event(
             coordinates,
-            crate::NewEventRecord::witnessed(
+            verlet_history::NewEventRecord::witnessed(
                 coordinates.clone(),
-                crate::EventKind::TurnSubmitted,
+                verlet_history::EventKind::TurnSubmitted,
                 serde_json::json!({
                     "turn_id": turn_id,
                     "entry_id": entry.entry_id.to_string(),
@@ -5223,19 +5497,22 @@ async fn append_turn_submitted_event(
 }
 
 async fn existing_turn_submitted_event(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
-) -> crate::VerletResult<Option<crate::EventRecord>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::EventRecord>> {
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     Ok(events
         .into_iter()
         .filter(|event| {
-            event.kind == crate::EventKind::TurnSubmitted
+            event.kind == verlet_history::EventKind::TurnSubmitted
                 && event
                     .payload
                     .get("turn_id")
@@ -5246,27 +5523,27 @@ async fn existing_turn_submitted_event(
 }
 
 async fn append_turn_completed_event(
-    services: &crate::RuntimeServices,
-    thread_context: &crate::ThreadContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: &str,
-) -> crate::VerletResult<crate::EventRecord> {
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     let coordinates = &thread_context.coordinates;
     let latest_source_id = latest_thread_event_id(services, coordinates).await?;
     let completed = services
         .append_thread_event(
             coordinates,
-            crate::NewEventRecord::discharged(
+            verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::EventKind::TurnCompleted,
+                verlet_history::EventKind::TurnCompleted,
                 serde_json::json!({
                     "turn_id": turn_id,
                 }),
-                crate::EventProvenance {
-                    source_streams: vec![crate::EventStreamId::for_thread(coordinates)],
+                verlet_history::EventProvenance {
+                    source_streams: vec![verlet_history::EventStreamId::for_thread(coordinates)],
                     source_event_ids: latest_source_id.into_iter().collect(),
                     discharged_by: Some("propagator:agent-loop".to_string()),
                     function: Some("turn_complete/v1".to_string()),
-                    ..crate::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             ),
         )
@@ -5274,7 +5551,7 @@ async fn append_turn_completed_event(
     services
         .append_thread_joined_event_if_spawned(
             thread_context,
-            crate::ThreadTerminalState::Completed,
+            verlet_history::ThreadTerminalState::Completed,
             None,
             Some(completed.id),
         )
@@ -5283,30 +5560,30 @@ async fn append_turn_completed_event(
 }
 
 async fn append_turn_resumed_event(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
-    consumed_fact_id: crate::EventRecordId,
-) -> crate::VerletResult<crate::EventRecord> {
+    consumed_fact_id: verlet_history::EventRecordId,
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     services
         .append_control_event(
             coordinates,
-            crate::NewEventRecord::discharged(
+            verlet_history::NewEventRecord::discharged(
                 coordinates.clone(),
-                crate::EventKind::TurnResumed,
+                verlet_history::EventKind::TurnResumed,
                 serde_json::json!({
                     "turn_id": turn_id,
                     "consumed_fact_id": consumed_fact_id.to_string(),
                 }),
-                crate::EventProvenance {
-                    source_streams: vec![crate::EventStreamId::new(format!(
+                verlet_history::EventProvenance {
+                    source_streams: vec![verlet_history::EventStreamId::new(format!(
                         "control:{}",
                         coordinates.thread_id
                     ))],
                     source_event_ids: vec![consumed_fact_id],
                     discharged_by: Some("scheduler:tool-decision".to_string()),
                     function: Some("tool_resume/v1".to_string()),
-                    ..crate::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             ),
         )
@@ -5314,16 +5591,16 @@ async fn append_turn_resumed_event(
 }
 
 async fn append_tool_call_requested_events(
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
     calls: &[(ProviderToolCall, String)],
-    assistant_entry_id: crate::SessionEntryId,
-) -> crate::VerletResult<Vec<crate::EventRecord>> {
+    assistant_entry_id: verlet_history::SessionEntryId,
+) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
     let assistant_event_id =
         session_entry_event_id(services, turn_context.coordinates(), assistant_entry_id)
             .await?
             .ok_or_else(|| {
-                crate::VerletError::History(format!(
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "assistant session entry {assistant_entry_id} has no durable source event"
                 ))
             })?;
@@ -5331,42 +5608,49 @@ async fn append_tool_call_requested_events(
     for (tool_call, snapshot_id) in calls {
         let args_fingerprint =
             crate::agent::tool_universe::args_fingerprint(&tool_call.name, &tool_call.arguments)?;
-        let mut payload = serde_json::to_value(crate::ToolCallRequestedPayload {
-            subject: crate::ToolCallSubject {
-                turn_id: turn_context.turn_id.clone(),
-                call_id: tool_call.id.clone(),
-            },
-            snapshot_id: snapshot_id.clone(),
-            tool_name: tool_call.name.clone(),
-            arguments: tool_call.arguments.clone(),
-            args_fingerprint: Some(args_fingerprint),
-            holds: tool_holds::derive_tool_holds(&tool_call.name, &tool_call.arguments)
-                .into_iter()
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| {
-                    crate::VerletError::History(format!("tool hold payload codec failed: {err}"))
-                })?,
-        })
-        .map_err(|err| {
-            crate::VerletError::History(format!("tool request payload codec failed: {err}"))
-        })?;
+        let mut payload =
+            serde_json::to_value(crate::kernel::control_decision::ToolCallRequestedPayload {
+                subject: crate::kernel::control_decision::ToolCallSubject {
+                    turn_id: turn_context.turn_id.clone(),
+                    call_id: tool_call.id.clone(),
+                },
+                snapshot_id: snapshot_id.clone(),
+                tool_name: tool_call.name.clone(),
+                arguments: tool_call.arguments.clone(),
+                args_fingerprint: Some(args_fingerprint),
+                holds: tool_holds::derive_tool_holds(&tool_call.name, &tool_call.arguments)
+                    .into_iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| {
+                        crate::kernel::runtime_host::VerletError::History(format!(
+                            "tool hold payload codec failed: {err}"
+                        ))
+                    })?,
+            })
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "tool request payload codec failed: {err}"
+                ))
+            })?;
         if let Some(object) = payload.as_object_mut() {
             object.insert(
                 "tool".to_string(),
                 serde_json::Value::String(tool_call.name.clone()),
             );
         }
-        records.push(crate::NewEventRecord::discharged(
+        records.push(verlet_history::NewEventRecord::discharged(
             turn_context.coordinates().clone(),
-            crate::EventKind::ToolCallRequested,
+            verlet_history::EventKind::ToolCallRequested,
             payload,
-            crate::EventProvenance {
-                source_streams: vec![crate::EventStreamId::for_thread(turn_context.coordinates())],
+            verlet_history::EventProvenance {
+                source_streams: vec![verlet_history::EventStreamId::for_thread(
+                    turn_context.coordinates(),
+                )],
                 source_event_ids: vec![assistant_event_id],
                 discharged_by: Some("propagator:agent-loop".to_string()),
                 function: Some("tool_request/v1".to_string()),
-                ..crate::EventProvenance::default()
+                ..verlet_history::EventProvenance::default()
             },
         ));
     }
@@ -5376,26 +5660,26 @@ async fn append_tool_call_requested_events(
 }
 
 async fn append_denied_tool_result(
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     call_id: String,
     tool_name: String,
     snapshot_id: String,
     args_fingerprint: Option<String>,
     reason: String,
     finish_order: Option<u64>,
-    cancellation: Option<crate::ToolCallCancellation>,
-    source_event_id: crate::EventRecordId,
-) -> crate::VerletResult<()> {
-    crate::emit_runtime_event(
+    cancellation: Option<crate::kernel::control_decision::ToolCallCancellation>,
+    source_event_id: verlet_history::EventRecordId,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
         events,
         turn_context.coordinates(),
-        crate::RuntimeEventKind::ToolLog {
+        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolLog {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
-            level: crate::RuntimeToolLogLevel::Error,
+            level: verlet_runtime_contracts::RuntimeToolLogLevel::Error,
             message: "tool denied".to_string(),
             metadata: std::collections::BTreeMap::from([
                 ("duration_ms".to_string(), "0".to_string()),
@@ -5403,8 +5687,12 @@ async fn append_denied_tool_result(
             ]),
         },
     );
-    let result =
-        crate::CanonicalMessage::tool_result(call_id.clone(), tool_name.clone(), reason, true);
+    let result = verlet_history::CanonicalMessage::tool_result(
+        call_id.clone(),
+        tool_name.clone(),
+        reason,
+        true,
+    );
     append_tool_result_message(
         services,
         turn_context.coordinates(),
@@ -5426,20 +5714,20 @@ async fn append_denied_tool_result(
 }
 
 async fn append_turn_waiting_event(
-    services: &crate::RuntimeServices,
-    turn_context: &crate::TurnContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
     call_id: &str,
     snapshot_id: &str,
-    waiting_on_event_id: crate::EventRecordId,
+    waiting_on_event_id: verlet_history::EventRecordId,
     approval_id: Option<String>,
     reason: Option<String>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     services
         .append_control_event(
             turn_context.coordinates(),
-            crate::NewEventRecord::discharged(
+            verlet_history::NewEventRecord::discharged(
                 turn_context.coordinates().clone(),
-                crate::EventKind::TurnWaiting,
+                verlet_history::EventKind::TurnWaiting,
                 serde_json::json!({
                     "turn_id": turn_context.turn_id.clone(),
                     "subject": {
@@ -5452,15 +5740,15 @@ async fn append_turn_waiting_event(
                     "reason": reason,
                     "continuation": "tool.call",
                 }),
-                crate::EventProvenance {
-                    source_streams: vec![crate::EventStreamId::new(format!(
+                verlet_history::EventProvenance {
+                    source_streams: vec![verlet_history::EventStreamId::new(format!(
                         "control:{}",
                         turn_context.coordinates().thread_id
                     ))],
                     source_event_ids: vec![waiting_on_event_id],
                     discharged_by: Some("scheduler:tool-decision".to_string()),
                     function: Some("tool_wait/v1".to_string()),
-                    ..crate::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
             ),
         )
@@ -5469,20 +5757,23 @@ async fn append_turn_waiting_event(
 }
 
 async fn session_entry_event_id(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
-    entry_id: crate::SessionEntryId,
-) -> crate::VerletResult<Option<crate::EventRecordId>> {
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    entry_id: verlet_history::SessionEntryId,
+) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::EventRecordId>> {
     let entry_id = entry_id.to_string();
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     Ok(events
         .into_iter()
         .find(|event| {
-            event.kind == crate::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event
                     .payload
                     .get("entry_id")
@@ -5493,14 +5784,17 @@ async fn session_entry_event_id(
 }
 
 async fn latest_thread_event_id(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
-) -> crate::VerletResult<Option<crate::EventRecordId>> {
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::EventRecordId>> {
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     Ok(events
         .into_iter()
         .max_by_key(|event| event.sequence.get())
@@ -5508,28 +5802,32 @@ async fn latest_thread_event_id(
 }
 
 async fn pending_tool_call_request(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
     call_id: &str,
-) -> crate::VerletResult<Option<PendingToolCallRequest>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<PendingToolCallRequest>> {
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut matches = Vec::new();
     for event in events
         .into_iter()
-        .filter(|event| event.kind == crate::EventKind::ToolCallRequested)
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallRequested)
     {
-        let payload =
-            serde_json::from_value::<crate::ToolCallRequestedPayload>(event.payload.clone())
-                .map_err(|err| {
-                    crate::VerletError::History(format!(
-                        "tool.call.requested payload is invalid: {err}"
-                    ))
-                })?;
+        let payload = serde_json::from_value::<
+            crate::kernel::control_decision::ToolCallRequestedPayload,
+        >(event.payload.clone())
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "tool.call.requested payload is invalid: {err}"
+            ))
+        })?;
         if payload.subject.turn_id == turn_id && payload.subject.call_id == call_id {
             let assistant_source_event_id = event
                 .provenance
@@ -5537,7 +5835,7 @@ async fn pending_tool_call_request(
                 .first()
                 .copied()
                 .ok_or_else(|| {
-                    crate::VerletError::History(format!(
+                    crate::kernel::runtime_host::VerletError::History(format!(
                         "tool.call.requested {} for {turn_id}/{call_id} has no assistant source event",
                         event.id
                     ))
@@ -5556,7 +5854,9 @@ async fn pending_tool_call_request(
                     .map(serde_json::from_value)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|err| {
-                        crate::VerletError::History(format!("tool hold payload is invalid: {err}"))
+                        crate::kernel::runtime_host::VerletError::History(format!(
+                            "tool hold payload is invalid: {err}"
+                        ))
                     })?,
             });
         }
@@ -5564,41 +5864,45 @@ async fn pending_tool_call_request(
     match matches.len() {
         0 => Ok(None),
         1 => Ok(matches.pop()),
-        count => Err(crate::VerletError::History(format!(
+        count => Err(crate::kernel::runtime_host::VerletError::History(format!(
             "found {count} tool.call.requested events for ambiguous subject {turn_id}/{call_id}"
         ))),
     }
 }
 
 async fn tool_call_batch_completed(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
-    assistant_source_event_id: crate::EventRecordId,
-) -> crate::VerletResult<bool> {
+    assistant_source_event_id: verlet_history::EventRecordId,
+) -> crate::kernel::runtime_host::VerletResult<bool> {
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let mut batch_subjects = std::collections::BTreeMap::new();
     let mut completed_subjects = std::collections::BTreeMap::<
-        crate::ToolCallSubject,
-        Vec<crate::ToolCallCompletedPayload>,
+        crate::kernel::control_decision::ToolCallSubject,
+        Vec<crate::kernel::control_decision::ToolCallCompletedPayload>,
     >::new();
     for event in events {
         match event.kind {
-            crate::EventKind::ToolCallRequested
+            verlet_history::EventKind::ToolCallRequested
                 if event.provenance.source_event_ids.first()
                     == Some(&assistant_source_event_id) =>
             {
-                let payload =
-                    serde_json::from_value::<crate::ToolCallRequestedPayload>(event.payload)
-                        .map_err(|err| {
-                            crate::VerletError::History(format!(
-                                "tool.call.requested payload is invalid: {err}"
-                            ))
-                        })?;
+                let payload = serde_json::from_value::<
+                    crate::kernel::control_decision::ToolCallRequestedPayload,
+                >(event.payload)
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(format!(
+                        "tool.call.requested payload is invalid: {err}"
+                    ))
+                })?;
                 if payload.subject.turn_id == turn_id
                     && batch_subjects
                         .insert(
@@ -5607,12 +5911,12 @@ async fn tool_call_batch_completed(
                         )
                         .is_some()
                 {
-                    return Err(crate::VerletError::History(format!(
+                    return Err(crate::kernel::runtime_host::VerletError::History(format!(
                         "assistant source event {assistant_source_event_id} contains duplicate tool call subjects"
                     )));
                 }
             }
-            crate::EventKind::ToolCallCompleted
+            verlet_history::EventKind::ToolCallCompleted
                 if event
                     .payload
                     .get("subject")
@@ -5620,13 +5924,14 @@ async fn tool_call_batch_completed(
                     .and_then(serde_json::Value::as_str)
                     == Some(turn_id) =>
             {
-                let payload =
-                    serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload)
-                        .map_err(|err| {
-                            crate::VerletError::History(format!(
-                                "tool.call.completed payload is invalid: {err}"
-                            ))
-                        })?;
+                let payload = serde_json::from_value::<
+                    crate::kernel::control_decision::ToolCallCompletedPayload,
+                >(event.payload)
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(format!(
+                        "tool.call.completed payload is invalid: {err}"
+                    ))
+                })?;
                 completed_subjects
                     .entry(payload.subject.clone())
                     .or_default()
@@ -5636,7 +5941,7 @@ async fn tool_call_batch_completed(
         }
     }
     if batch_subjects.is_empty() {
-        return Err(crate::VerletError::History(format!(
+        return Err(crate::kernel::runtime_host::VerletError::History(format!(
             "assistant source event {assistant_source_event_id} has no tool request batch for turn {turn_id}"
         )));
     }
@@ -5653,30 +5958,35 @@ async fn tool_call_batch_completed(
 }
 
 async fn matching_tool_call_completed_exists(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
     call_id: &str,
     snapshot_id: &str,
     args_fingerprint: Option<&str>,
-) -> crate::VerletResult<bool> {
+) -> crate::kernel::runtime_host::VerletResult<bool> {
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     for event in events.into_iter().filter(|event| {
-        event.kind == crate::EventKind::ToolCallCompleted
+        event.kind == verlet_history::EventKind::ToolCallCompleted
             && event.payload["subject"]["turn_id"] == turn_id
             && event.payload["subject"]["call_id"] == call_id
     }) {
-        let payload = serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload)
-            .map_err(|err| {
-                crate::VerletError::History(format!(
-                    "tool.call.completed {} payload is invalid: {err}",
-                    event.id
-                ))
-            })?;
+        let payload = serde_json::from_value::<
+            crate::kernel::control_decision::ToolCallCompletedPayload,
+        >(event.payload)
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "tool.call.completed {} payload is invalid: {err}",
+                event.id
+            ))
+        })?;
         if payload.snapshot_id == snapshot_id
             && payload.args_fingerprint.as_deref() == args_fingerprint
         {
@@ -5687,31 +5997,36 @@ async fn matching_tool_call_completed_exists(
 }
 
 async fn existing_tool_result_message(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
-    source_event_id: crate::EventRecordId,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    source_event_id: verlet_history::EventRecordId,
     call_id: &str,
     expected_snapshot_id: &str,
     expected_fingerprint: Option<&str>,
-) -> crate::VerletResult<Option<crate::CanonicalMessage>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
     let events = services
         .runtime_store()
-        .read_events(&crate::EventStreamId::for_thread(coordinates), None)
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     let Some(request_event) = events.iter().find(|event| {
-        event.id == source_event_id && event.kind == crate::EventKind::ToolCallRequested
+        event.id == source_event_id && event.kind == verlet_history::EventKind::ToolCallRequested
     }) else {
         return Ok(None);
     };
     let request =
-        serde_json::from_value::<crate::ToolCallRequestedPayload>(request_event.payload.clone())
-            .map_err(|err| {
-                crate::VerletError::History(format!(
-                    "tool.call.requested {} payload is invalid while reusing a result: {err}",
-                    request_event.id
-                ))
-            })?;
+        serde_json::from_value::<crate::kernel::control_decision::ToolCallRequestedPayload>(
+            request_event.payload.clone(),
+        )
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "tool.call.requested {} payload is invalid while reusing a result: {err}",
+                request_event.id
+            ))
+        })?;
     if !crate::kernel::control_decision::tool_invocation_fingerprint_matches(
         &request.snapshot_id,
         request.args_fingerprint.as_deref(),
@@ -5723,7 +6038,7 @@ async fn existing_tool_result_message(
     let result_entry_ids = events
         .into_iter()
         .filter(|event| {
-            event.kind == crate::EventKind::SessionEntryAppended
+            event.kind == verlet_history::EventKind::SessionEntryAppended
                 && event.provenance.source_event_ids.contains(&source_event_id)
         })
         .filter_map(|event| {
@@ -5743,9 +6058,9 @@ async fn existing_tool_result_message(
             return None;
         }
         match entry.kind {
-            crate::SessionEntryKind::Message {
+            verlet_history::SessionEntryKind::Message {
                 message:
-                    ref message @ crate::CanonicalMessage::ToolResult {
+                    ref message @ verlet_history::CanonicalMessage::ToolResult {
                         ref tool_call_id, ..
                     },
             } if tool_call_id == call_id => Some(message.clone()),
@@ -5755,30 +6070,31 @@ async fn existing_tool_result_message(
 }
 
 async fn tool_call_suspension_exists(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
     call_id: &str,
-) -> crate::VerletResult<bool> {
+) -> crate::kernel::runtime_host::VerletResult<bool> {
     let events = services
         .runtime_store()
         .read_events(
-            &crate::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
+            &verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id)),
             None,
         )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     for event in events
         .into_iter()
-        .filter(|event| event.kind == crate::EventKind::ToolCallSuspended)
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallSuspended)
     {
-        let payload =
-            serde_json::from_value::<crate::ToolCallSuspendedPayload>(event.payload.clone())
-                .map_err(|err| {
-                    crate::VerletError::History(format!(
-                        "tool.call.suspended payload is invalid: {err}"
-                    ))
-                })?;
+        let payload = serde_json::from_value::<
+            crate::kernel::control_decision::ToolCallSuspendedPayload,
+        >(event.payload.clone())
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "tool.call.suspended payload is invalid: {err}"
+            ))
+        })?;
         if payload.subject.turn_id == turn_id && payload.subject.call_id == call_id {
             return Ok(true);
         }
@@ -5787,22 +6103,22 @@ async fn tool_call_suspension_exists(
 }
 
 async fn append_tool_result_message(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     call_id: String,
     tool_name: String,
     turn_id: String,
     snapshot_id: String,
     args_fingerprint: Option<String>,
-    result: crate::CanonicalMessage,
+    result: verlet_history::CanonicalMessage,
     duration_ms: Option<u64>,
     finish_order: Option<u64>,
-    cancellation: Option<crate::ToolCallCancellation>,
-    source_event_id: crate::EventRecordId,
+    cancellation: Option<crate::kernel::control_decision::ToolCallCancellation>,
+    source_event_id: verlet_history::EventRecordId,
     idempotent_result_append: bool,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let existing_result = if idempotent_result_append {
         existing_tool_result_message(
             services,
@@ -5819,7 +6135,7 @@ async fn append_tool_result_message(
     let result_already_persisted = existing_result.is_some();
     let result = existing_result.unwrap_or(result);
     let success = match &result {
-        crate::CanonicalMessage::ToolResult { is_error, .. } => !is_error,
+        verlet_history::CanonicalMessage::ToolResult { is_error, .. } => !is_error,
         _ => false,
     };
     let output = text_from_message(&result);
@@ -5828,15 +6144,20 @@ async fn append_tool_result_message(
             .append_agent_loop_session_entry(
                 coordinates,
                 None,
-                crate::SessionEntryKind::Message { message: result },
+                verlet_history::SessionEntryKind::Message { message: result },
                 vec![source_event_id],
             )
             .await?;
-        let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
-        crate::emit_runtime_event(
+        let _ = events.send(
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror {
+                thread_id,
+                entry,
+            },
+        );
+        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
             events,
             coordinates,
-            crate::RuntimeEventKind::ToolCallResult {
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
                 call_id: call_id.clone(),
                 output,
                 success,
@@ -5862,8 +6183,8 @@ async fn append_tool_result_message(
 
 #[allow(clippy::too_many_arguments)]
 async fn append_tool_completion_event(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: String,
     call_id: String,
     snapshot_id: String,
@@ -5872,15 +6193,15 @@ async fn append_tool_completion_event(
     success: bool,
     duration_ms: Option<u64>,
     finish_order: Option<u64>,
-    cancellation: Option<crate::ToolCallCancellation>,
-) -> crate::VerletResult<()> {
-    let subject = crate::ToolCallSubject { turn_id, call_id };
+    cancellation: Option<crate::kernel::control_decision::ToolCallCancellation>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let subject = crate::kernel::control_decision::ToolCallSubject { turn_id, call_id };
     let completion_snapshot_id = snapshot_id.clone();
     let completion_fingerprint = args_fingerprint.clone();
-    let record = crate::NewEventRecord::witnessed(
+    let record = verlet_history::NewEventRecord::witnessed(
         coordinates.clone(),
-        crate::EventKind::ToolCallCompleted,
-        serde_json::to_value(crate::ToolCallCompletedPayload {
+        verlet_history::EventKind::ToolCallCompleted,
+        serde_json::to_value(crate::kernel::control_decision::ToolCallCompletedPayload {
             subject: subject.clone(),
             snapshot_id,
             tool_name,
@@ -5891,29 +6212,32 @@ async fn append_tool_completion_event(
             cancellation,
         })
         .map_err(|err| {
-            crate::VerletError::History(format!("tool completion payload codec failed: {err}"))
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "tool completion payload codec failed: {err}"
+            ))
         })?,
     );
-    let stream_id = crate::EventStreamId::for_thread(coordinates);
+    let stream_id = verlet_history::EventStreamId::for_thread(coordinates);
     loop {
         let existing = services
             .runtime_store()
             .read_events(&stream_id, None)
             .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
         for event in existing.iter().filter(|event| {
-            event.kind == crate::EventKind::ToolCallCompleted
+            event.kind == verlet_history::EventKind::ToolCallCompleted
                 && event.payload["subject"]["turn_id"] == subject.turn_id
                 && event.payload["subject"]["call_id"] == subject.call_id
         }) {
-            let payload =
-                serde_json::from_value::<crate::ToolCallCompletedPayload>(event.payload.clone())
-                    .map_err(|err| {
-                        crate::VerletError::History(format!(
-                            "tool.call.completed {} payload is invalid: {err}",
-                            event.id
-                        ))
-                    })?;
+            let payload = serde_json::from_value::<
+                crate::kernel::control_decision::ToolCallCompletedPayload,
+            >(event.payload.clone())
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "tool.call.completed {} payload is invalid: {err}",
+                    event.id
+                ))
+            })?;
             if payload.snapshot_id == completion_snapshot_id
                 && payload.args_fingerprint == completion_fingerprint
             {
@@ -5922,27 +6246,31 @@ async fn append_tool_completion_event(
         }
         let expected_next_sequence = existing
             .last()
-            .map(|event| crate::EventSequence::new(event.sequence.get().saturating_add(1)))
-            .unwrap_or_else(|| crate::EventSequence::new(1));
+            .map(|event| verlet_history::EventSequence::new(event.sequence.get().saturating_add(1)))
+            .unwrap_or_else(|| verlet_history::EventSequence::new(1));
         match services
             .runtime_store()
             .append_events_fenced(&stream_id, expected_next_sequence, vec![record.clone()])
             .await
         {
             Ok(_) => return Ok(()),
-            Err(crate::HistoryError::AppendFenceConflict { .. }) => continue,
-            Err(err) => return Err(crate::VerletError::History(err.to_string())),
+            Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
+            Err(err) => {
+                return Err(crate::kernel::runtime_host::VerletError::History(
+                    err.to_string(),
+                ));
+            }
         }
     }
 }
 
 async fn append_hook_contexts(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     contexts: Vec<String>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     for context in contexts
         .into_iter()
         .filter(|context| !context.trim().is_empty())
@@ -5951,28 +6279,35 @@ async fn append_hook_contexts(
             .append_session_entry(
                 coordinates,
                 None,
-                crate::SessionEntryKind::CustomContextMessage {
-                    message: crate::CanonicalMessage::user_text(context),
+                verlet_history::SessionEntryKind::CustomContextMessage {
+                    message: verlet_history::CanonicalMessage::user_text(context),
                 },
             )
             .await?;
-        let _ = events.send(crate::ThreadEvent::CanonicalMirror { thread_id, entry });
+        let _ = events.send(
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror {
+                thread_id,
+                entry,
+            },
+        );
     }
     Ok(())
 }
 
 async fn append_hook_mutation_witnesses(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
-    witnesses: Vec<crate::HookMutationWitness>,
-) -> crate::VerletResult<()> {
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    witnesses: Vec<crate::agent::hooks::HookMutationWitness>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if witnesses.is_empty() {
         return Ok(());
     }
     let store = services.runtime_store();
     for witness in witnesses {
         let mut payload = serde_json::to_value(&witness).map_err(|err| {
-            crate::VerletError::History(format!("hook witness codec failed: {err}"))
+            crate::kernel::runtime_host::VerletError::History(format!(
+                "hook witness codec failed: {err}"
+            ))
         })?;
         if let Some(payload) = payload.as_object_mut() {
             payload.insert(
@@ -5981,36 +6316,36 @@ async fn append_hook_mutation_witnesses(
             );
             payload.insert("witnessing".to_string(), serde_json::json!(true));
         }
-        let record = crate::NewObservationRecord::new(
+        let record = verlet_history::NewObservationRecord::new(
             HOOK_MUTATION_WITNESS_OBSERVATION_KIND,
             coordinates.clone(),
             payload,
         )
-        .with_provenance(crate::ObservationProvenance {
+        .with_provenance(verlet_history::ObservationProvenance {
             derivation_strategy: "host.hook.mutation_witnessing".to_string(),
             derivation_version: "v1".to_string(),
-            ..crate::ObservationProvenance::default()
+            ..verlet_history::ObservationProvenance::default()
         });
         store
             .append_observation(record)
             .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     }
     Ok(())
 }
 
 struct IntraTurnSteeringContext {
-    entry_id: crate::SessionEntryId,
+    entry_id: verlet_history::SessionEntryId,
     context: String,
 }
 
 async fn undelivered_intra_turn_steering_contexts(
-    services: &crate::RuntimeServices,
-    coordinates: &crate::ThreadCoordinates,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     active_turn_id: &str,
-    turn_delivery_start_sequence: crate::EventSequence,
-    session_entries: &[crate::SessionEntry],
-) -> crate::VerletResult<Vec<IntraTurnSteeringContext>> {
+    turn_delivery_start_sequence: verlet_history::EventSequence,
+    session_entries: &[verlet_history::SessionEntry],
+) -> crate::kernel::runtime_host::VerletResult<Vec<IntraTurnSteeringContext>> {
     // The original turn.submitted event is the safe lower bound: an entry
     // admitted before it belongs to ordinary history, while every steer that
     // can target this active turn and every receipt capable of delivering that
@@ -6019,11 +6354,11 @@ async fn undelivered_intra_turn_steering_contexts(
     let events = services
         .runtime_store()
         .read_events(
-            &crate::EventStreamId::for_thread(coordinates),
+            &verlet_history::EventStreamId::for_thread(coordinates),
             Some(turn_delivery_start_sequence),
         )
         .await
-        .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
     Ok(intra_turn_steering_contexts_from_events(
         &events,
         active_turn_id,
@@ -6033,16 +6368,16 @@ async fn undelivered_intra_turn_steering_contexts(
 }
 
 fn intra_turn_steering_contexts_from_events(
-    events: &[crate::EventRecord],
+    events: &[verlet_history::EventRecord],
     active_turn_id: &str,
-    turn_delivery_start_sequence: crate::EventSequence,
-    session_entries: &[crate::SessionEntry],
+    turn_delivery_start_sequence: verlet_history::EventSequence,
+    session_entries: &[verlet_history::SessionEntry],
 ) -> Vec<IntraTurnSteeringContext> {
     let admitted_entry_ids = events
         .iter()
         .filter(|event| {
             event.sequence.get() > turn_delivery_start_sequence.get()
-                && event.kind == crate::EventKind::SessionEntryAppended
+                && event.kind == verlet_history::EventKind::SessionEntryAppended
         })
         .filter_map(|event| event.payload.get("entry_id"))
         .filter_map(serde_json::Value::as_str)
@@ -6050,7 +6385,7 @@ fn intra_turn_steering_contexts_from_events(
         .collect::<std::collections::BTreeSet<_>>();
     let delivered_entry_ids = events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ContextCompileCompleted)
+        .filter(|event| event.kind == verlet_history::EventKind::ContextCompileCompleted)
         .filter_map(|event| event.payload.get("session_entry_ids"))
         .filter_map(serde_json::Value::as_array)
         .flatten()
@@ -6069,8 +6404,8 @@ fn intra_turn_steering_contexts_from_events(
             {
                 return None;
             }
-            let crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::User { content, .. },
+            let verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::User { content, .. },
             } = &entry.kind
             else {
                 return None;
@@ -6085,14 +6420,14 @@ fn intra_turn_steering_contexts_from_events(
         .collect()
 }
 
-fn canonical_content_text_projection(content: &[crate::CanonicalContent]) -> String {
+fn canonical_content_text_projection(content: &[verlet_history::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
-            crate::CanonicalContent::Image { .. }
-            | crate::CanonicalContent::Thinking { .. }
-            | crate::CanonicalContent::ToolCall { .. } => None,
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::Thinking { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -6112,40 +6447,43 @@ mod intra_turn_steering_context_tests {
 
     #[test]
     fn completed_history_without_compile_receipt_is_not_reclassified_as_steering() {
-        let coordinates =
-            crate::ThreadCoordinates::new("tenant_a", "user_1", "session_completed_history");
-        let stream_id = crate::EventStreamId::for_thread(&coordinates);
-        let old_entry = crate::SessionEntry::for_turn(
+        let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
+            "tenant_a",
+            "user_1",
+            "session_completed_history",
+        );
+        let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+        let old_entry = verlet_history::SessionEntry::for_turn(
             coordinates.clone(),
             None,
             "turn-old",
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::user_text("completed historical input"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("completed historical input"),
             },
         );
-        let steer_entry = crate::SessionEntry::for_turn(
+        let steer_entry = verlet_history::SessionEntry::for_turn(
             coordinates.clone(),
             Some(old_entry.entry_id),
             "turn-steer",
-            crate::SessionEntryKind::Message {
-                message: crate::CanonicalMessage::user_text("new boundary steer"),
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text("new boundary steer"),
             },
         );
-        let event = |sequence, kind, payload| crate::EventRecord {
-            id: crate::EventRecordId::new(),
+        let event = |sequence, kind, payload| verlet_history::EventRecord {
+            id: verlet_history::EventRecordId::new(),
             stream_id: stream_id.clone(),
-            sequence: crate::EventSequence::new(sequence),
+            sequence: verlet_history::EventSequence::new(sequence),
             coordinates: coordinates.clone(),
             created_at_ms: sequence,
             kind,
-            origin: crate::EventOrigin::Witnessed,
-            provenance: crate::EventProvenance::default(),
+            origin: verlet_history::EventOrigin::Witnessed,
+            provenance: verlet_history::EventProvenance::default(),
             payload,
         };
         let events = vec![
             event(
                 1,
-                crate::EventKind::SessionEntryAppended,
+                verlet_history::EventKind::SessionEntryAppended,
                 serde_json::json!({
                     "entry_id": old_entry.entry_id.to_string(),
                     "turn_id": "turn-old",
@@ -6154,17 +6492,17 @@ mod intra_turn_steering_context_tests {
             ),
             event(
                 2,
-                crate::EventKind::TurnCompleted,
+                verlet_history::EventKind::TurnCompleted,
                 serde_json::json!({"turn_id": "turn-old"}),
             ),
             event(
                 3,
-                crate::EventKind::TurnSubmitted,
+                verlet_history::EventKind::TurnSubmitted,
                 serde_json::json!({"turn_id": "turn-active"}),
             ),
             event(
                 4,
-                crate::EventKind::SessionEntryAppended,
+                verlet_history::EventKind::SessionEntryAppended,
                 serde_json::json!({
                     "entry_id": steer_entry.entry_id.to_string(),
                     "turn_id": "turn-steer",
@@ -6176,7 +6514,7 @@ mod intra_turn_steering_context_tests {
         let contexts = crate::adapters::agent_loop::intra_turn_steering_contexts_from_events(
             &events,
             "turn-active",
-            crate::EventSequence::new(3),
+            verlet_history::EventSequence::new(3),
             &[old_entry, steer_entry.clone()],
         );
 
@@ -6189,18 +6527,18 @@ mod intra_turn_steering_context_tests {
 
 async fn run_stop_hooks(
     runtime: &AgentLoop,
-    turn_context: &crate::TurnContext,
-    services: &crate::RuntimeServices,
-    thread_id: crate::ThreadId,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
+    turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
     last_assistant_message: Option<String>,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let Some(hook_pipeline) = &runtime.hook_pipeline else {
         return Ok(());
     };
     let outcome = hook_pipeline
         .run_stop(
-            crate::StopHookRequest {
+            crate::agent::hooks::StopHookRequest {
                 turn_context: turn_context.snapshot(),
                 last_assistant_message,
             },
@@ -6225,14 +6563,14 @@ async fn run_stop_hooks(
 }
 
 fn emit_hook_started(
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    coordinates: &crate::ThreadCoordinates,
-    spec: &crate::HookHandlerSpec,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    spec: &crate::agent::hooks::HookHandlerSpec,
 ) {
-    crate::emit_runtime_event(
+    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
         events,
         coordinates,
-        crate::RuntimeEventKind::HookStarted {
+        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::HookStarted {
             hook_id: spec.id.clone(),
             event_name: spec.event_name,
             matcher: spec.matcher.clone(),
@@ -6241,15 +6579,15 @@ fn emit_hook_started(
 }
 
 fn emit_hook_records(
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    coordinates: &crate::ThreadCoordinates,
-    records: &[crate::HookRunRecord],
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    records: &[crate::agent::hooks::HookRunRecord],
 ) {
     for record in records {
-        crate::emit_runtime_event(
+        crate::kernel::runtime_host::runtime_events::emit_runtime_event(
             events,
             coordinates,
-            crate::RuntimeEventKind::HookCompleted {
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::HookCompleted {
                 hook_id: record.hook_id.clone(),
                 event_name: record.event_name,
                 status: record.status,
@@ -6260,56 +6598,60 @@ fn emit_hook_records(
     }
 }
 
-fn text_from_message(message: &crate::CanonicalMessage) -> String {
+fn text_from_message(message: &verlet_history::CanonicalMessage) -> String {
     match message {
-        crate::CanonicalMessage::Assistant { content, .. } => content
+        verlet_history::CanonicalMessage::Assistant { content, .. } => content
             .iter()
             .filter_map(|content| match content {
-                crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
             .join(""),
-        crate::CanonicalMessage::ToolResult { content, .. } => content
+        verlet_history::CanonicalMessage::ToolResult { content, .. } => content
             .iter()
             .filter_map(|content| match content {
-                crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
             .join(""),
-        crate::CanonicalMessage::User { .. } => String::new(),
+        verlet_history::CanonicalMessage::User { .. } => String::new(),
     }
 }
 
 fn emit_non_stream_content_events(
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-    coordinates: &crate::ThreadCoordinates,
-    message: &crate::CanonicalMessage,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    message: &verlet_history::CanonicalMessage,
 ) {
-    let crate::CanonicalMessage::Assistant { content, .. } = message else {
+    let verlet_history::CanonicalMessage::Assistant { content, .. } = message else {
         return;
     };
     for content in content {
         match content {
-            crate::CanonicalContent::Text { text, .. } if !text.is_empty() => {
-                crate::emit_runtime_event(
+            verlet_history::CanonicalContent::Text { text, .. } if !text.is_empty() => {
+                crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                     events,
                     coordinates,
-                    crate::RuntimeEventKind::TextDelta { text: text.clone() },
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta {
+                        text: text.clone(),
+                    },
                 )
             }
-            crate::CanonicalContent::Thinking { text, .. } if !text.is_empty() => {
-                crate::emit_runtime_event(
+            verlet_history::CanonicalContent::Thinking { text, .. } if !text.is_empty() => {
+                crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                     events,
                     coordinates,
-                    crate::RuntimeEventKind::ThinkingDelta { text: text.clone() },
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ThinkingDelta {
+                        text: text.clone(),
+                    },
                 )
             }
-            crate::CanonicalContent::Text { .. }
-            | crate::CanonicalContent::Thinking { .. }
-            | crate::CanonicalContent::Image { .. }
-            | crate::CanonicalContent::ToolCall { .. } => {}
+            verlet_history::CanonicalContent::Text { .. }
+            | verlet_history::CanonicalContent::Thinking { .. }
+            | verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => {}
         }
     }
 }
@@ -6321,55 +6663,55 @@ struct PendingToolCall {
 }
 
 fn response_from_stream_events(
-    coordinates: &crate::ThreadCoordinates,
-    stream_events: Vec<crate::ProviderStreamEvent>,
-    events: &tokio::sync::broadcast::Sender<crate::ThreadEvent>,
-) -> Result<crate::ProviderResponse, ModelRequestAttemptError> {
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    stream_events: Vec<verlet_provider::ProviderStreamEvent>,
+    events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+) -> Result<verlet_provider::ProviderResponse, ModelRequestAttemptError> {
     let mut content = Vec::new();
     let mut text = String::new();
-    let mut usage = crate::CanonicalUsage::default();
-    let mut stop_reason = crate::CanonicalStopReason::EndTurn;
+    let mut usage = verlet_history::CanonicalUsage::default();
+    let mut stop_reason = verlet_history::CanonicalStopReason::EndTurn;
     let mut saw_done = false;
     let mut tool_order = Vec::new();
     let mut tool_calls = std::collections::BTreeMap::<String, PendingToolCall>::new();
 
     for event in stream_events {
         match event {
-            crate::ProviderStreamEvent::TextDelta { text: delta } => {
-                crate::emit_runtime_event(
+            verlet_provider::ProviderStreamEvent::TextDelta { text: delta } => {
+                crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                     events,
                     coordinates,
-                    crate::RuntimeEventKind::TextDelta {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::TextDelta {
                         text: delta.clone(),
                     },
                 );
                 text.push_str(&delta);
             }
-            crate::ProviderStreamEvent::ThinkingDelta { text: delta } => {
-                crate::emit_runtime_event(
+            verlet_provider::ProviderStreamEvent::ThinkingDelta { text: delta } => {
+                crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                     events,
                     coordinates,
-                    crate::RuntimeEventKind::ThinkingDelta {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ThinkingDelta {
                         text: delta.clone(),
                     },
                 );
-                content.push(crate::CanonicalContent::Thinking {
+                content.push(verlet_history::CanonicalContent::Thinking {
                     text: delta,
-                    provider: crate::ThinkingProvider::Other("stream".to_string()),
-                    metadata: crate::ThinkingMetadata::None,
+                    provider: verlet_history::ThinkingProvider::Other("stream".to_string()),
+                    metadata: verlet_history::ThinkingMetadata::None,
                 });
             }
-            crate::ProviderStreamEvent::ToolCallDelta {
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
                 id,
                 name,
                 arguments_delta,
             } => {
                 if !tool_calls.contains_key(&id) {
                     tool_order.push(id.clone());
-                    crate::emit_runtime_event(
+                    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
-                        crate::RuntimeEventKind::ToolCallStarted {
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
                             call_id: id.clone(),
                             name: name.clone().unwrap_or_default(),
                             input: serde_json::json!({}),
@@ -6382,8 +6724,8 @@ fn response_from_stream_events(
                 }
                 pending.arguments.push_str(&arguments_delta);
             }
-            crate::ProviderStreamEvent::Content { content: incoming } => {
-                if let crate::CanonicalContent::Text {
+            verlet_provider::ProviderStreamEvent::Content { content: incoming } => {
+                if let verlet_history::CanonicalContent::Text {
                     text: incoming_text,
                     ..
                 } = &incoming
@@ -6392,7 +6734,7 @@ fn response_from_stream_events(
                 {
                     continue;
                 }
-                if let crate::CanonicalContent::ToolCall {
+                if let verlet_history::CanonicalContent::ToolCall {
                     id,
                     name,
                     arguments,
@@ -6400,10 +6742,10 @@ fn response_from_stream_events(
                 {
                     tool_calls.remove(id);
                     tool_order.retain(|candidate| candidate != id);
-                    crate::emit_runtime_event(
+                    crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
-                        crate::RuntimeEventKind::ToolCallStarted {
+                        crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
                             call_id: id.clone(),
                             name: name.clone(),
                             input: arguments.clone(),
@@ -6412,16 +6754,16 @@ fn response_from_stream_events(
                 }
                 content.push(incoming);
             }
-            crate::ProviderStreamEvent::Usage { usage: next_usage } => {
+            verlet_provider::ProviderStreamEvent::Usage { usage: next_usage } => {
                 usage.input_tokens += next_usage.input_tokens;
                 usage.output_tokens += next_usage.output_tokens;
                 usage.cache_creation_input_tokens += next_usage.cache_creation_input_tokens;
                 usage.cache_read_input_tokens += next_usage.cache_read_input_tokens;
-                crate::emit_runtime_event(
+                crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                     events,
                     coordinates,
-                    crate::RuntimeEventKind::Usage {
-                        usage: crate::RuntimeUsage {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::Usage {
+                        usage: verlet_runtime_contracts::RuntimeUsage {
                             input_tokens: next_usage.input_tokens,
                             output_tokens: next_usage.output_tokens,
                             cache_creation_input_tokens: next_usage.cache_creation_input_tokens,
@@ -6430,13 +6772,13 @@ fn response_from_stream_events(
                     },
                 );
             }
-            crate::ProviderStreamEvent::Done {
+            verlet_provider::ProviderStreamEvent::Done {
                 stop_reason: reason,
             } => {
                 saw_done = true;
                 stop_reason = reason;
             }
-            crate::ProviderStreamEvent::Error { message } => {
+            verlet_provider::ProviderStreamEvent::Error { message } => {
                 return Err(stream_assembly_error(message));
             }
         }
@@ -6449,7 +6791,7 @@ fn response_from_stream_events(
     }
 
     if !text.is_empty() {
-        content.insert(0, crate::CanonicalContent::text(text));
+        content.insert(0, verlet_history::CanonicalContent::text(text));
     }
     for id in tool_order {
         let Some(pending) = tool_calls.remove(&id) else {
@@ -6462,29 +6804,34 @@ fn response_from_stream_events(
                 stream_assembly_error(format!("invalid streamed tool arguments for {id}: {err}"))
             })?
         };
-        content.push(crate::CanonicalContent::tool_call(
+        content.push(verlet_history::CanonicalContent::tool_call(
             id,
             pending.name.unwrap_or_default(),
             arguments,
         ));
     }
 
-    Ok(crate::ProviderResponse {
+    Ok(verlet_provider::ProviderResponse {
         content,
         usage,
         stop_reason,
     })
 }
 
-fn usage_from_message(message: &crate::CanonicalMessage) -> Option<crate::RuntimeUsage> {
+fn usage_from_message(
+    message: &verlet_history::CanonicalMessage,
+) -> Option<verlet_runtime_contracts::RuntimeUsage> {
     match message {
-        crate::CanonicalMessage::Assistant { usage, .. } => Some(crate::RuntimeUsage {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_creation_input_tokens: usage.cache_creation_input_tokens,
-            cache_read_input_tokens: usage.cache_read_input_tokens,
-        }),
-        crate::CanonicalMessage::User { .. } | crate::CanonicalMessage::ToolResult { .. } => None,
+        verlet_history::CanonicalMessage::Assistant { usage, .. } => {
+            Some(verlet_runtime_contracts::RuntimeUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+            })
+        }
+        verlet_history::CanonicalMessage::User { .. }
+        | verlet_history::CanonicalMessage::ToolResult { .. } => None,
     }
 }
 

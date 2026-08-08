@@ -20,7 +20,10 @@ fn parse_daemon_service_print_uses_explicit_target_and_config() {
 
     let parsed = crate::cli::daemon::parse_daemon_service_print_args(args).unwrap();
 
-    assert_eq!(parsed.target, crate::VerletDaemonServiceTarget::Systemd);
+    assert_eq!(
+        parsed.target,
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Systemd
+    );
     assert_eq!(
         parsed.config_path,
         std::path::PathBuf::from("/tmp/verlet.toml")
@@ -45,7 +48,10 @@ fn parse_daemon_service_uninstall_accepts_target_and_label() {
 
     let parsed = crate::cli::daemon::parse_daemon_service_uninstall_args(args).unwrap();
 
-    assert_eq!(parsed.target, crate::VerletDaemonServiceTarget::Launchd);
+    assert_eq!(
+        parsed.target,
+        crate::daemon::daemon_config::VerletDaemonServiceTarget::Launchd
+    );
     assert_eq!(parsed.label, "com.example.verlet");
 }
 
@@ -68,7 +74,7 @@ fn parse_daemon_run_accepts_config_only() {
 fn daemon_app_server_config_from_loaded_keeps_registry_defaults_when_unset() {
     let root =
         std::env::temp_dir().join(format!("verlet-daemon-defaults-{}", uuid::Uuid::now_v7()));
-    let mut daemon_config = crate::VerletDaemonConfig::default();
+    let mut daemon_config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     daemon_config.app_server.listen = "unix:///tmp/verlet-daemon-defaults.sock".to_string();
     daemon_config.runtime.cwd = Some(root.join("work"));
 
@@ -88,14 +94,14 @@ fn daemon_app_server_config_from_loaded_keeps_registry_defaults_when_unset() {
     );
     assert_eq!(
         app_config.default_placement,
-        crate::AgentManifestPlacementBinding::default()
+        crate::agent::manifest_bind::AgentManifestPlacementBinding::default()
     );
     assert_eq!(app_config.default_workspace, None);
 }
 
 #[test]
 fn daemon_app_server_config_from_loaded_applies_identity_config() {
-    let mut daemon_config = crate::VerletDaemonConfig::default();
+    let mut daemon_config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     daemon_config.identity.mode = crate::daemon::identity::IdentityMode::Managed;
     daemon_config.identity.tenant_id = Some("tenant-configured".to_string());
     daemon_config.identity.console_principal = Some(crate::daemon::identity::PrincipalId::new(
@@ -157,22 +163,23 @@ agents = "agents"
     )
     .unwrap();
 
-    let loaded = crate::load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
     let mut app_config = crate::cli::daemon::daemon_app_server_config_from_loaded(&loaded).unwrap();
     app_config.user_state_home = root.join("user-state");
-    app_config.console_assets = Some(crate::ConsoleAssetConfig {
+    app_config.console_assets = Some(crate::adapters::app_server::ConsoleAssetConfig {
         root: console_assets,
         session_token: "replaced-at-construction".to_string(),
     });
 
     let operator = crate::daemon::identity::PrincipalId::new("operator-managed");
-    let identity_store =
-        crate::SqliteSessionStore::open(app_config.state_home.join("session_history.sqlite3"))
-            .await
-            .unwrap();
+    let identity_store = verlet_history_sqlite::SqliteSessionStore::open(
+        app_config.state_home.join("session_history.sqlite3"),
+    )
+    .await
+    .unwrap();
     let authority = crate::daemon::identity::SqliteIdentityAuthority::new(
         identity_store,
-        std::sync::Arc::new(crate::SystemDaemonClock),
+        std::sync::Arc::new(crate::daemon::clock_route::SystemDaemonClock),
         None,
     )
     .await
@@ -189,7 +196,9 @@ agents = "agents"
         .filter(|credential| credential.revoked_at_ms.is_none())
         .count();
 
-    let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(app_config)
+        .await
+        .unwrap();
 
     assert_eq!(app.tenant_id(), "tenant-managed");
     assert_eq!(app.user_id(), "operator-managed");
@@ -242,7 +251,7 @@ fn daemon_app_server_config_from_loaded_revalidates_identity_config() {
             "console_principal",
         ),
     ] {
-        let mut daemon_config = crate::VerletDaemonConfig::default();
+        let mut daemon_config = crate::daemon::daemon_config::VerletDaemonConfig::default();
         daemon_config.identity.mode = crate::daemon::identity::IdentityMode::Managed;
         daemon_config.identity.tenant_id = tenant_id;
         daemon_config.identity.console_principal = console_principal;
@@ -261,12 +270,13 @@ fn daemon_app_server_config_from_loaded_revalidates_identity_config() {
 
 #[test]
 fn daemon_app_server_config_from_loaded_applies_placement_default() {
-    let mut daemon_config = crate::VerletDaemonConfig::default();
-    daemon_config.runtime.placement = Some(crate::AgentManifestPlacementBinding {
-        target: crate::PlacementTarget::Remote,
-        executor_ref: Some("executor://cluster/default".to_string()),
-        config: std::collections::BTreeMap::new(),
-    });
+    let mut daemon_config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    daemon_config.runtime.placement =
+        Some(crate::agent::manifest_bind::AgentManifestPlacementBinding {
+            target: crate::kernel::control_decision::PlacementTarget::Remote,
+            executor_ref: Some("executor://cluster/default".to_string()),
+            config: std::collections::BTreeMap::new(),
+        });
 
     let app_config = crate::cli::daemon::daemon_app_server_config_from_loaded(
         &loaded_daemon_config(daemon_config),
@@ -275,8 +285,8 @@ fn daemon_app_server_config_from_loaded_applies_placement_default() {
 
     assert_eq!(
         app_config.default_placement,
-        crate::AgentManifestPlacementBinding {
-            target: crate::PlacementTarget::Remote,
+        crate::agent::manifest_bind::AgentManifestPlacementBinding {
+            target: crate::kernel::control_decision::PlacementTarget::Remote,
             executor_ref: Some("executor://cluster/default".to_string()),
             config: std::collections::BTreeMap::new(),
         }
@@ -285,11 +295,12 @@ fn daemon_app_server_config_from_loaded_applies_placement_default() {
 
 #[test]
 fn daemon_app_server_config_from_loaded_applies_workspace_default() {
-    let mut daemon_config = crate::VerletDaemonConfig::default();
-    daemon_config.runtime.workspace = Some(crate::AgentManifestWorkspaceBinding {
-        host_path: std::path::PathBuf::from("/tmp/verlet-workspace"),
-        mode: crate::AgentManifestWorkspaceMode::ReadWrite,
-    });
+    let mut daemon_config = crate::daemon::daemon_config::VerletDaemonConfig::default();
+    daemon_config.runtime.workspace =
+        Some(crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
+            host_path: std::path::PathBuf::from("/tmp/verlet-workspace"),
+            mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        });
 
     let app_config = crate::cli::daemon::daemon_app_server_config_from_loaded(
         &loaded_daemon_config(daemon_config),
@@ -298,9 +309,9 @@ fn daemon_app_server_config_from_loaded_applies_workspace_default() {
 
     assert_eq!(
         app_config.default_workspace,
-        Some(crate::AgentManifestWorkspaceBinding {
+        Some(crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
             host_path: std::path::PathBuf::from("/tmp/verlet-workspace"),
-            mode: crate::AgentManifestWorkspaceMode::ReadWrite,
+            mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
         })
     );
 }
@@ -326,7 +337,7 @@ agents = ".verlet/agents"
 "#,
     )
     .unwrap();
-    let loaded = crate::load_verlet_daemon_config(Some(&path)).unwrap();
+    let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
 
     let app_config = crate::cli::daemon::daemon_app_server_config_from_loaded(&loaded).unwrap();
 
@@ -345,7 +356,7 @@ agents = ".verlet/agents"
 fn daemon_app_server_config_from_loaded_applies_operations_policy() {
     let root =
         std::env::temp_dir().join(format!("verlet-daemon-operations-{}", uuid::Uuid::now_v7()));
-    let mut daemon_config = crate::VerletDaemonConfig::default();
+    let mut daemon_config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     daemon_config.app_server.listen = "unix:///tmp/verlet-daemon-operations.sock".to_string();
     daemon_config.runtime.cwd = Some(root.clone());
     daemon_config.operations.global_operation_names =
@@ -375,7 +386,7 @@ fn daemon_app_server_config_from_loaded_applies_operations_policy() {
 #[test]
 fn daemon_app_server_config_from_loaded_absolutizes_relative_registry_roots() {
     let current_dir = std::env::current_dir().unwrap();
-    let mut daemon_config = crate::VerletDaemonConfig::default();
+    let mut daemon_config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     daemon_config.app_server.listen = "unix:///tmp/verlet-daemon-relative.sock".to_string();
     daemon_config.runtime.cwd = Some(std::path::PathBuf::from("config/work"));
     daemon_config.registries.operations =
@@ -425,7 +436,9 @@ async fn daemon_default_operation_registry_binds_agent_manifest_without_registri
         &loaded_daemon_config(daemon_config),
     )
     .unwrap();
-    let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(app_config)
+        .await
+        .unwrap();
 
     let operations = app
         .local_json_rpc_request("operation/list", serde_json::json!({}))
@@ -490,11 +503,14 @@ async fn daemon_operations_load_all_uses_default_registry_for_default_manifest()
         &loaded_daemon_config(daemon_config),
     )
     .unwrap();
-    let app = crate::VerletAppServer::new_local(app_config).await.unwrap();
-
-    let default_agent = crate::LocalAgentRegistry::new(workspace.join(".verlet/agents"))
-        .load_ref("agent://verlet/default@latest")
+    let app = crate::adapters::app_server::VerletAppServer::new_local(app_config)
+        .await
         .unwrap();
+
+    let default_agent =
+        crate::agent::manifest::LocalAgentRegistry::new(workspace.join(".verlet/agents"))
+            .load_ref("agent://verlet/default@latest")
+            .unwrap();
     let tools = default_agent.resolved_manifest["tools"].as_array().unwrap();
     for command in ["http_fetch", "file_read", "json_query"] {
         let row = tools
@@ -519,8 +535,8 @@ fn daemon_test_root(name: &str) -> std::path::PathBuf {
 fn daemon_test_config(
     root: &std::path::Path,
     workspace: &std::path::Path,
-) -> crate::VerletDaemonConfig {
-    let mut config = crate::VerletDaemonConfig::default();
+) -> crate::daemon::daemon_config::VerletDaemonConfig {
+    let mut config = crate::daemon::daemon_config::VerletDaemonConfig::default();
     config.app_server.listen = format!("unix://{}", root.join("daemon.sock").display());
     config.runtime.cwd = Some(workspace.to_path_buf());
     config.runtime.runtime_home = Some(root.join("runtime"));
@@ -532,23 +548,25 @@ async fn publish_daemon_test_operation(
     registry_root: &std::path::Path,
     record_name: &str,
     operation_name: &str,
-) -> crate::PublishedOperationRecord {
+) -> verlet_operations::operation_store::PublishedOperationRecord {
     std::fs::create_dir_all(registry_root).unwrap();
     let wasm = wat::parse_str(daemon_test_operation_guest(operation_name))
         .expect("daemon test operation fixture should compile");
     let artifact_path = registry_root.join(format!("{record_name}.wasm"));
     std::fs::write(&artifact_path, wasm).unwrap();
-    crate::LocalOperationRegistry::new(registry_root)
-        .publish_artifact(crate::PublishOperationRequest {
-            name: record_name.to_string(),
-            artifact_path: artifact_path.clone(),
-            source: crate::PublishedOperationSource::Wasm {
-                bin_path: artifact_path,
+    verlet_operations::operation_store::LocalOperationRegistry::new(registry_root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: record_name.to_string(),
+                artifact_path: artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact_path,
+                },
+                interface: None,
+                capability_grants: Default::default(),
+                metadata: Default::default(),
             },
-            interface: None,
-            capability_grants: Default::default(),
-            metadata: Default::default(),
-        })
+        )
         .await
         .unwrap()
 }
@@ -561,7 +579,7 @@ fn publish_daemon_test_agent(
     command: &str,
     tool_id: &str,
     operation_ref: &str,
-) -> crate::PublishedAgentRecord {
+) -> crate::agent::manifest::PublishedAgentRecord {
     publish_daemon_test_agent_result(
         root,
         agent_registry_root,
@@ -582,7 +600,7 @@ fn publish_daemon_test_agent_result(
     command: &str,
     tool_id: &str,
     operation_ref: &str,
-) -> crate::VerletResult<crate::PublishedAgentRecord> {
+) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest::PublishedAgentRecord> {
     let manifest_path = root.join(format!("{name}.verlet.agent.toml"));
     std::fs::write(
         &manifest_path,
@@ -612,7 +630,7 @@ streaming = false
         ),
     )
     .unwrap();
-    crate::LocalAgentRegistry::new(agent_registry_root)
+    crate::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
         .publish_manifest_path_with_operation_registry(&manifest_path, operation_registry_root)
 }
 
@@ -689,8 +707,10 @@ fn wat_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn loaded_daemon_config(config: crate::VerletDaemonConfig) -> crate::LoadedVerletDaemonConfig {
-    crate::LoadedVerletDaemonConfig {
+fn loaded_daemon_config(
+    config: crate::daemon::daemon_config::VerletDaemonConfig,
+) -> crate::daemon::daemon_config::LoadedVerletDaemonConfig {
+    crate::daemon::daemon_config::LoadedVerletDaemonConfig {
         config,
         path: None,
         base_dir: std::env::current_dir().unwrap(),

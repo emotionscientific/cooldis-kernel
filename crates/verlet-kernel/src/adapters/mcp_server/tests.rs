@@ -1,7 +1,7 @@
-use crate::EventStore as _;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
+use verlet_history::EventStore as _;
 
 const SEARCH_FIXTURE_TEMPLATE: &str =
     include_str!("../../../tests/fixtures/search_operation.wat.tpl");
@@ -60,9 +60,11 @@ async fn mcp_server_runs_prompt_and_command_through_daemon() {
     let root = std::path::PathBuf::from("/tmp")
         .join(format!("cdis-mcp-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
-    let listen = crate::AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
     let config = isolated_app_config(listen.clone(), &root);
-    let app = crate::VerletAppServer::new_local(config).await.unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
     let session_store_path = app.session_store_path().to_path_buf();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
@@ -209,17 +211,17 @@ async fn mcp_prompt_lets_model_shaped_agent_see_and_call_search_shell_command() 
         .join(format!("cdis-mcp-search-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
     let registry_root = root.join("capsules");
-    let listen = crate::AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
     publish_exa_without_secret(&registry_root).await;
     let provider = std::sync::Arc::new(ModelVbinLifecycleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = provider.clone();
-    let mut runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::OpenAIChatCompletions,
-        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
-        crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = provider.clone();
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     );
     runtime_config.max_tokens = 512;
-    let capsule_bindings = crate::CapsuleBindingsConfig::default()
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
         .with_registry_root(&registry_root)
         .with_global_operation_name("search");
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
@@ -228,12 +230,16 @@ async fn mcp_prompt_lets_model_shaped_agent_see_and_call_search_shell_command() 
         capsule_bindings.clone(),
     );
     let mut app_config = isolated_app_config(listen.clone(), &root);
-    app_config.model_provider = crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
-    app_config.model = crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
+    app_config.model_provider =
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
+    app_config.model = crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
     app_config.capsule_bindings = capsule_bindings;
-    let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
-        .await
-        .unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
+        app_config,
+        runtime_factory,
+    )
+    .await
+    .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
@@ -297,30 +303,34 @@ async fn mcp_capsule_binding_tools_update_global_scope() {
         .join(format!("cdis-mcp-bind-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
     let registry_root = root.join("capsules");
-    let listen = crate::AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
     publish_exa_without_secret(&registry_root).await;
     let provider = std::sync::Arc::new(ModelVbinLifecycleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = provider.clone();
-    let mut runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::OpenAIChatCompletions,
-        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
-        crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = provider.clone();
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     );
     runtime_config.max_tokens = 512;
-    let capsule_bindings =
-        crate::CapsuleBindingsConfig::default().with_registry_root(&registry_root);
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&registry_root);
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
         provider_client,
         capsule_bindings.clone(),
     );
     let mut app_config = isolated_app_config(listen.clone(), &root);
-    app_config.model_provider = crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
-    app_config.model = crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
+    app_config.model_provider =
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
+    app_config.model = crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
     app_config.capsule_bindings = capsule_bindings;
-    let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
-        .await
-        .unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
+        app_config,
+        runtime_factory,
+    )
+    .await
+    .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
@@ -411,7 +421,7 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
     ));
     let socket = root.join("app.sock");
     let registry_root = root.join("capsules");
-    let listen = crate::AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
     let (base_url, http_server) = spawn_http_server(
         r#"{"results":[{"title":"Verlet runtime","url":"https://verlet.local"}]}"#,
         vec![
@@ -425,27 +435,28 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
     let url = format!("{base_url}/search");
     let http_grant = format!("net.http.private:POST:{base_url}");
     publish_search_for_url(&registry_root, &url, &http_grant, br#"{"query":"verlet"}"#).await;
-    let secret_store = crate::SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
-        .await
-        .unwrap();
+    let secret_store =
+        verlet_metadata::secret_store::SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
+            .await
+            .unwrap();
     secret_store
         .set_secret(
             "EXAMPLE_API_KEY",
             "fixture-secret",
-            crate::SecretSourceKind::Env,
+            verlet_metadata::secret_store::SecretSourceKind::Env,
             Some("EXAMPLE_API_KEY".to_string()),
         )
         .await
         .unwrap();
     let provider = std::sync::Arc::new(ModelVbinLifecycleClient::expecting_search_success());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = provider.clone();
-    let mut runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::OpenAIChatCompletions,
-        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
-        crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = provider.clone();
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     );
     runtime_config.max_tokens = 512;
-    let capsule_bindings = crate::CapsuleBindingsConfig::default()
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
         .with_registry_root(&registry_root)
         .with_global_operation_name("search");
     let runtime_factory =
@@ -456,12 +467,16 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
             Some(std::sync::Arc::new(secret_store)),
         );
     let mut app_config = isolated_app_config(listen.clone(), &root);
-    app_config.model_provider = crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
-    app_config.model = crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
+    app_config.model_provider =
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
+    app_config.model = crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
     app_config.capsule_bindings = capsule_bindings;
-    let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
-        .await
-        .unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
+        app_config,
+        runtime_factory,
+    )
+    .await
+    .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
@@ -517,30 +532,34 @@ async fn mcp_prompt_rejects_thread_capsule_bindings() {
     ));
     let socket = root.join("app.sock");
     let registry_root = root.join("capsules");
-    let listen = crate::AppServerListenAddr::Unix(socket.clone());
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
     publish_exa_without_secret(&registry_root).await;
     let provider = std::sync::Arc::new(ModelVbinLifecycleClient::default());
-    let provider_client: std::sync::Arc<dyn crate::ProviderClient> = provider.clone();
-    let mut runtime_config = crate::AgentLoopConfig::new(
-        crate::ProviderApi::OpenAIChatCompletions,
-        crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
-        crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = provider.clone();
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL,
     );
     runtime_config.max_tokens = 512;
-    let capsule_bindings =
-        crate::CapsuleBindingsConfig::default().with_registry_root(&registry_root);
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&registry_root);
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
         provider_client,
         capsule_bindings.clone(),
     );
     let mut app_config = isolated_app_config(listen.clone(), &root);
-    app_config.model_provider = crate::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
-    app_config.model = crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
+    app_config.model_provider =
+        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
+    app_config.model = crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
     app_config.capsule_bindings = capsule_bindings;
-    let app = crate::VerletAppServer::with_runtime_factory(app_config, runtime_factory)
-        .await
-        .unwrap();
+    let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
+        app_config,
+        runtime_factory,
+    )
+    .await
+    .unwrap();
     let serve_task = tokio::spawn(async move { app.serve(listen).await });
     wait_for_socket(&socket).await;
 
@@ -635,10 +654,13 @@ async fn wait_for_socket(path: &std::path::Path) {
 }
 
 fn isolated_app_config(
-    listen: crate::AppServerListenAddr,
+    listen: crate::adapters::app_server::AppServerListenAddr,
     root: &std::path::Path,
-) -> crate::VerletAppServerConfig {
-    let mut config = crate::VerletAppServerConfig::local(listen, std::env::current_dir().unwrap());
+) -> crate::adapters::app_server::VerletAppServerConfig {
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
@@ -646,17 +668,19 @@ fn isolated_app_config(
 }
 
 async fn assert_admission_surface(store_path: &std::path::Path, thread_id: &str, surface: &str) {
-    let store = crate::SqliteSessionStore::open(store_path).await.unwrap();
+    let store = verlet_history_sqlite::SqliteSessionStore::open(store_path)
+        .await
+        .unwrap();
     let control_events = store
         .read_events(
-            &crate::EventStreamId::new(format!("control:{thread_id}")),
+            &verlet_history::EventStreamId::new(format!("control:{thread_id}")),
             None,
         )
         .await
         .unwrap();
     let thread_events = store
         .read_events(
-            &crate::EventStreamId::new(format!("thread:{thread_id}")),
+            &verlet_history::EventStreamId::new(format!("thread:{thread_id}")),
             None,
         )
         .await
@@ -670,7 +694,7 @@ async fn assert_admission_surface(store_path: &std::path::Path, thread_id: &str,
 
 #[derive(Default)]
 struct ModelVbinLifecycleClient {
-    requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
     expected: ModelSearchExpectation,
 }
 
@@ -689,22 +713,22 @@ impl ModelVbinLifecycleClient {
         }
     }
 
-    fn requests(&self) -> Vec<crate::ProviderRequest> {
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for ModelVbinLifecycleClient {
+impl verlet_provider::ProviderClient for ModelVbinLifecycleClient {
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.requests.lock().unwrap().push(request.clone());
         let has_tool_result = request
             .messages
             .iter()
-            .any(|message| matches!(message, crate::CanonicalMessage::ToolResult { .. }));
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
         if !has_tool_result {
             let bash_description = request
                 .tools
@@ -716,16 +740,16 @@ impl crate::ProviderClient for ModelVbinLifecycleClient {
                 bash_description.contains("search"),
                 "bash tool description should advertise search: {bash_description}"
             );
-            return Ok(crate::ProviderResponse {
-                content: vec![crate::CanonicalContent::tool_call(
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
                     "model_call_1",
                     "bash",
                     serde_json::json!({
                         "command": "command -v search && search '{\"query\":\"verlet\"}'"
                     }),
                 )],
-                usage: crate::CanonicalUsage::default(),
-                stop_reason: crate::CanonicalStopReason::ToolUse,
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
             });
         }
 
@@ -736,12 +760,12 @@ impl crate::ProviderClient for ModelVbinLifecycleClient {
                     text.contains("search") && text.contains(r#""exit_code":1"#),
                     "expected bash tool result to report failed Example Search command, got: {text}"
                 );
-                Ok(crate::ProviderResponse {
-                    content: vec![crate::CanonicalContent::text(
+                Ok(verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::text(
                         "MODEL_SEARCH_FAILURE_REPORTED",
                     )],
-                    usage: crate::CanonicalUsage::default(),
-                    stop_reason: crate::CanonicalStopReason::EndTurn,
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::EndTurn,
                 })
             }
             ModelSearchExpectation::Success => {
@@ -751,12 +775,12 @@ impl crate::ProviderClient for ModelVbinLifecycleClient {
                         && text.contains("Verlet runtime"),
                     "expected bash tool result to report successful Example Search command, got: {text}"
                 );
-                Ok(crate::ProviderResponse {
-                    content: vec![crate::CanonicalContent::text(
+                Ok(verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::text(
                         "MODEL_SEARCH_SUCCESS_REPORTED",
                     )],
-                    usage: crate::CanonicalUsage::default(),
-                    stop_reason: crate::CanonicalStopReason::EndTurn,
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::EndTurn,
                 })
             }
         }
@@ -784,19 +808,21 @@ async fn publish_search_for_url(
         .expect("Example Search WAT fixture should compile to wasm");
     let artifact_path = registry_root.join("search.wasm");
     std::fs::write(&artifact_path, wasm).unwrap();
-    crate::LocalOperationRegistry::new(registry_root)
-        .publish_artifact(crate::PublishOperationRequest {
-            name: "search".to_string(),
-            artifact_path: artifact_path.clone(),
-            source: crate::PublishedOperationSource::Wasm {
-                bin_path: artifact_path,
+    verlet_operations::operation_store::LocalOperationRegistry::new(registry_root)
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "search".to_string(),
+                artifact_path: artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact_path,
+                },
+                interface: None,
+                capability_grants: [http_grant.to_string(), "secret:EXAMPLE_API_KEY".to_string()]
+                    .into_iter()
+                    .collect(),
+                metadata: Default::default(),
             },
-            interface: None,
-            capability_grants: [http_grant.to_string(), "secret:EXAMPLE_API_KEY".to_string()]
-                .into_iter()
-                .collect(),
-            metadata: Default::default(),
-        })
+        )
         .await
         .unwrap();
 }
@@ -899,20 +925,19 @@ fn wat_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn text_from_canonical_messages(messages: &[crate::CanonicalMessage]) -> String {
+fn text_from_canonical_messages(messages: &[verlet_history::CanonicalMessage]) -> String {
     messages
         .iter()
         .flat_map(|message| match message {
-            crate::CanonicalMessage::User { content, .. }
-            | crate::CanonicalMessage::Assistant { content, .. }
-            | crate::CanonicalMessage::ToolResult { content, .. } => content,
+            verlet_history::CanonicalMessage::User { content, .. }
+            | verlet_history::CanonicalMessage::Assistant { content, .. }
+            | verlet_history::CanonicalMessage::ToolResult { content, .. } => content,
         })
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
-            crate::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
-            crate::CanonicalContent::Image { .. } | crate::CanonicalContent::ToolCall { .. } => {
-                None
-            }
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

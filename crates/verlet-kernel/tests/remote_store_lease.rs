@@ -1,8 +1,8 @@
 use chrono::TimeZone as _;
-use verlet::DaemonClock as _;
-use verlet::EventStore as _;
+use verlet::daemon::clock_route::DaemonClock as _;
 use verlet::daemon::remote_store::lease::StreamLeaseAuthority as _;
 use verlet::daemon::remote_store::lease::SyncCredentialAuthority as _;
+use verlet_history::EventStore as _;
 
 struct ClockReadGate {
     entered: std::sync::Barrier,
@@ -62,7 +62,7 @@ impl TestClock {
     }
 }
 
-impl verlet::DaemonClock for TestClock {
+impl verlet::daemon::clock_route::DaemonClock for TestClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
         let gate = self.next_read_gate.lock().unwrap().take();
         if let Some(gate) = gate {
@@ -78,7 +78,7 @@ impl verlet::DaemonClock for TestClock {
 
 struct Fixture {
     path: std::path::PathBuf,
-    store: verlet::SqliteSessionStore,
+    store: verlet_history_sqlite::SqliteSessionStore,
     authority: verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority,
     clock: std::sync::Arc<TestClock>,
 }
@@ -86,7 +86,9 @@ struct Fixture {
 impl Fixture {
     async fn new(test_name: &str, now_ms: i64, lease_ttl_secs: u32) -> Self {
         let path = temp_db_path(test_name);
-        let store = verlet::SqliteSessionStore::open(&path).await.unwrap();
+        let store = verlet_history_sqlite::SqliteSessionStore::open(&path)
+            .await
+            .unwrap();
         let clock = std::sync::Arc::new(TestClock::new(now_ms));
         let config = verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
             lease_ttl_secs,
@@ -95,7 +97,8 @@ impl Fixture {
         let authority = verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
             store.clone(),
             config,
-            std::sync::Arc::clone(&clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+            std::sync::Arc::clone(&clock)
+                as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
         )
         .await
         .unwrap();
@@ -117,7 +120,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
         .authority
         .grant_lease(
             &occupied,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-first"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-first"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -128,7 +131,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             .authority
             .grant_lease(
                 &occupied,
-                &verlet_runtime_contracts::DispatchId::new("dispatch-empty-lineage-loser"),
+                &verlet_runtime_contracts::handle::DispatchId::new("dispatch-empty-lineage-loser"),
                 verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
             )
             .await
@@ -141,7 +144,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
                 .authority
                 .grant_lease(
                     &verlet::daemon::remote_store::lease::StreamPrefixScope::new(overlapping),
-                    &verlet_runtime_contracts::DispatchId::new(format!(
+                    &verlet_runtime_contracts::handle::DispatchId::new(format!(
                         "dispatch-overlap-{overlapping}"
                     )),
                     verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
@@ -155,7 +158,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
         .authority
         .grant_lease(
             &verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:child-8"),
-            &verlet_runtime_contracts::DispatchId::new("dispatch-sibling"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-sibling"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -165,7 +168,9 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             .authority
             .grant_lease(
                 &occupied,
-                &verlet_runtime_contracts::DispatchId::new("dispatch-wrong-scope-predecessor"),
+                &verlet_runtime_contracts::handle::DispatchId::new(
+                    "dispatch-wrong-scope-predecessor"
+                ),
                 verlet::daemon::remote_store::lease::StreamLeaseLineage {
                     superseded_lease_id: Some(sibling.lease_id),
                 },
@@ -187,7 +192,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             authority
                 .grant_lease(
                     &scope,
-                    &verlet_runtime_contracts::DispatchId::new(dispatch),
+                    &verlet_runtime_contracts::handle::DispatchId::new(dispatch),
                     verlet::daemon::remote_store::lease::StreamLeaseLineage {
                         superseded_lease_id: Some(predecessor),
                     },
@@ -209,7 +214,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
     assert!(
         matches!(
             loser_error,
-            verlet::VerletError::History(ref message)
+            verlet::kernel::runtime_host::VerletError::History(ref message)
                 if message == "lease lineage does not name the immediately preceding grant"
         ),
         "the serialized loser must observe the winning generation, not reach the UNIQUE fallback: {loser_error}"
@@ -218,7 +223,9 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
         authority
             .grant_lease(
                 &occupied,
-                &verlet_runtime_contracts::DispatchId::new("dispatch-superseded-predecessor"),
+                &verlet_runtime_contracts::handle::DispatchId::new(
+                    "dispatch-superseded-predecessor"
+                ),
                 verlet::daemon::remote_store::lease::StreamLeaseLineage {
                     superseded_lease_id: Some(first.lease_id.clone()),
                 },
@@ -254,7 +261,7 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
     drop(fixture.authority);
     drop(fixture.store);
 
-    let reopened_store = verlet::SqliteSessionStore::open(&fixture.path)
+    let reopened_store = verlet_history_sqlite::SqliteSessionStore::open(&fixture.path)
         .await
         .unwrap();
     let reopened = verlet::daemon::remote_store::lease::SqliteStreamLeaseAuthority::new(
@@ -263,11 +270,12 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
             lease_ttl_secs: 60,
             ..verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig::default()
         },
-        std::sync::Arc::clone(&fixture.clock) as std::sync::Arc<dyn verlet::DaemonClock>,
+        std::sync::Arc::clone(&fixture.clock)
+            as std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock>,
     )
     .await
     .unwrap();
-    let stream_id = verlet::EventStreamId::new("thread:child-7");
+    let stream_id = verlet_history::EventStreamId::new("thread:child-7");
     assert_eq!(
         reopened
             .check_fence(&stream_id, &first.lease_id)
@@ -289,12 +297,12 @@ async fn first_grant_overlap_and_racing_releases_fail_closed() {
 async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
     let fixture = Fixture::new("expiry-recovery", 1_000, 1).await;
     let scope = verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:offline-child");
-    let stream_id = verlet::EventStreamId::new(scope.as_str());
+    let stream_id = verlet_history::EventStreamId::new(scope.as_str());
     let grant = fixture
         .authority
         .grant_lease(
             &scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-offline"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-offline"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -307,7 +315,7 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
         .append_if_current(
             &stream_id,
             &grant.lease_id,
-            verlet::EventSequence::new(1),
+            verlet_history::EventSequence::new(1),
             vec![record("rejected-while-expired")],
         )
         .await
@@ -339,7 +347,7 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
         .append_if_current(
             &stream_id,
             &grant.lease_id,
-            verlet::EventSequence::new(1),
+            verlet_history::EventSequence::new(1),
             vec![record("accepted-after-renewal")],
         )
         .await
@@ -347,15 +355,15 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
     assert!(matches!(
         appended,
         verlet::daemon::remote_store::lease::LeaseFencedAppendOutcome::Appended { ack }
-            if ack.start_sequence == verlet::EventSequence::new(1)
-                && ack.end_sequence == verlet::EventSequence::new(1)
+            if ack.start_sequence == verlet_history::EventSequence::new(1)
+                && ack.end_sequence == verlet_history::EventSequence::new(1)
     ));
 
     let successor = fixture
         .authority
         .grant_lease(
             &scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-successor"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-successor"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(grant.lease_id.clone()),
             },
@@ -386,7 +394,7 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
             .authority
             .grant_lease(
                 &scope,
-                &verlet_runtime_contracts::DispatchId::new(
+                &verlet_runtime_contracts::handle::DispatchId::new(
                     "dispatch-after-release-without-lineage"
                 ),
                 verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
@@ -399,7 +407,7 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
         .authority
         .grant_lease(
             &scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-after-release"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-after-release"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(successor.lease_id),
             },
@@ -412,12 +420,12 @@ async fn expiry_rejects_append_but_latest_lease_renews_and_resumes() {
 async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
     let fixture = Fixture::new("takeover-comeback-race", 10_000, 1).await;
     let scope = verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:takeover-race");
-    let stream_id = verlet::EventStreamId::new(scope.as_str());
+    let stream_id = verlet_history::EventStreamId::new(scope.as_str());
     let predecessor = fixture
         .authority
         .grant_lease(
             &scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-predecessor"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-predecessor"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -441,7 +449,7 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
         grant_authority
             .grant_lease(
                 &grant_scope,
-                &verlet_runtime_contracts::DispatchId::new("dispatch-takeover"),
+                &verlet_runtime_contracts::handle::DispatchId::new("dispatch-takeover"),
                 verlet::daemon::remote_store::lease::StreamLeaseLineage {
                     superseded_lease_id: Some(grant_predecessor),
                 },
@@ -479,12 +487,12 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
 
     let renew_first_scope =
         verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:renew-first");
-    let renew_first_stream = verlet::EventStreamId::new(renew_first_scope.as_str());
+    let renew_first_stream = verlet_history::EventStreamId::new(renew_first_scope.as_str());
     let renew_first = fixture
         .authority
         .grant_lease(
             &renew_first_scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-renew-first-predecessor"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-renew-first-predecessor"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -499,7 +507,7 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
         .authority
         .grant_lease(
             &renew_first_scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-after-renew"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-after-renew"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(renew_first.lease_id.clone()),
             },
@@ -521,7 +529,7 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
         .authority
         .grant_lease(
             &grant_first_scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-grant-first-predecessor"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-grant-first-predecessor"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -531,7 +539,7 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
         .authority
         .grant_lease(
             &grant_first_scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-grant-first-successor"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-grant-first-successor"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(grant_first.lease_id.clone()),
             },
@@ -552,12 +560,12 @@ async fn takeover_and_expired_comeback_serialize_to_one_current_lease() {
 async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving() {
     let fixture = Fixture::new("atomic-append", 1_000, 60).await;
     let scope = verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:atomic-child");
-    let stream_id = verlet::EventStreamId::new(scope.as_str());
+    let stream_id = verlet_history::EventStreamId::new(scope.as_str());
     let first = fixture
         .authority
         .grant_lease(
             &scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-first"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-first"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -575,7 +583,7 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
         .authority
         .grant_lease(
             &scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-replacement"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-replacement"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(first.lease_id.clone()),
             },
@@ -591,7 +599,7 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
             .append_if_current(
                 &append_stream_id,
                 &stale_lease_id,
-                verlet::EventSequence::new(1),
+                verlet_history::EventSequence::new(1),
                 vec![record("must-not-land")],
             )
             .await
@@ -638,7 +646,7 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
         .append_if_current(
             &stream_id,
             &replacement.lease_id,
-            verlet::EventSequence::new(1),
+            verlet_history::EventSequence::new(1),
             vec![record("winner")],
         )
         .await
@@ -648,7 +656,7 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
         .append_if_current(
             &stream_id,
             &replacement.lease_id,
-            verlet::EventSequence::new(1),
+            verlet_history::EventSequence::new(1),
             vec![record("wrong-tail")],
         )
         .await
@@ -656,7 +664,7 @@ async fn append_if_current_closes_diagnostic_check_then_supersede_interleaving()
     assert_eq!(
         conflict,
         verlet::daemon::remote_store::lease::LeaseFencedAppendOutcome::SequenceFenceConflict {
-            actual_next_sequence: verlet::EventSequence::new(2)
+            actual_next_sequence: verlet_history::EventSequence::new(2)
         }
     );
     let events = fixture.store.read_events(&stream_id, None).await.unwrap();
@@ -673,7 +681,7 @@ async fn credentials_verify_revoke_and_never_persist_or_render_the_bearer() {
         .authority
         .grant_lease(
             &scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-credential"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-credential"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
         )
         .await
@@ -707,7 +715,7 @@ async fn credentials_verify_revoke_and_never_persist_or_render_the_bearer() {
         .authority
         .grant_lease(
             &scope,
-            &verlet_runtime_contracts::DispatchId::new("dispatch-credential-successor"),
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-credential-successor"),
             verlet::daemon::remote_store::lease::StreamLeaseLineage {
                 superseded_lease_id: Some(grant.lease_id.clone()),
             },
@@ -790,10 +798,10 @@ async fn credentials_verify_revoke_and_never_persist_or_render_the_bearer() {
     assert_file_family_excludes(&path, release_token.as_bytes());
 }
 
-fn record(entry_id: &str) -> verlet::NewEventRecord {
-    verlet::NewEventRecord::witnessed(
+fn record(entry_id: &str) -> verlet_history::NewEventRecord {
+    verlet_history::NewEventRecord::witnessed(
         verlet_runtime_contracts::ThreadCoordinates::new("tenant-a", "user-a", "session-a"),
-        verlet::EventKind::SessionEntryAppended,
+        verlet_history::EventKind::SessionEntryAppended,
         serde_json::json!({"entry_id": entry_id}),
     )
 }

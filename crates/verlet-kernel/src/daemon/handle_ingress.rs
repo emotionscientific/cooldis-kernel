@@ -23,8 +23,8 @@
 //! is left for normal execution. This adapter then settles the recovered join
 //! without any recovery-specific behavior.
 
-use crate::EventStore as _;
-use crate::SessionStore as _;
+use verlet_history::EventStore as _;
+use verlet_history::SessionStore as _;
 
 /// Durable ingress source for terminal outcomes of thread handles.
 ///
@@ -47,7 +47,7 @@ use crate::SessionStore as _;
 ///   item until its durable ingress claim settles, and only then completes the
 ///   queue item.
 pub(crate) struct ThreadHandleIngressAdapter {
-    store: crate::SqliteSessionStore,
+    store: verlet_history_sqlite::SqliteSessionStore,
     sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
     tenant_id: String,
     user_id: String,
@@ -57,7 +57,7 @@ pub(crate) struct ThreadHandleIngressAdapter {
 
 impl ThreadHandleIngressAdapter {
     pub(crate) fn new(
-        store: crate::SqliteSessionStore,
+        store: verlet_history_sqlite::SqliteSessionStore,
         sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
         tenant_id: impl Into<String>,
         user_id: impl Into<String>,
@@ -75,7 +75,9 @@ impl ThreadHandleIngressAdapter {
     /// Scans durable spawn/terminal records once and submits each ready,
     /// previously unacknowledged settlement. A poisoned stream or settlement
     /// is diagnosed and retried on the next pass without blocking its peers.
-    pub(crate) async fn enqueue_ready_once(&self) -> crate::VerletResult<usize> {
+    pub(crate) async fn enqueue_ready_once(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<usize> {
         let mut ready = Vec::new();
         for consumer in self
             .store
@@ -86,7 +88,7 @@ impl ThreadHandleIngressAdapter {
             if consumer.tenant_id != self.tenant_id || consumer.user_id != self.user_id {
                 continue;
             }
-            let stream_id = crate::control_stream_id(&consumer);
+            let stream_id = crate::kernel::control_decision::control_stream_id(&consumer);
             let events = match self
                 .store
                 .read_events(&stream_id, None)
@@ -122,7 +124,7 @@ impl ThreadHandleIngressAdapter {
             {
                 continue;
             }
-            let child_coordinates = crate::ThreadCoordinates {
+            let child_coordinates = verlet_runtime_contracts::ThreadCoordinates {
                 tenant_id: settlement.consumer.tenant_id.clone(),
                 user_id: settlement.consumer.user_id.clone(),
                 session_id: settlement.consumer.session_id.clone(),
@@ -167,7 +169,7 @@ impl ThreadHandleIngressAdapter {
                     "verlet thread handle ingress sink rejected dispatch {} child {} consumer {}: {}",
                     settlement.dispatch_id,
                     settlement.child_thread_id,
-                    crate::control_stream_id(&settlement.consumer),
+                    crate::kernel::control_decision::control_stream_id(&settlement.consumer),
                     ack.reason.as_deref().unwrap_or("unspecified rejection"),
                 );
             }
@@ -194,30 +196,30 @@ fn log_settlement_skip(
         "verlet thread handle ingress skipped dispatch {} child {} consumer {} during {stage}: {err}",
         settlement.dispatch_id,
         settlement.child_thread_id,
-        crate::control_stream_id(&settlement.consumer),
+        crate::kernel::control_decision::control_stream_id(&settlement.consumer),
     );
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct ThreadTerminalSettlement {
-    consumer: crate::ThreadCoordinates,
-    dispatch_id: verlet_runtime_contracts::DispatchId,
+    consumer: verlet_runtime_contracts::ThreadCoordinates,
+    dispatch_id: verlet_runtime_contracts::handle::DispatchId,
     child_thread_id: verlet_runtime_contracts::ThreadId,
-    terminal_state: crate::ThreadTerminalState,
+    terminal_state: verlet_history::ThreadTerminalState,
     result_digest: Option<String>,
 }
 
 impl ThreadTerminalSettlement {
     fn ingress_envelope(
         &self,
-        context: &crate::SessionContext,
-    ) -> crate::VerletResult<verlet_io_core::IngressEnvelope> {
+        context: &verlet_history::SessionContext,
+    ) -> crate::kernel::runtime_host::VerletResult<verlet_io_core::IngressEnvelope> {
         let (runtime_state, outcome_reason, retryable) =
             terminal_projection(self.terminal_state, self.result_digest.as_deref());
-        let terminal = verlet_runtime_contracts::HandleTerminalEnvelope {
+        let terminal = verlet_runtime_contracts::handle::HandleTerminalEnvelope {
             dispatch_id: self.dispatch_id.clone(),
-            handle: verlet_runtime_contracts::HandleId::thread(self.child_thread_id),
-            outcome: verlet_runtime_contracts::HandleTerminalOutcome::from(runtime_state),
+            handle: verlet_runtime_contracts::handle::HandleId::thread(self.child_thread_id),
+            outcome: verlet_runtime_contracts::handle::HandleTerminalOutcome::from(runtime_state),
             outcome_reason,
             result: latest_assistant_result(context, self.child_thread_id),
             result_schema_id: None,
@@ -233,9 +235,9 @@ impl ThreadTerminalSettlement {
                 verlet_io_core::ConversationKind::System,
             ),
             verlet_io_core::IngressContent::Event {
-                kind: verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
+                kind: verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND.to_string(),
                 payload: serde_json::to_value(terminal).map_err(|err| {
-                    crate::VerletError::RuntimeExecution(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                         "handle terminal envelope encode failed: {err}"
                     ))
                 })?,
@@ -243,7 +245,7 @@ impl ThreadTerminalSettlement {
             now_ms(),
         )
         .with_dedupe_key(verlet_io_core::IoDedupeKey::new(
-            verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+            verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
             self.dispatch_id.to_string(),
         ))
         .with_delivery(verlet_io_core::IoDelivery::new(
@@ -256,16 +258,16 @@ impl ThreadTerminalSettlement {
         ))
         .with_metadata(
             "cooldis_route_id",
-            verlet_runtime_contracts::HANDLE_OUTCOME_CONTENT_KIND,
+            verlet_runtime_contracts::handle::HANDLE_OUTCOME_CONTENT_KIND,
         )
         .with_metadata("cooldis_route_policy", "queue_per_conversation"))
     }
 }
 
 fn fold_terminal_settlements(
-    consumer: &crate::ThreadCoordinates,
-    events: &[crate::EventRecord],
-) -> crate::VerletResult<Vec<ThreadTerminalSettlement>> {
+    consumer: &verlet_runtime_contracts::ThreadCoordinates,
+    events: &[verlet_history::EventRecord],
+) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadTerminalSettlement>> {
     let bindings = crate::kernel::thread_spawn_projector::fold_thread_handle_bindings(events)?
         .into_iter()
         .map(|binding| (binding.spawned_event_id.to_string(), binding))
@@ -273,7 +275,7 @@ fn fold_terminal_settlements(
     let mut settlements = std::collections::BTreeMap::<String, ThreadTerminalSettlement>::new();
     for joined in events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ThreadJoined)
+        .filter(|event| event.kind == verlet_history::EventKind::ThreadJoined)
     {
         let Some(spawned_event_id) = joined
             .payload
@@ -285,15 +287,16 @@ fn fold_terminal_settlements(
         let Some(binding) = bindings.get(spawned_event_id) else {
             continue;
         };
-        let payload = serde_json::from_value::<crate::ThreadJoinedPayload>(joined.payload.clone())
-            .map_err(|err| {
-                crate::VerletError::History(format!(
+        let payload =
+            serde_json::from_value::<verlet_history::ThreadJoinedPayload>(joined.payload.clone())
+                .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
                     "thread handle terminal joined payload decode failed: {err}"
                 ))
             })?;
         if binding.consumer != *consumer || payload.child_thread_id.to_string() != binding.handle.id
         {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread handle terminal join {} does not match its spawn binding",
                 joined.id
             )));
@@ -308,7 +311,7 @@ fn fold_terminal_settlements(
         if let Some(existing) = settlements.insert(spawned_event_id.to_string(), settlement.clone())
             && existing != settlement
         {
-            return Err(crate::VerletError::History(format!(
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "thread handle {} has conflicting terminal settlements",
                 settlement.dispatch_id
             )));
@@ -318,7 +321,7 @@ fn fold_terminal_settlements(
 }
 
 fn terminal_projection(
-    state: crate::ThreadTerminalState,
+    state: verlet_history::ThreadTerminalState,
     result_digest: Option<&str>,
 ) -> (
     verlet_runtime_contracts::RuntimeTerminalState,
@@ -326,17 +329,17 @@ fn terminal_projection(
     bool,
 ) {
     match state {
-        crate::ThreadTerminalState::Completed => (
+        verlet_history::ThreadTerminalState::Completed => (
             verlet_runtime_contracts::RuntimeTerminalState::Completed,
             None,
             false,
         ),
-        crate::ThreadTerminalState::Failed => (
+        verlet_history::ThreadTerminalState::Failed => (
             verlet_runtime_contracts::RuntimeTerminalState::Failed,
             Some(result_digest.unwrap_or("child thread failed").to_string()),
             true,
         ),
-        crate::ThreadTerminalState::Cancelled => (
+        verlet_history::ThreadTerminalState::Cancelled => (
             verlet_runtime_contracts::RuntimeTerminalState::Cancelled,
             Some(
                 result_digest
@@ -345,7 +348,7 @@ fn terminal_projection(
             ),
             false,
         ),
-        crate::ThreadTerminalState::BudgetExhausted => (
+        verlet_history::ThreadTerminalState::BudgetExhausted => (
             verlet_runtime_contracts::RuntimeTerminalState::Stopped,
             Some(
                 result_digest
@@ -358,18 +361,18 @@ fn terminal_projection(
 }
 
 fn latest_assistant_result(
-    context: &crate::SessionContext,
+    context: &verlet_history::SessionContext,
     child_thread_id: verlet_runtime_contracts::ThreadId,
 ) -> Option<serde_json::Value> {
     context.entries.iter().rev().find_map(|entry| {
         if entry.coordinates.thread_id != child_thread_id {
             return None;
         }
-        let (crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::Assistant { content, .. },
+        let (verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::Assistant { content, .. },
         }
-        | crate::SessionEntryKind::CustomContextMessage {
-            message: crate::CanonicalMessage::Assistant { content, .. },
+        | verlet_history::SessionEntryKind::CustomContextMessage {
+            message: verlet_history::CanonicalMessage::Assistant { content, .. },
         }) = &entry.kind
         else {
             return None;
@@ -377,10 +380,10 @@ fn latest_assistant_result(
         let text = content
             .iter()
             .filter_map(|content| match content {
-                crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
-                crate::CanonicalContent::Image { .. }
-                | crate::CanonicalContent::Thinking { .. }
-                | crate::CanonicalContent::ToolCall { .. } => None,
+                verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                verlet_history::CanonicalContent::Image { .. }
+                | verlet_history::CanonicalContent::Thinking { .. }
+                | verlet_history::CanonicalContent::ToolCall { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("");
@@ -389,7 +392,7 @@ fn latest_assistant_result(
 }
 
 fn total_thread_usage(
-    context: &crate::SessionContext,
+    context: &verlet_history::SessionContext,
     child_thread_id: verlet_runtime_contracts::ThreadId,
 ) -> verlet_runtime_contracts::RuntimeUsage {
     let mut total = verlet_runtime_contracts::RuntimeUsage {
@@ -402,11 +405,11 @@ fn total_thread_usage(
         if entry.coordinates.thread_id != child_thread_id {
             continue;
         }
-        let (crate::SessionEntryKind::Message {
-            message: crate::CanonicalMessage::Assistant { usage, .. },
+        let (verlet_history::SessionEntryKind::Message {
+            message: verlet_history::CanonicalMessage::Assistant { usage, .. },
         }
-        | crate::SessionEntryKind::CustomContextMessage {
-            message: crate::CanonicalMessage::Assistant { usage, .. },
+        | verlet_history::SessionEntryKind::CustomContextMessage {
+            message: verlet_history::CanonicalMessage::Assistant { usage, .. },
         }) = &entry.kind
         else {
             continue;
@@ -423,12 +426,12 @@ fn total_thread_usage(
     total
 }
 
-fn history_error(err: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::History(err.to_string())
+fn history_error(err: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::History(err.to_string())
 }
 
-fn io_error(err: impl std::fmt::Display) -> crate::VerletError {
-    crate::VerletError::RuntimeExecution(err.to_string())
+fn io_error(err: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeExecution(err.to_string())
 }
 
 fn now_ms() -> u64 {
@@ -443,7 +446,7 @@ mod tests {
 
     #[test]
     fn rc5_spawned_and_oldest_joined_payloads_decode_as_a_settlement() {
-        let consumer = crate::ThreadCoordinates {
+        let consumer = verlet_runtime_contracts::ThreadCoordinates {
             tenant_id: "tenant".to_string(),
             user_id: "user".to_string(),
             session_id: "legacy-session".to_string(),
@@ -455,16 +458,16 @@ mod tests {
         let child_thread_id =
             verlet_runtime_contracts::ThreadId::parse_str("018f0000-0000-7000-8000-000000000420")
                 .unwrap();
-        let request_id = crate::EventRecordId::from_uuid(
+        let request_id = verlet_history::EventRecordId::from_uuid(
             uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000421").unwrap(),
         );
-        let spawned_id = crate::EventRecordId::from_uuid(
+        let spawned_id = verlet_history::EventRecordId::from_uuid(
             uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000422").unwrap(),
         );
-        let joined_id = crate::EventRecordId::from_uuid(
+        let joined_id = verlet_history::EventRecordId::from_uuid(
             uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000423").unwrap(),
         );
-        let stream_id = crate::control_stream_id(&consumer);
+        let stream_id = crate::kernel::control_decision::control_stream_id(&consumer);
         let request_payload = serde_json::from_str(
             r#"{
                 "schema":"cooldis.thread.spawn.requested/1",
@@ -499,40 +502,40 @@ mod tests {
         )
         .unwrap();
         let events = vec![
-            crate::EventRecord {
+            verlet_history::EventRecord {
                 id: request_id,
                 stream_id: stream_id.clone(),
-                sequence: crate::EventSequence::new(1),
+                sequence: verlet_history::EventSequence::new(1),
                 coordinates: consumer.clone(),
                 created_at_ms: 1,
-                kind: crate::EventKind::ThreadSpawnRequested,
-                origin: crate::EventOrigin::Discharged,
-                provenance: crate::EventProvenance::default(),
+                kind: verlet_history::EventKind::ThreadSpawnRequested,
+                origin: verlet_history::EventOrigin::Discharged,
+                provenance: verlet_history::EventProvenance::default(),
                 payload: request_payload,
             },
-            crate::EventRecord {
+            verlet_history::EventRecord {
                 id: spawned_id,
                 stream_id: stream_id.clone(),
-                sequence: crate::EventSequence::new(2),
+                sequence: verlet_history::EventSequence::new(2),
                 coordinates: consumer.clone(),
                 created_at_ms: 2,
-                kind: crate::EventKind::ThreadSpawned,
-                origin: crate::EventOrigin::Discharged,
-                provenance: crate::EventProvenance {
+                kind: verlet_history::EventKind::ThreadSpawned,
+                origin: verlet_history::EventOrigin::Discharged,
+                provenance: verlet_history::EventProvenance {
                     source_event_ids: vec![request_id],
-                    ..crate::EventProvenance::default()
+                    ..verlet_history::EventProvenance::default()
                 },
                 payload: spawned_payload,
             },
-            crate::EventRecord {
+            verlet_history::EventRecord {
                 id: joined_id,
                 stream_id,
-                sequence: crate::EventSequence::new(3),
+                sequence: verlet_history::EventSequence::new(3),
                 coordinates: consumer.clone(),
                 created_at_ms: 3,
-                kind: crate::EventKind::ThreadJoined,
-                origin: crate::EventOrigin::Discharged,
-                provenance: crate::EventProvenance::default(),
+                kind: verlet_history::EventKind::ThreadJoined,
+                origin: verlet_history::EventOrigin::Discharged,
+                provenance: verlet_history::EventProvenance::default(),
                 payload: joined_payload,
             },
         ];
@@ -543,12 +546,12 @@ mod tests {
         assert_eq!(settlements.len(), 1);
         assert_eq!(
             settlements[0].dispatch_id,
-            verlet_runtime_contracts::DispatchId::new("legacy-dispatch")
+            verlet_runtime_contracts::handle::DispatchId::new("legacy-dispatch")
         );
         assert_eq!(settlements[0].child_thread_id, child_thread_id);
         assert_eq!(
             settlements[0].terminal_state,
-            crate::ThreadTerminalState::Completed
+            verlet_history::ThreadTerminalState::Completed
         );
         assert_eq!(settlements[0].result_digest, None);
 
@@ -560,12 +563,12 @@ mod tests {
         assert_eq!(bindings.len(), 1);
         assert_eq!(
             bindings[0].dispatch_id,
-            verlet_runtime_contracts::DispatchId::new("legacy-dispatch")
+            verlet_runtime_contracts::handle::DispatchId::new("legacy-dispatch")
         );
         assert_eq!(bindings[0].consumer, consumer);
         assert_eq!(
             bindings[0].handle,
-            verlet_runtime_contracts::HandleId::thread(child_thread_id)
+            verlet_runtime_contracts::handle::HandleId::thread(child_thread_id)
         );
     }
 
@@ -573,24 +576,24 @@ mod tests {
     fn failure_and_cancellation_outcomes_keep_reason_detail() {
         let (failed, failed_reason, failed_retryable) =
             crate::daemon::handle_ingress::terminal_projection(
-                crate::ThreadTerminalState::Failed,
+                verlet_history::ThreadTerminalState::Failed,
                 None,
             );
         assert_eq!(
-            verlet_runtime_contracts::HandleTerminalOutcome::from(failed),
-            verlet_runtime_contracts::HandleTerminalOutcome::Failed
+            verlet_runtime_contracts::handle::HandleTerminalOutcome::from(failed),
+            verlet_runtime_contracts::handle::HandleTerminalOutcome::Failed
         );
         assert_eq!(failed_reason.as_deref(), Some("child thread failed"));
         assert!(failed_retryable);
 
         let (cancelled, cancelled_reason, cancelled_retryable) =
             crate::daemon::handle_ingress::terminal_projection(
-                crate::ThreadTerminalState::Cancelled,
+                verlet_history::ThreadTerminalState::Cancelled,
                 Some("cancel requested"),
             );
         assert_eq!(
-            verlet_runtime_contracts::HandleTerminalOutcome::from(cancelled),
-            verlet_runtime_contracts::HandleTerminalOutcome::Cancelled
+            verlet_runtime_contracts::handle::HandleTerminalOutcome::from(cancelled),
+            verlet_runtime_contracts::handle::HandleTerminalOutcome::Cancelled
         );
         assert_eq!(cancelled_reason.as_deref(), Some("cancel requested"));
         assert!(!cancelled_retryable);

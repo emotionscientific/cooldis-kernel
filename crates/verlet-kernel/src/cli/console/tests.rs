@@ -109,7 +109,8 @@ listen = "unix:///tmp/ignored-console-config.sock"
 "#,
     )
     .unwrap();
-    let listen = crate::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
 
     let parsed = crate::cli::console::parse_console_args(
         vec!["--config", config_path.to_str().unwrap()]
@@ -154,7 +155,8 @@ fn console_app_server_config_defaults_to_project_local_roots_and_user_state() {
             .collect(),
     )
     .unwrap();
-    let listen = crate::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap());
     let config = crate::cli::console::console_app_server_config(&parsed, listen).unwrap();
 
     let project = root.join("work");
@@ -231,8 +233,8 @@ fn console_project_storage_prefers_new_state_directory() {
 fn prepare_console_project_storage_creates_operation_registry_root() {
     let root = std::env::temp_dir().join(format!("verlet-console-roots-{}", uuid::Uuid::now_v7()));
     let workspace = root.join("workspace");
-    let mut config = crate::VerletAppServerConfig::local(
-        crate::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        crate::adapters::app_server::AppServerListenAddr::WebSocket("127.0.0.1:0".parse().unwrap()),
         &workspace,
     );
     config.runtime_home = root.join("runtime");
@@ -469,7 +471,10 @@ fn load_chat_provider_config_reads_openai_compatible_json() {
             assert_eq!(provider, "openai_compatible");
             assert_eq!(base_url, "https://api.example.invalid/v1");
             assert_eq!(api_key, "test-openai_compatible-key");
-            assert_eq!(model, crate::APP_SERVER_OPENAI_COMPATIBLE_MODEL);
+            assert_eq!(
+                model,
+                crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL
+            );
             assert_eq!(max_tokens, 4096);
             assert!(!stream);
             assert_eq!(
@@ -546,12 +551,12 @@ fn load_daemon_provider_config_uses_catalog_for_plain_openai_compatible_without_
     std::fs::create_dir_all(&dir).unwrap();
     let env_path = dir.join("empty.env");
     std::fs::write(&env_path, "").unwrap();
-    let config = crate::VerletProviderConfig {
+    let config = crate::daemon::daemon_config::VerletProviderConfig {
         provider: Some("openai_compatible".to_string()),
         model: Some("example-chat-model-large".to_string()),
         stream: Some(false),
         env_file: Some(env_path),
-        ..crate::VerletProviderConfig::default()
+        ..crate::daemon::daemon_config::VerletProviderConfig::default()
     };
 
     match crate::cli::daemon::load_daemon_provider_config(&config).unwrap() {
@@ -589,11 +594,11 @@ AWS_BEDROCK_MODEL=anthropic.claude-sonnet-4-5-20250929-v1:0
 ",
     )
     .unwrap();
-    let config = crate::VerletProviderConfig {
+    let config = crate::daemon::daemon_config::VerletProviderConfig {
         provider: Some("anthropic_bedrock".to_string()),
         env_file: Some(env_path),
         stream: Some(false),
-        ..crate::VerletProviderConfig::default()
+        ..crate::daemon::daemon_config::VerletProviderConfig::default()
     };
 
     match crate::cli::daemon::load_daemon_provider_config(&config).unwrap() {

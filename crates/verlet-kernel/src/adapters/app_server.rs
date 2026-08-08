@@ -1,4 +1,3 @@
-use crate::LlmProviderCatalogStore as _;
 use crate::daemon::identity::IdentityAuthority as _;
 use std::io::Write as _;
 #[cfg(unix)]
@@ -7,28 +6,22 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::io::AsRawFd as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
-mod connection;
+use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
+pub mod connection;
 mod default_manifest;
 mod orchestrator_boundary;
 mod subscriptions;
 #[cfg(test)]
 mod tests;
-mod threads;
-
-pub use connection::{
-    JsonRpcError, JsonRpcErrorError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, RequestId,
-};
-pub(crate) use threads::{
-    active_manifest_receipt_payloads, recover_unwitnessed_workspace_metadata_as_unbound,
-};
+pub mod threads;
 
 pub const APP_SERVER_LOCAL_PROVIDER: &str = "local_offline";
 pub const APP_SERVER_LOCAL_MODEL: &str = "echo";
 pub const APP_SERVER_BIFROST_PROVIDER: &str = "openai";
 pub const APP_SERVER_BIFROST_MODEL: &str = "openai/gpt-5.5";
 pub const APP_SERVER_OPENAI_COMPATIBLE_PROVIDER: &str = "openai_compatible";
-pub const APP_SERVER_OPENAI_COMPATIBLE_MODEL: &str = crate::OPENAI_COMPATIBLE_DEFAULT_MODEL;
+pub const APP_SERVER_OPENAI_COMPATIBLE_MODEL: &str =
+    verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL;
 pub const APP_SERVER_ANTHROPIC_PROVIDER: &str = "anthropic";
 pub const APP_SERVER_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5-20250929";
 pub const APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER: &str = "anthropic_bedrock";
@@ -82,10 +75,10 @@ pub enum AppServerListenAddr {
 }
 
 impl AppServerListenAddr {
-    pub fn parse(value: &str) -> crate::VerletResult<Self> {
+    pub fn parse(value: &str) -> crate::kernel::runtime_host::VerletResult<Self> {
         if let Some(path) = value.strip_prefix("unix://") {
             if path.is_empty() {
-                return Err(crate::VerletError::RuntimeFactory(
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "unix app-server listen address requires a path".to_string(),
                 ));
             }
@@ -95,26 +88,28 @@ impl AppServerListenAddr {
         if let Some(rest) = value.strip_prefix("ws://") {
             let (authority, path) = split_websocket_listen_url(rest);
             if authority.is_empty() {
-                return Err(crate::VerletError::RuntimeFactory(
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "websocket app-server listen address requires host:port".to_string(),
                 ));
             }
             if !matches!(path, "" | "/rpc") {
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "unsupported app-server websocket path {path:?}; expected /rpc"
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!("unsupported app-server websocket path {path:?}; expected /rpc"),
+                ));
             }
             let addr = authority.parse::<std::net::SocketAddr>().map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "invalid app-server websocket listen address {authority:?}: {err}"
                 ))
             })?;
             return Ok(Self::WebSocket(addr));
         }
 
-        Err(crate::VerletError::RuntimeFactory(format!(
-            "unsupported app-server listen address {value:?}; expected unix://PATH or ws://HOST:PORT[/rpc]"
-        )))
+        Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "unsupported app-server listen address {value:?}; expected unix://PATH or ws://HOST:PORT[/rpc]"
+            ),
+        ))
     }
 
     pub fn display(&self) -> String {
@@ -144,9 +139,9 @@ pub struct VerletAppServerConfig {
     pub blob_registry_root: std::path::PathBuf,
     pub skill_registry_root: std::path::PathBuf,
     /// Deployment placement used when a bind surface does not override it.
-    pub default_placement: crate::AgentManifestPlacementBinding,
+    pub default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
     /// Host workspace used when a requiring manifest has no bind override.
-    pub default_workspace: Option<crate::AgentManifestWorkspaceBinding>,
+    pub default_workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
     /// Generation-local capability bit. The daemon flips this only after the
     /// configured sync listener has bound successfully.
     pub remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -189,7 +184,8 @@ impl VerletAppServerConfig {
             agent_registry_root: project_storage_root.join("agents"),
             blob_registry_root: project_storage_root.join("blobs"),
             skill_registry_root: project_storage_root.join("skills"),
-            default_placement: crate::AgentManifestPlacementBinding::default(),
+            default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding::default(
+            ),
             default_workspace: None,
             remote_event_store_served: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
@@ -473,7 +469,7 @@ pub struct VerletAppServer {
 }
 
 struct VerletAppServerInner {
-    supervisor: crate::VerletSupervisor,
+    supervisor: crate::kernel::supervisor::VerletSupervisor,
     tenant_id: String,
     user_id: String,
     identity_mode: crate::daemon::identity::IdentityMode,
@@ -485,21 +481,21 @@ struct VerletAppServerInner {
     agent_registry_root: std::path::PathBuf,
     blob_registry_root: std::path::PathBuf,
     skill_registry_root: std::path::PathBuf,
-    default_placement: crate::AgentManifestPlacementBinding,
-    default_workspace: Option<crate::AgentManifestWorkspaceBinding>,
+    default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
+    default_workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
     remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
     console_assets: Option<ConsoleAssetConfig>,
     identity_authority: std::sync::Arc<dyn crate::daemon::identity::IdentityAuthority>,
-    identity_clock: std::sync::Arc<dyn crate::DaemonClock>,
+    identity_clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
     console_credential: Option<ConsoleCredentialLease>,
     cwd: std::path::PathBuf,
     codex_home: std::path::PathBuf,
     metadata_store_path: std::path::PathBuf,
     user_metadata_store_path: std::path::PathBuf,
     session_store_path: std::path::PathBuf,
-    metadata_store: crate::SqliteMetadataStore,
-    user_metadata_store: crate::SqliteMetadataStore,
-    process_manager: verlet_process::AsyncExecutionManager,
+    metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+    user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+    process_manager: verlet_process::live::AsyncExecutionManager,
     process_dispatcher:
         tokio::sync::OnceCell<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
     subscriptions:
@@ -515,7 +511,7 @@ struct ConsoleCredentialLease {
 
 struct SessionCloseWitness {
     authority: std::sync::Arc<dyn crate::daemon::identity::IdentityAuthority>,
-    clock: std::sync::Arc<dyn crate::DaemonClock>,
+    clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
     session_id: String,
     armed: bool,
 }
@@ -523,7 +519,7 @@ struct SessionCloseWitness {
 impl SessionCloseWitness {
     fn new(
         authority: std::sync::Arc<dyn crate::daemon::identity::IdentityAuthority>,
-        clock: std::sync::Arc<dyn crate::DaemonClock>,
+        clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
         session_id: String,
     ) -> Self {
         Self {
@@ -534,7 +530,7 @@ impl SessionCloseWitness {
         }
     }
 
-    async fn close(&mut self) -> crate::VerletResult<()> {
+    async fn close(&mut self) -> crate::kernel::runtime_host::VerletResult<()> {
         // `witness_session_closed` starts its cancellation-safe transaction on
         // the first poll, so disarming here prevents a cancelled await from
         // scheduling a duplicate close witness.
@@ -606,13 +602,15 @@ struct AppServerProcessHandleIngress {
 }
 
 #[async_trait::async_trait]
-impl crate::ProcessHandleIngressSink for AppServerProcessHandleIngress {
+impl crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink
+    for AppServerProcessHandleIngress
+{
     async fn submit_process_handle_envelope(
         &self,
         envelope: verlet_io_core::IngressEnvelope,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let inner = self.app.upgrade().ok_or_else(|| {
-            crate::VerletError::RuntimeExecution(
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(
                 "app-server stopped before process handle ingress settled".to_string(),
             )
         })?;
@@ -620,65 +618,67 @@ impl crate::ProcessHandleIngressSink for AppServerProcessHandleIngress {
             .submit_durable_handle_envelope(envelope)
             .await
             .map(|_| ())
-            .map_err(|err| crate::VerletError::RuntimeExecution(err.to_string()))
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::RuntimeExecution(err.to_string())
+            })
     }
 }
 
 #[derive(Clone, Debug)]
 struct AppServerOfflineProviderClient {
-    capabilities: crate::ProviderCapabilityRecord,
+    capabilities: verlet_provider::ProviderCapabilityRecord,
 }
 
 impl AppServerOfflineProviderClient {
     fn new(provider_family: impl Into<String>, model: impl Into<String>) -> Self {
         let mut capabilities =
-            crate::ProviderCapabilityRecord::local_offline(provider_family, model);
+            verlet_provider::ProviderCapabilityRecord::local_offline(provider_family, model);
         capabilities.supports_tools = true;
         capabilities.tool_result_constraints =
-            crate::ProviderToolResultConstraints::open_tool_results();
+            verlet_provider::ProviderToolResultConstraints::open_tool_results();
         capabilities
             .supported_abi_projections
-            .insert(crate::ProviderAbiProjection::LlmTool);
+            .insert(verlet_provider::ProviderAbiProjection::LlmTool);
         Self { capabilities }
     }
 }
 
 #[async_trait::async_trait]
-impl crate::ProviderClient for AppServerOfflineProviderClient {
-    fn capabilities(&self) -> Option<crate::ProviderCapabilityRecord> {
+impl verlet_provider::ProviderClient for AppServerOfflineProviderClient {
+    fn capabilities(&self) -> Option<verlet_provider::ProviderCapabilityRecord> {
         Some(self.capabilities.clone())
     }
 
     async fn complete(
         &self,
-        request: &crate::ProviderRequest,
-    ) -> crate::ProviderResult<crate::ProviderResponse> {
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
         self.capabilities
-            .validate_request(request, crate::ProviderRequestMode::Complete)?;
+            .validate_request(request, verlet_provider::ProviderRequestMode::Complete)?;
         let last_user_text = request
             .messages
             .iter()
             .rev()
             .find_map(|message| match message {
-                crate::CanonicalMessage::User { content, .. } => {
+                verlet_history::CanonicalMessage::User { content, .. } => {
                     let text = text_from_canonical_content(content);
                     (!text.is_empty()).then_some(text)
                 }
-                crate::CanonicalMessage::Assistant { .. }
-                | crate::CanonicalMessage::ToolResult { .. } => None,
+                verlet_history::CanonicalMessage::Assistant { .. }
+                | verlet_history::CanonicalMessage::ToolResult { .. } => None,
             })
             .unwrap_or_default();
-        Ok(crate::ProviderResponse {
-            content: vec![crate::CanonicalContent::text(format!(
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(format!(
                 "local:{last_user_text}"
             ))],
-            usage: crate::CanonicalUsage {
+            usage: verlet_history::CanonicalUsage {
                 input_tokens: request.messages.len() as u64,
                 output_tokens: last_user_text.len() as u64,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
-            stop_reason: crate::CanonicalStopReason::EndTurn,
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })
     }
 }
@@ -687,11 +687,15 @@ impl VerletAppServer {
     /// Same constructor as [`Self::new`]; the name survives from before
     /// identity modes existed and remains the conventional entry point for
     /// configs built with [`VerletAppServerConfig::local`].
-    pub async fn new_local(config: VerletAppServerConfig) -> crate::VerletResult<Self> {
+    pub async fn new_local(
+        config: VerletAppServerConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         Self::new(config).await
     }
 
-    pub async fn new(mut config: VerletAppServerConfig) -> crate::VerletResult<Self> {
+    pub async fn new(
+        mut config: VerletAppServerConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let metadata_store = open_and_seed_metadata_store(config.metadata_store_path()).await?;
         let user_metadata_store =
             open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
@@ -710,12 +714,14 @@ impl VerletAppServer {
 
     pub async fn with_runtime_factory(
         config: VerletAppServerConfig,
-        runtime_factory: std::sync::Arc<dyn crate::AgentRuntimeFactory>,
-    ) -> crate::VerletResult<Self> {
-        let metadata_store = crate::SqliteMetadataStore::in_memory()
+        runtime_factory: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+        >,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
             .await
             .map_err(metadata_store_error)?;
-        let user_metadata_store = crate::SqliteMetadataStore::in_memory()
+        let user_metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
             .await
             .map_err(metadata_store_error)?;
         Self::with_runtime_factory_and_metadata_stores(
@@ -730,17 +736,19 @@ impl VerletAppServer {
     #[cfg(test)]
     pub(crate) async fn with_runtime_factory_and_session_store_decorator(
         config: VerletAppServerConfig,
-        runtime_factory: std::sync::Arc<dyn crate::AgentRuntimeFactory>,
+        runtime_factory: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+        >,
         decorate: impl FnOnce(
-            std::sync::Arc<dyn crate::RuntimeStore>,
-        ) -> std::sync::Arc<dyn crate::RuntimeStore>
+            std::sync::Arc<dyn verlet_history::RuntimeStore>,
+        ) -> std::sync::Arc<dyn verlet_history::RuntimeStore>
         + Send
         + 'static,
-    ) -> crate::VerletResult<Self> {
-        let metadata_store = crate::SqliteMetadataStore::in_memory()
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
             .await
             .map_err(metadata_store_error)?;
-        let user_metadata_store = crate::SqliteMetadataStore::in_memory()
+        let user_metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
             .await
             .map_err(metadata_store_error)?;
         Self::with_runtime_factory_and_metadata_stores_inner(
@@ -756,9 +764,11 @@ impl VerletAppServer {
     #[cfg(test)]
     async fn with_runtime_factory_and_metadata_store(
         config: VerletAppServerConfig,
-        runtime_factory: std::sync::Arc<dyn crate::AgentRuntimeFactory>,
-        metadata_store: crate::SqliteMetadataStore,
-    ) -> crate::VerletResult<Self> {
+        runtime_factory: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+        >,
+        metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let user_metadata_store =
             open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
         Self::with_runtime_factory_and_metadata_stores(
@@ -772,10 +782,12 @@ impl VerletAppServer {
 
     async fn with_runtime_factory_and_metadata_stores(
         config: VerletAppServerConfig,
-        runtime_factory: std::sync::Arc<dyn crate::AgentRuntimeFactory>,
-        metadata_store: crate::SqliteMetadataStore,
-        user_metadata_store: crate::SqliteMetadataStore,
-    ) -> crate::VerletResult<Self> {
+        runtime_factory: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+        >,
+        metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+        user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         Self::with_runtime_factory_and_metadata_stores_inner(
             config,
             runtime_factory,
@@ -788,63 +800,67 @@ impl VerletAppServer {
 
     async fn with_runtime_factory_and_metadata_stores_inner(
         mut config: VerletAppServerConfig,
-        runtime_factory: std::sync::Arc<dyn crate::AgentRuntimeFactory>,
-        metadata_store: crate::SqliteMetadataStore,
-        user_metadata_store: crate::SqliteMetadataStore,
+        runtime_factory: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+        >,
+        metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+        user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
         session_store_decorator: Option<
             Box<
                 dyn FnOnce(
-                        std::sync::Arc<dyn crate::RuntimeStore>,
-                    ) -> std::sync::Arc<dyn crate::RuntimeStore>
+                        std::sync::Arc<dyn verlet_history::RuntimeStore>,
+                    ) -> std::sync::Arc<dyn verlet_history::RuntimeStore>
                     + Send,
             >,
         >,
-    ) -> crate::VerletResult<Self> {
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         crate::adapters::app_server::threads::normalize_registry_roots(&mut config);
         let provider_surface =
             agent_manifest_provider_surface_for_config(&config, &metadata_store).await?;
-        crate::ensure_verlet_threads_published(operation_registry_root_for_kernel_publish(
-            &config,
-        ))?;
-        crate::ensure_verlet_schedule_published(operation_registry_root_for_kernel_publish(
-            &config,
-        ))?;
-        crate::ensure_verlet_process_published(operation_registry_root_for_kernel_publish(
-            &config,
-        ))?;
-        crate::ensure_verlet_notify_published(operation_registry_root_for_kernel_publish(&config))?;
+        crate::operations::kernel_packages::ensure_verlet_threads_published(
+            operation_registry_root_for_kernel_publish(&config),
+        )?;
+        crate::operations::kernel_packages::ensure_verlet_schedule_published(
+            operation_registry_root_for_kernel_publish(&config),
+        )?;
+        crate::operations::kernel_packages::ensure_verlet_process_published(
+            operation_registry_root_for_kernel_publish(&config),
+        )?;
+        crate::operations::kernel_packages::ensure_verlet_notify_published(
+            operation_registry_root_for_kernel_publish(&config),
+        )?;
         crate::adapters::app_server::default_manifest::ensure_default_manifest_published(
             &config,
             provider_surface.supports_streaming,
         )?;
         let metadata_store_path = config.metadata_store_path();
         let user_metadata_store_path = config.user_metadata_store_path();
-        let supervisor = crate::VerletSupervisor::new();
-        let mut tenant_context = crate::TenantRuntimeContext::local(
+        let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
+        let mut tenant_context = crate::kernel::supervisor::TenantRuntimeContext::local(
             config.tenant_id.clone(),
             config.runtime_home.clone(),
             config.state_home.clone(),
         );
         let codex_home = tenant_context.codex_home();
         let session_store_path = tenant_context.session_history_path();
-        let identity_store = crate::SqliteSessionStore::open(&session_store_path)
+        let identity_store = verlet_history_sqlite::SqliteSessionStore::open(&session_store_path)
             .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
-        let runtime_store =
-            std::sync::Arc::new(identity_store.clone()) as std::sync::Arc<dyn crate::RuntimeStore>;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+        let runtime_store = std::sync::Arc::new(identity_store.clone())
+            as std::sync::Arc<dyn verlet_history::RuntimeStore>;
         let runtime_store = match session_store_decorator {
             Some(decorate) => decorate(runtime_store),
             None => runtime_store,
         };
         tenant_context = tenant_context.with_session_store(runtime_store);
         supervisor
-            .register_tenant(crate::TenantRegistration {
+            .register_tenant(crate::kernel::supervisor::TenantRegistration {
                 context: tenant_context,
                 runtime_factory,
             })
             .await?;
-        let identity_clock: std::sync::Arc<dyn crate::DaemonClock> =
-            std::sync::Arc::new(crate::SystemDaemonClock);
+        let identity_clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock> =
+            std::sync::Arc::new(crate::daemon::clock_route::SystemDaemonClock);
         let console_credential_record_path = session_store_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
@@ -887,7 +903,7 @@ impl VerletAppServer {
                 session_store_path,
                 metadata_store,
                 user_metadata_store,
-                process_manager: verlet_process::AsyncExecutionManager::default(),
+                process_manager: verlet_process::live::AsyncExecutionManager::default(),
                 process_dispatcher: tokio::sync::OnceCell::new(),
                 subscriptions: tokio::sync::Mutex::new(
                     crate::adapters::app_server::subscriptions::AppServerSubscriptions::default(),
@@ -897,10 +913,11 @@ impl VerletAppServer {
                 ),
             }),
         };
-        let process_ingress: std::sync::Arc<dyn crate::ProcessHandleIngressSink> =
-            std::sync::Arc::new(AppServerProcessHandleIngress {
-                app: std::sync::Arc::downgrade(&app.inner),
-            });
+        let process_ingress: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink,
+        > = std::sync::Arc::new(AppServerProcessHandleIngress {
+            app: std::sync::Arc::downgrade(&app.inner),
+        });
         let runtime_store = app
             .inner
             .supervisor
@@ -915,7 +932,7 @@ impl VerletAppServer {
             .process_dispatcher
             .set(process_dispatcher.clone())
             .map_err(|_| {
-                crate::VerletError::RuntimeFactory(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "app-server process dispatcher initialized twice".to_string(),
                 )
             })?;
@@ -941,9 +958,12 @@ impl VerletAppServer {
         // standalone app-server serving, and in-process/local JSON-RPC users.
         // Run recovery before returning the first callable surface.
         process_dispatcher.assert_startup_registry_empty().await?;
-        let recovery_store = crate::SqliteSessionStore::open(&app.inner.session_store_path)
-            .await
-            .map_err(|err| crate::VerletError::History(err.to_string()))?;
+        let recovery_store =
+            verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+                .await
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(err.to_string())
+                })?;
         let recovery = crate::daemon::recovery_sweep::StartupRecoverySweep::new(
             recovery_store,
             process_dispatcher,
@@ -961,14 +981,17 @@ impl VerletAppServer {
         Ok(app)
     }
 
-    pub async fn serve(&self, listen: AppServerListenAddr) -> crate::VerletResult<()> {
+    pub async fn serve(
+        &self,
+        listen: AppServerListenAddr,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         match listen {
             AppServerListenAddr::Unix(path) => self.serve_unix(path).await,
             AppServerListenAddr::WebSocket(addr) => self.serve_websocket(addr).await,
         }
     }
 
-    pub fn supervisor(&self) -> crate::VerletSupervisor {
+    pub fn supervisor(&self) -> crate::kernel::supervisor::VerletSupervisor {
         self.inner.supervisor.clone()
     }
 
@@ -1024,16 +1047,19 @@ impl VerletAppServer {
     }
 
     #[cfg(unix)]
-    async fn serve_unix(&self, path: std::path::PathBuf) -> crate::VerletResult<()> {
+    async fn serve_unix(
+        &self,
+        path: std::path::PathBuf,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         prepare_unix_socket_path(&path)?;
         let listener = tokio::net::UnixListener::bind(&path).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to bind Verlet app-server socket {}: {err}",
                 path.display()
             ))
         })?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to secure Verlet app-server socket {}: {err}",
                 path.display()
             ))
@@ -1041,14 +1067,14 @@ impl VerletAppServer {
 
         loop {
             let (stream, _) = listener.accept().await.map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to accept Verlet app-server connection: {err}"
                 ))
             })?;
             let peer_uid = stream
                 .peer_cred()
                 .map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to inspect Verlet app-server peer credentials: {err}"
                     ))
                 })?
@@ -1063,13 +1089,19 @@ impl VerletAppServer {
     }
 
     #[cfg(not(unix))]
-    async fn serve_unix(&self, _path: std::path::PathBuf) -> crate::VerletResult<()> {
-        Err(crate::VerletError::RuntimeFactory(
+    async fn serve_unix(
+        &self,
+        _path: std::path::PathBuf,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
+        Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "unix app-server sockets are only supported on Unix platforms".to_string(),
         ))
     }
 
-    async fn serve_websocket(&self, addr: std::net::SocketAddr) -> crate::VerletResult<()> {
+    async fn serve_websocket(
+        &self,
+        addr: std::net::SocketAddr,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let listener = bind_websocket_listener(addr).await?;
         self.serve_websocket_listener(listener).await
     }
@@ -1077,21 +1109,23 @@ impl VerletAppServer {
     pub async fn serve_websocket_listener(
         &self,
         listener: tokio::net::TcpListener,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let addr = listener.local_addr().map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to inspect Verlet app-server websocket listener: {err}"
             ))
         })?;
         if !addr.ip().is_loopback() {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "app-server websocket listen address {addr} is not loopback; configure websocket auth before binding non-loopback addresses"
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "app-server websocket listen address {addr} is not loopback; configure websocket auth before binding non-loopback addresses"
+                ),
+            ));
         }
 
         loop {
             let (stream, peer) = listener.accept().await.map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to accept Verlet app-server websocket connection: {err}"
                 ))
             })?;
@@ -1109,7 +1143,7 @@ impl VerletAppServer {
         &self,
         mut stream: tokio::net::UnixStream,
         peer_uid: u32,
-    ) -> crate::VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let Some(resolved_principal) = self
             .authenticate_unix_websocket(&mut stream, peer_uid)
             .await?
@@ -1119,7 +1153,7 @@ impl VerletAppServer {
         let websocket = accept_authenticated_websocket(stream)
             .await
             .map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to upgrade Verlet app-server unix socket websocket: {err}"
                 ))
             })?;
@@ -1131,7 +1165,10 @@ impl VerletAppServer {
         .await
     }
 
-    async fn handle_tcp_stream(&self, stream: tokio::net::TcpStream) -> crate::VerletResult<()> {
+    async fn handle_tcp_stream(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let mut stream = stream;
         if self.handle_http_request(&mut stream).await? {
             return Ok(());
@@ -1144,7 +1181,7 @@ impl VerletAppServer {
         let websocket = accept_authenticated_websocket(stream)
             .await
             .map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to upgrade Verlet app-server tcp websocket: {err}"
                 ))
             })?;
@@ -1155,7 +1192,7 @@ impl VerletAppServer {
     async fn handle_http_request(
         &self,
         stream: &mut tokio::net::TcpStream,
-    ) -> crate::VerletResult<bool> {
+    ) -> crate::kernel::runtime_host::VerletResult<bool> {
         let Some(request) = peek_http_request(stream).await? else {
             return Ok(false);
         };
@@ -1210,7 +1247,7 @@ impl VerletAppServer {
             .is_some_and(|name| name == "index.html")
         {
             let html = String::from_utf8(body).map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "console index.html is not valid UTF-8 at {}: {err}",
                     asset_path.display()
                 ))
@@ -1224,7 +1261,7 @@ impl VerletAppServer {
     async fn authenticate_tcp_websocket(
         &self,
         stream: &mut tokio::net::TcpStream,
-    ) -> crate::VerletResult<
+    ) -> crate::kernel::runtime_host::VerletResult<
         Option<(
             crate::daemon::identity::ResolvedPrincipal,
             crate::daemon::identity::BoundarySurface,
@@ -1253,7 +1290,8 @@ impl VerletAppServer {
         &self,
         stream: &mut tokio::net::UnixStream,
         peer_uid: u32,
-    ) -> crate::VerletResult<Option<crate::daemon::identity::ResolvedPrincipal>> {
+    ) -> crate::kernel::runtime_host::VerletResult<Option<crate::daemon::identity::ResolvedPrincipal>>
+    {
         let same_uid = peer_uid == current_effective_uid();
         if self.inner.identity_mode == crate::daemon::identity::IdentityMode::Local
             && same_uid
@@ -1298,7 +1336,9 @@ impl VerletAppServer {
     async fn token_rejection_reason(
         &self,
         token: &str,
-    ) -> crate::VerletResult<crate::daemon::identity::IdentityAuthRejectionReason> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::daemon::identity::IdentityAuthRejectionReason,
+    > {
         let digest = crate::daemon::identity::identity_token_digest(token);
         let now_ms = self.inner.identity_clock.now().timestamp_millis();
         for principal in self.inner.identity_authority.list_principals().await? {
@@ -1345,7 +1385,7 @@ impl VerletAppServer {
         stream: &mut S,
         surface: crate::daemon::identity::BoundarySurface,
         reason: crate::daemon::identity::IdentityAuthRejectionReason,
-    ) -> crate::VerletResult<()>
+    ) -> crate::kernel::runtime_host::VerletResult<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -1371,14 +1411,14 @@ impl VerletAppServer {
 }
 
 async fn initialize_boundary_identity(
-    store: crate::SqliteSessionStore,
-    clock: std::sync::Arc<dyn crate::DaemonClock>,
+    store: verlet_history_sqlite::SqliteSessionStore,
+    clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
     mode: crate::daemon::identity::IdentityMode,
     console_principal: Option<crate::daemon::identity::PrincipalId>,
     default_operator_id: &str,
     console_assets: Option<&mut ConsoleAssetConfig>,
     console_credential_record_path: &std::path::Path,
-) -> crate::VerletResult<(
+) -> crate::kernel::runtime_host::VerletResult<(
     std::sync::Arc<dyn crate::daemon::identity::IdentityAuthority>,
     Option<ConsoleCredentialLease>,
 )> {
@@ -1418,7 +1458,7 @@ async fn initialize_boundary_identity(
                     .flatten()
             })
             .ok_or_else(|| {
-                crate::VerletError::RuntimeFactory(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "console authentication requires a configured active operator principal"
                         .to_string(),
                 )
@@ -1453,23 +1493,29 @@ async fn initialize_boundary_identity(
     Ok((std::sync::Arc::new(authority), console_credential))
 }
 
-fn read_console_credential_id(path: &std::path::Path) -> crate::VerletResult<Option<String>> {
+fn read_console_credential_id(
+    path: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<Option<String>> {
     let value = match std::fs::read_to_string(path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "failed to read Verlet console credential record {}: {error}",
-                path.display()
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "failed to read Verlet console credential record {}: {error}",
+                    path.display()
+                ),
+            ));
         }
     };
     let credential_id = value.trim();
     if credential_id.is_empty() || credential_id.chars().any(char::is_whitespace) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "Verlet console credential record {} is malformed",
-            path.display()
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "Verlet console credential record {} is malformed",
+                path.display()
+            ),
+        ));
     }
     Ok(Some(credential_id.to_string()))
 }
@@ -1477,10 +1523,10 @@ fn read_console_credential_id(path: &std::path::Path) -> crate::VerletResult<Opt
 fn persist_console_credential_id(
     path: &std::path::Path,
     credential_id: &str,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to prepare Verlet console credential record directory {}: {error}",
             parent.display()
         ))
@@ -1505,15 +1551,19 @@ fn persist_console_credential_id(
     })();
     if let Err(error) = write_result {
         let _ = std::fs::remove_file(&temporary);
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "failed to persist Verlet console credential record {}: {error}",
-            path.display()
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "failed to persist Verlet console credential record {}: {error}",
+                path.display()
+            ),
+        ));
     }
     Ok(())
 }
 
-fn ignore_missing_credential(result: crate::VerletResult<()>) -> crate::VerletResult<()> {
+fn ignore_missing_credential(
+    result: crate::kernel::runtime_host::VerletResult<()>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     match result {
         Err(error)
             if error
@@ -1529,7 +1579,7 @@ fn ignore_missing_credential(result: crate::VerletResult<()>) -> crate::VerletRe
 async fn retire_console_credential(
     authority: std::sync::Arc<dyn crate::daemon::identity::IdentityAuthority>,
     credential: &ConsoleCredentialLease,
-) -> crate::VerletResult<()> {
+) -> crate::kernel::runtime_host::VerletResult<()> {
     ignore_missing_credential(
         authority
             .revoke_credential(&credential.principal_id, &credential.credential_id)
@@ -1541,10 +1591,12 @@ async fn retire_console_credential(
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "failed to clear Verlet console credential record {}: {error}",
-                    credential.record_path.display()
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "failed to clear Verlet console credential record {}: {error}",
+                        credential.record_path.display()
+                    ),
+                ));
             }
         }
     }
@@ -1552,29 +1604,29 @@ async fn retire_console_credential(
 }
 
 struct ResolvedCatalogOpenAIChatCompletionsProvider {
-    runtime_config: crate::AgentLoopConfig,
-    endpoint: crate::ProviderEndpoint,
+    runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
+    endpoint: verlet_provider::ProviderEndpoint,
 }
 
 async fn resolve_catalog_openai_chat_completions_provider<C, A>(
     provider_store: &C,
     auth_store: &A,
-    auth_context: &crate::LlmProviderAuthContext,
+    auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
     provider_id: &str,
     model: Option<&str>,
     max_tokens: u32,
     stream: bool,
-) -> crate::VerletResult<ResolvedCatalogOpenAIChatCompletionsProvider>
+) -> crate::kernel::runtime_host::VerletResult<ResolvedCatalogOpenAIChatCompletionsProvider>
 where
-    C: crate::LlmProviderCatalogStore,
-    A: crate::LlmProviderAuthStore,
+    C: verlet_metadata::provider_store::LlmProviderCatalogStore,
+    A: verlet_metadata::provider_store::LlmProviderAuthStore,
 {
     let provider = provider_store
         .get_provider(provider_id)
         .await
         .map_err(provider_store_error)?
         .ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "catalog provider {provider_id:?} is not in the provider metadata store"
             ))
         })?;
@@ -1586,23 +1638,29 @@ where
     let api = model_record
         .and_then(|model| model.api.clone())
         .unwrap_or_else(|| provider.api.clone());
-    if api != crate::ProviderApi::OpenAIChatCompletions {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "catalog provider {provider_id:?} uses api {api:?}; only OpenAI Chat Completions catalog providers are supported here"
-        )));
+    if api != verlet_history::ProviderApi::OpenAIChatCompletions {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "catalog provider {provider_id:?} uses api {api:?}; only OpenAI Chat Completions catalog providers are supported here"
+            ),
+        ));
     }
     let base_url = model_record
         .and_then(|model| model.base_url.clone())
         .unwrap_or_else(|| provider.base_url.clone());
-    let resolved_auth = crate::resolve_llm_provider_auth(auth_store, &provider, auth_context)
-        .await
-        .map_err(provider_store_error)?;
+    let resolved_auth = verlet_metadata::provider_store::resolve_llm_provider_auth(
+        auth_store,
+        &provider,
+        auth_context,
+    )
+    .await
+    .map_err(provider_store_error)?;
     if provider.auth_header && resolved_auth.is_none() {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "catalog provider {provider_id:?} requires an API key but none was configured"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("catalog provider {provider_id:?} requires an API key but none was configured"),
+        ));
     }
-    let mut endpoint = crate::ProviderEndpoint::openai_chat_completions(
+    let mut endpoint = verlet_provider::ProviderEndpoint::openai_chat_completions(
         &base_url,
         resolved_auth
             .as_ref()
@@ -1610,7 +1668,7 @@ where
             .unwrap_or_default(),
     );
     if !provider.auth_header {
-        endpoint.auth = crate::ProviderAuth::None;
+        endpoint.auth = verlet_provider::ProviderAuth::None;
     }
 
     let mut headers = provider.headers.clone();
@@ -1619,8 +1677,11 @@ where
     }
     endpoint.headers = resolve_catalog_headers(&headers, auth_context)?;
 
-    let mut runtime_config =
-        crate::AgentLoopConfig::new(api, provider.provider_id.clone(), model_id);
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        api,
+        provider.provider_id.clone(),
+        model_id,
+    );
     runtime_config.max_tokens = max_tokens;
     runtime_config.stream = stream;
     Ok(ResolvedCatalogOpenAIChatCompletionsProvider {
@@ -1630,9 +1691,9 @@ where
 }
 
 fn selected_catalog_model_id(
-    provider: &crate::LlmProviderRecord,
+    provider: &verlet_metadata::provider_store::LlmProviderRecord,
     requested_model: Option<&str>,
-) -> crate::VerletResult<String> {
+) -> crate::kernel::runtime_host::VerletResult<String> {
     if let Some(model) = requested_model.filter(|model| !model.trim().is_empty()) {
         return Ok(model.to_string());
     }
@@ -1648,7 +1709,7 @@ fn selected_catalog_model_id(
         .or_else(|| provider.models.first())
         .map(|model| model.model_id.clone())
         .ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "catalog provider {:?} has no models",
                 provider.provider_id
             ))
@@ -1656,9 +1717,12 @@ fn selected_catalog_model_id(
 }
 
 fn resolve_catalog_headers(
-    headers: &std::collections::BTreeMap<String, crate::LlmProviderConfigValue>,
-    auth_context: &crate::LlmProviderAuthContext,
-) -> crate::VerletResult<Vec<(String, String)>> {
+    headers: &std::collections::BTreeMap<
+        String,
+        verlet_metadata::provider_store::LlmProviderConfigValue,
+    >,
+    auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
+) -> crate::kernel::runtime_host::VerletResult<Vec<(String, String)>> {
     headers
         .iter()
         .map(|(name, value)| {
@@ -1671,35 +1735,45 @@ fn resolve_catalog_headers(
 }
 
 fn resolve_catalog_config_value(
-    value: &crate::LlmProviderConfigValue,
-    auth_context: &crate::LlmProviderAuthContext,
-) -> crate::VerletResult<String> {
+    value: &verlet_metadata::provider_store::LlmProviderConfigValue,
+    auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
+) -> crate::kernel::runtime_host::VerletResult<String> {
     match value {
-        crate::LlmProviderConfigValue::Literal { value } => Ok(value.clone()),
-        crate::LlmProviderConfigValue::Env { name } => auth_context
+        verlet_metadata::provider_store::LlmProviderConfigValue::Literal { value } => {
+            Ok(value.clone())
+        }
+        verlet_metadata::provider_store::LlmProviderConfigValue::Env { name } => auth_context
             .environment
             .get(name)
             .filter(|value| !value.is_empty())
             .cloned()
             .ok_or_else(|| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "catalog provider header env var {name} is not configured"
                 ))
             }),
-        crate::LlmProviderConfigValue::Command { .. } => Err(crate::VerletError::RuntimeFactory(
-            "catalog provider command-backed header resolution is not enabled".to_string(),
-        )),
+        verlet_metadata::provider_store::LlmProviderConfigValue::Command { .. } => {
+            Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "catalog provider command-backed header resolution is not enabled".to_string(),
+            ))
+        }
     }
 }
 
-fn provider_store_error(err: crate::LlmProviderStoreError) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(format!("provider metadata store failed: {err}"))
+fn provider_store_error(
+    err: verlet_metadata::provider_store::LlmProviderStoreError,
+) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+        "provider metadata store failed: {err}"
+    ))
 }
 
 async fn agent_manifest_provider_surface_for_config(
     config: &VerletAppServerConfig,
-    metadata_store: &crate::SqliteMetadataStore,
-) -> crate::VerletResult<crate::AgentManifestProviderSurface> {
+    metadata_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::agent::manifest_bind::AgentManifestProviderSurface,
+> {
     agent_manifest_provider_surface_from_parts(
         &config.provider,
         &config.model_provider,
@@ -1713,8 +1787,10 @@ async fn agent_manifest_provider_surface_from_parts(
     provider_config: &AppServerProviderConfig,
     model_provider: &str,
     model: &str,
-    metadata_store: &crate::SqliteMetadataStore,
-) -> crate::VerletResult<crate::AgentManifestProviderSurface> {
+    metadata_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::agent::manifest_bind::AgentManifestProviderSurface,
+> {
     match provider_config {
         AppServerProviderConfig::CatalogOpenAIChatCompletions { provider_id, .. } => {
             let provider = metadata_store
@@ -1722,64 +1798,74 @@ async fn agent_manifest_provider_surface_from_parts(
                 .await
                 .map_err(provider_store_error)?
                 .ok_or_else(|| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "catalog provider {provider_id:?} is not in the provider metadata store"
                     ))
                 })?;
-            Ok(crate::AgentManifestProviderSurface::from_provider_record(
-                &provider,
-            ))
+            Ok(
+                crate::agent::manifest_bind::AgentManifestProviderSurface::from_provider_record(
+                    &provider,
+                ),
+            )
         }
-        AppServerProviderConfig::LocalOffline => Ok(crate::AgentManifestProviderSurface::single(
-            model_provider.to_string(),
-            model.to_string(),
-        )
-        .with_supports_streaming(false)),
+        AppServerProviderConfig::LocalOffline => Ok(
+            crate::agent::manifest_bind::AgentManifestProviderSurface::single(
+                model_provider.to_string(),
+                model.to_string(),
+            )
+            .with_supports_streaming(false),
+        ),
         AppServerProviderConfig::BifrostOpenAIResponses { .. }
         | AppServerProviderConfig::OpenAIChatCompletions { .. }
         | AppServerProviderConfig::AnthropicMessages { .. }
-        | AppServerProviderConfig::AnthropicBedrock { .. } => {
-            Ok(crate::AgentManifestProviderSurface::single(
+        | AppServerProviderConfig::AnthropicBedrock { .. } => Ok(
+            crate::agent::manifest_bind::AgentManifestProviderSurface::single(
                 model_provider.to_string(),
                 model.to_string(),
-            ))
-        }
+            ),
+        ),
     }
 }
 
-fn metadata_store_error(err: crate::MetadataStoreError) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(err.to_string())
+fn metadata_store_error(
+    err: verlet_metadata::provider_store::MetadataStoreError,
+) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(err.to_string())
 }
 
-fn secret_store_error(err: crate::SecretStoreError) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(format!("secret store failed: {err}"))
+fn secret_store_error(
+    err: verlet_metadata::secret_store::SecretStoreError,
+) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!("secret store failed: {err}"))
 }
 
-fn metadata_store_jsonrpc_error(err: crate::MetadataStoreError) -> JsonRpcErrorError {
+fn metadata_store_jsonrpc_error(
+    err: verlet_metadata::provider_store::MetadataStoreError,
+) -> crate::adapters::app_server::connection::JsonRpcErrorError {
     crate::adapters::app_server::connection::internal_error(metadata_store_error(err))
 }
 
-fn text_from_canonical_content(content: &[crate::CanonicalContent]) -> String {
+fn text_from_canonical_content(content: &[verlet_history::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
-            crate::CanonicalContent::Image { .. }
-            | crate::CanonicalContent::ToolCall { .. }
-            | crate::CanonicalContent::Thinking { .. } => None,
+            verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. }
+            | verlet_history::CanonicalContent::Thinking { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("")
 }
 
-fn thinking_text_from_canonical_content(content: &[crate::CanonicalContent]) -> String {
+fn thinking_text_from_canonical_content(content: &[verlet_history::CanonicalContent]) -> String {
     content
         .iter()
         .filter_map(|content| match content {
-            crate::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
-            crate::CanonicalContent::Text { .. }
-            | crate::CanonicalContent::Image { .. }
-            | crate::CanonicalContent::ToolCall { .. } => None,
+            verlet_history::CanonicalContent::Thinking { text, .. } => Some(text.as_str()),
+            verlet_history::CanonicalContent::Text { .. }
+            | verlet_history::CanonicalContent::Image { .. }
+            | verlet_history::CanonicalContent::ToolCall { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -1787,11 +1873,12 @@ fn thinking_text_from_canonical_content(content: &[crate::CanonicalContent]) -> 
 
 async fn open_and_seed_metadata_store(
     path: impl AsRef<std::path::Path>,
-) -> crate::VerletResult<crate::SqliteMetadataStore> {
-    let store = crate::SqliteMetadataStore::open(path)
+) -> crate::kernel::runtime_host::VerletResult<verlet_metadata::provider_store::SqliteMetadataStore>
+{
+    let store = verlet_metadata::provider_store::SqliteMetadataStore::open(path)
         .await
         .map_err(metadata_store_error)?;
-    crate::seed_default_llm_providers(&store)
+    verlet_metadata::provider_store::seed_default_llm_providers(&store)
         .await
         .map_err(provider_store_error)?;
     Ok(store)
@@ -1799,8 +1886,8 @@ async fn open_and_seed_metadata_store(
 
 async fn sync_catalog_provider_identity(
     config: &mut VerletAppServerConfig,
-    provider_store: &crate::SqliteMetadataStore,
-) -> crate::VerletResult<()> {
+    provider_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if let AppServerProviderConfig::CatalogOpenAIChatCompletions {
         provider_id, model, ..
     } = &config.provider
@@ -1810,7 +1897,7 @@ async fn sync_catalog_provider_identity(
             .await
             .map_err(provider_store_error)?
             .ok_or_else(|| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "catalog provider {provider_id:?} is not in the provider metadata store"
                 ))
             })?;
@@ -1822,15 +1909,17 @@ async fn sync_catalog_provider_identity(
 
 async fn runtime_factory_from_config(
     config: &VerletAppServerConfig,
-    provider_store: &crate::SqliteMetadataStore,
-    auth_store: &crate::SqliteMetadataStore,
-) -> crate::VerletResult<std::sync::Arc<dyn crate::AgentRuntimeFactory>> {
+    provider_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+    auth_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+) -> crate::kernel::runtime_host::VerletResult<
+    std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
+> {
     match &config.provider {
         AppServerProviderConfig::LocalOffline => {
             let provider = config.model_provider.clone();
             let model = config.model.clone();
-            let runtime_config = crate::AgentLoopConfig::new(
-                crate::ProviderApi::Other(provider.clone()),
+            let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::Other(provider.clone()),
                 provider.clone(),
                 model.clone(),
             );
@@ -1850,24 +1939,24 @@ async fn runtime_factory_from_config(
             max_tokens,
             stream,
         } => {
-            let adapter: std::sync::Arc<dyn crate::ProviderWireAdapter> =
-                std::sync::Arc::new(crate::OpenAIResponsesAdapter {
+            let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+                std::sync::Arc::new(verlet_provider::OpenAIResponsesAdapter {
                     include_encrypted_reasoning: false,
-                    reasoning_summary: crate::OpenAIReasoningSummary::Auto,
+                    reasoning_summary: verlet_provider::OpenAIReasoningSummary::Auto,
                 });
             let client = std::sync::Arc::new(
-                crate::ProviderHttpClient::new(
-                    crate::ProviderEndpoint::openai_responses(base_url, api_key.clone()),
+                verlet_provider::ProviderHttpClient::new(
+                    verlet_provider::ProviderEndpoint::openai_responses(base_url, api_key.clone()),
                     adapter,
                 )
                 .map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to build Bifrost OpenAI provider client: {err}"
                     ))
                 })?,
             );
-            let mut runtime_config = crate::AgentLoopConfig::new(
-                crate::ProviderApi::OpenAIResponses,
+            let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::OpenAIResponses,
                 APP_SERVER_BIFROST_PROVIDER,
                 model.clone(),
             );
@@ -1891,20 +1980,22 @@ async fn runtime_factory_from_config(
             stream,
             headers,
         } => {
-            let adapter: std::sync::Arc<dyn crate::ProviderWireAdapter> =
-                std::sync::Arc::new(crate::OpenAIChatCompletionsAdapter);
-            let mut endpoint =
-                crate::ProviderEndpoint::openai_chat_completions(base_url, api_key.clone());
+            let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+                std::sync::Arc::new(verlet_provider::OpenAIChatCompletionsAdapter);
+            let mut endpoint = verlet_provider::ProviderEndpoint::openai_chat_completions(
+                base_url,
+                api_key.clone(),
+            );
             endpoint.headers = headers.clone();
             let client = std::sync::Arc::new(
-                crate::ProviderHttpClient::new(endpoint, adapter).map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!(
+                verlet_provider::ProviderHttpClient::new(endpoint, adapter).map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to build OpenAI Chat Completions provider client: {err}"
                     ))
                 })?,
             );
-            let mut runtime_config = crate::AgentLoopConfig::new(
-                crate::ProviderApi::OpenAIChatCompletions,
+            let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::OpenAIChatCompletions,
                 provider.clone(),
                 model.clone(),
             );
@@ -1926,21 +2017,24 @@ async fn runtime_factory_from_config(
             max_tokens,
             stream,
         } => {
-            let adapter: std::sync::Arc<dyn crate::ProviderWireAdapter> =
-                std::sync::Arc::new(crate::AnthropicMessagesAdapter);
+            let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+                std::sync::Arc::new(verlet_provider::AnthropicMessagesAdapter);
             let client = std::sync::Arc::new(
-                crate::ProviderHttpClient::new(
-                    crate::ProviderEndpoint::anthropic_messages(base_url, api_key.clone()),
+                verlet_provider::ProviderHttpClient::new(
+                    verlet_provider::ProviderEndpoint::anthropic_messages(
+                        base_url,
+                        api_key.clone(),
+                    ),
                     adapter,
                 )
                 .map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to build Anthropic Messages provider client: {err}"
                     ))
                 })?,
             );
-            let mut runtime_config = crate::AgentLoopConfig::new(
-                crate::ProviderApi::AnthropicMessages,
+            let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::AnthropicMessages,
                 APP_SERVER_ANTHROPIC_PROVIDER,
                 model.clone(),
             );
@@ -1965,10 +2059,10 @@ async fn runtime_factory_from_config(
             max_tokens,
             stream,
         } => {
-            let adapter: std::sync::Arc<dyn crate::ProviderWireAdapter> =
-                std::sync::Arc::new(crate::AnthropicBedrockMessagesAdapter);
+            let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+                std::sync::Arc::new(verlet_provider::AnthropicBedrockMessagesAdapter);
             let endpoint = if let Some(base_url) = base_url {
-                crate::ProviderEndpoint::anthropic_bedrock_with_base_url(
+                verlet_provider::ProviderEndpoint::anthropic_bedrock_with_base_url(
                     base_url,
                     region,
                     model,
@@ -1977,7 +2071,7 @@ async fn runtime_factory_from_config(
                     session_token.clone(),
                 )
             } else {
-                crate::ProviderEndpoint::anthropic_bedrock(
+                verlet_provider::ProviderEndpoint::anthropic_bedrock(
                     region,
                     model,
                     access_key_id.clone(),
@@ -1986,14 +2080,14 @@ async fn runtime_factory_from_config(
                 )
             };
             let client = std::sync::Arc::new(
-                crate::ProviderHttpClient::new(endpoint, adapter).map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!(
+                verlet_provider::ProviderHttpClient::new(endpoint, adapter).map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to build Anthropic Bedrock provider client: {err}"
                     ))
                 })?,
             );
-            let mut runtime_config = crate::AgentLoopConfig::new(
-                crate::ProviderApi::AnthropicMessages,
+            let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::AnthropicMessages,
                 APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER,
                 model.clone(),
             );
@@ -2017,21 +2111,23 @@ async fn runtime_factory_from_config(
             let resolved = resolve_catalog_openai_chat_completions_provider(
                 provider_store,
                 auth_store,
-                &crate::LlmProviderAuthContext::from_process_env(),
+                &verlet_metadata::provider_store::LlmProviderAuthContext::from_process_env(),
                 provider_id,
                 model.as_deref(),
                 *max_tokens,
                 *stream,
             )
             .await?;
-            let adapter: std::sync::Arc<dyn crate::ProviderWireAdapter> =
-                std::sync::Arc::new(crate::OpenAIChatCompletionsAdapter);
+            let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
+                std::sync::Arc::new(verlet_provider::OpenAIChatCompletionsAdapter);
             let client = std::sync::Arc::new(
-                crate::ProviderHttpClient::new(resolved.endpoint, adapter).map_err(|err| {
-                    crate::VerletError::RuntimeFactory(format!(
-                        "failed to build catalog OpenAI Chat Completions provider client: {err}"
-                    ))
-                })?,
+                verlet_provider::ProviderHttpClient::new(resolved.endpoint, adapter).map_err(
+                    |err| {
+                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                            "failed to build catalog OpenAI Chat Completions provider client: {err}"
+                        ))
+                    },
+                )?,
             );
             let secret_resolver = secret_resolver_from_config(config).await?;
             Ok(runtime_factory_from_provider_parts_with_app_paths(
@@ -2047,10 +2143,10 @@ async fn runtime_factory_from_config(
 
 #[cfg(test)]
 pub(crate) fn runtime_factory_from_provider_parts(
-    runtime_config: crate::AgentLoopConfig,
-    client: std::sync::Arc<dyn crate::ProviderClient>,
+    runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     capsule_bindings: CapsuleBindingsConfig,
-) -> std::sync::Arc<dyn crate::AgentRuntimeFactory> {
+) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
     runtime_factory_from_provider_parts_with_secret_resolver(
         runtime_config,
         client,
@@ -2061,12 +2157,12 @@ pub(crate) fn runtime_factory_from_provider_parts(
 
 #[cfg(test)]
 pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
-    runtime_config: crate::AgentLoopConfig,
-    client: std::sync::Arc<dyn crate::ProviderClient>,
+    runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing app-server config field name
     capsule_bindings: CapsuleBindingsConfig,
-    secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
-) -> std::sync::Arc<dyn crate::AgentRuntimeFactory> {
+    secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
+) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
     runtime_factory_from_provider_parts_with_store_paths(
         runtime_config,
         client,
@@ -2080,20 +2176,20 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         None,
         None,
-        crate::AgentManifestPlacementBinding::default(),
+        crate::agent::manifest_bind::AgentManifestPlacementBinding::default(),
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
 }
 
 pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
-    runtime_config: crate::AgentLoopConfig,
-    client: std::sync::Arc<dyn crate::ProviderClient>,
+    runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type name
     capsule_bindings: CapsuleBindingsConfig,
-    secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
+    secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
     config: &VerletAppServerConfig,
-) -> std::sync::Arc<dyn crate::AgentRuntimeFactory> {
+) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
     runtime_factory_from_provider_parts_with_store_paths(
         runtime_config,
         client,
@@ -2114,11 +2210,11 @@ pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
 }
 
 fn runtime_factory_from_provider_parts_with_store_paths(
-    runtime_config: crate::AgentLoopConfig,
-    client: std::sync::Arc<dyn crate::ProviderClient>,
+    runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type name
     capsule_bindings: CapsuleBindingsConfig,
-    secret_resolver: Option<std::sync::Arc<dyn crate::SecretResolver>>,
+    secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
     metadata_store_path: Option<std::path::PathBuf>,
     secret_store_path: Option<std::path::PathBuf>,
     session_store_path: Option<std::path::PathBuf>,
@@ -2126,10 +2222,10 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     blob_registry_root: Option<std::path::PathBuf>,
     skill_registry_root: Option<std::path::PathBuf>,
     cwd: Option<std::path::PathBuf>,
-    default_placement: crate::AgentManifestPlacementBinding,
-    default_workspace: Option<crate::AgentManifestWorkspaceBinding>,
+    default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
+    default_workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
     remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> std::sync::Arc<dyn crate::AgentRuntimeFactory> {
+) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
     // lexicon-allow: capsule - existing app-server runtime factory name
     std::sync::Arc::new(threads::CapsuleBindingRuntimeFactory {
         config: runtime_config,
@@ -2152,10 +2248,13 @@ fn runtime_factory_from_provider_parts_with_store_paths(
 
 async fn secret_resolver_from_config(
     config: &VerletAppServerConfig,
-) -> crate::VerletResult<Option<std::sync::Arc<dyn crate::SecretResolver>>> {
-    let store = crate::SqliteSecretStore::open(config.user_metadata_store_path())
-        .await
-        .map_err(secret_store_error)?;
+) -> crate::kernel::runtime_host::VerletResult<
+    Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
+> {
+    let store =
+        verlet_metadata::secret_store::SqliteSecretStore::open(config.user_metadata_store_path())
+            .await
+            .map_err(secret_store_error)?;
     Ok(Some(std::sync::Arc::new(store)))
 }
 
@@ -2208,14 +2307,16 @@ where
 
 async fn bind_websocket_listener(
     addr: std::net::SocketAddr,
-) -> crate::VerletResult<tokio::net::TcpListener> {
+) -> crate::kernel::runtime_host::VerletResult<tokio::net::TcpListener> {
     if !addr.ip().is_loopback() {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "app-server websocket listen address {addr} is not loopback; configure websocket auth before binding non-loopback addresses"
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "app-server websocket listen address {addr} is not loopback; configure websocket auth before binding non-loopback addresses"
+            ),
+        ));
     }
     tokio::net::TcpListener::bind(addr).await.map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to bind Verlet app-server websocket listener {addr}: {err}"
         ))
     })
@@ -2229,12 +2330,12 @@ struct HttpRequestHead {
 
 async fn peek_http_request(
     stream: &tokio::net::TcpStream,
-) -> crate::VerletResult<Option<HttpRequestHead>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<HttpRequestHead>> {
     let mut request = [0_u8; MAX_HTTP_REQUEST_HEADER_BYTES];
     let inspected = tokio::time::timeout(HTTP_REQUEST_HEADER_TIMEOUT, async {
         loop {
             let len = stream.peek(&mut request).await.map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to inspect Verlet app-server tcp request: {err}"
                 ))
             })?;
@@ -2261,12 +2362,12 @@ async fn peek_http_request(
 #[cfg(unix)]
 async fn peek_unix_http_request(
     stream: &tokio::net::UnixStream,
-) -> crate::VerletResult<Option<HttpRequestHead>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<HttpRequestHead>> {
     let mut request = [0_u8; MAX_HTTP_REQUEST_HEADER_BYTES];
     let inspected = tokio::time::timeout(HTTP_REQUEST_HEADER_TIMEOUT, async {
         loop {
             stream.readable().await.map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to inspect Verlet app-server unix request: {err}"
                 ))
             })?;
@@ -2283,9 +2384,9 @@ async fn peek_unix_http_request(
                 if error.kind() == std::io::ErrorKind::WouldBlock {
                     continue;
                 }
-                return Err(crate::VerletError::RuntimeFactory(format!(
-                    "failed to inspect Verlet app-server unix request: {error}"
-                )));
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!("failed to inspect Verlet app-server unix request: {error}"),
+                ));
             }
             if len == 0 {
                 return Ok(None);
@@ -2432,7 +2533,7 @@ async fn write_http_response<S>(
     status: &str,
     content_type: &str,
     body: &[u8],
-) -> crate::VerletResult<()>
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
@@ -2441,19 +2542,21 @@ where
         body.len()
     );
     stream.write_all(response.as_bytes()).await.map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to write Verlet app-server HTTP response: {err}"
         ))
     })?;
     stream.write_all(body).await.map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "failed to write Verlet app-server HTTP response body: {err}"
         ))
     })?;
     Ok(())
 }
 
-async fn consume_http_request_headers<S>(stream: &mut S) -> crate::VerletResult<()>
+async fn consume_http_request_headers<S>(
+    stream: &mut S,
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
@@ -2463,7 +2566,7 @@ where
         let mut total = 0;
         loop {
             let len = stream.read(&mut chunk).await.map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to read Verlet app-server HTTP request: {err}"
                 ))
             })?;
@@ -2529,11 +2632,13 @@ fn split_websocket_listen_url(value: &str) -> (&str, &str) {
 }
 
 #[cfg(unix)]
-fn prepare_unix_socket_path(path: &std::path::Path) -> crate::VerletResult<()> {
+fn prepare_unix_socket_path(
+    path: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     if let Some(parent) = path.parent() {
         let parent_existed = parent.exists();
         std::fs::create_dir_all(parent).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to create app-server socket directory {}: {err}",
                 parent.display()
             ))
@@ -2541,7 +2646,7 @@ fn prepare_unix_socket_path(path: &std::path::Path) -> crate::VerletResult<()> {
         if !parent_existed {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
                 |err| {
-                    crate::VerletError::RuntimeFactory(format!(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                         "failed to secure app-server socket directory {}: {err}",
                         parent.display()
                     ))
@@ -2551,19 +2656,21 @@ fn prepare_unix_socket_path(path: &std::path::Path) -> crate::VerletResult<()> {
     }
     if path.exists() {
         let metadata = std::fs::symlink_metadata(path).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to inspect existing app-server socket {}: {err}",
                 path.display()
             ))
         })?;
         if metadata.file_type().is_file() || metadata.file_type().is_dir() {
-            return Err(crate::VerletError::RuntimeFactory(format!(
-                "refusing to replace non-socket app-server path {}",
-                path.display()
-            )));
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "refusing to replace non-socket app-server path {}",
+                    path.display()
+                ),
+            ));
         }
         std::fs::remove_file(path).map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "failed to remove stale app-server socket {}: {err}",
                 path.display()
             ))

@@ -138,7 +138,7 @@ struct OperationRegistryEntry {
 
 enum OperationRegistryEntryRuntime {
     Wasm {
-        factory: std::sync::Arc<verlet_wasm::WasmRuntimeFactory>,
+        factory: std::sync::Arc<verlet_wasm::runner::WasmRuntimeFactory>,
     },
     Kernel {
         dispatcher: tokio::sync::RwLock<Option<std::sync::Arc<dyn KernelOperationDispatcher>>>,
@@ -173,7 +173,9 @@ impl OperationRegistry {
     ) -> crate::VerletResult<crate::RegisteredOperation> {
         let name = normalize_registration_name(&registration.name)?;
         let config = registration.config.clone();
-        let factory = std::sync::Arc::new(verlet_wasm::WasmRuntimeFactory::new(config.clone())?);
+        let factory = std::sync::Arc::new(verlet_wasm::runner::WasmRuntimeFactory::new(
+            config.clone(),
+        )?);
         let mut manifest = match manifest {
             Some(manifest) => manifest,
             None => factory.describe().await?.ok_or_else(|| {
@@ -289,7 +291,7 @@ impl OperationRegistry {
         registered_name: &str,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> crate::VerletResult<verlet_process::WasmOperationOutput> {
+    ) -> crate::VerletResult<verlet_process::process::WasmOperationOutput> {
         self.invoke_bytes_with_kernel_metadata(
             registered_name,
             operation_name,
@@ -305,7 +307,7 @@ impl OperationRegistry {
         operation_name: &str,
         input: impl Into<Vec<u8>>,
         kernel_metadata: std::collections::BTreeMap<String, serde_json::Value>,
-    ) -> crate::VerletResult<verlet_process::WasmOperationOutput> {
+    ) -> crate::VerletResult<verlet_process::process::WasmOperationOutput> {
         let entry = self
             .entries
             .read()
@@ -345,7 +347,7 @@ impl OperationRegistry {
                     .operation(operation_name)
                     .expect("operation existence checked before dispatch")
                     .clone();
-                Ok(verlet_process::WasmOperationOutput {
+                Ok(verlet_process::process::WasmOperationOutput {
                     manifest: entry.record.manifest.clone(),
                     operation,
                     output,
@@ -361,12 +363,12 @@ impl OperationRegistry {
         registered_name: &str,
         operation_name: &str,
         input: impl Into<Vec<u8>>,
-    ) -> crate::VerletResult<verlet_process::VerletProcessHandle> {
+    ) -> crate::VerletResult<verlet_process::process::VerletProcessHandle> {
         let output = self
             .invoke_bytes(registered_name, operation_name, input)
             .await?;
         Ok(
-            verlet_process::VerletProcessHandle::from_wasm_operation_output(
+            verlet_process::process::VerletProcessHandle::from_wasm_operation_output(
                 Some(registered_name.to_string()),
                 output,
             ),
@@ -379,7 +381,7 @@ impl OperationRegistry {
         operation_name: &str,
         input: impl Into<Vec<u8>>,
         kernel_metadata: std::collections::BTreeMap<String, serde_json::Value>,
-    ) -> crate::VerletResult<verlet_process::VerletProcessHandle> {
+    ) -> crate::VerletResult<verlet_process::process::VerletProcessHandle> {
         let output = self
             .invoke_bytes_with_kernel_metadata(
                 registered_name,
@@ -389,7 +391,7 @@ impl OperationRegistry {
             )
             .await?;
         Ok(
-            verlet_process::VerletProcessHandle::from_wasm_operation_output(
+            verlet_process::process::VerletProcessHandle::from_wasm_operation_output(
                 Some(registered_name.to_string()),
                 output,
             ),

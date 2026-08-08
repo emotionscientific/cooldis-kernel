@@ -45,11 +45,13 @@ impl StdlibCouplingExecutor {
 }
 
 #[async_trait::async_trait]
-impl crate::CouplingExecutor for StdlibCouplingExecutor {
+impl crate::kernel::coupling_scheduler::CouplingExecutor for StdlibCouplingExecutor {
     async fn invoke(
         &self,
-        request: crate::CouplingInvocation,
-    ) -> crate::VerletResult<crate::CouplingExecutionResult> {
+        request: crate::kernel::coupling_scheduler::CouplingInvocation,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::kernel::coupling_scheduler::CouplingExecutionResult,
+    > {
         match request.coupling.id.as_str() {
             STD_QUEUE_TASK_TEMPLATE_ID => invoke_queue_task(request),
             STD_QUEUE_COMPLETION_CALLBACK_TEMPLATE_ID => invoke_queue_completion_callback(request),
@@ -71,9 +73,9 @@ impl crate::CouplingExecutor for StdlibCouplingExecutor {
             }
             STD_RETRY_WITH_BUDGET_TEMPLATE_ID => invoke_retry_with_budget(request),
             STD_FAILURE_DEADLETTER_TEMPLATE_ID => invoke_failure_deadletter(request),
-            id => Err(crate::VerletError::RuntimeFactory(format!(
-                "stdlib coupling executor does not implement template {id:?}"
-            ))),
+            id => Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("stdlib coupling executor does not implement template {id:?}"),
+            )),
         }
     }
 }
@@ -88,7 +90,7 @@ struct QueueTaskConfig {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct ContextSpillConfig {
-    summary_event_id: Option<crate::EventRecordId>,
+    summary_event_id: Option<verlet_history::EventRecordId>,
     summary_text: Option<String>,
     read_plan_name: Option<String>,
     pipeline_id: Option<String>,
@@ -117,7 +119,7 @@ impl Default for ContextTruncateConfig {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct ContextSummarizeConfig {
-    summary_event_id: Option<crate::EventRecordId>,
+    summary_event_id: Option<verlet_history::EventRecordId>,
     summary_text: Option<String>,
     read_plan_name: Option<String>,
     pipeline_id: Option<String>,
@@ -128,7 +130,7 @@ struct ContextSummarizeConfig {
 #[serde(default)]
 struct MemoryExtractConfig {
     #[serde(alias = "memory_event_id")]
-    checkpoint_event_id: Option<crate::EventRecordId>,
+    checkpoint_event_id: Option<verlet_history::EventRecordId>,
     #[serde(alias = "memory_text")]
     text: Option<String>,
     #[serde(alias = "memory_kind")]
@@ -159,7 +161,7 @@ impl Default for MemoryRecallConfig {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct PromptDynamicInstructionsConfig {
-    instruction_event_id: Option<crate::EventRecordId>,
+    instruction_event_id: Option<verlet_history::EventRecordId>,
     instruction_text: Option<String>,
     instruction_name: Option<String>,
     read_plan_name: Option<String>,
@@ -176,7 +178,7 @@ struct PromptSteerConfig {
     next_turn_input: Option<String>,
     read_plan_name: Option<String>,
     pipeline_id: Option<String>,
-    checkpoint_event_id: Option<crate::EventRecordId>,
+    checkpoint_event_id: Option<verlet_history::EventRecordId>,
     checkpoint_stream_id: Option<String>,
     event_role: Option<String>,
 }
@@ -291,7 +293,7 @@ struct ScheduleCronConfig {
 #[serde(rename_all = "snake_case")]
 enum ScheduleCronMandateScope {
     MatchAll,
-    Subject(crate::MandateSubject),
+    Subject(crate::kernel::control_decision::MandateSubject),
 }
 
 impl Default for ScheduleCronMandateScope {
@@ -301,7 +303,7 @@ impl Default for ScheduleCronMandateScope {
 }
 
 impl ScheduleCronMandateScope {
-    fn matches(&self, subject: &crate::MandateSubject) -> bool {
+    fn matches(&self, subject: &crate::kernel::control_decision::MandateSubject) -> bool {
         match self {
             Self::MatchAll => true,
             Self::Subject(expected) => expected == subject,
@@ -407,13 +409,17 @@ enum QueueCompletionAction {
 }
 
 fn invoke_queue_task(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
-    if request.trigger_event.kind != crate::EventKind::TurnSubmitted {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_QUEUE_TASK_TEMPLATE_ID} expected turn.submitted trigger, got {}",
-            request.trigger_event.kind
-        )));
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
+    if request.trigger_event.kind != verlet_history::EventKind::TurnSubmitted {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_QUEUE_TASK_TEMPLATE_ID} expected turn.submitted trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = queue_task_config(&request.coupling.config)?;
     let turn_id = request
@@ -422,7 +428,7 @@ fn invoke_queue_task(
         .get("turn_id")
         .and_then(|value| value.as_str())
         .ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "std::queue.task trigger payload is missing turn_id".to_string(),
             )
         })?;
@@ -430,7 +436,7 @@ fn invoke_queue_task(
     let mut payload = serde_json::Map::from_iter([
         (
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::TurnWaiting.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::TurnWaiting.payload_schema_id()),
         ),
         (
             "template_id".to_string(),
@@ -468,79 +474,85 @@ fn invoke_queue_task(
         payload.insert("entry_id".to_string(), serde_json::json!(entry_id));
     }
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "control".to_string(),
-            kind: crate::EventKind::TurnWaiting,
+            kind: verlet_history::EventKind::TurnWaiting,
             payload: serde_json::Value::Object(payload),
         }],
     })
 }
 
 fn invoke_queue_completion_callback(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
-    if request.trigger_event.kind != crate::EventKind::CouplingRunCompleted {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_QUEUE_COMPLETION_CALLBACK_TEMPLATE_ID} expected coupling.run.completed trigger, got {}",
-            request.trigger_event.kind
-        )));
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
+    if request.trigger_event.kind != verlet_history::EventKind::CouplingRunCompleted {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_QUEUE_COMPLETION_CALLBACK_TEMPLATE_ID} expected coupling.run.completed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = queue_completion_config(&request.coupling.config)?;
-    let completed = serde_json::from_value::<crate::CouplingRunReceipt>(
+    let completed = serde_json::from_value::<crate::kernel::coupling_scheduler::CouplingRunReceipt>(
         request.trigger_event.payload.clone(),
     )
     .map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::queue.completion_callback trigger payload is not a coupling run receipt: {err}"
         ))
     })?;
-    if completed.status != crate::CouplingRunStatus::Completed {
-        return Ok(crate::CouplingExecutionResult::default());
+    if completed.status != crate::kernel::coupling_scheduler::CouplingRunStatus::Completed {
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult::default());
     }
     if let Some(watch_coupling_id) = &config.watch_coupling_id
         && completed.coupling_id != *watch_coupling_id
     {
-        return Ok(crate::CouplingExecutionResult::default());
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult::default());
     }
 
     let discharge = match config.on_completed {
-        QueueCompletionAction::CompleteLoop => crate::CouplingDischarge {
-            event_id: None,
-            stream: "control".to_string(),
-            kind: crate::EventKind::LoopCompleted,
-            payload: serde_json::json!({
-                "schema": crate::EventKind::LoopCompleted.payload_schema_id(),
-                "template_id": STD_QUEUE_COMPLETION_CALLBACK_TEMPLATE_ID,
-                "snapshot_id": request.activation.snapshot_id,
-                "completed_coupling_id": completed.coupling_id,
-                "completed_trigger_event_id": completed.trigger_event_id.to_string(),
-                "completed_discharged_event_ids": completed
-                    .discharged_event_ids
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>(),
-                "reason": config
-                    .reason
-                    .unwrap_or_else(|| "queued work completed".to_string()),
-            }),
-        },
+        QueueCompletionAction::CompleteLoop => {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
+                event_id: None,
+                stream: "control".to_string(),
+                kind: verlet_history::EventKind::LoopCompleted,
+                payload: serde_json::json!({
+                    "schema": verlet_history::EventKind::LoopCompleted.payload_schema_id(),
+                    "template_id": STD_QUEUE_COMPLETION_CALLBACK_TEMPLATE_ID,
+                    "snapshot_id": request.activation.snapshot_id,
+                    "completed_coupling_id": completed.coupling_id,
+                    "completed_trigger_event_id": completed.trigger_event_id.to_string(),
+                    "completed_discharged_event_ids": completed
+                        .discharged_event_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                    "reason": config
+                        .reason
+                        .unwrap_or_else(|| "queued work completed".to_string()),
+                }),
+            }
+        }
         QueueCompletionAction::RequestContinuation => {
             let next_turn_input = config.next_turn_input.ok_or_else(|| {
-                crate::VerletError::RuntimeFactory(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "std::queue.completion_callback request_continuation requires next_turn_input"
                         .to_string(),
                 )
             })?;
             let parent_turn_id = config.parent_turn_id.ok_or_else(|| {
-                crate::VerletError::RuntimeFactory(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "std::queue.completion_callback request_continuation requires parent_turn_id"
                         .to_string(),
                 )
             })?;
-            let payload = crate::TurnContinueRequestedPayload {
-                subject: crate::TurnContinuationSubject {
+            let payload = crate::kernel::control_decision::TurnContinueRequestedPayload {
+                subject: crate::kernel::control_decision::TurnContinuationSubject {
                     loop_id: config.loop_id.unwrap_or_else(|| "default".to_string()),
                     parent_turn_id,
                 },
@@ -548,14 +560,16 @@ fn invoke_queue_completion_callback(
                 next_turn_input,
             };
             let mut payload = serde_json::to_value(payload).map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "std::queue.completion_callback continuation payload codec failed: {err}"
                 ))
             })?;
             if let Some(object) = payload.as_object_mut() {
                 object.insert(
                     "schema".to_string(),
-                    serde_json::json!(crate::EventKind::TurnContinueRequested.payload_schema_id()),
+                    serde_json::json!(
+                        verlet_history::EventKind::TurnContinueRequested.payload_schema_id()
+                    ),
                 );
                 object.insert(
                     "template_id".to_string(),
@@ -566,42 +580,49 @@ fn invoke_queue_completion_callback(
                     serde_json::json!(completed.coupling_id),
                 );
             }
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "control".to_string(),
-                kind: crate::EventKind::TurnContinueRequested,
+                kind: verlet_history::EventKind::TurnContinueRequested,
                 payload,
             }
         }
     };
 
-    Ok(crate::CouplingExecutionResult {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
         discharges: vec![discharge],
     })
 }
 
 fn invoke_supervisor_spawn(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     if !matches!(
         request.trigger_event.kind,
-        crate::EventKind::TurnSubmitted | crate::EventKind::ToolCallRequested
+        verlet_history::EventKind::TurnSubmitted | verlet_history::EventKind::ToolCallRequested
     ) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} expected turn.submitted or tool.call.requested trigger, got {}",
-            request.trigger_event.kind
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} expected turn.submitted or tool.call.requested trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     if !request
         .coupling
         .grants
         .iter()
-        .any(|grant| grant == crate::THREADS_SPAWN_CAPABILITY)
+        .any(|grant| grant == crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY)
     {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} requires {THREADS_SPAWN_CAPABILITY} grant",
-            THREADS_SPAWN_CAPABILITY = crate::THREADS_SPAWN_CAPABILITY
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} requires {THREADS_SPAWN_CAPABILITY} grant",
+                THREADS_SPAWN_CAPABILITY =
+                    crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
+            ),
+        ));
     }
 
     let config = supervisor_spawn_config(&request.coupling.config)?;
@@ -618,7 +639,7 @@ fn invoke_supervisor_spawn(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "std::supervisor.spawn requires initial_submission".to_string(),
             )
         })?;
@@ -633,7 +654,7 @@ fn invoke_supervisor_spawn(
             )
         });
 
-    let payload = crate::ThreadSpawnRequestedPayload {
+    let payload = verlet_history::ThreadSpawnRequestedPayload {
         parent_thread_id: request.trigger_event.coordinates.thread_id,
         parent_turn_id: parent_turn_id.clone(),
         task_name: None,
@@ -644,14 +665,14 @@ fn invoke_supervisor_spawn(
         block_parent: config.block_parent,
     };
     let mut payload = serde_json::to_value(payload).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::supervisor.spawn request payload codec failed: {err}"
         ))
     })?;
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::ThreadSpawnRequested.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::ThreadSpawnRequested.payload_schema_id()),
         );
         object.insert(
             "template_id".to_string(),
@@ -679,27 +700,27 @@ fn invoke_supervisor_spawn(
         );
     }
 
-    let request_event_id = crate::EventRecordId::new();
-    let mut discharges = vec![crate::CouplingDischarge {
+    let request_event_id = verlet_history::EventRecordId::new();
+    let mut discharges = vec![crate::kernel::coupling_scheduler::CouplingDischarge {
         event_id: Some(request_event_id),
         stream: "control".to_string(),
-        kind: crate::EventKind::ThreadSpawnRequested,
+        kind: verlet_history::EventKind::ThreadSpawnRequested,
         payload,
     }];
 
     if config.block_parent {
         let parent_turn_id = parent_turn_id.ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "std::supervisor.spawn block_parent requires parent_turn_id or trigger turn_id"
                     .to_string(),
             )
         })?;
-        discharges.push(crate::CouplingDischarge {
+        discharges.push(crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "control".to_string(),
-            kind: crate::EventKind::TurnWaiting,
+            kind: verlet_history::EventKind::TurnWaiting,
             payload: serde_json::json!({
-                "schema": crate::EventKind::TurnWaiting.payload_schema_id(),
+                "schema": verlet_history::EventKind::TurnWaiting.payload_schema_id(),
                 "template_id": STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
                 "snapshot_id": request.activation.snapshot_id,
                 "turn_id": parent_turn_id,
@@ -711,17 +732,21 @@ fn invoke_supervisor_spawn(
         });
     }
 
-    Ok(crate::CouplingExecutionResult { discharges })
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult { discharges })
 }
 
 fn invoke_context_spill(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
-    if request.trigger_event.kind != crate::EventKind::ContextCompileCompleted {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_CONTEXT_SPILL_TEMPLATE_ID} expected context.compile.completed trigger, got {}",
-            request.trigger_event.kind
-        )));
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
+    if request.trigger_event.kind != verlet_history::EventKind::ContextCompileCompleted {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_CONTEXT_SPILL_TEMPLATE_ID} expected context.compile.completed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = context_spill_config(&request.coupling.config)?;
     let source_ranges = context_spill_source_ranges(&request);
@@ -730,16 +755,16 @@ fn invoke_context_spill(
         .unwrap_or_else(|| context_spill_summary_text(&request));
     let summary_event_id = config
         .summary_event_id
-        .unwrap_or_else(crate::EventRecordId::new);
+        .unwrap_or_else(verlet_history::EventRecordId::new);
     let read_plan_name = config
         .read_plan_name
         .unwrap_or_else(|| "history.default".to_string());
     let pipeline_id = config
         .pipeline_id
         .unwrap_or_else(|| "context.default".to_string());
-    let summary_hash = crate::agent::contracts::sha256_hex(summary_text.as_bytes());
+    let summary_hash = verlet_agent::contracts::sha256_hex(summary_text.as_bytes());
     let summary_payload = serde_json::json!({
-        "schema": crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextSummaryCompleted.payload_schema_id(),
         "role": "summary_checkpoint",
         "text": summary_text,
         "covered_ranges": source_ranges_json(&source_ranges),
@@ -750,7 +775,7 @@ fn invoke_context_spill(
         "compile_event_id": request.trigger_event.id.to_string(),
     });
     let read_plan_payload = serde_json::json!({
-        "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextReadPlanSet.payload_schema_id(),
         "scope": "thread",
         "name": read_plan_name,
         "pipeline_id": pipeline_id,
@@ -758,7 +783,7 @@ fn invoke_context_spill(
         "summary_event_id": summary_event_id.to_string(),
         "template_id": STD_CONTEXT_SPILL_TEMPLATE_ID,
         "read_plan": {
-            "schema": crate::CONTEXT_READ_PLAN_SCHEMA_V1,
+            "schema": verlet_history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": read_plan_name,
             "source_stream": request.trigger_event.stream_id.as_str(),
             "frontier": "compile_frontier",
@@ -766,18 +791,18 @@ fn invoke_context_spill(
         },
     });
 
-    Ok(crate::CouplingExecutionResult {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
         discharges: vec![
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: Some(summary_event_id),
                 stream: "derived:context".to_string(),
-                kind: crate::EventKind::ContextSummaryCompleted,
+                kind: verlet_history::EventKind::ContextSummaryCompleted,
                 payload: summary_payload,
             },
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "derived:context".to_string(),
-                kind: crate::EventKind::ContextReadPlanSet,
+                kind: verlet_history::EventKind::ContextReadPlanSet,
                 payload: read_plan_payload,
             },
         ],
@@ -785,13 +810,17 @@ fn invoke_context_spill(
 }
 
 fn invoke_context_truncate(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
-    if request.trigger_event.kind != crate::EventKind::ContextCompileCompleted {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_CONTEXT_TRUNCATE_TEMPLATE_ID} expected context.compile.completed trigger, got {}",
-            request.trigger_event.kind
-        )));
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
+    if request.trigger_event.kind != verlet_history::EventKind::ContextCompileCompleted {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_CONTEXT_TRUNCATE_TEMPLATE_ID} expected context.compile.completed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = context_truncate_config(&request.coupling.config)?;
     let source_ranges = context_spill_source_ranges(&request);
@@ -807,7 +836,7 @@ fn invoke_context_truncate(
         .unwrap_or_else(|| "bounded context tail selected".to_string());
     let entries = truncate_read_plan_entries(&source_ranges, retain_tail_events, &reason);
     let payload = serde_json::json!({
-        "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextReadPlanSet.payload_schema_id(),
         "scope": "thread",
         "name": read_plan_name,
         "pipeline_id": pipeline_id,
@@ -818,7 +847,7 @@ fn invoke_context_truncate(
         "retain_tail_events": retain_tail_events,
         "reason": reason,
         "read_plan": {
-            "schema": crate::CONTEXT_READ_PLAN_SCHEMA_V1,
+            "schema": verlet_history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": read_plan_name,
             "source_stream": request.trigger_event.stream_id.as_str(),
             "frontier": "compile_frontier",
@@ -826,27 +855,32 @@ fn invoke_context_truncate(
         },
     });
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "control".to_string(),
-            kind: crate::EventKind::ContextReadPlanSet,
+            kind: verlet_history::EventKind::ContextReadPlanSet,
             payload,
         }],
     })
 }
 
 fn invoke_context_summarize(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     if !matches!(
         request.trigger_event.kind,
-        crate::EventKind::ContextCompileCompleted | crate::EventKind::TurnCompleted
+        verlet_history::EventKind::ContextCompileCompleted
+            | verlet_history::EventKind::TurnCompleted
     ) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_CONTEXT_SUMMARIZE_TEMPLATE_ID} expected context.compile.completed or turn.completed trigger, got {}",
-            request.trigger_event.kind
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_CONTEXT_SUMMARIZE_TEMPLATE_ID} expected context.compile.completed or turn.completed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = context_summarize_config(&request.coupling.config)?;
     let source_ranges = context_spill_source_ranges(&request);
@@ -866,7 +900,7 @@ fn invoke_context_summarize(
         });
     let summary_event_id = config
         .summary_event_id
-        .unwrap_or_else(crate::EventRecordId::new);
+        .unwrap_or_else(verlet_history::EventRecordId::new);
     let read_plan_name = config
         .read_plan_name
         .unwrap_or_else(|| "history.default".to_string());
@@ -876,9 +910,9 @@ fn invoke_context_summarize(
     let reason = config
         .reason
         .unwrap_or_else(|| "summary checkpoint selected".to_string());
-    let content_hash = crate::agent::contracts::sha256_hex(summary_text.as_bytes());
+    let content_hash = verlet_agent::contracts::sha256_hex(summary_text.as_bytes());
     let summary_payload = serde_json::json!({
-        "schema": crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextSummaryCompleted.payload_schema_id(),
         "role": "summary_checkpoint",
         "text": summary_text,
         "covered_ranges": source_ranges_json(&source_ranges),
@@ -892,7 +926,7 @@ fn invoke_context_summarize(
         "reason": reason,
     });
     let read_plan_payload = serde_json::json!({
-        "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextReadPlanSet.payload_schema_id(),
         "scope": "thread",
         "name": read_plan_name,
         "pipeline_id": pipeline_id,
@@ -902,7 +936,7 @@ fn invoke_context_summarize(
         "trigger_event_id": request.trigger_event.id.to_string(),
         "trigger_kind": request.trigger_event.kind.to_string(),
         "read_plan": {
-            "schema": crate::CONTEXT_READ_PLAN_SCHEMA_V1,
+            "schema": verlet_history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": read_plan_name,
             "source_stream": request.trigger_event.stream_id.as_str(),
             "frontier": "compile_frontier",
@@ -910,18 +944,18 @@ fn invoke_context_summarize(
         },
     });
 
-    Ok(crate::CouplingExecutionResult {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
         discharges: vec![
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: Some(summary_event_id),
                 stream: "derived:context".to_string(),
-                kind: crate::EventKind::ContextSummaryCompleted,
+                kind: verlet_history::EventKind::ContextSummaryCompleted,
                 payload: summary_payload,
             },
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "derived:context".to_string(),
-                kind: crate::EventKind::ContextReadPlanSet,
+                kind: verlet_history::EventKind::ContextReadPlanSet,
                 payload: read_plan_payload,
             },
         ],
@@ -929,16 +963,20 @@ fn invoke_context_summarize(
 }
 
 fn invoke_memory_extract(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     if !matches!(
         request.trigger_event.kind,
-        crate::EventKind::TurnCompleted | crate::EventKind::ToolCallCompleted
+        verlet_history::EventKind::TurnCompleted | verlet_history::EventKind::ToolCallCompleted
     ) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_MEMORY_EXTRACT_TEMPLATE_ID} expected turn.completed or tool.call.completed trigger, got {}",
-            request.trigger_event.kind
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_MEMORY_EXTRACT_TEMPLATE_ID} expected turn.completed or tool.call.completed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = memory_extract_config(&request.coupling.config)?;
     let memory_text = config
@@ -955,9 +993,9 @@ fn invoke_memory_extract(
         .unwrap_or_else(|| "observation".to_string());
     let memory_event_id = config.checkpoint_event_id;
     let source_ranges = context_spill_source_ranges(&request);
-    let content_hash = crate::agent::contracts::sha256_hex(memory_text.as_bytes());
+    let content_hash = verlet_agent::contracts::sha256_hex(memory_text.as_bytes());
     let payload = serde_json::json!({
-        "schema": crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextSummaryCompleted.payload_schema_id(),
         "role": "summary_checkpoint",
         "text": memory_text,
         "covered_ranges": source_ranges_json(&source_ranges),
@@ -971,11 +1009,11 @@ fn invoke_memory_extract(
         "snapshot_id": request.activation.snapshot_id,
     });
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: memory_event_id,
             stream: "derived:memory".to_string(),
-            kind: crate::EventKind::ContextSummaryCompleted,
+            kind: verlet_history::EventKind::ContextSummaryCompleted,
             payload,
         }],
     })
@@ -1000,16 +1038,21 @@ fn memory_text_from_payload(payload: &serde_json::Value) -> Option<String> {
 }
 
 fn invoke_memory_recall(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     if !matches!(
         request.trigger_event.kind,
-        crate::EventKind::TurnSubmitted | crate::EventKind::ContextCompileCompleted
+        verlet_history::EventKind::TurnSubmitted
+            | verlet_history::EventKind::ContextCompileCompleted
     ) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_MEMORY_RECALL_TEMPLATE_ID} expected turn.submitted or context.compile.completed trigger, got {}",
-            request.trigger_event.kind
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_MEMORY_RECALL_TEMPLATE_ID} expected turn.submitted or context.compile.completed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = memory_recall_config(&request.coupling.config)?;
     let read_plan_name = config
@@ -1022,7 +1065,7 @@ fn invoke_memory_recall(
     let mut memories = request
         .source_events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ContextSummaryCompleted)
+        .filter(|event| event.kind == verlet_history::EventKind::ContextSummaryCompleted)
         .filter(|event| memory_kind_matches(&event.payload, config.observation_kind.as_deref()))
         .collect::<Vec<_>>();
     memories.sort_by(|left, right| {
@@ -1041,7 +1084,7 @@ fn invoke_memory_recall(
         memories = memories[memories.len() - max_events..].to_vec();
     }
     if memories.is_empty() {
-        return Ok(crate::CouplingExecutionResult::default());
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult::default());
     }
     let source_stream = memories[0].stream_id.as_str();
     let selected_event_ids = memories
@@ -1060,7 +1103,7 @@ fn invoke_memory_recall(
         })
         .collect::<Vec<_>>();
     let payload = serde_json::json!({
-        "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextReadPlanSet.payload_schema_id(),
         "scope": "thread",
         "name": read_plan_name,
         "pipeline_id": pipeline_id,
@@ -1071,7 +1114,7 @@ fn invoke_memory_recall(
         "snapshot_id": request.activation.snapshot_id,
         "selected_event_ids": selected_event_ids,
         "read_plan": {
-            "schema": crate::CONTEXT_READ_PLAN_SCHEMA_V1,
+            "schema": verlet_history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": read_plan_name,
             "source_stream": source_stream,
             "frontier": "compile_frontier",
@@ -1079,11 +1122,11 @@ fn invoke_memory_recall(
         },
     });
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "derived:context".to_string(),
-            kind: crate::EventKind::ContextReadPlanSet,
+            kind: verlet_history::EventKind::ContextReadPlanSet,
             payload,
         }],
     })
@@ -1096,16 +1139,20 @@ fn memory_kind_matches(payload: &serde_json::Value, expected: Option<&str>) -> b
 }
 
 fn invoke_prompt_steer(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     if !matches!(
         request.trigger_event.kind,
-        crate::EventKind::TurnCompleted | crate::EventKind::ApprovalResolved
+        verlet_history::EventKind::TurnCompleted | verlet_history::EventKind::ApprovalResolved
     ) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_PROMPT_STEER_TEMPLATE_ID} expected turn.completed or approval.resolved trigger, got {}",
-            request.trigger_event.kind
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_PROMPT_STEER_TEMPLATE_ID} expected turn.completed or approval.resolved trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = prompt_steer_config(&request.coupling.config)?;
     match config.action {
@@ -1115,9 +1162,11 @@ fn invoke_prompt_steer(
 }
 
 fn invoke_prompt_steer_continuation(
-    request: crate::CouplingInvocation,
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
     config: PromptSteerConfig,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     let parent_turn_id = config
         .parent_turn_id
         .or_else(|| {
@@ -1127,17 +1176,17 @@ fn invoke_prompt_steer_continuation(
             )
         })
         .ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "std::prompt.steer request_continuation requires parent_turn_id".to_string(),
             )
         })?;
     let next_turn_input = config.next_turn_input.ok_or_else(|| {
-        crate::VerletError::RuntimeFactory(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "std::prompt.steer request_continuation requires next_turn_input".to_string(),
         )
     })?;
-    let payload = crate::TurnContinueRequestedPayload {
-        subject: crate::TurnContinuationSubject {
+    let payload = crate::kernel::control_decision::TurnContinueRequestedPayload {
+        subject: crate::kernel::control_decision::TurnContinuationSubject {
             loop_id: config.loop_id.unwrap_or_else(|| "prompt.steer".to_string()),
             parent_turn_id,
         },
@@ -1145,12 +1194,14 @@ fn invoke_prompt_steer_continuation(
         next_turn_input,
     };
     let mut payload = serde_json::to_value(payload).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("std::prompt.steer payload codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "std::prompt.steer payload codec failed: {err}"
+        ))
     })?;
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::TurnContinueRequested.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::TurnContinueRequested.payload_schema_id()),
         );
         object.insert(
             "template_id".to_string(),
@@ -1174,22 +1225,24 @@ fn invoke_prompt_steer_continuation(
         );
     }
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "control".to_string(),
-            kind: crate::EventKind::TurnContinueRequested,
+            kind: verlet_history::EventKind::TurnContinueRequested,
             payload,
         }],
     })
 }
 
 fn invoke_prompt_steer_read_plan(
-    request: crate::CouplingInvocation,
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
     config: PromptSteerConfig,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     let checkpoint_event_id = config.checkpoint_event_id.ok_or_else(|| {
-        crate::VerletError::RuntimeFactory(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "std::prompt.steer set_read_plan requires checkpoint_event_id".to_string(),
         )
     })?;
@@ -1206,7 +1259,7 @@ fn invoke_prompt_steer_read_plan(
         .pipeline_id
         .unwrap_or_else(|| "context.instructions".to_string());
     let payload = serde_json::json!({
-        "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextReadPlanSet.payload_schema_id(),
         "scope": "thread",
         "name": read_plan_name,
         "pipeline_id": pipeline_id,
@@ -1220,7 +1273,7 @@ fn invoke_prompt_steer_read_plan(
             .reason
             .unwrap_or_else(|| "prompt steering selected read plan".to_string()),
         "read_plan": {
-            "schema": crate::CONTEXT_READ_PLAN_SCHEMA_V1,
+            "schema": verlet_history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": read_plan_name,
             "source_stream": checkpoint_stream_id,
             "frontier": "compile_frontier",
@@ -1233,27 +1286,32 @@ fn invoke_prompt_steer_read_plan(
         },
     });
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "control".to_string(),
-            kind: crate::EventKind::ContextReadPlanSet,
+            kind: verlet_history::EventKind::ContextReadPlanSet,
             payload,
         }],
     })
 }
 
 fn invoke_prompt_dynamic_instructions(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     if !matches!(
         request.trigger_event.kind,
-        crate::EventKind::ManifestBindCompleted | crate::EventKind::ContextCompileCompleted
+        verlet_history::EventKind::ManifestBindCompleted
+            | verlet_history::EventKind::ContextCompileCompleted
     ) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_PROMPT_DYNAMIC_INSTRUCTIONS_TEMPLATE_ID} expected manifest.bind.completed or context.compile.completed trigger, got {}",
-            request.trigger_event.kind
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_PROMPT_DYNAMIC_INSTRUCTIONS_TEMPLATE_ID} expected manifest.bind.completed or context.compile.completed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = prompt_dynamic_instructions_config(&request.coupling.config)?;
     let instruction_text = config
@@ -1276,15 +1334,15 @@ fn invoke_prompt_dynamic_instructions(
         .unwrap_or_else(|| "context.instructions".to_string());
     let instruction_event_id = config
         .instruction_event_id
-        .unwrap_or_else(crate::EventRecordId::new);
+        .unwrap_or_else(verlet_history::EventRecordId::new);
     let source_ranges = context_spill_source_ranges(&request);
-    let content_hash = crate::agent::contracts::sha256_hex(instruction_text.as_bytes());
+    let content_hash = verlet_agent::contracts::sha256_hex(instruction_text.as_bytes());
     let derived_context_stream = format!(
         "derived:context:{}",
         request.trigger_event.coordinates.thread_id
     );
     let summary_payload = serde_json::json!({
-        "schema": crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextSummaryCompleted.payload_schema_id(),
         "role": "summary_checkpoint",
         "text": instruction_text,
         "covered_ranges": source_ranges_json(&source_ranges),
@@ -1298,7 +1356,7 @@ fn invoke_prompt_dynamic_instructions(
         "snapshot_id": request.activation.snapshot_id,
     });
     let read_plan_payload = serde_json::json!({
-        "schema": crate::EventKind::ContextReadPlanSet.payload_schema_id(),
+        "schema": verlet_history::EventKind::ContextReadPlanSet.payload_schema_id(),
         "scope": "thread",
         "name": read_plan_name,
         "pipeline_id": pipeline_id,
@@ -1308,7 +1366,7 @@ fn invoke_prompt_dynamic_instructions(
         "trigger_event_id": request.trigger_event.id.to_string(),
         "trigger_kind": request.trigger_event.kind.to_string(),
         "read_plan": {
-            "schema": crate::CONTEXT_READ_PLAN_SCHEMA_V1,
+            "schema": verlet_history::CONTEXT_READ_PLAN_SCHEMA_V1,
             "name": read_plan_name,
             "source_stream": derived_context_stream,
             "frontier": "compile_frontier",
@@ -1321,18 +1379,18 @@ fn invoke_prompt_dynamic_instructions(
         },
     });
 
-    Ok(crate::CouplingExecutionResult {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
         discharges: vec![
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: Some(instruction_event_id),
                 stream: "derived:context".to_string(),
-                kind: crate::EventKind::ContextSummaryCompleted,
+                kind: verlet_history::EventKind::ContextSummaryCompleted,
                 payload: summary_payload,
             },
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "derived:context".to_string(),
-                kind: crate::EventKind::ContextReadPlanSet,
+                kind: verlet_history::EventKind::ContextReadPlanSet,
                 payload: read_plan_payload,
             },
         ],
@@ -1358,16 +1416,20 @@ fn instruction_text_from_payload(payload: &serde_json::Value) -> Option<String> 
 }
 
 fn invoke_failure_deadletter(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     if !matches!(
         request.trigger_event.kind,
-        crate::EventKind::CouplingRunFailed | crate::EventKind::LoopBlocked
+        verlet_history::EventKind::CouplingRunFailed | verlet_history::EventKind::LoopBlocked
     ) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_FAILURE_DEADLETTER_TEMPLATE_ID} expected coupling.run.failed or loop.blocked trigger, got {}",
-            request.trigger_event.kind
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_FAILURE_DEADLETTER_TEMPLATE_ID} expected coupling.run.failed or loop.blocked trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     if request
         .trigger_event
@@ -1376,7 +1438,7 @@ fn invoke_failure_deadletter(
         .and_then(|value| value.as_str())
         == Some("deadletter_projection")
     {
-        return Ok(crate::CouplingExecutionResult::default());
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult::default());
     }
     let config = failure_deadletter_config(&request.coupling.config)?;
     let reason = config
@@ -1392,7 +1454,7 @@ fn invoke_failure_deadletter(
         .unwrap_or_else(|| "projected into deadletter stream".to_string());
     let queue = config.queue.unwrap_or_else(|| "default".to_string());
     let payload = serde_json::json!({
-        "schema": crate::EventKind::CouplingRunFailed.payload_schema_id(),
+        "schema": verlet_history::EventKind::CouplingRunFailed.payload_schema_id(),
         "role": "deadletter_projection",
         "template_id": STD_FAILURE_DEADLETTER_TEMPLATE_ID,
         "status": "deadlettered",
@@ -1407,31 +1469,35 @@ fn invoke_failure_deadletter(
         "failure": request.trigger_event.payload,
     });
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "derived:deadletter".to_string(),
-            kind: crate::EventKind::CouplingRunFailed,
+            kind: verlet_history::EventKind::CouplingRunFailed,
             payload,
         }],
     })
 }
 
 fn invoke_permission_tool_gate(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
-    if request.trigger_event.kind != crate::EventKind::ToolCallRequested {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_PERMISSION_TOOL_GATE_TEMPLATE_ID} expected tool.call.requested trigger, got {}",
-            request.trigger_event.kind
-        )));
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
+    if request.trigger_event.kind != verlet_history::EventKind::ToolCallRequested {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_PERMISSION_TOOL_GATE_TEMPLATE_ID} expected tool.call.requested trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = permission_tool_gate_config(&request.coupling.config)?;
-    let requested = serde_json::from_value::<crate::ToolCallRequestedPayload>(
-        request.trigger_event.payload.clone(),
-    )
+    let requested = serde_json::from_value::<
+        crate::kernel::control_decision::ToolCallRequestedPayload,
+    >(request.trigger_event.payload.clone())
     .map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::permission.tool_gate trigger payload codec failed: {err}"
         ))
     })?;
@@ -1440,19 +1506,21 @@ fn invoke_permission_tool_gate(
         PermissionToolGateDecision::Allow => permission_tool_decision_result(
             &request,
             &requested,
-            crate::ToolCallDecisionOutcomePayload::Allow,
+            crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Allow,
             config.reason,
         ),
         PermissionToolGateDecision::Rewrite => {
             let arguments = config.arguments.ok_or_else(|| {
-                crate::VerletError::RuntimeFactory(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "std::permission.tool_gate rewrite requires arguments".to_string(),
                 )
             })?;
             permission_tool_decision_result(
                 &request,
                 &requested,
-                crate::ToolCallDecisionOutcomePayload::Rewrite { arguments },
+                crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Rewrite {
+                    arguments,
+                },
                 config.reason,
             )
         }
@@ -1463,14 +1531,14 @@ fn invoke_permission_tool_gate(
             permission_tool_decision_result(
                 &request,
                 &requested,
-                crate::ToolCallDecisionOutcomePayload::Deny {
+                crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Deny {
                     reason: reason.clone(),
                 },
                 Some(reason),
             )
         }
         PermissionToolGateDecision::Wait => {
-            let payload = crate::ToolCallSuspendedPayload {
+            let payload = crate::kernel::control_decision::ToolCallSuspendedPayload {
                 subject: requested.subject,
                 snapshot_id: request.activation.snapshot_id.clone(),
                 approval_id: config.approval_id,
@@ -1479,14 +1547,16 @@ fn invoke_permission_tool_gate(
                     .or_else(|| Some("waiting on std::permission.tool_gate".to_string())),
             };
             let mut payload = serde_json::to_value(payload).map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "std::permission.tool_gate suspended payload codec failed: {err}"
                 ))
             })?;
             if let Some(object) = payload.as_object_mut() {
                 object.insert(
                     "schema".to_string(),
-                    serde_json::json!(crate::EventKind::ToolCallSuspended.payload_schema_id()),
+                    serde_json::json!(
+                        verlet_history::EventKind::ToolCallSuspended.payload_schema_id()
+                    ),
                 );
                 object.insert(
                     "template_id".to_string(),
@@ -1501,11 +1571,11 @@ fn invoke_permission_tool_gate(
                     serde_json::json!(request.trigger_event.id.to_string()),
                 );
             }
-            Ok(crate::CouplingExecutionResult {
-                discharges: vec![crate::CouplingDischarge {
+            Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+                discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
                     event_id: None,
                     stream: "control".to_string(),
-                    kind: crate::EventKind::ToolCallSuspended,
+                    kind: verlet_history::EventKind::ToolCallSuspended,
                     payload,
                 }],
             })
@@ -1514,20 +1584,24 @@ fn invoke_permission_tool_gate(
 }
 
 fn invoke_permission_approval_gate(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
-    if request.trigger_event.kind != crate::EventKind::ToolCallRequested {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_PERMISSION_APPROVAL_GATE_TEMPLATE_ID} expected tool.call.requested trigger, got {}",
-            request.trigger_event.kind
-        )));
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
+    if request.trigger_event.kind != verlet_history::EventKind::ToolCallRequested {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_PERMISSION_APPROVAL_GATE_TEMPLATE_ID} expected tool.call.requested trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = permission_approval_gate_config(&request.coupling.config)?;
-    let requested = serde_json::from_value::<crate::ToolCallRequestedPayload>(
-        request.trigger_event.payload.clone(),
-    )
+    let requested = serde_json::from_value::<
+        crate::kernel::control_decision::ToolCallRequestedPayload,
+    >(request.trigger_event.payload.clone())
     .map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::permission.approval_gate trigger payload codec failed: {err}"
         ))
     })?;
@@ -1547,7 +1621,7 @@ fn invoke_permission_approval_gate(
     let resume_token = config.resume_token.unwrap_or_else(|| approval_id.clone());
 
     let approval_requested = serde_json::json!({
-        "schema": crate::EventKind::ApprovalRequested.payload_schema_id(),
+        "schema": verlet_history::EventKind::ApprovalRequested.payload_schema_id(),
         "template_id": STD_PERMISSION_APPROVAL_GATE_TEMPLATE_ID,
         "approval_id": approval_id.clone(),
         "kind": "tool.call",
@@ -1562,21 +1636,21 @@ fn invoke_permission_approval_gate(
         "resume_token": resume_token.clone(),
     });
 
-    let suspended_payload = crate::ToolCallSuspendedPayload {
+    let suspended_payload = crate::kernel::control_decision::ToolCallSuspendedPayload {
         subject,
         snapshot_id,
         approval_id: Some(approval_id),
         reason,
     };
     let mut suspended = serde_json::to_value(suspended_payload).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::permission.approval_gate suspended payload codec failed: {err}"
         ))
     })?;
     if let Some(object) = suspended.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::ToolCallSuspended.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::ToolCallSuspended.payload_schema_id()),
         );
         object.insert(
             "template_id".to_string(),
@@ -1600,18 +1674,18 @@ fn invoke_permission_approval_gate(
         );
     }
 
-    Ok(crate::CouplingExecutionResult {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
         discharges: vec![
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "control".to_string(),
-                kind: crate::EventKind::ApprovalRequested,
+                kind: verlet_history::EventKind::ApprovalRequested,
                 payload: approval_requested,
             },
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "control".to_string(),
-                kind: crate::EventKind::ToolCallSuspended,
+                kind: verlet_history::EventKind::ToolCallSuspended,
                 payload: suspended,
             },
         ],
@@ -1619,26 +1693,28 @@ fn invoke_permission_approval_gate(
 }
 
 fn permission_tool_decision_result(
-    request: &crate::CouplingInvocation,
-    requested: &crate::ToolCallRequestedPayload,
-    outcome: crate::ToolCallDecisionOutcomePayload,
+    request: &crate::kernel::coupling_scheduler::CouplingInvocation,
+    requested: &crate::kernel::control_decision::ToolCallRequestedPayload,
+    outcome: crate::kernel::control_decision::ToolCallDecisionOutcomePayload,
     reason: Option<String>,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
-    let payload = crate::ToolCallDecisionPayload {
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
+    let payload = crate::kernel::control_decision::ToolCallDecisionPayload {
         subject: requested.subject.clone(),
         snapshot_id: request.activation.snapshot_id.clone(),
         outcome,
         admissible: None,
     };
     let mut payload = serde_json::to_value(payload).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::permission.tool_gate decision payload codec failed: {err}"
         ))
     })?;
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::ToolCallDecision.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::ToolCallDecision.payload_schema_id()),
         );
         object.insert(
             "template_id".to_string(),
@@ -1657,41 +1733,47 @@ fn permission_tool_decision_result(
         }
     }
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "control".to_string(),
-            kind: crate::EventKind::ToolCallDecision,
+            kind: verlet_history::EventKind::ToolCallDecision,
             payload,
         }],
     })
 }
 
 fn invoke_schedule_cron(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     match request.trigger_event.kind {
-        crate::EventKind::MandateStarted => Ok(crate::CouplingExecutionResult::default()),
-        crate::EventKind::TimerFired => {
+        verlet_history::EventKind::MandateStarted => {
+            Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult::default())
+        }
+        verlet_history::EventKind::TimerFired => {
             let config = schedule_cron_config(&request.coupling.config)?;
             invoke_schedule_cron_timer_fired(request, config)
         }
-        kind => Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_SCHEDULE_CRON_TEMPLATE_ID} expected timer.fired trigger, got {kind}"
-        ))),
+        kind => Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!("{STD_SCHEDULE_CRON_TEMPLATE_ID} expected timer.fired trigger, got {kind}"),
+        )),
     }
 }
 
 fn invoke_schedule_cron_timer_fired(
-    request: crate::CouplingInvocation,
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
     config: ScheduleCronConfig,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     let timer = timer_fired_payload(&request)?;
     let Some((mandate_event, mandate)) = timer_fired_mandate(&request, &timer)? else {
-        return Ok(crate::CouplingExecutionResult::default());
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult::default());
     };
     if !config.mandate_scope.matches(&mandate.subject) {
-        return Ok(crate::CouplingExecutionResult::default());
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult::default());
     }
 
     let max_occurrences = mandate.max_occurrences.unwrap_or(config.max_occurrences);
@@ -1718,13 +1800,13 @@ fn invoke_schedule_cron_timer_fired(
                 serde_json::json!(request.trigger_event.id.to_string()),
             );
         }
-        return Ok(crate::CouplingExecutionResult {
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
             discharges: vec![discharge],
         });
     }
 
     let parent_turn_id = config.parent_turn_id.ok_or_else(|| {
-        crate::VerletError::RuntimeFactory(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "std::schedule.cron continuation requires parent_turn_id".to_string(),
         )
     })?;
@@ -1733,13 +1815,13 @@ fn invoke_schedule_cron_timer_fired(
         .clone()
         .or(config.next_turn_input)
         .ok_or_else(|| {
-            crate::VerletError::RuntimeFactory(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "std::schedule.cron continuation requires input_template".to_string(),
             )
         })?;
     let next_turn_input = render_schedule_input_template(&input_template, &timer.scheduled_for);
-    let payload = crate::TurnContinueRequestedPayload {
-        subject: crate::TurnContinuationSubject {
+    let payload = crate::kernel::control_decision::TurnContinueRequestedPayload {
+        subject: crate::kernel::control_decision::TurnContinuationSubject {
             loop_id: config
                 .loop_id
                 .or_else(|| mandate.subject.loop_id.clone())
@@ -1750,14 +1832,14 @@ fn invoke_schedule_cron_timer_fired(
         next_turn_input,
     };
     let mut payload = serde_json::to_value(payload).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::schedule.cron payload codec failed: {err}"
         ))
     })?;
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::TurnContinueRequested.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::TurnContinueRequested.payload_schema_id()),
         );
         object.insert(
             "template_id".to_string(),
@@ -1785,30 +1867,35 @@ fn invoke_schedule_cron_timer_fired(
         );
     }
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "control".to_string(),
-            kind: crate::EventKind::TurnContinueRequested,
+            kind: verlet_history::EventKind::TurnContinueRequested,
             payload,
         }],
     })
 }
 
 fn timer_fired_payload(
-    request: &crate::CouplingInvocation,
-) -> crate::VerletResult<crate::TimerFiredPayload> {
+    request: &crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::TimerFiredPayload> {
     serde_json::from_value(request.trigger_event.payload.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::schedule.cron timer payload failed: {err}"
         ))
     })
 }
 
 fn timer_fired_mandate(
-    request: &crate::CouplingInvocation,
-    timer: &crate::TimerFiredPayload,
-) -> crate::VerletResult<Option<(crate::EventRecord, crate::MandateStartedPayload)>> {
+    request: &crate::kernel::coupling_scheduler::CouplingInvocation,
+    timer: &verlet_history::TimerFiredPayload,
+) -> crate::kernel::runtime_host::VerletResult<
+    Option<(
+        verlet_history::EventRecord,
+        crate::kernel::control_decision::MandateStartedPayload,
+    )>,
+> {
     if !request
         .trigger_event
         .provenance
@@ -1818,16 +1905,19 @@ fn timer_fired_mandate(
         return Ok(None);
     }
     let Some(event) = request.source_events.iter().find(|event| {
-        event.id == timer.mandate_event_id && event.kind == crate::EventKind::MandateStarted
+        event.id == timer.mandate_event_id
+            && event.kind == verlet_history::EventKind::MandateStarted
     }) else {
         return Ok(None);
     };
-    let mandate = serde_json::from_value::<crate::MandateStartedPayload>(event.payload.clone())
-        .map_err(|err| {
-            crate::VerletError::RuntimeFactory(format!(
-                "std::schedule.cron mandate payload failed: {err}"
-            ))
-        })?;
+    let mandate = serde_json::from_value::<crate::kernel::control_decision::MandateStartedPayload>(
+        event.payload.clone(),
+    )
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "std::schedule.cron mandate payload failed: {err}"
+        ))
+    })?;
     Ok(Some((event.clone(), mandate)))
 }
 
@@ -1836,19 +1926,19 @@ fn render_schedule_input_template(template: &str, scheduled_for: &str) -> String
 }
 
 fn schedule_budget_exhausted_discharge(
-    request: &crate::CouplingInvocation,
+    request: &crate::kernel::coupling_scheduler::CouplingInvocation,
     schedule_id: &str,
-    mandate_event_id: crate::EventRecordId,
+    mandate_event_id: verlet_history::EventRecordId,
     mandate_id: Option<&str>,
     occurrence: u64,
     max_occurrences: u32,
-) -> crate::CouplingDischarge {
-    crate::CouplingDischarge {
+) -> crate::kernel::coupling_scheduler::CouplingDischarge {
+    crate::kernel::coupling_scheduler::CouplingDischarge {
         event_id: None,
         stream: "control".to_string(),
-        kind: crate::EventKind::LoopBudgetExhausted,
+        kind: verlet_history::EventKind::LoopBudgetExhausted,
         payload: serde_json::json!({
-            "schema": crate::EventKind::LoopBudgetExhausted.payload_schema_id(),
+            "schema": verlet_history::EventKind::LoopBudgetExhausted.payload_schema_id(),
             "template_id": STD_SCHEDULE_CRON_TEMPLATE_ID,
             "snapshot_id": request.activation.snapshot_id,
             "mandate_event_id": mandate_event_id.to_string(),
@@ -1864,20 +1954,24 @@ fn schedule_budget_exhausted_discharge(
 }
 
 fn invoke_supervisor_child_completion(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
     if !matches!(
         request.trigger_event.kind,
-        crate::EventKind::TurnCompleted | crate::EventKind::CouplingRunCompleted
+        verlet_history::EventKind::TurnCompleted | verlet_history::EventKind::CouplingRunCompleted
     ) {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID} expected turn.completed or coupling.run.completed trigger, got {}",
-            request.trigger_event.kind
-        )));
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID} expected turn.completed or coupling.run.completed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = supervisor_child_completion_config(&request.coupling.config)?;
     let Some(completion) = supervisor_child_completion_fact(&request, &config)? else {
-        return Ok(crate::CouplingExecutionResult::default());
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult::default());
     };
 
     let discharge = match config.on_completed {
@@ -1885,7 +1979,7 @@ fn invoke_supervisor_child_completion(
             let mut payload = serde_json::Map::from_iter([
                 (
                     "schema".to_string(),
-                    serde_json::json!(crate::EventKind::LoopCompleted.payload_schema_id()),
+                    serde_json::json!(verlet_history::EventKind::LoopCompleted.payload_schema_id()),
                 ),
                 (
                     "template_id".to_string(),
@@ -1922,10 +2016,10 @@ fn invoke_supervisor_child_completion(
                 completion.parent_thread_id.clone(),
             );
 
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "control".to_string(),
-                kind: crate::EventKind::LoopCompleted,
+                kind: verlet_history::EventKind::LoopCompleted,
                 payload: serde_json::Value::Object(payload),
             }
         }
@@ -1939,19 +2033,19 @@ fn invoke_supervisor_child_completion(
                     )
                 })
                 .ok_or_else(|| {
-                    crate::VerletError::RuntimeFactory(
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "std::supervisor.child_completion request_continuation requires parent_turn_id"
                         .to_string(),
                 )
                 })?;
             let next_turn_input = config.next_turn_input.ok_or_else(|| {
-                crate::VerletError::RuntimeFactory(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "std::supervisor.child_completion request_continuation requires next_turn_input"
                         .to_string(),
                 )
             })?;
-            let payload = crate::TurnContinueRequestedPayload {
-                subject: crate::TurnContinuationSubject {
+            let payload = crate::kernel::control_decision::TurnContinueRequestedPayload {
+                subject: crate::kernel::control_decision::TurnContinuationSubject {
                     loop_id: config.loop_id.unwrap_or_else(|| "supervisor".to_string()),
                     parent_turn_id,
                 },
@@ -1959,14 +2053,16 @@ fn invoke_supervisor_child_completion(
                 next_turn_input,
             };
             let mut payload = serde_json::to_value(payload).map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "std::supervisor.child_completion continuation payload codec failed: {err}"
                 ))
             })?;
             if let Some(object) = payload.as_object_mut() {
                 object.insert(
                     "schema".to_string(),
-                    serde_json::json!(crate::EventKind::TurnContinueRequested.payload_schema_id()),
+                    serde_json::json!(
+                        verlet_history::EventKind::TurnContinueRequested.payload_schema_id()
+                    ),
                 );
                 object.insert(
                     "template_id".to_string(),
@@ -1991,16 +2087,16 @@ fn invoke_supervisor_child_completion(
                     supervisor_child_completion_json(&completion),
                 );
             }
-            crate::CouplingDischarge {
+            crate::kernel::coupling_scheduler::CouplingDischarge {
                 event_id: None,
                 stream: "control".to_string(),
-                kind: crate::EventKind::TurnContinueRequested,
+                kind: verlet_history::EventKind::TurnContinueRequested,
                 payload,
             }
         }
     };
 
-    Ok(crate::CouplingExecutionResult {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
         discharges: vec![discharge],
     })
 }
@@ -2012,16 +2108,16 @@ struct SupervisorChildCompletionFact {
     child_turn_id: Option<String>,
     status: String,
     completed_coupling_id: Option<String>,
-    completed_trigger_event_id: Option<crate::EventRecordId>,
-    completed_discharged_event_ids: Vec<crate::EventRecordId>,
+    completed_trigger_event_id: Option<verlet_history::EventRecordId>,
+    completed_discharged_event_ids: Vec<verlet_history::EventRecordId>,
 }
 
 fn supervisor_child_completion_fact(
-    request: &crate::CouplingInvocation,
+    request: &crate::kernel::coupling_scheduler::CouplingInvocation,
     config: &SupervisorChildCompletionConfig,
-) -> crate::VerletResult<Option<SupervisorChildCompletionFact>> {
+) -> crate::kernel::runtime_host::VerletResult<Option<SupervisorChildCompletionFact>> {
     match request.trigger_event.kind {
-        crate::EventKind::TurnCompleted => Ok(Some(SupervisorChildCompletionFact {
+        verlet_history::EventKind::TurnCompleted => Ok(Some(SupervisorChildCompletionFact {
             parent_thread_id: config
                 .parent_thread_id
                 .clone()
@@ -2043,16 +2139,16 @@ fn supervisor_child_completion_fact(
             completed_trigger_event_id: None,
             completed_discharged_event_ids: Vec::new(),
         })),
-        crate::EventKind::CouplingRunCompleted => {
-            let completed = serde_json::from_value::<crate::CouplingRunReceipt>(
+        verlet_history::EventKind::CouplingRunCompleted => {
+            let completed = serde_json::from_value::<crate::kernel::coupling_scheduler::CouplingRunReceipt>(
                 request.trigger_event.payload.clone(),
             )
             .map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "std::supervisor.child_completion trigger payload is not a coupling run receipt: {err}"
                 ))
             })?;
-            if completed.status != crate::CouplingRunStatus::Completed {
+            if completed.status != crate::kernel::coupling_scheduler::CouplingRunStatus::Completed {
                 return Ok(None);
             }
             if let Some(watch_coupling_id) = &config.watch_coupling_id
@@ -2150,13 +2246,17 @@ fn supervisor_child_completion_json(
 }
 
 fn invoke_retry_with_budget(
-    request: crate::CouplingInvocation,
-) -> crate::VerletResult<crate::CouplingExecutionResult> {
-    if request.trigger_event.kind != crate::EventKind::CouplingRunFailed {
-        return Err(crate::VerletError::RuntimeFactory(format!(
-            "{STD_RETRY_WITH_BUDGET_TEMPLATE_ID} expected coupling.run.failed trigger, got {}",
-            request.trigger_event.kind
-        )));
+    request: crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> crate::kernel::runtime_host::VerletResult<
+    crate::kernel::coupling_scheduler::CouplingExecutionResult,
+> {
+    if request.trigger_event.kind != verlet_history::EventKind::CouplingRunFailed {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{STD_RETRY_WITH_BUDGET_TEMPLATE_ID} expected coupling.run.failed trigger, got {}",
+                request.trigger_event.kind
+            ),
+        ));
     }
     let config = retry_with_budget_config(&request.coupling.config)?;
     let attempt = request
@@ -2178,7 +2278,7 @@ fn invoke_retry_with_budget(
             "retry denied for error class {}",
             error_class.as_deref().unwrap_or("unknown")
         );
-        return Ok(crate::CouplingExecutionResult {
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
             discharges: vec![retry_budget_exhausted_discharge(
                 &request,
                 attempt,
@@ -2189,7 +2289,7 @@ fn invoke_retry_with_budget(
         });
     }
     if attempt >= config.max_attempts {
-        return Ok(crate::CouplingExecutionResult {
+        return Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
             discharges: vec![retry_budget_exhausted_discharge(
                 &request,
                 attempt,
@@ -2204,18 +2304,18 @@ fn invoke_retry_with_budget(
     }
 
     let parent_turn_id = config.parent_turn_id.ok_or_else(|| {
-        crate::VerletError::RuntimeFactory(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "std::retry.with_budget continuation requires parent_turn_id".to_string(),
         )
     })?;
     let next_turn_input = config.next_turn_input.ok_or_else(|| {
-        crate::VerletError::RuntimeFactory(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(
             "std::retry.with_budget continuation requires next_turn_input".to_string(),
         )
     })?;
     let next_attempt = attempt + 1;
-    let payload = crate::TurnContinueRequestedPayload {
-        subject: crate::TurnContinuationSubject {
+    let payload = crate::kernel::control_decision::TurnContinueRequestedPayload {
+        subject: crate::kernel::control_decision::TurnContinuationSubject {
             loop_id: config.loop_id.unwrap_or_else(|| "default".to_string()),
             parent_turn_id,
         },
@@ -2223,14 +2323,14 @@ fn invoke_retry_with_budget(
         next_turn_input,
     };
     let mut payload = serde_json::to_value(payload).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::retry.with_budget payload codec failed: {err}"
         ))
     })?;
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "schema".to_string(),
-            serde_json::json!(crate::EventKind::TurnContinueRequested.payload_schema_id()),
+            serde_json::json!(verlet_history::EventKind::TurnContinueRequested.payload_schema_id()),
         );
         object.insert(
             "template_id".to_string(),
@@ -2256,29 +2356,29 @@ fn invoke_retry_with_budget(
         );
     }
 
-    Ok(crate::CouplingExecutionResult {
-        discharges: vec![crate::CouplingDischarge {
+    Ok(crate::kernel::coupling_scheduler::CouplingExecutionResult {
+        discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
             event_id: None,
             stream: "control".to_string(),
-            kind: crate::EventKind::TurnContinueRequested,
+            kind: verlet_history::EventKind::TurnContinueRequested,
             payload,
         }],
     })
 }
 
 fn retry_budget_exhausted_discharge(
-    request: &crate::CouplingInvocation,
+    request: &crate::kernel::coupling_scheduler::CouplingInvocation,
     attempt: u32,
     max_attempts: u32,
     error_class: Option<String>,
     reason: String,
-) -> crate::CouplingDischarge {
-    crate::CouplingDischarge {
+) -> crate::kernel::coupling_scheduler::CouplingDischarge {
+    crate::kernel::coupling_scheduler::CouplingDischarge {
         event_id: None,
         stream: "control".to_string(),
-        kind: crate::EventKind::LoopBudgetExhausted,
+        kind: verlet_history::EventKind::LoopBudgetExhausted,
         payload: serde_json::json!({
-            "schema": crate::EventKind::LoopBudgetExhausted.payload_schema_id(),
+            "schema": verlet_history::EventKind::LoopBudgetExhausted.payload_schema_id(),
             "template_id": STD_RETRY_WITH_BUDGET_TEMPLATE_ID,
             "snapshot_id": request.activation.snapshot_id,
             "failed_event_id": request.trigger_event.id.to_string(),
@@ -2313,7 +2413,7 @@ fn payload_string(payload: &serde_json::Value, keys: &[&str]) -> Option<String> 
     })
 }
 
-fn source_payload_string(events: &[crate::EventRecord], keys: &[&str]) -> Option<String> {
+fn source_payload_string(events: &[verlet_history::EventRecord], keys: &[&str]) -> Option<String> {
     events
         .iter()
         .rev()
@@ -2331,8 +2431,8 @@ fn insert_optional_string(
 }
 
 fn context_spill_source_ranges(
-    request: &crate::CouplingInvocation,
-) -> Vec<crate::ObservationSourceRange> {
+    request: &crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> Vec<verlet_history::ObservationSourceRange> {
     if !request.trigger_event.provenance.source_ranges.is_empty() {
         return request.trigger_event.provenance.source_ranges.clone();
     }
@@ -2340,15 +2440,17 @@ fn context_spill_source_ranges(
         .source_cut
         .entries
         .iter()
-        .map(|entry| crate::ObservationSourceRange {
-            stream_id: crate::EventStreamId::new(entry.stream_id.clone()),
-            from_sequence: crate::EventSequence::new(1),
-            to_sequence: crate::EventSequence::new(entry.max_sequence),
+        .map(|entry| verlet_history::ObservationSourceRange {
+            stream_id: verlet_history::EventStreamId::new(entry.stream_id.clone()),
+            from_sequence: verlet_history::EventSequence::new(1),
+            to_sequence: verlet_history::EventSequence::new(entry.max_sequence),
         })
         .collect()
 }
 
-fn context_spill_summary_text(request: &crate::CouplingInvocation) -> String {
+fn context_spill_summary_text(
+    request: &crate::kernel::coupling_scheduler::CouplingInvocation,
+) -> String {
     let truncated = request
         .trigger_event
         .payload
@@ -2361,7 +2463,9 @@ fn context_spill_summary_text(request: &crate::CouplingInvocation) -> String {
     )
 }
 
-fn source_ranges_json(source_ranges: &[crate::ObservationSourceRange]) -> Vec<serde_json::Value> {
+fn source_ranges_json(
+    source_ranges: &[verlet_history::ObservationSourceRange],
+) -> Vec<serde_json::Value> {
     source_ranges
         .iter()
         .map(|range| {
@@ -2375,7 +2479,7 @@ fn source_ranges_json(source_ranges: &[crate::ObservationSourceRange]) -> Vec<se
 }
 
 fn truncate_read_plan_entries(
-    source_ranges: &[crate::ObservationSourceRange],
+    source_ranges: &[verlet_history::ObservationSourceRange],
     retain_tail_events: i64,
     reason: &str,
 ) -> Vec<serde_json::Value> {
@@ -2406,7 +2510,7 @@ fn truncate_read_plan_entries(
                 "kind": "raw_range",
                 "stream_id": range.stream_id.as_str(),
                 "range": {
-                    "from": read_plan_from_cursor(crate::EventSequence::new(retain_from_sequence)),
+                    "from": read_plan_from_cursor(verlet_history::EventSequence::new(retain_from_sequence)),
                     "to": {
                         "sequence": to_sequence
                     }
@@ -2418,8 +2522,8 @@ fn truncate_read_plan_entries(
 }
 
 fn summary_checkpoint_entries(
-    summary_event_id: crate::EventRecordId,
-    source_ranges: &[crate::ObservationSourceRange],
+    summary_event_id: verlet_history::EventRecordId,
+    source_ranges: &[verlet_history::ObservationSourceRange],
 ) -> Vec<serde_json::Value> {
     if source_ranges.is_empty() {
         return vec![serde_json::json!({
@@ -2447,7 +2551,7 @@ fn summary_checkpoint_entries(
         .collect()
 }
 
-fn read_plan_from_cursor(sequence: crate::EventSequence) -> serde_json::Value {
+fn read_plan_from_cursor(sequence: verlet_history::EventSequence) -> serde_json::Value {
     if sequence.get() <= 1 {
         serde_json::Value::String("start".to_string())
     } else {
@@ -2455,33 +2559,41 @@ fn read_plan_from_cursor(sequence: crate::EventSequence) -> serde_json::Value {
     }
 }
 
-fn queue_task_config(value: &serde_json::Value) -> crate::VerletResult<QueueTaskConfig> {
+fn queue_task_config(
+    value: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<QueueTaskConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("std::queue.task config codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "std::queue.task config codec failed: {err}"
+        ))
     })
 }
 
 fn queue_completion_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<QueueCompletionCallbackConfig> {
+) -> crate::kernel::runtime_host::VerletResult<QueueCompletionCallbackConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::queue.completion_callback config codec failed: {err}"
         ))
     })
 }
 
-fn context_spill_config(value: &serde_json::Value) -> crate::VerletResult<ContextSpillConfig> {
+fn context_spill_config(
+    value: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<ContextSpillConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("std::context.spill config codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "std::context.spill config codec failed: {err}"
+        ))
     })
 }
 
 fn context_truncate_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<ContextTruncateConfig> {
+) -> crate::kernel::runtime_host::VerletResult<ContextTruncateConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::context.truncate config codec failed: {err}"
         ))
     })
@@ -2489,39 +2601,49 @@ fn context_truncate_config(
 
 fn context_summarize_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<ContextSummarizeConfig> {
+) -> crate::kernel::runtime_host::VerletResult<ContextSummarizeConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::context.summarize config codec failed: {err}"
         ))
     })
 }
 
-fn memory_extract_config(value: &serde_json::Value) -> crate::VerletResult<MemoryExtractConfig> {
+fn memory_extract_config(
+    value: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<MemoryExtractConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::memory.extract config codec failed: {err}"
         ))
     })
 }
 
-fn memory_recall_config(value: &serde_json::Value) -> crate::VerletResult<MemoryRecallConfig> {
+fn memory_recall_config(
+    value: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<MemoryRecallConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("std::memory.recall config codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "std::memory.recall config codec failed: {err}"
+        ))
     })
 }
 
-fn prompt_steer_config(value: &serde_json::Value) -> crate::VerletResult<PromptSteerConfig> {
+fn prompt_steer_config(
+    value: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<PromptSteerConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("std::prompt.steer config codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "std::prompt.steer config codec failed: {err}"
+        ))
     })
 }
 
 fn prompt_dynamic_instructions_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<PromptDynamicInstructionsConfig> {
+) -> crate::kernel::runtime_host::VerletResult<PromptDynamicInstructionsConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::prompt.dynamic_instructions config codec failed: {err}"
         ))
     })
@@ -2529,9 +2651,9 @@ fn prompt_dynamic_instructions_config(
 
 fn permission_tool_gate_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<PermissionToolGateConfig> {
+) -> crate::kernel::runtime_host::VerletResult<PermissionToolGateConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::permission.tool_gate config codec failed: {err}"
         ))
     })
@@ -2539,9 +2661,9 @@ fn permission_tool_gate_config(
 
 fn permission_approval_gate_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<PermissionApprovalGateConfig> {
+) -> crate::kernel::runtime_host::VerletResult<PermissionApprovalGateConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::permission.approval_gate config codec failed: {err}"
         ))
     })
@@ -2549,9 +2671,9 @@ fn permission_approval_gate_config(
 
 fn failure_deadletter_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<FailureDeadletterConfig> {
+) -> crate::kernel::runtime_host::VerletResult<FailureDeadletterConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::failure.deadletter config codec failed: {err}"
         ))
     })
@@ -2559,25 +2681,29 @@ fn failure_deadletter_config(
 
 fn retry_with_budget_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<RetryWithBudgetConfig> {
+) -> crate::kernel::runtime_host::VerletResult<RetryWithBudgetConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::retry.with_budget config codec failed: {err}"
         ))
     })
 }
 
-fn schedule_cron_config(value: &serde_json::Value) -> crate::VerletResult<ScheduleCronConfig> {
+fn schedule_cron_config(
+    value: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<ScheduleCronConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!("std::schedule.cron config codec failed: {err}"))
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "std::schedule.cron config codec failed: {err}"
+        ))
     })
 }
 
 fn supervisor_spawn_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<SupervisorSpawnConfig> {
+) -> crate::kernel::runtime_host::VerletResult<SupervisorSpawnConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::supervisor.spawn config codec failed: {err}"
         ))
     })
@@ -2585,9 +2711,9 @@ fn supervisor_spawn_config(
 
 fn supervisor_child_completion_config(
     value: &serde_json::Value,
-) -> crate::VerletResult<SupervisorChildCompletionConfig> {
+) -> crate::kernel::runtime_host::VerletResult<SupervisorChildCompletionConfig> {
     serde_json::from_value(value.clone()).map_err(|err| {
-        crate::VerletError::RuntimeFactory(format!(
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "std::supervisor.child_completion config codec failed: {err}"
         ))
     })
@@ -2595,11 +2721,11 @@ fn supervisor_child_completion_config(
 
 #[cfg(test)]
 mod tests {
-    use crate::kernel::history::EventStore as _;
+    use verlet_history::EventStore as _;
 
     #[test]
     fn stdlib_executor_supports_exact_runtime_executable_catalog_templates() {
-        let catalog = crate::coupling_template_catalog_v1();
+        let catalog = crate::agent::coupling_templates::coupling_template_catalog_v1();
         let declared = catalog
             .templates
             .iter()
@@ -2621,15 +2747,16 @@ mod tests {
 
     #[tokio::test]
     async fn std_queue_task_and_completion_callback_discharge_control_facts() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let submitted = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({
                         "turn_id": "turn-1",
                         "entry_id": "entry-1",
@@ -2640,10 +2767,11 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_queue_task_coupling(), std_queue_completion_callback()],
                 ),
@@ -2667,11 +2795,11 @@ mod tests {
 
         let waiting = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::TurnWaiting)
+            .find(|event| event.kind == verlet_history::EventKind::TurnWaiting)
             .unwrap();
         assert_eq!(
             waiting.payload["schema"],
-            crate::EventKind::TurnWaiting.payload_schema_id()
+            verlet_history::EventKind::TurnWaiting.payload_schema_id()
         );
         assert_eq!(waiting.payload["template_id"], "std::queue.task");
         assert_eq!(waiting.payload["turn_id"], "turn-1");
@@ -2682,11 +2810,11 @@ mod tests {
 
         let completed = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::LoopCompleted)
+            .find(|event| event.kind == verlet_history::EventKind::LoopCompleted)
             .unwrap();
         assert_eq!(
             completed.payload["schema"],
-            crate::EventKind::LoopCompleted.payload_schema_id()
+            verlet_history::EventKind::LoopCompleted.payload_schema_id()
         );
         assert_eq!(
             completed.payload["template_id"],
@@ -2704,22 +2832,23 @@ mod tests {
 
     #[tokio::test]
     async fn std_context_spill_discharges_summary_and_read_plan_with_same_event_id() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
-        let source_range = crate::ObservationSourceRange {
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
+        let source_range = verlet_history::ObservationSourceRange {
             stream_id: thread_stream.clone(),
-            from_sequence: crate::EventSequence::new(1),
-            to_sequence: crate::EventSequence::new(4),
+            from_sequence: verlet_history::EventSequence::new(1),
+            to_sequence: verlet_history::EventSequence::new(4),
         };
         let compiled = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::ContextCompileCompleted,
+                    verlet_history::EventKind::ContextCompileCompleted,
                     serde_json::json!({
-                        "schema": crate::EventKind::ContextCompileCompleted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::ContextCompileCompleted.payload_schema_id(),
                         "truncated_text_bytes": 640,
                         "read_plan": {
                             "schema": "cooldis.context.read_plan/1",
@@ -2729,12 +2858,12 @@ mod tests {
                             "entries": []
                         }
                     }),
-                    crate::EventProvenance {
+                    verlet_history::EventProvenance {
                         source_streams: vec![thread_stream.clone()],
                         source_ranges: vec![source_range],
                         discharged_by: Some("projection:test-context-compiler".to_string()),
                         function: Some("test_context_compile/v1".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -2742,10 +2871,14 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new("snapshot-a", vec![std_context_spill_coupling()]),
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![std_context_spill_coupling()],
+                ),
                 compiled,
             )
             .await
@@ -2764,11 +2897,11 @@ mod tests {
             .unwrap();
         let summary = derived_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ContextSummaryCompleted)
+            .find(|event| event.kind == verlet_history::EventKind::ContextSummaryCompleted)
             .unwrap();
         let read_plan = derived_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ContextReadPlanSet)
+            .find(|event| event.kind == verlet_history::EventKind::ContextReadPlanSet)
             .unwrap();
         assert_eq!(
             read_plan.payload["summary_event_id"],
@@ -2786,22 +2919,23 @@ mod tests {
 
     #[tokio::test]
     async fn std_context_truncate_discharges_drop_and_tail_read_plan() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
-        let source_range = crate::ObservationSourceRange {
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
+        let source_range = verlet_history::ObservationSourceRange {
             stream_id: thread_stream.clone(),
-            from_sequence: crate::EventSequence::new(1),
-            to_sequence: crate::EventSequence::new(10),
+            from_sequence: verlet_history::EventSequence::new(1),
+            to_sequence: verlet_history::EventSequence::new(10),
         };
         let compiled = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::ContextCompileCompleted,
+                    verlet_history::EventKind::ContextCompileCompleted,
                     serde_json::json!({
-                        "schema": crate::EventKind::ContextCompileCompleted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::ContextCompileCompleted.payload_schema_id(),
                         "truncated_text_bytes": 1200,
                         "read_plan": {
                             "schema": "cooldis.context.read_plan/1",
@@ -2811,12 +2945,12 @@ mod tests {
                             "entries": []
                         }
                     }),
-                    crate::EventProvenance {
+                    verlet_history::EventProvenance {
                         source_streams: vec![thread_stream.clone()],
                         source_ranges: vec![source_range],
                         discharged_by: Some("projection:test-context-compiler".to_string()),
                         function: Some("test_context_compile/v1".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -2824,10 +2958,14 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new("snapshot-a", vec![std_context_truncate_coupling()]),
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![std_context_truncate_coupling()],
+                ),
                 compiled,
             )
             .await
@@ -2843,11 +2981,11 @@ mod tests {
             .unwrap();
         let read_plan = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ContextReadPlanSet)
+            .find(|event| event.kind == verlet_history::EventKind::ContextReadPlanSet)
             .unwrap();
         assert_eq!(
             read_plan.payload["schema"],
-            crate::EventKind::ContextReadPlanSet.payload_schema_id()
+            verlet_history::EventKind::ContextReadPlanSet.payload_schema_id()
         );
         assert_eq!(read_plan.payload["template_id"], "std::context.truncate");
         assert_eq!(read_plan.payload["retain_tail_events"], 3);
@@ -2879,25 +3017,26 @@ mod tests {
 
     #[tokio::test]
     async fn std_context_summarize_discharges_summary_checkpoint_and_read_plan() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let completed = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::TurnCompleted,
+                    verlet_history::EventKind::TurnCompleted,
                     serde_json::json!({
-                        "schema": crate::EventKind::TurnCompleted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::TurnCompleted.payload_schema_id(),
                         "turn_id": "turn-1",
                         "output_text": "The user wants SQLite first, S2 later, and explicit segment maps.",
                     }),
-                    crate::EventProvenance {
+                    verlet_history::EventProvenance {
                         source_streams: vec![thread_stream.clone()],
                         discharged_by: Some("runtime:provider-loop".to_string()),
                         function: Some("turn_completion/v1".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -2905,10 +3044,14 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new("snapshot-a", vec![std_context_summarize_coupling()]),
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![std_context_summarize_coupling()],
+                ),
                 completed.clone(),
             )
             .await
@@ -2927,11 +3070,11 @@ mod tests {
             .unwrap();
         let summary = derived_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ContextSummaryCompleted)
+            .find(|event| event.kind == verlet_history::EventKind::ContextSummaryCompleted)
             .unwrap();
         let read_plan = derived_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ContextReadPlanSet)
+            .find(|event| event.kind == verlet_history::EventKind::ContextReadPlanSet)
             .unwrap();
         assert_eq!(summary.payload["template_id"], "std::context.summarize");
         assert_eq!(
@@ -2954,25 +3097,26 @@ mod tests {
 
     #[tokio::test]
     async fn std_prompt_steer_requests_continuation_or_sets_instruction_read_plan() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let completed = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::TurnCompleted,
+                    verlet_history::EventKind::TurnCompleted,
                     serde_json::json!({
-                        "schema": crate::EventKind::TurnCompleted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::TurnCompleted.payload_schema_id(),
                         "turn_id": "turn-1",
                         "output_text": "Need one more clarification turn.",
                     }),
-                    crate::EventProvenance {
+                    verlet_history::EventProvenance {
                         source_streams: vec![thread_stream.clone()],
                         discharged_by: Some("runtime:provider-loop".to_string()),
                         function: Some("turn_completion/v1".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -2980,10 +3124,11 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let continuation_receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_prompt_steer_continuation_coupling()],
                 ),
@@ -3003,11 +3148,11 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let continuation = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::TurnContinueRequested)
+            .find(|event| event.kind == verlet_history::EventKind::TurnContinueRequested)
             .unwrap();
         assert_eq!(
             continuation.payload["schema"],
-            crate::EventKind::TurnContinueRequested.payload_schema_id()
+            verlet_history::EventKind::TurnContinueRequested.payload_schema_id()
         );
         assert_eq!(continuation.payload["template_id"], "std::prompt.steer");
         assert_eq!(
@@ -3018,11 +3163,11 @@ mod tests {
         let approval = store
             .append_events(
                 &control_stream,
-                vec![crate::NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::ApprovalResolved,
+                    verlet_history::EventKind::ApprovalResolved,
                     serde_json::json!({
-                        "schema": crate::EventKind::ApprovalResolved.payload_schema_id(),
+                        "schema": verlet_history::EventKind::ApprovalResolved.payload_schema_id(),
                         "approval_id": "approval-instructions",
                         "decision": "approved",
                     }),
@@ -3032,7 +3177,7 @@ mod tests {
             .unwrap();
         let read_plan_receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_prompt_steer_read_plan_coupling()],
                 ),
@@ -3046,7 +3191,7 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let read_plan = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ContextReadPlanSet)
+            .find(|event| event.kind == verlet_history::EventKind::ContextReadPlanSet)
             .unwrap();
         assert_eq!(read_plan.payload["template_id"], "std::prompt.steer");
         assert_eq!(read_plan.payload["pipeline_id"], "context.instructions");
@@ -3062,22 +3207,23 @@ mod tests {
 
     #[tokio::test]
     async fn std_failure_deadletter_projects_failed_control_fact_to_derived_stream() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let failed = store
             .append_events(
                 &control_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::CouplingRunFailed,
+                    verlet_history::EventKind::CouplingRunFailed,
                     serde_json::json!({
                         "coupling_id": "std::queue.task",
                         "status": "failed",
                         "reason": "remote service unavailable",
-                        "root_event_id": crate::EventRecordId::new().to_string(),
-                        "trigger_event_id": crate::EventRecordId::new().to_string(),
+                        "root_event_id": verlet_history::EventRecordId::new().to_string(),
+                        "trigger_event_id": verlet_history::EventRecordId::new().to_string(),
                         "trigger_stream_id": "thread:test",
                         "trigger_sequence": 1,
                         "snapshot_id": "snapshot-a",
@@ -3089,12 +3235,14 @@ mod tests {
                         "config_hash": "sha256:queue-task",
                         "budget_spent": {"discharge_events": 0}
                     }),
-                    crate::EventProvenance {
-                        source_streams: vec![crate::EventStreamId::for_thread(&coordinates)],
+                    verlet_history::EventProvenance {
+                        source_streams: vec![verlet_history::EventStreamId::for_thread(
+                            &coordinates,
+                        )],
                         discharged_by: Some("coupling:std::queue.task".to_string()),
                         function: Some("op://std-queue-task/run@sha256:test".to_string()),
                         config_hash: Some("sha256:queue-task".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -3102,10 +3250,11 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_failure_deadletter_coupling()],
                 ),
@@ -3127,10 +3276,13 @@ mod tests {
             .unwrap();
         assert_eq!(deadletter_events.len(), 1);
         let deadletter = &deadletter_events[0];
-        assert_eq!(deadletter.kind, crate::EventKind::CouplingRunFailed);
+        assert_eq!(
+            deadletter.kind,
+            verlet_history::EventKind::CouplingRunFailed
+        );
         assert_eq!(
             deadletter.payload["schema"],
-            crate::EventKind::CouplingRunFailed.payload_schema_id()
+            verlet_history::EventKind::CouplingRunFailed.payload_schema_id()
         );
         assert_eq!(deadletter.payload["template_id"], "std::failure.deadletter");
         assert_eq!(deadletter.payload["status"], "deadlettered");
@@ -3150,24 +3302,25 @@ mod tests {
 
     #[tokio::test]
     async fn std_memory_extract_projects_completed_turn_to_derived_memory() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let completed = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::TurnCompleted,
+                    verlet_history::EventKind::TurnCompleted,
                     serde_json::json!({
                         "turn_id": "turn-1",
                         "output_text": "User prefers SQLite first, then S2 as stream backend.",
                     }),
-                    crate::EventProvenance {
+                    verlet_history::EventProvenance {
                         source_streams: vec![thread_stream.clone()],
                         discharged_by: Some("runtime:provider-loop".to_string()),
                         function: Some("turn_completion/v1".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -3175,10 +3328,14 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new("snapshot-a", vec![std_memory_extract_coupling()]),
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![std_memory_extract_coupling()],
+                ),
                 completed.clone(),
             )
             .await
@@ -3197,10 +3354,13 @@ mod tests {
             .unwrap();
         assert_eq!(memory_events.len(), 1);
         let memory = &memory_events[0];
-        assert_eq!(memory.kind, crate::EventKind::ContextSummaryCompleted);
+        assert_eq!(
+            memory.kind,
+            verlet_history::EventKind::ContextSummaryCompleted
+        );
         assert_eq!(
             memory.payload["schema"],
-            crate::EventKind::ContextSummaryCompleted.payload_schema_id()
+            verlet_history::EventKind::ContextSummaryCompleted.payload_schema_id()
         );
         assert_eq!(memory.payload["template_id"], "std::memory.extract");
         assert_eq!(memory.payload["memory_kind"], "observation");
@@ -3220,19 +3380,20 @@ mod tests {
 
     #[tokio::test]
     async fn std_memory_recall_projects_memory_summaries_to_read_plan() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let memory_stream =
-            crate::EventStreamId::new(format!("derived:memory:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("derived:memory:{}", coordinates.thread_id));
         let memory = store
             .append_events(
                 &memory_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::ContextSummaryCompleted,
+                    verlet_history::EventKind::ContextSummaryCompleted,
                     serde_json::json!({
-                        "schema": crate::EventKind::ContextSummaryCompleted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::ContextSummaryCompleted.payload_schema_id(),
                         "role": "summary_checkpoint",
                         "text": "User prefers SQLite first, then S2 as stream backend.",
                         "covered_ranges": [{
@@ -3246,11 +3407,11 @@ mod tests {
                         "template_id": "std::memory.extract",
                         "memory_kind": "observation"
                     }),
-                    crate::EventProvenance {
+                    verlet_history::EventProvenance {
                         source_streams: vec![thread_stream.clone()],
                         discharged_by: Some("coupling:std::memory.extract".to_string()),
                         function: Some("op://std-memory-extract/run@sha256:test".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -3259,9 +3420,9 @@ mod tests {
         let submitted = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({
                         "turn_id": "turn-2",
                         "input_text": "What should we use for V1 stream storage?",
@@ -3272,10 +3433,14 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new("snapshot-a", vec![std_memory_recall_coupling()]),
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
+                    "snapshot-a",
+                    vec![std_memory_recall_coupling()],
+                ),
                 submitted,
             )
             .await
@@ -3295,11 +3460,11 @@ mod tests {
             .unwrap();
         let read_plan = context_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ContextReadPlanSet)
+            .find(|event| event.kind == verlet_history::EventKind::ContextReadPlanSet)
             .unwrap();
         assert_eq!(
             read_plan.payload["schema"],
-            crate::EventKind::ContextReadPlanSet.payload_schema_id()
+            verlet_history::EventKind::ContextReadPlanSet.payload_schema_id()
         );
         assert_eq!(read_plan.payload["template_id"], "std::memory.recall");
         assert_eq!(read_plan.payload["name"], "memory.default");
@@ -3325,10 +3490,11 @@ mod tests {
 
     #[tokio::test]
     async fn std_retry_with_budget_requests_continuation_for_retryable_failure() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let failed = append_failed_coupling_run(
             &store,
             &coordinates,
@@ -3342,10 +3508,11 @@ mod tests {
         .await;
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_retry_with_budget_coupling(2)],
                 ),
@@ -3361,11 +3528,11 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let retry = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::TurnContinueRequested)
+            .find(|event| event.kind == verlet_history::EventKind::TurnContinueRequested)
             .unwrap();
         assert_eq!(
             retry.payload["schema"],
-            crate::EventKind::TurnContinueRequested.payload_schema_id()
+            verlet_history::EventKind::TurnContinueRequested.payload_schema_id()
         );
         assert_eq!(retry.payload["template_id"], "std::retry.with_budget");
         assert_eq!(retry.payload["subject"]["parent_turn_id"], "turn-1");
@@ -3380,10 +3547,11 @@ mod tests {
 
     #[tokio::test]
     async fn std_retry_with_budget_emits_budget_exhausted_when_limit_reached() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let failed = append_failed_coupling_run(
             &store,
             &coordinates,
@@ -3397,10 +3565,11 @@ mod tests {
         .await;
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_retry_with_budget_coupling(2)],
                 ),
@@ -3416,11 +3585,11 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let exhausted = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::LoopBudgetExhausted)
+            .find(|event| event.kind == verlet_history::EventKind::LoopBudgetExhausted)
             .unwrap();
         assert_eq!(
             exhausted.payload["schema"],
-            crate::EventKind::LoopBudgetExhausted.payload_schema_id()
+            verlet_history::EventKind::LoopBudgetExhausted.payload_schema_id()
         );
         assert_eq!(exhausted.payload["template_id"], "std::retry.with_budget");
         assert_eq!(exhausted.payload["attempt"], 2);
@@ -3433,15 +3602,16 @@ mod tests {
 
     #[tokio::test]
     async fn std_schedule_cron_mandate_started_does_not_discharge() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let mandate = append_schedule_mandate_started(
             &store,
             &coordinates,
             &control_stream,
-            crate::MandateSubject {
+            crate::kernel::control_decision::MandateSubject {
                 thread_id: Some(coordinates.thread_id.to_string()),
                 loop_id: Some("loop-nightly".to_string()),
             },
@@ -3450,13 +3620,14 @@ mod tests {
         )
         .await;
         let mut coupling = std_schedule_cron_coupling();
-        coupling.trigger_kind = crate::EventKind::MandateStarted;
+        coupling.trigger_kind = verlet_history::EventKind::MandateStarted;
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::agent::manifest_bind::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 vec![mandate],
             )
             .await
@@ -3469,21 +3640,23 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         assert!(control_events.iter().all(|event| !matches!(
             event.kind,
-            crate::EventKind::TurnContinueRequested | crate::EventKind::LoopBudgetExhausted
+            verlet_history::EventKind::TurnContinueRequested
+                | verlet_history::EventKind::LoopBudgetExhausted
         )));
     }
 
     #[tokio::test]
     async fn std_schedule_cron_requests_continuation_for_timer_fired() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let mandate = append_schedule_mandate_started(
             &store,
             &coordinates,
             &control_stream,
-            crate::MandateSubject {
+            crate::kernel::control_decision::MandateSubject {
                 thread_id: Some(coordinates.thread_id.to_string()),
                 loop_id: Some("loop-nightly".to_string()),
             },
@@ -3503,10 +3676,11 @@ mod tests {
         .await;
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_schedule_cron_timer_coupling(serde_json::json!({
                         "max_occurrences": 2,
@@ -3528,11 +3702,11 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let continuation = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::TurnContinueRequested)
+            .find(|event| event.kind == verlet_history::EventKind::TurnContinueRequested)
             .unwrap();
         assert_eq!(
             continuation.payload["schema"],
-            crate::EventKind::TurnContinueRequested.payload_schema_id()
+            verlet_history::EventKind::TurnContinueRequested.payload_schema_id()
         );
         assert_eq!(continuation.payload["template_id"], "std::schedule.cron");
         assert_eq!(
@@ -3549,15 +3723,16 @@ mod tests {
 
     #[tokio::test]
     async fn std_schedule_cron_emits_budget_exhausted_for_timer_fired_at_cap() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let mandate = append_schedule_mandate_started(
             &store,
             &coordinates,
             &control_stream,
-            crate::MandateSubject {
+            crate::kernel::control_decision::MandateSubject {
                 thread_id: Some(coordinates.thread_id.to_string()),
                 loop_id: Some("loop-nightly".to_string()),
             },
@@ -3577,10 +3752,11 @@ mod tests {
         .await;
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_schedule_cron_timer_coupling(serde_json::json!({
                         "max_occurrences": 2,
@@ -3603,15 +3779,15 @@ mod tests {
         assert!(
             control_events
                 .iter()
-                .all(|event| event.kind != crate::EventKind::TurnContinueRequested)
+                .all(|event| event.kind != verlet_history::EventKind::TurnContinueRequested)
         );
         let exhausted = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::LoopBudgetExhausted)
+            .find(|event| event.kind == verlet_history::EventKind::LoopBudgetExhausted)
             .unwrap();
         assert_eq!(
             exhausted.payload["schema"],
-            crate::EventKind::LoopBudgetExhausted.payload_schema_id()
+            verlet_history::EventKind::LoopBudgetExhausted.payload_schema_id()
         );
         assert_eq!(exhausted.payload["template_id"], "std::schedule.cron");
         assert_eq!(
@@ -3624,15 +3800,16 @@ mod tests {
 
     #[tokio::test]
     async fn std_schedule_cron_ignores_timer_fired_for_other_mandate_scope() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let mandate = append_schedule_mandate_started(
             &store,
             &coordinates,
             &control_stream,
-            crate::MandateSubject {
+            crate::kernel::control_decision::MandateSubject {
                 thread_id: Some(coordinates.thread_id.to_string()),
                 loop_id: Some("loop-nightly".to_string()),
             },
@@ -3652,10 +3829,11 @@ mod tests {
         .await;
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_schedule_cron_timer_coupling(serde_json::json!({
                         "max_occurrences": 2,
@@ -3682,23 +3860,25 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         assert!(control_events.iter().all(|event| !matches!(
             event.kind,
-            crate::EventKind::TurnContinueRequested | crate::EventKind::LoopBudgetExhausted
+            verlet_history::EventKind::TurnContinueRequested
+                | verlet_history::EventKind::LoopBudgetExhausted
         )));
     }
 
     #[tokio::test]
     async fn std_supervisor_spawn_discharges_spawn_request_and_parent_waiting() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let submitted = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({
-                        "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::TurnSubmitted.payload_schema_id(),
                         "turn_id": "parent-turn-1",
                         "entry_id": "entry-1",
                         "input_text": "delegate the release audit",
@@ -3709,10 +3889,11 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_supervisor_spawn_coupling(serde_json::json!({
                         "child_agent_ref": "agent://release-worker",
@@ -3739,17 +3920,17 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let requested = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ThreadSpawnRequested)
+            .find(|event| event.kind == verlet_history::EventKind::ThreadSpawnRequested)
             .unwrap();
         assert_eq!(
             requested.payload["schema"],
-            crate::EventKind::ThreadSpawnRequested.payload_schema_id()
+            verlet_history::EventKind::ThreadSpawnRequested.payload_schema_id()
         );
         assert_eq!(
             requested.payload["template_id"],
             crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
         );
-        let payload: crate::ThreadSpawnRequestedPayload =
+        let payload: verlet_history::ThreadSpawnRequestedPayload =
             serde_json::from_value(requested.payload.clone()).unwrap();
         assert_eq!(payload.parent_thread_id, coordinates.thread_id);
         assert_eq!(payload.parent_turn_id.as_deref(), Some("parent-turn-1"));
@@ -3764,11 +3945,11 @@ mod tests {
 
         let waiting = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::TurnWaiting)
+            .find(|event| event.kind == verlet_history::EventKind::TurnWaiting)
             .unwrap();
         assert_eq!(
             waiting.payload["schema"],
-            crate::EventKind::TurnWaiting.payload_schema_id()
+            verlet_history::EventKind::TurnWaiting.payload_schema_id()
         );
         assert_eq!(
             waiting.payload["template_id"],
@@ -3784,17 +3965,18 @@ mod tests {
 
     #[tokio::test]
     async fn std_supervisor_spawn_without_threads_spawn_grant_is_refused_and_recorded() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let submitted = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::TurnSubmitted,
+                    verlet_history::EventKind::TurnSubmitted,
                     serde_json::json!({
-                        "schema": crate::EventKind::TurnSubmitted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::TurnSubmitted.payload_schema_id(),
                         "turn_id": "parent-turn-1",
                     }),
                 )],
@@ -3808,10 +3990,11 @@ mod tests {
         coupling.grants.retain(|grant| grant != "threads.spawn");
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new("snapshot-a", vec![coupling]),
+                &crate::agent::manifest_bind::BoundCouplingSet::new("snapshot-a", vec![coupling]),
                 submitted,
             )
             .await
@@ -3822,7 +4005,10 @@ mod tests {
             receipt.runs[0].coupling_id,
             crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
         );
-        assert_eq!(receipt.runs[0].status, crate::CouplingRunStatus::Failed);
+        assert_eq!(
+            receipt.runs[0].status,
+            crate::kernel::coupling_scheduler::CouplingRunStatus::Failed
+        );
         assert!(
             receipt.runs[0]
                 .reason
@@ -3835,10 +4021,10 @@ mod tests {
         assert!(
             control_events
                 .iter()
-                .all(|event| event.kind != crate::EventKind::ThreadSpawnRequested)
+                .all(|event| event.kind != verlet_history::EventKind::ThreadSpawnRequested)
         );
         assert!(control_events.iter().any(|event| {
-            event.kind == crate::EventKind::CouplingRunFailed
+            event.kind == verlet_history::EventKind::CouplingRunFailed
                 && event
                     .payload
                     .get("reason")
@@ -3849,28 +4035,29 @@ mod tests {
 
     #[tokio::test]
     async fn std_supervisor_child_completion_joins_child_turn_to_parent_control_fact() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let completed = store
             .append_events(
                 &thread_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::TurnCompleted,
+                    verlet_history::EventKind::TurnCompleted,
                     serde_json::json!({
-                        "schema": crate::EventKind::TurnCompleted.payload_schema_id(),
+                        "schema": verlet_history::EventKind::TurnCompleted.payload_schema_id(),
                         "turn_id": "child-turn-1",
                         "parent_thread_id": coordinates.thread_id.to_string(),
                         "child_thread_id": "child-thread-1",
                         "status": "completed",
                         "output_text": "child finished release evidence collection",
                     }),
-                    crate::EventProvenance {
+                    verlet_history::EventProvenance {
                         source_streams: vec![thread_stream.clone()],
                         discharged_by: Some("runtime:child-thread".to_string()),
                         function: Some("child_turn_completion/v1".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -3878,10 +4065,11 @@ mod tests {
             .unwrap();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_supervisor_child_completion_coupling()],
                 ),
@@ -3901,11 +4089,11 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let joined = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::LoopCompleted)
+            .find(|event| event.kind == verlet_history::EventKind::LoopCompleted)
             .unwrap();
         assert_eq!(
             joined.payload["schema"],
-            crate::EventKind::LoopCompleted.payload_schema_id()
+            verlet_history::EventKind::LoopCompleted.payload_schema_id()
         );
         assert_eq!(
             joined.payload["template_id"],
@@ -3921,19 +4109,21 @@ mod tests {
 
     #[tokio::test]
     async fn std_permission_tool_gate_allows_tool_call() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let requested =
             append_tool_call_requested(&store, &coordinates, &thread_stream, "call-allow").await;
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_permission_tool_gate_coupling(serde_json::json!({
                         "decision": "allow",
@@ -3952,11 +4142,11 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let decision = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ToolCallDecision)
+            .find(|event| event.kind == verlet_history::EventKind::ToolCallDecision)
             .unwrap();
         assert_eq!(
             decision.payload["schema"],
-            crate::EventKind::ToolCallDecision.payload_schema_id()
+            verlet_history::EventKind::ToolCallDecision.payload_schema_id()
         );
         assert_eq!(decision.payload["template_id"], "std::permission.tool_gate");
         assert_eq!(decision.payload["outcome"]["decision"], "allow");
@@ -3968,19 +4158,21 @@ mod tests {
 
     #[tokio::test]
     async fn std_permission_tool_gate_waits_with_suspension() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let requested =
             append_tool_call_requested(&store, &coordinates, &thread_stream, "call-wait").await;
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_permission_tool_gate_coupling(serde_json::json!({
                         "decision": "wait",
@@ -4000,11 +4192,11 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let suspended = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ToolCallSuspended)
+            .find(|event| event.kind == verlet_history::EventKind::ToolCallSuspended)
             .unwrap();
         assert_eq!(
             suspended.payload["schema"],
-            crate::EventKind::ToolCallSuspended.payload_schema_id()
+            verlet_history::EventKind::ToolCallSuspended.payload_schema_id()
         );
         assert_eq!(
             suspended.payload["template_id"],
@@ -4016,20 +4208,22 @@ mod tests {
 
     #[tokio::test]
     async fn std_permission_approval_gate_requests_and_suspends_tool_call() {
-        let coordinates = crate::ThreadCoordinates::new("tenant", "user", "session");
-        let store = crate::InMemorySessionStore::default();
-        let thread_stream = crate::EventStreamId::for_thread(&coordinates);
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let store = verlet_history::InMemorySessionStore::default();
+        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
         let control_stream =
-            crate::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
         let requested =
             append_tool_call_requested(&store, &coordinates, &thread_stream, "call-approve").await;
         let request_event_id = requested[0].id.to_string();
 
         let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler = crate::CouplingScheduler::new(&store, &executor);
+        let scheduler =
+            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
         let receipt = scheduler
             .run_batch(
-                &crate::BoundCouplingSet::new(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     "snapshot-a",
                     vec![std_permission_approval_gate_coupling(serde_json::json!({
                         "approval_id": "approval-shell-call",
@@ -4052,11 +4246,11 @@ mod tests {
         let control_events = store.read_events(&control_stream, None).await.unwrap();
         let approval = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ApprovalRequested)
+            .find(|event| event.kind == verlet_history::EventKind::ApprovalRequested)
             .unwrap();
         assert_eq!(
             approval.payload["schema"],
-            crate::EventKind::ApprovalRequested.payload_schema_id()
+            verlet_history::EventKind::ApprovalRequested.payload_schema_id()
         );
         assert_eq!(
             approval.payload["template_id"],
@@ -4075,11 +4269,11 @@ mod tests {
 
         let suspended = control_events
             .iter()
-            .find(|event| event.kind == crate::EventKind::ToolCallSuspended)
+            .find(|event| event.kind == verlet_history::EventKind::ToolCallSuspended)
             .unwrap();
         assert_eq!(
             suspended.payload["schema"],
-            crate::EventKind::ToolCallSuspended.payload_schema_id()
+            verlet_history::EventKind::ToolCallSuspended.payload_schema_id()
         );
         assert_eq!(
             suspended.payload["template_id"],
@@ -4096,16 +4290,16 @@ mod tests {
     }
 
     async fn append_failed_coupling_run(
-        store: &crate::InMemorySessionStore,
-        coordinates: &crate::ThreadCoordinates,
-        control_stream: &crate::EventStreamId,
+        store: &verlet_history::InMemorySessionStore,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        control_stream: &verlet_history::EventStreamId,
         fields: serde_json::Value,
-    ) -> Vec<crate::EventRecord> {
+    ) -> Vec<verlet_history::EventRecord> {
         let mut payload = serde_json::json!({
             "coupling_id": "std::queue.task",
             "status": "failed",
-            "root_event_id": crate::EventRecordId::new().to_string(),
-            "trigger_event_id": crate::EventRecordId::new().to_string(),
+            "root_event_id": verlet_history::EventRecordId::new().to_string(),
+            "trigger_event_id": verlet_history::EventRecordId::new().to_string(),
             "trigger_stream_id": "thread:test",
             "trigger_sequence": 1,
             "snapshot_id": "snapshot-a",
@@ -4125,16 +4319,18 @@ mod tests {
         store
             .append_events(
                 control_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::CouplingRunFailed,
+                    verlet_history::EventKind::CouplingRunFailed,
                     payload,
-                    crate::EventProvenance {
-                        source_streams: vec![crate::EventStreamId::for_thread(coordinates)],
+                    verlet_history::EventProvenance {
+                        source_streams: vec![verlet_history::EventStreamId::for_thread(
+                            coordinates,
+                        )],
                         discharged_by: Some("coupling:std::queue.task".to_string()),
                         function: Some("op://std-queue-task/run@sha256:test".to_string()),
                         config_hash: Some("sha256:queue-task".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -4143,31 +4339,35 @@ mod tests {
     }
 
     async fn append_schedule_mandate_started(
-        store: &crate::InMemorySessionStore,
-        coordinates: &crate::ThreadCoordinates,
-        control_stream: &crate::EventStreamId,
-        subject: crate::MandateSubject,
+        store: &verlet_history::InMemorySessionStore,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        control_stream: &verlet_history::EventStreamId,
+        subject: crate::kernel::control_decision::MandateSubject,
         max_occurrences: u32,
         input_template: &str,
-    ) -> crate::EventRecord {
+    ) -> verlet_history::EventRecord {
         store
             .append_events(
                 control_stream,
-                vec![crate::NewEventRecord::witnessed(
+                vec![verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
-                    crate::EventKind::MandateStarted,
-                    serde_json::to_value(crate::MandateStartedPayload {
+                    verlet_history::EventKind::MandateStarted,
+                    serde_json::to_value(crate::kernel::control_decision::MandateStartedPayload {
                         subject,
                         mandate_id: "mandate-nightly-summary".to_string(),
                         snapshot_id: "schedule.v1".to_string(),
                         thread_id: Some(coordinates.thread_id.to_string()),
                         max_continuations: None,
                         expires_at_ms: None,
-                        schedule: Some(crate::MandateSchedulePayload::Interval {
-                            every_ms: 60_000,
-                        }),
+                        schedule: Some(
+                            crate::kernel::control_decision::MandateSchedulePayload::Interval {
+                                every_ms: 60_000,
+                            },
+                        ),
                         max_occurrences: Some(max_occurrences),
-                        catch_up: Some(crate::MandateCatchUpPolicy::SkipMissed),
+                        catch_up: Some(
+                            crate::kernel::control_decision::MandateCatchUpPolicy::SkipMissed,
+                        ),
                         input_template: Some(input_template.to_string()),
                     })
                     .unwrap(),
@@ -4180,18 +4380,18 @@ mod tests {
     }
 
     async fn append_timer_fired(
-        store: &crate::InMemorySessionStore,
-        coordinates: &crate::ThreadCoordinates,
-        control_stream: &crate::EventStreamId,
-        mandate_event_id: crate::EventRecordId,
+        store: &verlet_history::InMemorySessionStore,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        control_stream: &verlet_history::EventStreamId,
+        mandate_event_id: verlet_history::EventRecordId,
         occurrence_index: u64,
         scheduled_for: &str,
-        provenance_event_id: crate::EventRecordId,
-    ) -> Vec<crate::EventRecord> {
-        let mut record = crate::NewEventRecord::witnessed(
+        provenance_event_id: verlet_history::EventRecordId,
+    ) -> Vec<verlet_history::EventRecord> {
+        let mut record = verlet_history::NewEventRecord::witnessed(
             coordinates.clone(),
-            crate::EventKind::TimerFired,
-            serde_json::to_value(crate::TimerFiredPayload {
+            verlet_history::EventKind::TimerFired,
+            serde_json::to_value(verlet_history::TimerFiredPayload {
                 mandate_event_id,
                 scheduled_for: scheduled_for.to_string(),
                 occurrence_index,
@@ -4199,10 +4399,10 @@ mod tests {
             })
             .unwrap(),
         );
-        record.provenance = crate::EventProvenance {
+        record.provenance = verlet_history::EventProvenance {
             source_streams: vec![control_stream.clone()],
             source_event_ids: vec![provenance_event_id],
-            ..crate::EventProvenance::default()
+            ..verlet_history::EventProvenance::default()
         };
         store
             .append_events(control_stream, vec![record])
@@ -4211,19 +4411,19 @@ mod tests {
     }
 
     async fn append_tool_call_requested(
-        store: &crate::InMemorySessionStore,
-        coordinates: &crate::ThreadCoordinates,
-        thread_stream: &crate::EventStreamId,
+        store: &verlet_history::InMemorySessionStore,
+        coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+        thread_stream: &verlet_history::EventStreamId,
         call_id: &str,
-    ) -> Vec<crate::EventRecord> {
+    ) -> Vec<verlet_history::EventRecord> {
         store
             .append_events(
                 thread_stream,
-                vec![crate::NewEventRecord::discharged(
+                vec![verlet_history::NewEventRecord::discharged(
                     coordinates.clone(),
-                    crate::EventKind::ToolCallRequested,
+                    verlet_history::EventKind::ToolCallRequested,
                     serde_json::json!({
-                        "schema": crate::EventKind::ToolCallRequested.payload_schema_id(),
+                        "schema": verlet_history::EventKind::ToolCallRequested.payload_schema_id(),
                         "subject": {
                             "turn_id": "turn-1",
                             "call_id": call_id,
@@ -4234,11 +4434,13 @@ mod tests {
                             "cmd": "date",
                         },
                     }),
-                    crate::EventProvenance {
-                        source_streams: vec![crate::EventStreamId::for_thread(coordinates)],
+                    verlet_history::EventProvenance {
+                        source_streams: vec![verlet_history::EventStreamId::for_thread(
+                            coordinates,
+                        )],
                         discharged_by: Some("runtime:provider-loop".to_string()),
                         function: Some("provider_tool_request/v1".to_string()),
-                        ..crate::EventProvenance::default()
+                        ..verlet_history::EventProvenance::default()
                     },
                 )],
             )
@@ -4246,25 +4448,25 @@ mod tests {
             .unwrap()
     }
 
-    fn std_queue_task_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_queue_task_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::queue.task".to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::TurnSubmitted,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::TurnSubmitted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::TurnSubmitted],
+                kinds: vec![verlet_history::EventKind::TurnSubmitted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::TurnWaiting],
+                kinds: vec![verlet_history::EventKind::TurnWaiting],
             },
             function_ref: format!("op://std-queue-task/run@sha256:{}", "a".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-queue-task".to_string(),
                 artifact_hash: "a".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4273,7 +4475,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4282,33 +4484,33 @@ mod tests {
         }
     }
 
-    fn std_queue_completion_callback() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_queue_completion_callback() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::queue.completion_callback".to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::CouplingRunCompleted,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::CouplingRunCompleted,
             trigger_match: [(
                 "coupling_id".to_string(),
                 serde_json::json!("std::queue.task"),
             )]
             .into_iter()
             .collect(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::CouplingRunCompleted],
+                kinds: vec![verlet_history::EventKind::CouplingRunCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::LoopCompleted],
+                kinds: vec![verlet_history::EventKind::LoopCompleted],
             },
             function_ref: format!(
                 "op://std-queue-completion-callback/run@sha256:{}",
                 "b".repeat(64)
             ),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-queue-completion-callback".to_string(),
                 artifact_hash: "b".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4317,7 +4519,7 @@ mod tests {
                 "stream.read:control".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4329,28 +4531,28 @@ mod tests {
         }
     }
 
-    fn std_context_spill_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_context_spill_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::context.spill".to_string(),
-            role: crate::CouplingRole::Projection,
-            trigger_kind: crate::EventKind::ContextCompileCompleted,
+            role: crate::agent::manifest_bind::CouplingRole::Projection,
+            trigger_kind: verlet_history::EventKind::ContextCompileCompleted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::ContextCompileCompleted],
+                kinds: vec![verlet_history::EventKind::ContextCompileCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "derived:context".to_string(),
                 kinds: vec![
-                    crate::EventKind::ContextSummaryCompleted,
-                    crate::EventKind::ContextReadPlanSet,
+                    verlet_history::EventKind::ContextSummaryCompleted,
+                    verlet_history::EventKind::ContextReadPlanSet,
                 ],
             },
             function_ref: format!("op://std-context-spill/run@sha256:{}", "c".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-context-spill".to_string(),
                 artifact_hash: "c".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4359,7 +4561,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:derived:context".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
             },
@@ -4368,25 +4570,25 @@ mod tests {
         }
     }
 
-    fn std_context_truncate_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_context_truncate_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::context.truncate".to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::ContextCompileCompleted,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::ContextCompileCompleted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::ContextCompileCompleted],
+                kinds: vec![verlet_history::EventKind::ContextCompileCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::ContextReadPlanSet],
+                kinds: vec![verlet_history::EventKind::ContextReadPlanSet],
             },
             function_ref: format!("op://std-context-truncate/run@sha256:{}", "d".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-context-truncate".to_string(),
                 artifact_hash: "d".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4395,7 +4597,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4407,31 +4609,31 @@ mod tests {
         }
     }
 
-    fn std_context_summarize_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_context_summarize_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::context.summarize".to_string(),
-            role: crate::CouplingRole::Projection,
-            trigger_kind: crate::EventKind::TurnCompleted,
+            role: crate::agent::manifest_bind::CouplingRole::Projection,
+            trigger_kind: verlet_history::EventKind::TurnCompleted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
                 kinds: vec![
-                    crate::EventKind::SessionEntryAppended,
-                    crate::EventKind::TurnCompleted,
+                    verlet_history::EventKind::SessionEntryAppended,
+                    verlet_history::EventKind::TurnCompleted,
                 ],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "derived:context".to_string(),
                 kinds: vec![
-                    crate::EventKind::ContextSummaryCompleted,
-                    crate::EventKind::ContextReadPlanSet,
+                    verlet_history::EventKind::ContextSummaryCompleted,
+                    verlet_history::EventKind::ContextReadPlanSet,
                 ],
             },
             function_ref: format!("op://std-context-summarize/run@sha256:{}", "e".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-context-summarize".to_string(),
                 artifact_hash: "e".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4440,7 +4642,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:derived:context".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
             },
@@ -4449,25 +4651,25 @@ mod tests {
         }
     }
 
-    fn std_prompt_steer_continuation_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_prompt_steer_continuation_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::prompt.steer".to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::TurnCompleted,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::TurnCompleted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::TurnCompleted],
+                kinds: vec![verlet_history::EventKind::TurnCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::TurnContinueRequested],
+                kinds: vec![verlet_history::EventKind::TurnContinueRequested],
             },
             function_ref: format!("op://std-prompt-steer/run@sha256:{}", "h".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-prompt-steer".to_string(),
                 artifact_hash: "h".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4476,7 +4678,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4491,25 +4693,25 @@ mod tests {
         }
     }
 
-    fn std_prompt_steer_read_plan_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_prompt_steer_read_plan_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::prompt.steer".to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::ApprovalResolved,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::ApprovalResolved,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::ApprovalResolved],
+                kinds: vec![verlet_history::EventKind::ApprovalResolved],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::ContextReadPlanSet],
+                kinds: vec![verlet_history::EventKind::ContextReadPlanSet],
             },
             function_ref: format!("op://std-prompt-steer/run@sha256:{}", "h".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-prompt-steer".to_string(),
                 artifact_hash: "h".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4518,13 +4720,13 @@ mod tests {
                 "stream.read:control".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
             config: serde_json::json!({
                 "action": "set_read_plan",
-                "checkpoint_event_id": crate::EventRecordId::new().to_string(),
+                "checkpoint_event_id": verlet_history::EventRecordId::new().to_string(),
                 "checkpoint_stream_id": "derived:context:instruction-fixture",
                 "event_role": "instruction_checkpoint",
                 "reason": "approved steering instructions"
@@ -4533,30 +4735,30 @@ mod tests {
         }
     }
 
-    fn std_failure_deadletter_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_failure_deadletter_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::failure.deadletter".to_string(),
-            role: crate::CouplingRole::Projection,
-            trigger_kind: crate::EventKind::CouplingRunFailed,
+            role: crate::agent::manifest_bind::CouplingRole::Projection,
+            trigger_kind: verlet_history::EventKind::CouplingRunFailed,
             trigger_match: [("status".to_string(), serde_json::json!("failed"))]
                 .into_iter()
                 .collect(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::CouplingRunFailed,
-                    crate::EventKind::LoopBlocked,
+                    verlet_history::EventKind::CouplingRunFailed,
+                    verlet_history::EventKind::LoopBlocked,
                 ],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "derived:deadletter".to_string(),
-                kinds: vec![crate::EventKind::CouplingRunFailed],
+                kinds: vec![verlet_history::EventKind::CouplingRunFailed],
             },
             function_ref: format!("op://std-failure-deadletter/run@sha256:{}", "d".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-failure-deadletter".to_string(),
                 artifact_hash: "d".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4565,7 +4767,7 @@ mod tests {
                 "stream.read:control".to_string(),
                 "stream.write:derived:deadletter".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4576,30 +4778,32 @@ mod tests {
         }
     }
 
-    fn std_retry_with_budget_coupling(max_attempts: u32) -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_retry_with_budget_coupling(
+        max_attempts: u32,
+    ) -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::retry.with_budget".to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::CouplingRunFailed,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::CouplingRunFailed,
             trigger_match: [("status".to_string(), serde_json::json!("failed"))]
                 .into_iter()
                 .collect(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "control".to_string(),
-                kinds: vec![crate::EventKind::CouplingRunFailed],
+                kinds: vec![verlet_history::EventKind::CouplingRunFailed],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::TurnContinueRequested,
-                    crate::EventKind::LoopBudgetExhausted,
+                    verlet_history::EventKind::TurnContinueRequested,
+                    verlet_history::EventKind::LoopBudgetExhausted,
                 ],
             },
             function_ref: format!("op://std-retry-with-budget/run@sha256:{}", "e".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-retry-with-budget".to_string(),
                 artifact_hash: "e".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4608,7 +4812,7 @@ mod tests {
                 "stream.read:control".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4623,32 +4827,32 @@ mod tests {
         }
     }
 
-    fn std_schedule_cron_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_schedule_cron_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::schedule.cron".to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::TimerFired,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::TimerFired,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::MandateStarted,
-                    crate::EventKind::MandateRevoked,
-                    crate::EventKind::TimerFired,
+                    verlet_history::EventKind::MandateStarted,
+                    verlet_history::EventKind::MandateRevoked,
+                    verlet_history::EventKind::TimerFired,
                 ],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::TurnContinueRequested,
-                    crate::EventKind::LoopBudgetExhausted,
+                    verlet_history::EventKind::TurnContinueRequested,
+                    verlet_history::EventKind::LoopBudgetExhausted,
                 ],
             },
             function_ref: format!("op://std-schedule-cron/run@sha256:{}", "s".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-schedule-cron".to_string(),
                 artifact_hash: "s".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4657,7 +4861,7 @@ mod tests {
                 "stream.read:control".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4671,34 +4875,38 @@ mod tests {
         }
     }
 
-    fn std_schedule_cron_timer_coupling(config: serde_json::Value) -> crate::BoundCoupling {
+    fn std_schedule_cron_timer_coupling(
+        config: serde_json::Value,
+    ) -> crate::agent::manifest_bind::BoundCoupling {
         let mut coupling = std_schedule_cron_coupling();
         coupling.config = config;
         coupling
     }
 
-    fn std_supervisor_spawn_coupling(config: serde_json::Value) -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_supervisor_spawn_coupling(
+        config: serde_json::Value,
+    ) -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID.to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::TurnSubmitted,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::TurnSubmitted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::TurnSubmitted],
+                kinds: vec![verlet_history::EventKind::TurnSubmitted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::ThreadSpawnRequested,
-                    crate::EventKind::TurnWaiting,
+                    verlet_history::EventKind::ThreadSpawnRequested,
+                    verlet_history::EventKind::TurnWaiting,
                 ],
             },
             function_ref: format!("op://std-supervisor-spawn/run@sha256:{}", "i".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-supervisor-spawn".to_string(),
                 artifact_hash: "i".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4708,7 +4916,7 @@ mod tests {
                 "stream.write:control".to_string(),
                 "threads.spawn".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
             },
@@ -4717,32 +4925,32 @@ mod tests {
         }
     }
 
-    fn std_supervisor_child_completion_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_supervisor_child_completion_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: crate::kernel::stdlib_couplings::STD_SUPERVISOR_CHILD_COMPLETION_TEMPLATE_ID
                 .to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::TurnCompleted,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::TurnCompleted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::TurnCompleted],
+                kinds: vec![verlet_history::EventKind::TurnCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::TurnContinueRequested,
-                    crate::EventKind::LoopCompleted,
+                    verlet_history::EventKind::TurnContinueRequested,
+                    verlet_history::EventKind::LoopCompleted,
                 ],
             },
             function_ref: format!(
                 "op://std-supervisor-child-completion/run@sha256:{}",
                 "j".repeat(64)
             ),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-supervisor-child-completion".to_string(),
                 artifact_hash: "j".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4751,7 +4959,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4763,31 +4971,33 @@ mod tests {
         }
     }
 
-    fn std_permission_tool_gate_coupling(config: serde_json::Value) -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_permission_tool_gate_coupling(
+        config: serde_json::Value,
+    ) -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::permission.tool_gate".to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::ToolCallRequested,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::ToolCallRequested,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::ToolCallRequested],
+                kinds: vec![verlet_history::EventKind::ToolCallRequested],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::ToolCallDecision,
-                    crate::EventKind::ToolCallSuspended,
+                    verlet_history::EventKind::ToolCallDecision,
+                    verlet_history::EventKind::ToolCallSuspended,
                 ],
             },
             function_ref: format!(
                 "op://std-permission-tool-gate/run@sha256:{}",
                 "p".repeat(64)
             ),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-permission-tool-gate".to_string(),
                 artifact_hash: "p".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4796,7 +5006,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4805,32 +5015,34 @@ mod tests {
         }
     }
 
-    fn std_permission_approval_gate_coupling(config: serde_json::Value) -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_permission_approval_gate_coupling(
+        config: serde_json::Value,
+    ) -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: crate::kernel::stdlib_couplings::STD_PERMISSION_APPROVAL_GATE_TEMPLATE_ID
                 .to_string(),
-            role: crate::CouplingRole::Controller,
-            trigger_kind: crate::EventKind::ToolCallRequested,
+            role: crate::agent::manifest_bind::CouplingRole::Controller,
+            trigger_kind: verlet_history::EventKind::ToolCallRequested,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
-                kinds: vec![crate::EventKind::ToolCallRequested],
+                kinds: vec![verlet_history::EventKind::ToolCallRequested],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "control".to_string(),
                 kinds: vec![
-                    crate::EventKind::ApprovalRequested,
-                    crate::EventKind::ToolCallSuspended,
+                    verlet_history::EventKind::ApprovalRequested,
+                    verlet_history::EventKind::ToolCallSuspended,
                 ],
             },
             function_ref: format!(
                 "op://std-permission-approval-gate/run@sha256:{}",
                 "q".repeat(64)
             ),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-permission-approval-gate".to_string(),
                 artifact_hash: "q".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4839,7 +5051,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:control".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
             },
@@ -4848,28 +5060,28 @@ mod tests {
         }
     }
 
-    fn std_memory_extract_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_memory_extract_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::memory.extract".to_string(),
-            role: crate::CouplingRole::Projection,
-            trigger_kind: crate::EventKind::TurnCompleted,
+            role: crate::agent::manifest_bind::CouplingRole::Projection,
+            trigger_kind: verlet_history::EventKind::TurnCompleted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "thread".to_string(),
                 kinds: vec![
-                    crate::EventKind::TurnCompleted,
-                    crate::EventKind::ToolCallCompleted,
+                    verlet_history::EventKind::TurnCompleted,
+                    verlet_history::EventKind::ToolCallCompleted,
                 ],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "derived:memory".to_string(),
-                kinds: vec![crate::EventKind::ContextSummaryCompleted],
+                kinds: vec![verlet_history::EventKind::ContextSummaryCompleted],
             },
             function_ref: format!("op://std-memory-extract/run@sha256:{}", "f".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-memory-extract".to_string(),
                 artifact_hash: "f".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4878,7 +5090,7 @@ mod tests {
                 "stream.read:thread".to_string(),
                 "stream.write:derived:memory".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },
@@ -4887,25 +5099,25 @@ mod tests {
         }
     }
 
-    fn std_memory_recall_coupling() -> crate::BoundCoupling {
-        crate::BoundCoupling {
+    fn std_memory_recall_coupling() -> crate::agent::manifest_bind::BoundCoupling {
+        crate::agent::manifest_bind::BoundCoupling {
             id: "std::memory.recall".to_string(),
-            role: crate::CouplingRole::Projection,
-            trigger_kind: crate::EventKind::TurnSubmitted,
+            role: crate::agent::manifest_bind::CouplingRole::Projection,
+            trigger_kind: verlet_history::EventKind::TurnSubmitted,
             trigger_match: Default::default(),
-            trigger_quota: crate::AgentManifestCouplingQuota::default(),
-            source_selectors: vec![crate::BoundCouplingSelector {
+            trigger_quota: verlet_agent::manifest_schema::AgentManifestCouplingQuota::default(),
+            source_selectors: vec![crate::agent::manifest_bind::BoundCouplingSelector {
                 stream: "derived:memory".to_string(),
-                kinds: vec![crate::EventKind::ContextSummaryCompleted],
+                kinds: vec![verlet_history::EventKind::ContextSummaryCompleted],
                 scope: None,
                 since: None,
             }],
-            sink: crate::BoundCouplingSink {
+            sink: crate::agent::manifest_bind::BoundCouplingSink {
                 stream: "derived:context".to_string(),
-                kinds: vec![crate::EventKind::ContextReadPlanSet],
+                kinds: vec![verlet_history::EventKind::ContextReadPlanSet],
             },
             function_ref: format!("op://std-memory-recall/run@sha256:{}", "f".repeat(64)),
-            function: crate::BoundCouplingFunction {
+            function: crate::agent::manifest_bind::BoundCouplingFunction {
                 name: "std-memory-recall".to_string(),
                 artifact_hash: "f".repeat(64),
                 operation_name: Some("run".to_string()),
@@ -4914,7 +5126,7 @@ mod tests {
                 "stream.read:derived:memory".to_string(),
                 "stream.write:derived:context".to_string(),
             ],
-            budget: crate::AgentManifestCouplingBudget {
+            budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
             },

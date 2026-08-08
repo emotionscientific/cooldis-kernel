@@ -1,5 +1,5 @@
-use crate::EventStore as _;
 use crate::agent::agent_tool_router::AgentKernelToolProvider as _;
+use verlet_history::EventStore as _;
 
 struct RecordingCaller {
     calls: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
@@ -12,7 +12,9 @@ impl crate::agent::tool_universe::ToolUniverseCaller for RecordingCaller {
         &self,
         _tool_name: &str,
         arguments: serde_json::Value,
-    ) -> crate::VerletResult<crate::agent::tool_universe::ToolUniverseCallOutput> {
+    ) -> crate::kernel::runtime_host::VerletResult<
+        crate::agent::tool_universe::ToolUniverseCallOutput,
+    > {
         self.calls.lock().unwrap().push(arguments);
         Ok(self.output.clone())
     }
@@ -27,7 +29,8 @@ impl crate::agent::tool_universe::ToolUniverseDiscoverer for StaticDiscoverer {
     async fn discover(
         &self,
         _server_ref: &str,
-    ) -> crate::VerletResult<crate::agent::tool_universe::ToolUniverseDiscovery> {
+    ) -> crate::kernel::runtime_host::VerletResult<crate::agent::tool_universe::ToolUniverseDiscovery>
+    {
         Ok(self.discovery.clone())
     }
 }
@@ -35,7 +38,7 @@ impl crate::agent::tool_universe::ToolUniverseDiscoverer for StaticDiscoverer {
 #[test]
 fn pin_refs_parse_and_fail_closed() {
     let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let pin = verlet_agent::PinnedToolRef::parse(&format!(
+    let pin = verlet_agent::tool_ref::PinnedToolRef::parse(&format!(
         "mcptool://arcade/GoogleSearch.search@sha256:{hash}"
     ))
     .unwrap();
@@ -56,7 +59,7 @@ fn pin_refs_parse_and_fail_closed() {
         &format!("mcptool:///tool@sha256:{hash}"),
     ] {
         assert!(
-            verlet_agent::PinnedToolRef::parse(bad).is_err(),
+            verlet_agent::tool_ref::PinnedToolRef::parse(bad).is_err(),
             "{bad} should fail"
         );
     }
@@ -64,7 +67,7 @@ fn pin_refs_parse_and_fail_closed() {
 
 #[test]
 fn witnessed_contracts_are_schema_hash_addressed() {
-    let definition = crate::ToolDefinition::new(
+    let definition = verlet_provider::ToolDefinition::new(
         "GoogleSearch.search",
         "Search the web.",
         serde_json::json!({
@@ -85,13 +88,13 @@ fn witnessed_contracts_are_schema_hash_addressed() {
         .schema_hash
         .trim_start_matches("sha256:")
         .to_string();
-    let pin = verlet_agent::PinnedToolRef::parse(&format!(
+    let pin = verlet_agent::tool_ref::PinnedToolRef::parse(&format!(
         "mcptool://arcade/GoogleSearch.search@sha256:{hex}"
     ))
     .unwrap();
     assert!(contract.matches_pin(&pin));
 
-    let drifted = verlet_agent::PinnedToolRef {
+    let drifted = verlet_agent::tool_ref::PinnedToolRef {
         schema_hash: format!("sha256:{}", "f".repeat(64)),
         ..pin
     };
@@ -131,17 +134,21 @@ fn argument_fingerprint_is_stable_across_object_key_order() {
 #[test]
 fn discovery_filter_restamps_the_hash() {
     let tools = vec![
-        crate::agent::tool_universe::WitnessedToolContract::witness(&crate::ToolDefinition::new(
-            "a.one",
-            "first",
-            serde_json::json!({"type": "object"}),
-        ))
+        crate::agent::tool_universe::WitnessedToolContract::witness(
+            &verlet_provider::ToolDefinition::new(
+                "a.one",
+                "first",
+                serde_json::json!({"type": "object"}),
+            ),
+        )
         .unwrap(),
-        crate::agent::tool_universe::WitnessedToolContract::witness(&crate::ToolDefinition::new(
-            "b.two",
-            "second",
-            serde_json::json!({"type": "object"}),
-        ))
+        crate::agent::tool_universe::WitnessedToolContract::witness(
+            &verlet_provider::ToolDefinition::new(
+                "b.two",
+                "second",
+                serde_json::json!({"type": "object"}),
+            ),
+        )
         .unwrap(),
     ];
     let discovery =
@@ -411,10 +418,11 @@ async fn protocol_tool_import_grant_lapse_fails_before_the_live_caller() {
         }),
         None,
     );
-    mounted.binding.grant_expiries = vec![crate::AgentManifestGrantExpiry {
-        capability: "net.localhost".to_string(),
-        expires_at: "1970-01-01T00:00:01Z".to_string(),
-    }];
+    mounted.binding.grant_expiries =
+        vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
+            capability: "net.localhost".to_string(),
+            expires_at: "1970-01-01T00:00:01Z".to_string(),
+        }];
     let surface = crate::agent::tool_universe::ToolUniverseSearchSurface::new(vec![mounted]);
 
     let err = surface
@@ -459,10 +467,11 @@ async fn cancellable_protocol_tool_call_honors_the_injected_expiry_time() {
         }),
         None,
     );
-    mounted.binding.grant_expiries = vec![crate::AgentManifestGrantExpiry {
-        capability: "net.localhost".to_string(),
-        expires_at: "2050-01-01T00:00:00Z".to_string(),
-    }];
+    mounted.binding.grant_expiries =
+        vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
+            capability: "net.localhost".to_string(),
+            expires_at: "2050-01-01T00:00:00Z".to_string(),
+        }];
     let surface = crate::agent::tool_universe::ToolUniverseSearchSurface::new(vec![mounted]);
 
     let err = surface
@@ -476,7 +485,7 @@ async fn cancellable_protocol_tool_call_honors_the_injected_expiry_time() {
                 }),
                 turn_context: None,
             },
-            crate::ToolInvocationCancellation::never(),
+            crate::agent::agent_tool_router::ToolInvocationCancellation::never(),
             2_524_608_000_001,
         )
         .await
@@ -530,7 +539,7 @@ async fn tool_call_validation_failure_does_not_touch_the_universe() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult { is_error: true, .. }
+        verlet_history::CanonicalMessage::ToolResult { is_error: true, .. }
     ));
     assert!(tool_text(&result).contains("missing required"));
     assert!(calls.lock().unwrap().is_empty());
@@ -559,20 +568,18 @@ async fn validation_failure_records_error_receipt_when_context_is_available() {
         }),
         None,
     );
-    let store = std::sync::Arc::new(crate::InMemorySessionStore::new());
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
     let surface = crate::agent::tool_universe::ToolUniverseSearchSurface {
         universes: vec![mounted],
         event_store: Some(store.clone()),
         live_discoverer: None,
     };
-    let turn_context = crate::TurnContext::new(
-        crate::ThreadContext::root(crate::ThreadCoordinates::new(
-            "tenant_a",
-            "user_1",
-            "session_1",
-        )),
+    let turn_context = crate::kernel::runtime_host::turn::TurnContext::new(
+        verlet_runtime_contracts::ThreadContext::root(
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+        ),
         "turn_1",
-        &crate::TurnInput::text("call it"),
+        &crate::kernel::runtime_host::turn::TurnInput::text("call it"),
         tokio_util::sync::CancellationToken::new(),
     )
     .snapshot();
@@ -596,15 +603,18 @@ async fn validation_failure_records_error_receipt_when_context_is_available() {
     assert!(calls.lock().unwrap().is_empty());
     let events = store
         .read_events(
-            &crate::EventStreamId::for_thread(&turn_context.coordinates),
+            &verlet_history::EventStreamId::for_thread(&turn_context.coordinates),
             None,
         )
         .await
         .unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].kind, crate::EventKind::ToolUniverseCallCompleted);
+    assert_eq!(
+        events[0].kind,
+        verlet_history::EventKind::ToolUniverseCallCompleted
+    );
     assert_eq!(events[0].payload["is_error"].as_bool(), Some(true));
-    let output_hash = crate::agent::contracts::sha256_hex(content.as_bytes());
+    let output_hash = verlet_agent::contracts::sha256_hex(content.as_bytes());
     assert_eq!(
         events[0].payload["output_hash"].as_str(),
         Some(output_hash.as_str())
@@ -678,7 +688,7 @@ async fn pinned_direct_row_rechecks_live_schema_hash_before_calling() {
         }),
     );
     let hash = pinned.schema_hash.trim_start_matches("sha256:");
-    let pin = verlet_agent::PinnedToolRef::parse(&format!(
+    let pin = verlet_agent::tool_ref::PinnedToolRef::parse(&format!(
         "mcptool://arcade/verlet_mcp_echo@sha256:{hash}"
     ))
     .unwrap();
@@ -722,7 +732,7 @@ async fn pinned_direct_row_rechecks_live_schema_hash_before_calling() {
 
     assert!(matches!(
         result,
-        crate::CanonicalMessage::ToolResult { is_error: true, .. }
+        verlet_history::CanonicalMessage::ToolResult { is_error: true, .. }
     ));
     assert!(tool_text(&result).contains("drifted"));
     assert!(calls.lock().unwrap().is_empty());
@@ -749,7 +759,7 @@ async fn pinned_direct_row_rechecks_live_schema_before_argument_validation() {
         }),
     );
     let hash = pinned.schema_hash.trim_start_matches("sha256:");
-    let pin = verlet_agent::PinnedToolRef::parse(&format!(
+    let pin = verlet_agent::tool_ref::PinnedToolRef::parse(&format!(
         "mcptool://arcade/verlet_mcp_echo@sha256:{hash}"
     ))
     .unwrap();
@@ -817,7 +827,7 @@ async fn pinned_direct_row_refuses_binding_schema_drift_before_live_call() {
         }),
     );
     let hash = pinned.schema_hash.trim_start_matches("sha256:");
-    let pin = verlet_agent::PinnedToolRef::parse(&format!(
+    let pin = verlet_agent::tool_ref::PinnedToolRef::parse(&format!(
         "mcptool://arcade/verlet_mcp_echo@sha256:{hash}"
     ))
     .unwrap();
@@ -866,11 +876,13 @@ fn contract(
     tool_name: &str,
     input_schema: serde_json::Value,
 ) -> crate::agent::tool_universe::WitnessedToolContract {
-    crate::agent::tool_universe::WitnessedToolContract::witness(&crate::ToolDefinition::new(
-        tool_name,
-        format!("Description for {tool_name}."),
-        input_schema,
-    ))
+    crate::agent::tool_universe::WitnessedToolContract::witness(
+        &verlet_provider::ToolDefinition::new(
+            tool_name,
+            format!("Description for {tool_name}."),
+            input_schema,
+        ),
+    )
     .unwrap()
 }
 
@@ -878,13 +890,13 @@ fn mounted_universe(
     server_ref: &str,
     tools: Vec<crate::agent::tool_universe::WitnessedToolContract>,
     caller: std::sync::Arc<dyn crate::agent::tool_universe::ToolUniverseCaller>,
-    pin: Option<verlet_agent::PinnedToolRef>,
+    pin: Option<verlet_agent::tool_ref::PinnedToolRef>,
 ) -> crate::agent::tool_universe::MountedToolUniverse {
     crate::agent::tool_universe::MountedToolUniverse {
         binding: crate::agent::tool_universe::ToolUniverseBinding {
             import_id: server_ref.trim_start_matches("mcp://").to_string(),
             server_ref: server_ref.to_string(),
-            effect_class: crate::EffectClass::AtMostOnce,
+            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             include_tools: None,
             pin,
             grant_expiries: Vec::new(),
@@ -897,12 +909,12 @@ fn mounted_universe(
     }
 }
 
-fn tool_text(message: &crate::CanonicalMessage) -> String {
+fn tool_text(message: &verlet_history::CanonicalMessage) -> String {
     match message {
-        crate::CanonicalMessage::ToolResult { content, .. } => content
+        verlet_history::CanonicalMessage::ToolResult { content, .. } => content
             .iter()
             .filter_map(|content| match content {
-                crate::CanonicalContent::Text { text, .. } => Some(text.as_str()),
+                verlet_history::CanonicalContent::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()

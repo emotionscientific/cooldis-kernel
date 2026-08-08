@@ -44,7 +44,9 @@ impl LocalBlobRegistry {
         name: Option<&str>,
         source_path: Option<std::path::PathBuf>,
     ) -> crate::VerletResult<PublishedBlobRecord> {
-        let name = name.map(crate::validate_record_name).transpose()?;
+        let name = name
+            .map(crate::operation_store::validate_record_name)
+            .transpose()?;
         let hash = self.artifacts.put(&bytes)?;
         let record = PublishedBlobRecord {
             schema_version: BLOB_RECORD_SCHEMA_VERSION,
@@ -126,7 +128,7 @@ impl LocalBlobRegistry {
     }
 
     pub fn named_record_path(&self, name: &str) -> crate::VerletResult<std::path::PathBuf> {
-        let name = crate::validate_record_name(name)?;
+        let name = crate::operation_store::validate_record_name(name)?;
         Ok(self.root.join("names").join(format!("{name}.json")))
     }
 
@@ -191,7 +193,7 @@ impl PublishedBlobRecord {
             )));
         }
         if let Some(name) = &self.name {
-            crate::validate_record_name(name)?;
+            crate::operation_store::validate_record_name(name)?;
         }
         validate_blob_hash(&self.artifact_hash)?;
         let expected_ref = blob_ref_uri(&self.artifact_hash);
@@ -223,7 +225,7 @@ impl BlobArtifactStore {
     }
 
     fn put(&self, bytes: &[u8]) -> crate::VerletResult<String> {
-        let hash = crate::wasm_sha256(bytes);
+        let hash = crate::operation_store::wasm_sha256(bytes);
         let path = self.artifact_path(&hash)?;
         if path.exists() {
             let existing = std::fs::read(&path).map_err(|err| {
@@ -232,7 +234,7 @@ impl BlobArtifactStore {
                     path.display()
                 ))
             })?;
-            if crate::wasm_sha256(&existing) == hash {
+            if crate::operation_store::wasm_sha256(&existing) == hash {
                 return Ok(hash);
             }
             std::fs::remove_file(&path).map_err(|err| {
@@ -304,7 +306,7 @@ impl BlobArtifactStore {
                 path.display()
             ))
         })?;
-        let actual = crate::wasm_sha256(&bytes);
+        let actual = crate::operation_store::wasm_sha256(&bytes);
         if actual != hash {
             return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "blob artifact {} hash mismatch: expected {hash}, got {actual}",

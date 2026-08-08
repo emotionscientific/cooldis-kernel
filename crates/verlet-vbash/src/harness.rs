@@ -9,7 +9,7 @@ pub trait VbashOperationRegistry: Send + Sync + 'static {
         registered_name: &str,
         operation_name: &str,
         input: Vec<u8>,
-    ) -> Result<verlet_process::VirtualCommandOutput, String>;
+    ) -> Result<verlet_process::execution::VirtualCommandOutput, String>;
 }
 
 #[derive(Clone)]
@@ -25,7 +25,8 @@ pub struct BashkitExecutionConfig {
     pub workspace_vfs: Option<std::sync::Arc<verlet_vfs::VerletVfs>>,
     pub capability_grants: std::collections::BTreeSet<String>,
     pub execution_policy: crate::BashExecutionPolicy,
-    pub external_executor: Option<std::sync::Arc<dyn verlet_process::ExternalCommandExecutor>>,
+    pub external_executor:
+        Option<std::sync::Arc<dyn verlet_process::execution::ExternalCommandExecutor>>,
 }
 
 impl std::fmt::Debug for BashkitExecutionConfig {
@@ -169,7 +170,7 @@ impl BashkitExecutionConfig {
 
     pub fn with_external_executor(
         mut self,
-        executor: std::sync::Arc<dyn verlet_process::ExternalCommandExecutor>,
+        executor: std::sync::Arc<dyn verlet_process::execution::ExternalCommandExecutor>,
     ) -> Self {
         self.external_executor = Some(executor);
         self
@@ -194,7 +195,8 @@ pub struct BashkitExecutionHarness {
     cwd: std::path::PathBuf,
     execution_timeout: std::time::Duration,
     execution_policy: crate::BashExecutionPolicy,
-    external_executor: Option<std::sync::Arc<dyn verlet_process::ExternalCommandExecutor>>,
+    external_executor:
+        Option<std::sync::Arc<dyn verlet_process::execution::ExternalCommandExecutor>>,
     max_output_bytes: usize,
 }
 
@@ -212,18 +214,18 @@ impl BashkitLiveBackend {
 }
 
 #[async_trait::async_trait]
-impl verlet_process::LiveProcessBackend for BashkitLiveBackend {
-    fn backend_kind(&self) -> verlet_process::VerletProcessBackend {
-        verlet_process::VerletProcessBackend::VirtualBash
+impl verlet_process::live::LiveProcessBackend for BashkitLiveBackend {
+    fn backend_kind(&self) -> verlet_process::process::VerletProcessBackend {
+        verlet_process::process::VerletProcessBackend::VirtualBash
     }
 
     async fn start(
         &self,
-        request: verlet_process::LiveProcessStartRequest,
-        process: verlet_process::VerletProcessHandle,
+        request: verlet_process::live::LiveProcessStartRequest,
+        process: verlet_process::process::VerletProcessHandle,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> verlet_process::VerletProcessResult<verlet_process::LiveProcessSpawn> {
-        let verlet_process::LiveProcessInvocation::VirtualBashScript { script } =
+    ) -> verlet_process::VerletProcessResult<verlet_process::live::LiveProcessSpawn> {
+        let verlet_process::live::LiveProcessInvocation::VirtualBashScript { script } =
             request.invocation
         else {
             return Err(verlet_process::VerletProcessError::Execution(
@@ -233,7 +235,7 @@ impl verlet_process::LiveProcessBackend for BashkitLiveBackend {
         let mut config = self.config.clone();
         config.execution_timeout = request.deadline.timeout;
         config.max_output_bytes = request.output_cap_bytes;
-        process.record(verlet_process::VerletProcessEventKind::Started {
+        process.record(verlet_process::process::VerletProcessEventKind::Started {
             command: Some(script.clone()),
         });
         let join = tokio::spawn(async move {
@@ -241,46 +243,53 @@ impl verlet_process::LiveProcessBackend for BashkitLiveBackend {
                 .await
                 .map_err(|err| verlet_process::VerletProcessError::Execution(err.to_string()))?;
             let execution_cancellation = cancellation.clone();
-            let result: crate::VerletVirtualBashResult<verlet_process::VerletProcessHandle> =
-                harness
-                    .execute_process_cancellable(&script, execution_cancellation)
-                    .await;
+            let result: crate::VerletVirtualBashResult<
+                verlet_process::process::VerletProcessHandle,
+            > = harness
+                .execute_process_cancellable(&script, execution_cancellation)
+                .await;
             let cancelled = cancellation.is_cancelled();
             match result {
                 Ok(handle) => {
                     let output = handle.output();
                     let exit_code = output.exit_code().unwrap_or(1);
                     if !output.stdout.is_empty() {
-                        process.record(verlet_process::VerletProcessEventKind::Stdout {
+                        process.record(verlet_process::process::VerletProcessEventKind::Stdout {
                             bytes: output.stdout,
                         });
                     }
                     if !output.stderr.is_empty() {
-                        process.record(verlet_process::VerletProcessEventKind::Stderr {
+                        process.record(verlet_process::process::VerletProcessEventKind::Stderr {
                             bytes: output.stderr,
                         });
                     }
                     if output.stdout_truncated || output.stderr_truncated {
-                        process.record(verlet_process::VerletProcessEventKind::OutputTruncated {
-                            stdout: output.stdout_truncated,
-                            stderr: output.stderr_truncated,
-                        });
+                        process.record(
+                            verlet_process::process::VerletProcessEventKind::OutputTruncated {
+                                stdout: output.stdout_truncated,
+                                stderr: output.stderr_truncated,
+                            },
+                        );
                     }
                     process.record(match (cancelled, exit_code) {
-                        (true, _) => verlet_process::VerletProcessEventKind::Cancelled {
+                        (true, _) => verlet_process::process::VerletProcessEventKind::Cancelled {
                             reason: "virtual bash execution cancelled".to_string(),
                         },
-                        (false, 124) => verlet_process::VerletProcessEventKind::TimedOut {
+                        (false, 124) => verlet_process::process::VerletProcessEventKind::TimedOut {
                             timeout_ms: Some(request.deadline.timeout_ms()),
                             message: "virtual bash execution timed out".to_string(),
                         },
-                        (false, code) => verlet_process::VerletProcessEventKind::Completed {
-                            status: verlet_process::VerletProcessExitStatus::exited(code),
-                        },
+                        (false, code) => {
+                            verlet_process::process::VerletProcessEventKind::Completed {
+                                status: verlet_process::process::VerletProcessExitStatus::exited(
+                                    code,
+                                ),
+                            }
+                        }
                     });
                 }
                 Err(err) => {
-                    process.record(verlet_process::VerletProcessEventKind::Failed {
+                    process.record(verlet_process::process::VerletProcessEventKind::Failed {
                         code: "virtual_bash_failed".to_string(),
                         message: err.to_string(),
                     });
@@ -288,7 +297,7 @@ impl verlet_process::LiveProcessBackend for BashkitLiveBackend {
             }
             Ok(())
         });
-        Ok(verlet_process::LiveProcessSpawn { stdin: None, join })
+        Ok(verlet_process::live::LiveProcessSpawn { stdin: None, join })
     }
 }
 
@@ -414,7 +423,7 @@ impl BashkitExecutionHarness {
     pub async fn execute(
         &mut self,
         script: &str,
-    ) -> crate::VerletVirtualBashResult<verlet_process::VirtualCommandOutput> {
+    ) -> crate::VerletVirtualBashResult<verlet_process::execution::VirtualCommandOutput> {
         Ok(crate::enforce_output_limit(
             self.execute_full_output(script).await?,
             self.max_output_bytes,
@@ -424,9 +433,9 @@ impl BashkitExecutionHarness {
     pub async fn execute_full_output(
         &mut self,
         script: &str,
-    ) -> crate::VerletVirtualBashResult<verlet_process::VirtualCommandOutput> {
+    ) -> crate::VerletVirtualBashResult<verlet_process::execution::VirtualCommandOutput> {
         let process = self.execute_process(script).await?;
-        Ok(verlet_process::VirtualCommandOutput::from(
+        Ok(verlet_process::execution::VirtualCommandOutput::from(
             &process.output(),
         ))
     }
@@ -438,11 +447,11 @@ impl BashkitExecutionHarness {
         &mut self,
         script: &str,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> crate::VerletVirtualBashResult<verlet_process::VirtualCommandOutput> {
+    ) -> crate::VerletVirtualBashResult<verlet_process::execution::VirtualCommandOutput> {
         let process = self
             .execute_process_cancellable(script, cancellation)
             .await?;
-        Ok(verlet_process::VirtualCommandOutput::from(
+        Ok(verlet_process::execution::VirtualCommandOutput::from(
             &process.output(),
         ))
     }
@@ -450,7 +459,7 @@ impl BashkitExecutionHarness {
     pub async fn execute_process(
         &mut self,
         script: &str,
-    ) -> crate::VerletVirtualBashResult<verlet_process::VerletProcessHandle> {
+    ) -> crate::VerletVirtualBashResult<verlet_process::process::VerletProcessHandle> {
         self.execute_process_inner(script, None).await
     }
 
@@ -458,7 +467,7 @@ impl BashkitExecutionHarness {
         &mut self,
         script: &str,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> crate::VerletVirtualBashResult<verlet_process::VerletProcessHandle> {
+    ) -> crate::VerletVirtualBashResult<verlet_process::process::VerletProcessHandle> {
         let cancellation_flag = self.cancellation_flag();
         let cancellation_wait = cancellation.cancelled();
         let execution = self.execute_process_inner(script, Some(cancellation.clone()));
@@ -477,10 +486,11 @@ impl BashkitExecutionHarness {
         &mut self,
         script: &str,
         cancellation: Option<tokio_util::sync::CancellationToken>,
-    ) -> crate::VerletVirtualBashResult<verlet_process::VerletProcessHandle> {
+    ) -> crate::VerletVirtualBashResult<verlet_process::process::VerletProcessHandle> {
         self.cancellation
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        let deadline = verlet_process::ExecutionDeadline::from_now(self.execution_timeout);
+        let deadline =
+            verlet_process::execution::ExecutionDeadline::from_now(self.execution_timeout);
         match self.execution_policy.routing.default_route {
             crate::CommandRoute::VirtualBash => {
                 if let Some(shell_commands) = self.operation_shell_commands.as_mut() {
@@ -497,9 +507,11 @@ impl BashkitExecutionHarness {
                     .map(crate::virtual_command_output_from_exec_result)
                     .map_err(execution_error)?;
                 self.vfs.flush().await.map_err(execution_error)?;
-                Ok(verlet_process::VerletProcessHandle::from_virtual_command(
-                    script, output,
-                ))
+                Ok(
+                    verlet_process::process::VerletProcessHandle::from_virtual_command(
+                        script, output,
+                    ),
+                )
             }
             crate::CommandRoute::HostBash | crate::CommandRoute::RemoteLinux => {
                 let executor = self.external_executor.clone().ok_or_else(|| {
@@ -507,8 +519,8 @@ impl BashkitExecutionHarness {
                         "external command executor is not configured".to_string(),
                     )
                 })?;
-                let request = verlet_process::ExternalCommandRequest {
-                    invocation: verlet_process::ExternalCommandInvocation::Script(
+                let request = verlet_process::execution::ExternalCommandRequest {
+                    invocation: verlet_process::execution::ExternalCommandInvocation::Script(
                         script.to_string(),
                     ),
                     executor: self
@@ -535,16 +547,20 @@ impl BashkitExecutionHarness {
                     crate::enforce_output_limit(result.output, crate::SPILL_RETENTION_MAX_BYTES);
                 crate::apply_external_file_writes(self.vfs.as_ref(), &result).await?;
                 self.vfs.flush().await.map_err(execution_error)?;
-                Ok(verlet_process::VerletProcessHandle::from_external_command(
-                    &request, result,
-                ))
+                Ok(
+                    verlet_process::process::VerletProcessHandle::from_external_command(
+                        &request, result,
+                    ),
+                )
             }
             crate::CommandRoute::Deny => {
                 let output = crate::deny_output(script);
                 self.vfs.flush().await.map_err(execution_error)?;
-                Ok(verlet_process::VerletProcessHandle::from_virtual_command(
-                    script, output,
-                ))
+                Ok(
+                    verlet_process::process::VerletProcessHandle::from_virtual_command(
+                        script, output,
+                    ),
+                )
             }
         }
     }
@@ -614,7 +630,7 @@ impl bashkit::Builtin for ApplyPatchBuiltin {
             ctx.args.join("\n")
         };
 
-        match crate::apply_patch_to_bashkit(ctx.fs, ctx.cwd, &patch).await {
+        match crate::apply_patch::apply_patch_to_bashkit(ctx.fs, ctx.cwd, &patch).await {
             Ok(summary) => Ok(bashkit::ExecResult::ok(summary)),
             Err(message) => Ok(bashkit::ExecResult::err(
                 format!("apply_patch: {message}\n"),
@@ -806,7 +822,7 @@ impl bashkit::Builtin for ManBuiltin {
 struct ExternalCommandProxyBuiltin {
     command: String,
     route: crate::CommandRoute,
-    executor: Option<std::sync::Arc<dyn verlet_process::ExternalCommandExecutor>>,
+    executor: Option<std::sync::Arc<dyn verlet_process::execution::ExternalCommandExecutor>>,
 }
 
 #[async_trait::async_trait]
@@ -840,13 +856,13 @@ impl bashkit::Builtin for ExternalCommandProxyBuiltin {
             ));
         };
         let deadline = ctx
-            .execution_extension::<verlet_process::ExecutionDeadline>()
+            .execution_extension::<verlet_process::execution::ExecutionDeadline>()
             .cloned()
             .unwrap_or_else(|| {
-                verlet_process::ExecutionDeadline::from_now(std::time::Duration::ZERO)
+                verlet_process::execution::ExecutionDeadline::from_now(std::time::Duration::ZERO)
             });
-        let request = verlet_process::ExternalCommandRequest {
-            invocation: verlet_process::ExternalCommandInvocation::Argv {
+        let request = verlet_process::execution::ExternalCommandRequest {
+            invocation: verlet_process::execution::ExternalCommandInvocation::Argv {
                 command: self.command.clone(),
                 args: ctx.args.to_vec(),
             },
@@ -1194,7 +1210,7 @@ mod tests {
             _registered_name: &str,
             _operation_name: &str,
             _input: Vec<u8>,
-        ) -> Result<verlet_process::VirtualCommandOutput, String> {
+        ) -> Result<verlet_process::execution::VirtualCommandOutput, String> {
             Err("manual test should not invoke operation".to_string())
         }
     }

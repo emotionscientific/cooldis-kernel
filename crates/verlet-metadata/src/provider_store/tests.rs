@@ -1,7 +1,7 @@
-use crate::SecretResolver as _;
 use crate::provider_store::LlmProviderAuthStore as _;
 use crate::provider_store::LlmProviderCatalogStore as _;
 use crate::provider_store::ThreadMetadataStore as _;
+use crate::secret_store::SecretResolver as _;
 
 const RUSQLITE_METADATA_V1: &[u8] =
     include_bytes!("../../tests/fixtures/rusqlite-metadata-v1.sqlite3");
@@ -261,14 +261,19 @@ async fn turso_decodes_rusqlite_created_metadata_v1_fixture() {
     );
     drop(provider_store);
 
-    let secret_store = crate::SqliteSecretStore::open(&db_path).await.unwrap();
+    let secret_store = crate::secret_store::SqliteSecretStore::open(&db_path)
+        .await
+        .unwrap();
     let secret = secret_store
         .resolve_secret("LEGACY_SECRET")
         .await
         .unwrap()
         .expect("legacy secret record should decode");
     assert_eq!(secret.value, "legacy-secret-value");
-    assert_eq!(secret.source_kind, crate::SecretSourceKind::Local);
+    assert_eq!(
+        secret.source_kind,
+        crate::secret_store::SecretSourceKind::Local
+    );
     drop(secret_store);
 
     remove_sqlite_files(&db_path);

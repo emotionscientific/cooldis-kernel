@@ -12,7 +12,7 @@ pub struct VerletMcpServerConfig {
 impl Default for VerletMcpServerConfig {
     fn default() -> Self {
         Self {
-            daemon_socket: crate::default_verlet_daemon_socket_path(),
+            daemon_socket: crate::daemon::daemon_config::default_verlet_daemon_socket_path(),
             request_timeout: std::time::Duration::from_secs(120),
         }
     }
@@ -22,7 +22,7 @@ pub async fn serve_mcp_stdio<R, W>(
     reader: R,
     writer: W,
     config: VerletMcpServerConfig,
-) -> crate::VerletResult<()>
+) -> crate::kernel::runtime_host::VerletResult<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -46,7 +46,9 @@ where
         };
         if let Some(response) = response {
             let payload = serde_json::to_string(&response).map_err(|err| {
-                crate::VerletError::RuntimeFactory(format!("failed to encode MCP response: {err}"))
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "failed to encode MCP response: {err}"
+                ))
             })?;
             writer
                 .write_all(payload.as_bytes())
@@ -66,7 +68,7 @@ struct VerletMcpServer {
     initialized_seen: bool,
     client_info: Option<serde_json::Value>,
     #[cfg(unix)]
-    daemon_client: Option<crate::CodexTuiTestClient<tokio::net::UnixStream>>,
+    daemon_client: Option<crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>>,
 }
 
 impl VerletMcpServer {
@@ -397,13 +399,14 @@ impl VerletMcpServer {
     #[cfg(unix)]
     async fn client(
         &mut self,
-    ) -> Result<&mut crate::CodexTuiTestClient<tokio::net::UnixStream>, String> {
+    ) -> Result<&mut crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>, String>
+    {
         if self.daemon_client.is_none() {
-            let mut client = crate::CodexTuiTestClient::connect_unix(
+            let mut client = crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
                 self.config.daemon_socket.clone(),
-                crate::CodexTuiConnectConfig {
+                crate::adapters::codex_tui::CodexTuiConnectConfig {
                     client_name: "verlet-mcp-server".to_string(),
-                    ..crate::CodexTuiConnectConfig::default()
+                    ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
                 },
             )
             .await
@@ -560,7 +563,7 @@ fn timeout_from_ms(timeout_ms: Option<u64>, default: std::time::Duration) -> std
 }
 
 fn completed_turn_json(
-    completed: crate::CodexTuiCompletedTurn,
+    completed: crate::adapters::codex_tui::CodexTuiCompletedTurn,
     submitted_turn: Option<serde_json::Value>,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -879,8 +882,8 @@ fn array_string_prop(
     )
 }
 
-fn mcp_io_error(err: std::io::Error) -> crate::VerletError {
-    crate::VerletError::RuntimeFactory(format!("MCP stdio I/O failed: {err}"))
+fn mcp_io_error(err: std::io::Error) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!("MCP stdio I/O failed: {err}"))
 }
 
 #[cfg(test)]
