@@ -1,3 +1,4 @@
+#[path = "support/test_mount.rs"]
 mod support;
 
 use verlet::EventStore as _;
