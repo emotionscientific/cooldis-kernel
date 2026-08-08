@@ -1875,6 +1875,55 @@ async fn in_memory_append_events_rejects_partial_batch_without_mutation() {
 }
 
 #[tokio::test]
+async fn in_memory_failed_session_append_leaves_entries_and_lease_epoch_unchanged() {
+    let coordinates = coords("tenant_a", "user_1", "lease-rollback");
+    let store = crate::InMemorySessionStore::new();
+    let higher = store.clone().with_lease_epoch(9);
+    let lower = store.with_lease_epoch(8);
+
+    let error = higher
+        .append_with_provenance(
+            &coordinates,
+            None,
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::assistant(
+                    "test-provider",
+                    crate::ProviderApi::OpenAIResponses,
+                    "test-model",
+                    vec![crate::CanonicalContent::text("must roll back")],
+                    crate::CanonicalStopReason::EndTurn,
+                ),
+            },
+            crate::EventProvenance::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::HistoryError::DischargedWithoutProvenance(_)
+    ));
+    assert!(
+        higher
+            .build_context(&coordinates)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+
+    lower
+        .append(
+            &coordinates,
+            None,
+            crate::SessionEntryKind::Message {
+                message: crate::CanonicalMessage::user_text("lower epoch remains current"),
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn in_memory_append_events_validate_stream_schema_before_mutation() {
     let coordinates = coords("tenant_a", "user_1", "session_1");
     let stream_id = crate::EventStreamId::for_thread(&coordinates);
@@ -1888,7 +1937,9 @@ async fn in_memory_append_events_validate_stream_schema_before_mutation() {
         crate::EventKind::TurnSubmitted,
         serde_json::json!("not-an-object-payload"),
     );
-    let store = crate::InMemorySessionStore::new();
+    let shared = crate::InMemorySessionStore::new();
+    let store = shared.clone().with_lease_epoch(9);
+    let lower = shared.with_lease_epoch(8);
 
     let err = store
         .append_events(&stream_id, vec![valid.clone(), invalid])
@@ -1905,7 +1956,7 @@ async fn in_memory_append_events_validate_stream_schema_before_mutation() {
             .is_empty()
     );
 
-    let appended = store.append_events(&stream_id, vec![valid]).await.unwrap();
+    let appended = lower.append_events(&stream_id, vec![valid]).await.unwrap();
     assert_eq!(appended.len(), 1);
     assert_eq!(appended[0].sequence.get(), 1);
 }

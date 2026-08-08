@@ -772,7 +772,8 @@ pub(crate) async fn run_remote_child(
 
     let local_store = verlet_history_sqlite::SqliteSessionStore::open(app.session_store_path())
         .await
-        .map_err(|error| crate::kernel::runtime_host::VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::kernel::runtime_host::VerletError::History(error.to_string()))?
+        .with_lease_epoch(app.lease_epoch());
     init_child_cursor_schema(local_store.clone()).await?;
     let state_store = std::sync::Arc::new(
         crate::daemon::remote_store::propagator::SqlitePropagationStateStore::new(

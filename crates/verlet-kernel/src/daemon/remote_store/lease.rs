@@ -655,7 +655,7 @@ impl StreamLeaseAuthority for SqliteStreamLeaseAuthority {
                     actual_next_sequence,
                     ..
                 }) => {
-                    transaction.commit().await.map_err(storage_error)?;
+                    transaction.rollback().await.map_err(storage_error)?;
                     return Ok(LeaseFencedAppendOutcome::SequenceFenceConflict {
                         actual_next_sequence: verlet_history::EventSequence::new(
                             actual_next_sequence,

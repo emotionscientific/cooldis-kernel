@@ -11,6 +11,12 @@ The daemon config format is TOML:
 cwd = "."
 runtime_home = ".verlet/runtime"
 state_home = ".verlet/state"
+# One-writer law: every journal append presents this placement epoch, and a
+# daemon below the journal's durable minimum fails closed instead of writing.
+# Provisioning copies the bound epoch from the orchestrator placement stream
+# here whenever it homes or rehomes the daemon. Unplaced single-instance
+# daemons leave this at 0, which keeps the fence table empty.
+lease_epoch = 0
 
 [daemon.runtime.placement]
 # Optional. Absent means local. Keep the daemon default local when root

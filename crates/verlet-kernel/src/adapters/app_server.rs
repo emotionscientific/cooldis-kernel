@@ -138,6 +138,9 @@ pub struct VerletAppServerConfig {
     pub agent_registry_root: std::path::PathBuf,
     pub blob_registry_root: std::path::PathBuf,
     pub skill_registry_root: std::path::PathBuf,
+    /// Placement-lease epoch presented by every journal store handle opened
+    /// by this daemon/app-server instance.
+    pub lease_epoch: u64,
     /// Deployment placement used when a bind surface does not override it.
     pub default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
     /// Host workspace used when a requiring manifest has no bind override.
@@ -184,6 +187,7 @@ impl VerletAppServerConfig {
             agent_registry_root: project_storage_root.join("agents"),
             blob_registry_root: project_storage_root.join("blobs"),
             skill_registry_root: project_storage_root.join("skills"),
+            lease_epoch: 0,
             default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding::default(
             ),
             default_workspace: None,
@@ -493,6 +497,7 @@ struct VerletAppServerInner {
     metadata_store_path: std::path::PathBuf,
     user_metadata_store_path: std::path::PathBuf,
     session_store_path: std::path::PathBuf,
+    lease_epoch: u64,
     metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
     user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
     process_manager: verlet_process::live::AsyncExecutionManager,
@@ -845,7 +850,8 @@ impl VerletAppServer {
         let session_store_path = tenant_context.session_history_path();
         let identity_store = verlet_history_sqlite::SqliteSessionStore::open(&session_store_path)
             .await
-            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+            .with_lease_epoch(config.lease_epoch);
         let runtime_store = std::sync::Arc::new(identity_store.clone())
             as std::sync::Arc<dyn verlet_history::RuntimeStore>;
         let runtime_store = match session_store_decorator {
@@ -901,6 +907,7 @@ impl VerletAppServer {
                 metadata_store_path,
                 user_metadata_store_path,
                 session_store_path,
+                lease_epoch: config.lease_epoch,
                 metadata_store,
                 user_metadata_store,
                 process_manager: verlet_process::live::AsyncExecutionManager::default(),
@@ -961,9 +968,8 @@ impl VerletAppServer {
         let recovery_store =
             verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
                 .await
-                .map_err(|err| {
-                    crate::kernel::runtime_host::VerletError::History(err.to_string())
-                })?;
+                .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+                .with_lease_epoch(app.inner.lease_epoch);
         let recovery = crate::daemon::recovery_sweep::StartupRecoverySweep::new(
             recovery_store,
             process_dispatcher,
@@ -1032,6 +1038,10 @@ impl VerletAppServer {
 
     pub fn session_store_path(&self) -> &std::path::Path {
         &self.inner.session_store_path
+    }
+
+    pub(crate) fn lease_epoch(&self) -> u64 {
+        self.inner.lease_epoch
     }
 
     pub(crate) fn mark_remote_event_store_served(&self) {
@@ -2172,6 +2182,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         None,
         None,
+        0,
         None,
         None,
         None,
@@ -2199,6 +2210,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
         Some(config.metadata_store_path()),
         Some(config.user_metadata_store_path()),
         Some(config.state_home.join("session_history.sqlite3")),
+        config.lease_epoch,
         Some(config.agent_registry_root.clone()),
         Some(config.blob_registry_root.clone()),
         Some(config.skill_registry_root.clone()),
@@ -2218,6 +2230,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     metadata_store_path: Option<std::path::PathBuf>,
     secret_store_path: Option<std::path::PathBuf>,
     session_store_path: Option<std::path::PathBuf>,
+    lease_epoch: u64,
     agent_registry_root: Option<std::path::PathBuf>,
     blob_registry_root: Option<std::path::PathBuf>,
     skill_registry_root: Option<std::path::PathBuf>,
@@ -2236,6 +2249,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         metadata_store_path,
         secret_store_path,
         session_store_path,
+        lease_epoch,
         agent_registry_root,
         blob_registry_root,
         skill_registry_root,

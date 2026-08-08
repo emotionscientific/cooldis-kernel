@@ -800,10 +800,14 @@ declared non-`cooldis.*` schema id are validated before any append.
 
 Result:
 `{ "streamId": "client:orch:placement", "records": [{ "eventId": "...", "sequence": 1 }] }`.
-The batch is atomic and principal-attributed. A stale fence returns JSON-RPC
-error `-32004` with data `{ "expected": 1, "actual": 2 }`. This is a Host
-effect, so the session host-effect witness must commit before validation or
-append execution begins.
+The batch is atomic and principal-attributed. A stale sequence fence returns
+JSON-RPC error `-32004` with data `{ "expected": 1, "actual": 2 }`. A daemon
+whose placement lease has been superseded returns `-32005`, message
+`journal lease epoch is stale`, and data
+`{ "streamId": "client:orch:placement", "presentedEpoch": 7, "minimumEpoch": 8 }`;
+the orchestrator must treat that as a rehome signal rather than retrying the
+stale daemon. This is a Host effect, so the session host-effect witness must
+commit before validation or append execution begins.
 
 ### `stream/read`
 

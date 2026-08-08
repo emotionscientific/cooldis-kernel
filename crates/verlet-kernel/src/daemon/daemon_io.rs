@@ -1072,6 +1072,7 @@ pub struct VerletDaemonIoBridge {
     model_provider: String,
     cwd: std::path::PathBuf,
     session_store_path: Option<std::path::PathBuf>,
+    lease_epoch: u64,
     threads: std::sync::Arc<
         tokio::sync::Mutex<
             std::collections::HashMap<String, verlet_runtime_contracts::ThreadCoordinates>,
@@ -1156,6 +1157,7 @@ impl VerletDaemonIoBridge {
             model_provider: model_provider.into(),
             cwd: cwd.into(),
             session_store_path: None,
+            lease_epoch: 0,
             threads: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             thread_scope_locks: std::sync::Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
@@ -1222,6 +1224,7 @@ impl VerletDaemonIoBridge {
         );
         bridge.app_server = Some(server.clone());
         bridge.session_store_path = Some(server.session_store_path().to_path_buf());
+        bridge.lease_epoch = server.lease_epoch();
         bridge
     }
 
@@ -2046,7 +2049,8 @@ impl VerletDaemonIoBridge {
         let timer = clock_tick_payload(envelope)?;
         let store = verlet_history_sqlite::SqliteSessionStore::open(store_path)
             .await
-            .map_err(verlet_history_error)?;
+            .map_err(verlet_history_error)?
+            .with_lease_epoch(self.lease_epoch);
         let mandate_is_live =
             crate::kernel::mandate_lifecycle::list_active_mandates(&store, &coordinates)
                 .await
@@ -2381,6 +2385,7 @@ impl VerletDaemonIoBridge {
         })?;
         verlet_history_sqlite::SqliteSessionStore::open(store_path)
             .await
+            .map(|store| store.with_lease_epoch(self.lease_epoch))
             .map_err(verlet_history_error)
     }
 

@@ -6102,6 +6102,186 @@ async fn client_stream_append_read_round_trip_is_atomic_fenced_and_cursor_scoped
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nonzero_daemon_lease_epoch_reaches_client_stream_and_ingress_witness_handles() {
+    let root = unique_test_root("app-server-lease-epoch");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(root.join("app-server.sock"));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.lease_epoch = 7;
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap();
+    let coordinates = app.coordinates_for_thread(thread_id).await.unwrap();
+    let higher = verlet_history_sqlite::SqliteSessionStore::open(app.session_store_path())
+        .await
+        .unwrap()
+        .with_lease_epoch(7);
+
+    let client_stream = verlet_history::EventStreamId::new("client:orch:lease-epoch");
+    higher
+        .append_events(
+            &client_stream,
+            vec![verlet_history::NewEventRecord::witnessed(
+                coordinates.clone(),
+                verlet_history::EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "epoch-seed"}),
+            )],
+        )
+        .await
+        .unwrap();
+    let appended = app
+        .dispatch_request(
+            &connection,
+            "stream/append",
+            Some(serde_json::json!({
+                "stream": client_stream.as_str(),
+                "expectedSequence": 2,
+                "records": [{
+                    "kind": "placement.bound",
+                    "payloadSchema": "verlet.orch.placement.bound/1",
+                    "payload": {"agent": "agent://epoch-worker@1.0.0"},
+                }],
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(appended["records"][0]["sequence"], 2);
+
+    let control_stream = crate::kernel::control_decision::control_stream_id(&coordinates);
+    higher
+        .append_events(
+            &control_stream,
+            vec![verlet_history::NewEventRecord::witnessed(
+                coordinates.clone(),
+                verlet_history::EventKind::LoopCompleted,
+                serde_json::json!({"loop_id": "epoch-seed"}),
+            )],
+        )
+        .await
+        .unwrap();
+    let ingress = app
+        .dispatch_request(
+            &connection,
+            "ingress/submit",
+            Some(serde_json::json!({
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "epoch ingress", "text_elements": []}],
+                "delivery": {
+                    "deliveryId": "epoch-delivery",
+                    "attempt": 1,
+                    "metadata": {"source": "test"},
+                },
+                "correlationId": "epoch-run",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ingress["deduped"], false);
+    assert!(
+        higher
+            .read_events(&control_stream, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_daemon_stream_append_returns_distinct_rehome_error_before_sequence_conflict() {
+    let root = unique_test_root("app-server-stale-lease-epoch");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(root.join("app-server.sock"));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.lease_epoch = 7;
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let stream_id = verlet_history::EventStreamId::new("client:orch:stale-lease");
+    let namespace =
+        uuid::Uuid::parse_str(super::orchestrator_boundary::CLIENT_STREAM_THREAD_NAMESPACE)
+            .unwrap();
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates {
+        tenant_id: app.tenant_id().to_string(),
+        user_id: connection.resolved_principal.principal_id.to_string(),
+        session_id: connection.witnessed_session_id.clone(),
+        thread_id: verlet_runtime_contracts::ThreadId::parse_str(
+            &uuid::Uuid::new_v5(&namespace, stream_id.as_str().as_bytes()).to_string(),
+        )
+        .unwrap(),
+    };
+    let higher = verlet_history_sqlite::SqliteSessionStore::open(app.session_store_path())
+        .await
+        .unwrap()
+        .with_lease_epoch(8);
+    higher
+        .append_events(
+            &stream_id,
+            vec![verlet_history::NewEventRecord::witnessed(
+                coordinates,
+                verlet_history::EventKind::ClientRecordAppended,
+                serde_json::to_value(verlet_history::ClientRecordAppendedPayload {
+                    client_kind: "placement.bound".to_string(),
+                    client_schema: "verlet.orch.placement.bound/1".to_string(),
+                    principal_id: connection.resolved_principal.principal_id.to_string(),
+                    body: serde_json::json!({"agent": "agent://winner@1.0.0"}),
+                })
+                .unwrap(),
+            )],
+        )
+        .await
+        .unwrap();
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "stream/append",
+            Some(serde_json::json!({
+                "stream": stream_id.as_str(),
+                "expectedSequence": 1,
+                "records": [{
+                    "kind": "placement.bound",
+                    "payloadSchema": "verlet.orch.placement.bound/1",
+                    "payload": {"agent": "agent://stale@1.0.0"},
+                }],
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32005);
+    assert_eq!(error.message, "journal lease epoch is stale");
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({
+            "streamId": stream_id.as_str(),
+            "presentedEpoch": 7,
+            "minimumEpoch": 8,
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn app_server_envelope_ingress_records_surface_admission_before_execution() {
     let app = test_app().await;
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -13632,6 +13812,7 @@ where
         Some(config.metadata_store_path()),
         None,
         Some(config.state_home.join("session_history.sqlite3")),
+        config.lease_epoch,
         None,
         None,
         None,

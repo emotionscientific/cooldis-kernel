@@ -1,5 +1,6 @@
 pub async fn session_store_parity_transcript<S: verlet_history::RuntimeStore + ?Sized>(
     store: &S,
+    stale_store: &S,
 ) -> verlet_history::HistoryResult<crate::support::transcript::NormalizedTranscript> {
     let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: "parity-tenant".to_string(),
@@ -87,6 +88,43 @@ pub async fn session_store_parity_transcript<S: verlet_history::RuntimeStore + ?
         &appended,
         vec![verlet_history::StreamAckClass::LocalCommitted],
     )?;
+    let lease_stream = verlet_history::EventStreamId::new("parity:lease-epoch");
+    store
+        .append_events(
+            &lease_stream,
+            vec![event_record(
+                &coordinates,
+                4,
+                verlet_history::EventKind::TurnSubmitted,
+                6_000,
+            )],
+        )
+        .await?;
+    let lease_error = stale_store
+        .append_events(
+            &lease_stream,
+            vec![event_record(
+                &coordinates,
+                5,
+                verlet_history::EventKind::TurnSubmitted,
+                7_000,
+            )],
+        )
+        .await
+        .unwrap_err();
+    let lease_fence = match lease_error {
+        verlet_history::HistoryError::StaleLeaseEpoch {
+            stream_id,
+            presented_epoch,
+            minimum_epoch,
+        } => serde_json::json!({
+            "stream_id": stream_id,
+            "presented_epoch": presented_epoch,
+            "minimum_epoch": minimum_epoch,
+            "events_after_rejection": store.read_events(&lease_stream, None).await?.len(),
+        }),
+        error => panic!("expected stale lease epoch, got {error}"),
+    };
 
     let mut transcript = crate::support::transcript::TypedTranscript::new();
     transcript.push_receipt("session.append.root", &root);
@@ -104,6 +142,7 @@ pub async fn session_store_parity_transcript<S: verlet_history::RuntimeStore + ?
     for event in &fenced {
         transcript.push_event("events.fenced_append", event);
     }
+    transcript.push_receipt("events.lease_epoch_fence", &lease_fence);
     Ok(transcript.normalize())
 }
 

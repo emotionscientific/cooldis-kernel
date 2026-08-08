@@ -152,6 +152,7 @@ console_principal = "operator-managed"
 cwd = "workspace"
 runtime_home = "runtime"
 state_home = "state"
+lease_epoch = 7
 
 [daemon.app_server]
 listen = "unix://run/verlet.sock"
@@ -165,6 +166,7 @@ agents = "agents"
 
     let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&path)).unwrap();
     let mut app_config = crate::cli::daemon::daemon_app_server_config_from_loaded(&loaded).unwrap();
+    assert_eq!(app_config.lease_epoch, 7);
     app_config.user_state_home = root.join("user-state");
     app_config.console_assets = Some(crate::adapters::app_server::ConsoleAssetConfig {
         root: console_assets,
@@ -202,6 +204,7 @@ agents = "agents"
 
     assert_eq!(app.tenant_id(), "tenant-managed");
     assert_eq!(app.user_id(), "operator-managed");
+    assert_eq!(app.lease_epoch(), 7);
     assert_eq!(
         app.identity_boundary_config(),
         (

@@ -3,20 +3,26 @@ mod support;
 
 #[tokio::test]
 async fn in_memory_and_sqlite_session_stores_have_observable_parity() {
+    let in_memory_store = verlet_history::InMemorySessionStore::new();
     let in_memory = crate::support::store_parity::session_store_parity_transcript(
-        &verlet_history::InMemorySessionStore::new(),
+        &in_memory_store.clone().with_lease_epoch(9),
+        &in_memory_store.with_lease_epoch(8),
     )
     .await
     .unwrap();
+    let repeated_store = verlet_history::InMemorySessionStore::new();
     let repeated = crate::support::store_parity::session_store_parity_transcript(
-        &verlet_history::InMemorySessionStore::new(),
+        &repeated_store.clone().with_lease_epoch(9),
+        &repeated_store.with_lease_epoch(8),
     )
     .await
     .unwrap();
+    let sqlite_store = verlet_history_sqlite::SqliteSessionStore::in_memory()
+        .await
+        .unwrap();
     let sqlite = crate::support::store_parity::session_store_parity_transcript(
-        &verlet_history_sqlite::SqliteSessionStore::in_memory()
-            .await
-            .unwrap(),
+        &sqlite_store.clone().with_lease_epoch(9),
+        &sqlite_store.with_lease_epoch(8),
     )
     .await
     .unwrap();
