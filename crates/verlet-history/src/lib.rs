@@ -193,340 +193,192 @@ impl std::fmt::Display for EventRecordId {
 ///   passthrough. There is no `Other` variant by design.
 /// - Event kinds are the trigger addressing scheme for every future
 ///   propagator and controller; renaming one would make receipts lie.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+    strum::VariantArray,
+)]
 #[serde(try_from = "String", into = "String")]
 pub enum EventKind {
     /// A session entry was appended to the thread stream.
+    #[strum(serialize = "session.entry.appended")]
     SessionEntryAppended,
     /// Context assembly completed; the payload is the assembly receipt.
+    #[strum(serialize = "context.compile.completed")]
     ContextCompileCompleted,
     /// A context summarizer discharged a summary checkpoint event. The compacted
     /// text lives in the payload; provenance records the summarizer boundary.
+    #[strum(serialize = "context.summary.completed")]
     ContextSummaryCompleted,
     /// A context controller selected a named read plan for future assembly.
+    #[strum(serialize = "context.read_plan.set")]
     ContextReadPlanSet,
     /// A manifest compiled to a resolved plan; the payload is the compile
     /// receipt. Emitted by the WS-A compile/bind layer.
+    #[strum(serialize = "manifest.compile.completed")]
     ManifestCompileCompleted,
     /// An agent ref resolved through aliases to a manifest hash and bound;
     /// the payload is the bind receipt. Emitted at publish and at run time.
+    #[strum(serialize = "manifest.bind.completed")]
     ManifestBindCompleted,
     /// A tool universe's contracts were witnessed (at bind or on demand);
     /// the payload is `ToolUniverseDiscoveryReceipt` — server ref, discovery
     /// hash, and per-tool schema hashes. Witnessed origin: the contracts
     /// arrived from outside the system.
+    #[strum(serialize = "tool.universe.discovery.completed")]
     ToolUniverseDiscoveryCompleted,
     /// One `tool.call` against a live universe completed; the payload is
     /// `ToolUniverseCallReceipt` — server ref, tool name, the schema hash
     /// the arguments were validated against, and the output hash.
+    #[strum(serialize = "tool.universe.call.completed")]
     ToolUniverseCallCompleted,
     /// A model/tool surface requested one tool call.
+    #[strum(serialize = "tool.call.requested")]
     ToolCallRequested,
     /// A controller suspended a tool call pending later control input.
+    #[strum(serialize = "tool.call.suspended")]
     ToolCallSuspended,
     /// A controller decided how a pending tool call should proceed.
+    #[strum(serialize = "tool.call.decision")]
     ToolCallDecision,
     /// A tool executor observed a completed tool invocation.
+    #[strum(serialize = "tool.call.completed")]
     ToolCallCompleted,
     /// A turn submission entered the thread.
+    #[strum(serialize = "turn.submitted")]
     TurnSubmitted,
     /// A turn is waiting on a durable control fact.
+    #[strum(serialize = "turn.waiting")]
     TurnWaiting,
     /// A previously waiting turn resumed.
+    #[strum(serialize = "turn.resumed")]
     TurnResumed,
     /// A turn reached quiescence.
+    #[strum(serialize = "turn.completed")]
     TurnCompleted,
     /// A controller requested external approval.
+    #[strum(serialize = "approval.requested")]
     ApprovalRequested,
     /// An approved external surface witnessed an approval decision.
+    #[strum(serialize = "approval.resolved")]
     ApprovalResolved,
     /// An external grantor started a standing activation mandate.
+    #[strum(serialize = "mandate.started")]
     MandateStarted,
     /// An external grantor revoked a standing activation mandate.
+    #[strum(serialize = "mandate.revoked")]
     MandateRevoked,
     /// A controller requested another turn.
+    #[strum(serialize = "turn.continue.requested")]
     TurnContinueRequested,
     /// The scheduler accepted a continuation request.
+    #[strum(serialize = "turn.continuation.accepted")]
     TurnContinuationAccepted,
     /// The scheduler rejected a continuation request.
+    #[strum(serialize = "turn.continuation.rejected")]
     TurnContinuationRejected,
     /// A loop completed successfully.
+    #[strum(serialize = "loop.completed")]
     LoopCompleted,
     /// A loop stopped because it is blocked.
+    #[strum(serialize = "loop.blocked")]
     LoopBlocked,
     /// A loop stopped because its budget is exhausted.
+    #[strum(serialize = "loop.budget_exhausted")]
     LoopBudgetExhausted,
     /// A loop stopped because continuation was denied.
+    #[strum(serialize = "loop.denied")]
     LoopDenied,
     /// A coupling activation completed and emitted its run receipt.
+    #[strum(serialize = "coupling.run.completed")]
     CouplingRunCompleted,
     /// A coupling activation failed and emitted its run receipt.
+    #[strum(serialize = "coupling.run.failed")]
     CouplingRunFailed,
     /// A placement controller selected where execution should run.
+    #[strum(serialize = "placement.decision")]
     PlacementDecision,
     /// A coupling proposed spawning supervised child work. A durable
     /// projector consumes the request, performs the spawn through the
     /// thread/turn kernel package, and the kernel witnesses `thread.spawned`
     /// — the same requested/projector grammar as IO egress.
+    #[strum(serialize = "thread.spawn.requested")]
     ThreadSpawnRequested,
     /// A parent thread spawned a child thread with the recorded manifest,
     /// policy, grants, and input digest.
+    #[strum(serialize = "thread.spawned")]
     ThreadSpawned,
     /// A spawned child thread reached a terminal state and joined back to its
     /// parent lineage.
+    #[strum(serialize = "thread.joined")]
     ThreadJoined,
     /// A thread's live branch selection changed; appended in the same
     /// transaction as the `active_leaves` cache update. Selecting no branch
     /// (clearing) is itself a witnessed selection. Added in
     /// `cooldis.events/0.3`.
+    #[strum(serialize = "thread.branch.selected")]
     ThreadBranchSelected,
     /// A lazily reloaded thread's journal could not reconstruct full
     /// lifecycle identity and the loader fell back to a fabricated root
     /// record. Added in `cooldis.events/0.3`.
+    #[strum(serialize = "thread.reload.degraded")]
     ThreadReloadDegraded,
     /// A policy identity became active. The binding is valid until the next
     /// `policy.bound` with the same `policy_id`.
+    #[strum(serialize = "policy.bound")]
     PolicyBound,
     /// A thread petitioned for additional grants. Resolution is recorded with
     /// the existing approval event pair.
+    #[strum(serialize = "grant.petitioned")]
     GrantPetitioned,
     /// A standing mandate produced a clock occurrence.
+    #[strum(serialize = "timer.fired")]
     TimerFired,
     /// A boundary client appended one opaque, schema-declared record to a
     /// client-owned stream. The declared kind and schema live in the payload.
+    #[strum(serialize = "client.record.appended")]
     ClientRecordAppended,
     /// An external IO route received an ingress envelope.
+    #[strum(serialize = "io.ingress.received")]
     IoIngressReceived,
     /// The runtime accepted sole responsibility for an admitted ingress
     /// envelope's outcome, fenced onto the resolved thread's control stream
     /// before any non-idempotent effect (ADR 0003). `io.ingress` names the
     /// ingress-envelope outcome lifecycle, not the producing component or
     /// stream. Added in `cooldis.events/0.3`.
+    #[strum(serialize = "io.ingress.claimed")]
     IoIngressClaimed,
     /// A claimed ingress outcome reached its terminal state, with provenance
     /// to the claim and its execution evidence. A settled claim is terminal:
     /// redelivery dedupes against it. Added in `cooldis.events/0.3`.
+    #[strum(serialize = "io.ingress.settled")]
     IoIngressSettled,
     /// A tool path requested an IO egress action for later projection.
+    #[strum(serialize = "io.egress.requested")]
     IoEgressRequested,
     /// An IO egress attempt was delivered to the external route.
+    #[strum(serialize = "io.egress.delivered")]
     IoEgressDelivered,
     /// An IO egress attempt failed and may have been dead-lettered.
+    #[strum(serialize = "io.egress.failed")]
     IoEgressFailed,
     /// An admission policy chose how to handle one or more ingress events.
+    #[strum(serialize = "admission.decided")]
     AdmissionDecided,
 }
 
 impl EventKind {
-    pub const fn all() -> &'static [EventKind] {
-        &[
-            Self::SessionEntryAppended,
-            Self::ContextCompileCompleted,
-            Self::ContextSummaryCompleted,
-            Self::ContextReadPlanSet,
-            Self::ManifestCompileCompleted,
-            Self::ManifestBindCompleted,
-            Self::ToolUniverseDiscoveryCompleted,
-            Self::ToolUniverseCallCompleted,
-            Self::ToolCallRequested,
-            Self::ToolCallSuspended,
-            Self::ToolCallDecision,
-            Self::ToolCallCompleted,
-            Self::TurnSubmitted,
-            Self::TurnWaiting,
-            Self::TurnResumed,
-            Self::TurnCompleted,
-            Self::ApprovalRequested,
-            Self::ApprovalResolved,
-            Self::MandateStarted,
-            Self::MandateRevoked,
-            Self::TurnContinueRequested,
-            Self::TurnContinuationAccepted,
-            Self::TurnContinuationRejected,
-            Self::LoopCompleted,
-            Self::LoopBlocked,
-            Self::LoopBudgetExhausted,
-            Self::LoopDenied,
-            Self::CouplingRunCompleted,
-            Self::CouplingRunFailed,
-            Self::PlacementDecision,
-            Self::ThreadSpawnRequested,
-            Self::ThreadSpawned,
-            Self::ThreadJoined,
-            Self::ThreadBranchSelected,
-            Self::ThreadReloadDegraded,
-            Self::PolicyBound,
-            Self::GrantPetitioned,
-            Self::TimerFired,
-            Self::ClientRecordAppended,
-            Self::IoIngressReceived,
-            Self::IoIngressClaimed,
-            Self::IoIngressSettled,
-            Self::IoEgressRequested,
-            Self::IoEgressDelivered,
-            Self::IoEgressFailed,
-            Self::AdmissionDecided,
-        ]
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SessionEntryAppended => "session.entry.appended",
-            Self::ContextCompileCompleted => "context.compile.completed",
-            Self::ContextSummaryCompleted => "context.summary.completed",
-            Self::ContextReadPlanSet => "context.read_plan.set",
-            Self::ManifestCompileCompleted => "manifest.compile.completed",
-            Self::ManifestBindCompleted => "manifest.bind.completed",
-            Self::ToolUniverseDiscoveryCompleted => "tool.universe.discovery.completed",
-            Self::ToolUniverseCallCompleted => "tool.universe.call.completed",
-            Self::ToolCallRequested => "tool.call.requested",
-            Self::ToolCallSuspended => "tool.call.suspended",
-            Self::ToolCallDecision => "tool.call.decision",
-            Self::ToolCallCompleted => "tool.call.completed",
-            Self::TurnSubmitted => "turn.submitted",
-            Self::TurnWaiting => "turn.waiting",
-            Self::TurnResumed => "turn.resumed",
-            Self::TurnCompleted => "turn.completed",
-            Self::ApprovalRequested => "approval.requested",
-            Self::ApprovalResolved => "approval.resolved",
-            Self::MandateStarted => "mandate.started",
-            Self::MandateRevoked => "mandate.revoked",
-            Self::TurnContinueRequested => "turn.continue.requested",
-            Self::TurnContinuationAccepted => "turn.continuation.accepted",
-            Self::TurnContinuationRejected => "turn.continuation.rejected",
-            Self::LoopCompleted => "loop.completed",
-            Self::LoopBlocked => "loop.blocked",
-            Self::LoopBudgetExhausted => "loop.budget_exhausted",
-            Self::LoopDenied => "loop.denied",
-            Self::CouplingRunCompleted => "coupling.run.completed",
-            Self::CouplingRunFailed => "coupling.run.failed",
-            Self::PlacementDecision => "placement.decision",
-            Self::ThreadSpawnRequested => "thread.spawn.requested",
-            Self::ThreadSpawned => "thread.spawned",
-            Self::ThreadJoined => "thread.joined",
-            Self::ThreadBranchSelected => "thread.branch.selected",
-            Self::ThreadReloadDegraded => "thread.reload.degraded",
-            Self::PolicyBound => "policy.bound",
-            Self::GrantPetitioned => "grant.petitioned",
-            Self::TimerFired => "timer.fired",
-            Self::ClientRecordAppended => "client.record.appended",
-            Self::IoIngressReceived => "io.ingress.received",
-            Self::IoIngressClaimed => "io.ingress.claimed",
-            Self::IoIngressSettled => "io.ingress.settled",
-            Self::IoEgressRequested => "io.egress.requested",
-            Self::IoEgressDelivered => "io.egress.delivered",
-            Self::IoEgressFailed => "io.egress.failed",
-            Self::AdmissionDecided => "admission.decided",
-        }
-    }
-
-    pub fn payload_schema_id(self) -> &'static str {
-        match self {
-            Self::SessionEntryAppended => "cooldis.event.session.entry.appended/1",
-            Self::ContextCompileCompleted => "cooldis.event.context.compile.completed/1",
-            Self::ContextSummaryCompleted => "cooldis.event.context.summary.completed/1",
-            Self::ContextReadPlanSet => "cooldis.event.context.read_plan.set/1",
-            Self::ManifestCompileCompleted => "cooldis.event.manifest.compile.completed/1",
-            Self::ManifestBindCompleted => "cooldis.event.manifest.bind.completed/1",
-            Self::ToolUniverseDiscoveryCompleted => {
-                "cooldis.event.tool.universe.discovery.completed/1"
-            }
-            Self::ToolUniverseCallCompleted => "cooldis.event.tool.universe.call.completed/1",
-            Self::ToolCallRequested => "cooldis.event.tool.call.requested/1",
-            Self::ToolCallSuspended => "cooldis.event.tool.call.suspended/1",
-            Self::ToolCallDecision => "cooldis.event.tool.call.decision/1",
-            Self::ToolCallCompleted => "cooldis.event.tool.call.completed/1",
-            Self::TurnSubmitted => "cooldis.event.turn.submitted/1",
-            Self::TurnWaiting => "cooldis.event.turn.waiting/1",
-            Self::TurnResumed => "cooldis.event.turn.resumed/1",
-            Self::TurnCompleted => "cooldis.event.turn.completed/1",
-            Self::ApprovalRequested => "cooldis.event.approval.requested/1",
-            Self::ApprovalResolved => "cooldis.event.approval.resolved/1",
-            Self::MandateStarted => "cooldis.event.mandate.started/1",
-            Self::MandateRevoked => "cooldis.event.mandate.revoked/1",
-            Self::TurnContinueRequested => "cooldis.event.turn.continue.requested/1",
-            Self::TurnContinuationAccepted => "cooldis.event.turn.continuation.accepted/1",
-            Self::TurnContinuationRejected => "cooldis.event.turn.continuation.rejected/1",
-            Self::LoopCompleted => "cooldis.event.loop.completed/1",
-            Self::LoopBlocked => "cooldis.event.loop.blocked/1",
-            Self::LoopBudgetExhausted => "cooldis.event.loop.budget_exhausted/1",
-            Self::LoopDenied => "cooldis.event.loop.denied/1",
-            Self::CouplingRunCompleted => "cooldis.event.coupling.run.completed/1",
-            Self::CouplingRunFailed => "cooldis.event.coupling.run.failed/1",
-            Self::PlacementDecision => "cooldis.event.placement.decision/1",
-            Self::ThreadSpawnRequested => "cooldis.event.thread.spawn.requested/1",
-            Self::ThreadSpawned => "cooldis.event.thread.spawned/1",
-            Self::ThreadJoined => "cooldis.event.thread.joined/1",
-            Self::ThreadBranchSelected => "cooldis.event.thread.branch.selected/1",
-            Self::ThreadReloadDegraded => "cooldis.event.thread.reload.degraded/1",
-            Self::PolicyBound => "cooldis.event.policy.bound/1",
-            Self::GrantPetitioned => "cooldis.event.grant.petitioned/1",
-            Self::TimerFired => "cooldis.event.timer.fired/1",
-            Self::ClientRecordAppended => "cooldis.event.client.record.appended/1",
-            Self::IoIngressReceived => "cooldis.event.io.ingress.received/1",
-            Self::IoIngressClaimed => "cooldis.event.io.ingress.claimed/1",
-            Self::IoIngressSettled => "cooldis.event.io.ingress.settled/1",
-            Self::IoEgressRequested => "cooldis.event.io.egress.requested/1",
-            Self::IoEgressDelivered => "cooldis.event.io.egress.delivered/1",
-            Self::IoEgressFailed => "cooldis.event.io.egress.failed/1",
-            Self::AdmissionDecided => "cooldis.event.admission.decided/1",
-        }
-    }
-}
-
-impl std::str::FromStr for EventKind {
-    type Err = HistoryError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "session.entry.appended" => Ok(Self::SessionEntryAppended),
-            "context.compile.completed" => Ok(Self::ContextCompileCompleted),
-            "context.summary.completed" => Ok(Self::ContextSummaryCompleted),
-            "context.read_plan.set" => Ok(Self::ContextReadPlanSet),
-            "manifest.compile.completed" => Ok(Self::ManifestCompileCompleted),
-            "manifest.bind.completed" => Ok(Self::ManifestBindCompleted),
-            "tool.universe.discovery.completed" => Ok(Self::ToolUniverseDiscoveryCompleted),
-            "tool.universe.call.completed" => Ok(Self::ToolUniverseCallCompleted),
-            "tool.call.requested" => Ok(Self::ToolCallRequested),
-            "tool.call.suspended" => Ok(Self::ToolCallSuspended),
-            "tool.call.decision" => Ok(Self::ToolCallDecision),
-            "tool.call.completed" => Ok(Self::ToolCallCompleted),
-            "turn.submitted" => Ok(Self::TurnSubmitted),
-            "turn.waiting" => Ok(Self::TurnWaiting),
-            "turn.resumed" => Ok(Self::TurnResumed),
-            "turn.completed" => Ok(Self::TurnCompleted),
-            "approval.requested" => Ok(Self::ApprovalRequested),
-            "approval.resolved" => Ok(Self::ApprovalResolved),
-            "mandate.started" => Ok(Self::MandateStarted),
-            "mandate.revoked" => Ok(Self::MandateRevoked),
-            "turn.continue.requested" => Ok(Self::TurnContinueRequested),
-            "turn.continuation.accepted" => Ok(Self::TurnContinuationAccepted),
-            "turn.continuation.rejected" => Ok(Self::TurnContinuationRejected),
-            "loop.completed" => Ok(Self::LoopCompleted),
-            "loop.blocked" => Ok(Self::LoopBlocked),
-            "loop.budget_exhausted" => Ok(Self::LoopBudgetExhausted),
-            "loop.denied" => Ok(Self::LoopDenied),
-            "coupling.run.completed" => Ok(Self::CouplingRunCompleted),
-            "coupling.run.failed" => Ok(Self::CouplingRunFailed),
-            "placement.decision" => Ok(Self::PlacementDecision),
-            "thread.spawn.requested" => Ok(Self::ThreadSpawnRequested),
-            "thread.spawned" => Ok(Self::ThreadSpawned),
-            "thread.joined" => Ok(Self::ThreadJoined),
-            "thread.branch.selected" => Ok(Self::ThreadBranchSelected),
-            "thread.reload.degraded" => Ok(Self::ThreadReloadDegraded),
-            "policy.bound" => Ok(Self::PolicyBound),
-            "grant.petitioned" => Ok(Self::GrantPetitioned),
-            "timer.fired" => Ok(Self::TimerFired),
-            "client.record.appended" => Ok(Self::ClientRecordAppended),
-            "io.ingress.received" => Ok(Self::IoIngressReceived),
-            "io.ingress.claimed" => Ok(Self::IoIngressClaimed),
-            "io.ingress.settled" => Ok(Self::IoIngressSettled),
-            "io.egress.requested" => Ok(Self::IoEgressRequested),
-            "io.egress.delivered" => Ok(Self::IoEgressDelivered),
-            "io.egress.failed" => Ok(Self::IoEgressFailed),
-            "admission.decided" => Ok(Self::AdmissionDecided),
-            other => Err(HistoryError::Codec(format!("unknown event kind: {other}"))),
-        }
+    pub fn payload_schema_id(self) -> String {
+        format!("cooldis.event.{self}/1")
     }
 }
 
@@ -534,19 +386,16 @@ impl TryFrom<String> for EventKind {
     type Error = HistoryError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        value.parse()
+        let parsed: Result<Self, strum::ParseError> = value.parse();
+        // `strum::ParseError` carries no detail beyond "no such variant"; the
+        // offending string is the only useful context, so it is what we keep.
+        parsed.map_err(|_| HistoryError::Codec(format!("unknown event kind: {value}")))
     }
 }
 
 impl From<EventKind> for String {
     fn from(kind: EventKind) -> Self {
-        kind.as_str().to_string()
-    }
-}
-
-impl std::fmt::Display for EventKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        kind.to_string()
     }
 }
 
@@ -860,20 +709,24 @@ pub struct ThreadReloadDegradedPayload {
 /// - `Discharged`: the event was produced by a coupling (propagator,
 ///   projection, or controller). A discharged event MUST carry non-empty
 ///   provenance; appending one without provenance is an error.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum EventOrigin {
     Witnessed,
     Discharged,
-}
-
-impl EventOrigin {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Witnessed => "witnessed",
-            Self::Discharged => "discharged",
-        }
-    }
 }
 
 /// Provenance for a discharged event: which coupling produced it, from what
@@ -1238,9 +1091,9 @@ impl EventRecord {
             sequence: self.sequence,
             coordinates: self.coordinates.clone(),
             created_at_ms: self.created_at_ms,
-            kind: self.kind.as_str().to_string(),
+            kind: self.kind.to_string(),
             origin: self.origin,
-            payload_schema: self.kind.payload_schema_id().to_string(),
+            payload_schema: self.kind.payload_schema_id(),
             trace_context: None,
             provenance: self.provenance.clone(),
             payload: self.payload.clone(),
@@ -1264,7 +1117,7 @@ impl EventRecord {
             .map_err(|err| HistoryError::Codec(err.to_string()))?;
         if self.kind == EventKind::IoEgressRequested {
             registry
-                .validate(self.kind.payload_schema_id(), &self.payload)
+                .validate(&self.kind.payload_schema_id(), &self.payload)
                 .map_err(|err| HistoryError::Codec(err.to_string()))?;
         }
         Ok(())
@@ -1511,7 +1364,7 @@ pub fn validate_context_payload_schema_v1(
     kind: EventKind,
     payload: &serde_json::Value,
 ) -> Result<(), verlet_runtime_contracts::JsonSchemaValidationError> {
-    stream_schema_registry_v1().validate(kind.payload_schema_id(), payload)
+    stream_schema_registry_v1().validate(&kind.payload_schema_id(), payload)
 }
 
 fn stream_record_schema_v1() -> serde_json::Value {
@@ -2706,8 +2559,9 @@ impl CanonicalMessage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, strum::AsRefStr)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum SessionEntryKind {
     Message {
         message: CanonicalMessage,
@@ -3617,7 +3471,7 @@ fn session_entry_event_with_optional_provenance(
     let mut payload = serde_json::json!({
         "entry_id": entry.entry_id.to_string(),
         "parent_entry_id": entry.parent_entry_id.map(|id| id.to_string()),
-        "entry_kind": session_entry_kind_name(&entry.kind),
+        "entry_kind": entry.kind.as_ref(),
     });
     if let Some(turn_id) = &entry.turn_id
         && let Some(object) = payload.as_object_mut()
@@ -3690,33 +3544,12 @@ pub fn turn_input_kinds_match(left: &SessionEntryKind, right: &SessionEntryKind)
     }
 }
 
-fn session_entry_kind_name(kind: &SessionEntryKind) -> &'static str {
-    match kind {
-        SessionEntryKind::Message { .. } => "message",
-        SessionEntryKind::ModelChange { .. } => "model_change",
-        SessionEntryKind::Compaction { .. } => "compaction",
-        SessionEntryKind::BranchSummary { .. } => "branch_summary",
-        SessionEntryKind::Runtime { .. } => "runtime",
-        SessionEntryKind::CustomContextMessage { .. } => "custom_context_message",
-    }
-}
-
 pub fn parse_uuid(value: &str) -> HistoryResult<uuid::Uuid> {
     uuid::Uuid::parse_str(value).map_err(codec_error)
 }
 
 pub fn parse_thread_id(value: &str) -> HistoryResult<verlet_runtime_contracts::ThreadId> {
     verlet_runtime_contracts::ThreadId::parse_str(value).map_err(codec_error)
-}
-
-pub fn parse_event_origin(value: &str) -> HistoryResult<EventOrigin> {
-    match value {
-        "witnessed" => Ok(EventOrigin::Witnessed),
-        "discharged" => Ok(EventOrigin::Discharged),
-        other => Err(HistoryError::Codec(format!(
-            "unknown event origin: {other}"
-        ))),
-    }
 }
 
 pub fn validate_new_event(record: &NewEventRecord) -> HistoryResult<()> {

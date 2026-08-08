@@ -645,8 +645,19 @@ fn static_source_budget_share(
 
 /// Role inferred from the coupling's resolved sink relation. Manifest
 /// authors cannot choose this directly.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum CouplingRole {
     Projection,
     Controller,
@@ -2003,7 +2014,7 @@ fn parse_coupling_event_kind(
     label: &str,
     value: &str,
 ) -> crate::VerletResult<crate::EventKind> {
-    value.parse::<crate::EventKind>().map_err(|err| {
+    crate::EventKind::try_from(value.to_string()).map_err(|err| {
         crate::VerletError::RuntimeFactory(format!(
             "coupling {coupling_id:?} {label} {value:?} is not in the kernel event-kind vocabulary: {err}"
         ))
@@ -2838,26 +2849,11 @@ fn parse_operation_ref_body(
     }
 }
 
-fn override_key_name(
-    key: crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey,
-) -> &'static str {
-    match key {
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::DefaultCwd => "default_cwd",
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::Streaming => "streaming",
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::TurnTimeoutMs => "turn_timeout_ms",
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::CancellationGraceMs => "cancellation_grace_ms",
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::MaxToolRounds => "max_tool_rounds",
-        crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey::CompactionAutoAtTextBytes => {
-            "compaction.auto_at_text_bytes"
-        }
-    }
-}
-
 fn require_override_key(
     allowlist: &[crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey],
     key: crate::agent::manifest_schema::AgentManifestRuntimeOverrideKey,
 ) -> crate::VerletResult<&'static str> {
-    let name = override_key_name(key);
+    let name: &'static str = key.into();
     if allowlist.contains(&key) {
         Ok(name)
     } else {
@@ -2961,15 +2957,37 @@ pub struct AgentManifestBindReceipt {
     pub workspace_origin: Option<AgentManifestBindingOrigin>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::Display,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum AgentManifestModelProfileOrigin {
     ManifestDefault,
     SelectedAtStart,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::Display,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum AgentManifestBindingOrigin {
     DaemonDefault,
     BindOverride,
@@ -3068,11 +3086,7 @@ fn resolve_manifest_placement_with_origin(
         });
     }
     if resolved.target != crate::kernel::control_decision::PlacementTarget::Local {
-        let target = match resolved.target {
-            crate::kernel::control_decision::PlacementTarget::Local => "local",
-            crate::kernel::control_decision::PlacementTarget::Remote => "remote",
-            crate::kernel::control_decision::PlacementTarget::Sandbox => "sandbox",
-        };
+        let target: &str = resolved.target.as_ref();
         return Err(crate::VerletError::RuntimeFactory(format!(
             "placement target {target} requires the remote EventStore backend capability, which is not available"
         )));
@@ -3162,10 +3176,10 @@ fn resolve_manifest_workspace_with_origin(
     };
 
     if binding.mode < requirement.min_mode {
+        let mode: &'static str = binding.mode.into();
+        let min_mode: &'static str = requirement.min_mode.into();
         return Err(crate::VerletError::RuntimeFactory(format!(
-            "workspace binding mode {} does not satisfy manifest minimum mode {}",
-            workspace_mode_name(binding.mode),
-            workspace_mode_name(requirement.min_mode)
+            "workspace binding mode {mode} does not satisfy manifest minimum mode {min_mode}"
         )));
     }
     let host_path = std::fs::canonicalize(&binding.host_path).map_err(|err| {
@@ -3188,15 +3202,6 @@ fn resolve_manifest_workspace_with_origin(
         },
         origin,
     }))
-}
-
-fn workspace_mode_name(
-    mode: crate::agent::manifest_schema::AgentManifestWorkspaceMode,
-) -> &'static str {
-    match mode {
-        crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadOnly => "ro",
-        crate::agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite => "rw",
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

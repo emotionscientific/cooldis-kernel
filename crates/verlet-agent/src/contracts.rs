@@ -39,14 +39,6 @@ pub enum ThreadContractSourceFormat {
     MarkdownV0,
 }
 
-impl ThreadContractSourceFormat {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::MarkdownV0 => THREAD_CONTRACT_SOURCE_FORMAT,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompiledThreadContract {
     pub kind: String,

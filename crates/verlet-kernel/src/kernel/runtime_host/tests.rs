@@ -5549,7 +5549,7 @@ impl TsAgentThreadFixture {
             session_id: record.coordinates.session_id.clone(),
             thread_id: record.coordinates.thread_id.to_string(),
             parent_thread_id: record.parent_thread_id.map(|id| id.to_string()),
-            status: lifecycle_status_to_ts(record.status).to_string(),
+            status: record.status.as_ref().to_string(),
             latest_signal_id: record.latest_signal_id.map(|id| id.to_string()),
             latest_checkpoint_id: record.latest_checkpoint_id.map(|id| id.to_string()),
             metadata: record.metadata.clone(),
@@ -5563,13 +5563,15 @@ impl TsAgentThreadFixture {
             session_id: self.session_id,
             thread_id: crate::kernel::runtime_host::ThreadId::parse_str(&self.thread_id).unwrap(),
         };
+        let status: crate::kernel::runtime_host::ThreadLifecycleStatus =
+            self.status.parse().unwrap();
         crate::kernel::runtime_host::ThreadLifecycleRecord {
             coordinates,
             parent_thread_id: self
                 .parent_thread_id
                 .map(|id| crate::kernel::runtime_host::ThreadId::parse_str(&id).unwrap()),
             topology: crate::kernel::runtime_host::ThreadTopology::root(),
-            status: lifecycle_status_from_ts(&self.status),
+            status,
             latest_signal_id: self.latest_signal_id.map(|id| {
                 crate::kernel::runtime_host::ThreadSignalId::from_uuid(
                     uuid::Uuid::parse_str(&id).unwrap(),
@@ -5606,12 +5608,13 @@ impl TsAgentThreadSignalFixture {
             user_id: signal.coordinates.user_id.clone(),
             session_id: signal.coordinates.session_id.clone(),
             thread_id: signal.coordinates.thread_id.to_string(),
-            kind: signal_kind_to_ts(signal.kind).to_string(),
+            kind: signal.kind.as_ref().to_string(),
             metadata: signal.metadata.clone(),
         }
     }
 
     fn into_signal(self) -> crate::kernel::runtime_host::ThreadSignal {
+        let kind: crate::kernel::runtime_host::ThreadSignalKind = self.kind.parse().unwrap();
         crate::kernel::runtime_host::ThreadSignal {
             id: crate::kernel::runtime_host::ThreadSignalId::from_uuid(
                 uuid::Uuid::parse_str(&self.signal_id).unwrap(),
@@ -5623,7 +5626,7 @@ impl TsAgentThreadSignalFixture {
                 thread_id: crate::kernel::runtime_host::ThreadId::parse_str(&self.thread_id)
                     .unwrap(),
             },
-            kind: signal_kind_from_ts(&self.kind),
+            kind,
             metadata: self.metadata,
             created_at_ms: 0,
         }
@@ -5764,60 +5767,4 @@ fn ts_style_signal_and_checkpoint_fixtures_round_trip_without_product_fields() {
     );
     assert_eq!(checkpoint_roundtrip.label, checkpoint.label);
     assert_eq!(checkpoint_roundtrip.metadata, checkpoint.metadata);
-}
-
-fn lifecycle_status_to_ts(
-    status: crate::kernel::runtime_host::ThreadLifecycleStatus,
-) -> &'static str {
-    match status {
-        crate::kernel::runtime_host::ThreadLifecycleStatus::Starting => "starting",
-        crate::kernel::runtime_host::ThreadLifecycleStatus::Idle => "idle",
-        crate::kernel::runtime_host::ThreadLifecycleStatus::Running => "running",
-        crate::kernel::runtime_host::ThreadLifecycleStatus::Cancelling => "cancelling",
-        crate::kernel::runtime_host::ThreadLifecycleStatus::Stopped => "stopped",
-        crate::kernel::runtime_host::ThreadLifecycleStatus::Failed => "failed",
-    }
-}
-
-fn lifecycle_status_from_ts(status: &str) -> crate::kernel::runtime_host::ThreadLifecycleStatus {
-    match status {
-        "starting" => crate::kernel::runtime_host::ThreadLifecycleStatus::Starting,
-        "idle" => crate::kernel::runtime_host::ThreadLifecycleStatus::Idle,
-        "running" => crate::kernel::runtime_host::ThreadLifecycleStatus::Running,
-        "cancelling" => crate::kernel::runtime_host::ThreadLifecycleStatus::Cancelling,
-        "stopped" => crate::kernel::runtime_host::ThreadLifecycleStatus::Stopped,
-        "failed" => crate::kernel::runtime_host::ThreadLifecycleStatus::Failed,
-        other => panic!("unknown ts status: {other}"),
-    }
-}
-
-fn signal_kind_to_ts(kind: crate::kernel::runtime_host::ThreadSignalKind) -> &'static str {
-    match kind {
-        crate::kernel::runtime_host::ThreadSignalKind::InterruptCancel => "interrupt_cancel",
-        crate::kernel::runtime_host::ThreadSignalKind::Shutdown => "shutdown",
-        crate::kernel::runtime_host::ThreadSignalKind::UserQueue => "user_queue",
-        crate::kernel::runtime_host::ThreadSignalKind::UserSteer => "user_steer",
-        crate::kernel::runtime_host::ThreadSignalKind::UserInterrupt => "user_interrupt",
-        crate::kernel::runtime_host::ThreadSignalKind::CheckpointRequested => {
-            "checkpoint_requested"
-        }
-        crate::kernel::runtime_host::ThreadSignalKind::CheckpointCreated => "checkpoint_created",
-        crate::kernel::runtime_host::ThreadSignalKind::Failed => "failed",
-    }
-}
-
-fn signal_kind_from_ts(kind: &str) -> crate::kernel::runtime_host::ThreadSignalKind {
-    match kind {
-        "interrupt_cancel" => crate::kernel::runtime_host::ThreadSignalKind::InterruptCancel,
-        "shutdown" => crate::kernel::runtime_host::ThreadSignalKind::Shutdown,
-        "user_queue" => crate::kernel::runtime_host::ThreadSignalKind::UserQueue,
-        "user_steer" => crate::kernel::runtime_host::ThreadSignalKind::UserSteer,
-        "user_interrupt" => crate::kernel::runtime_host::ThreadSignalKind::UserInterrupt,
-        "checkpoint_requested" => {
-            crate::kernel::runtime_host::ThreadSignalKind::CheckpointRequested
-        }
-        "checkpoint_created" => crate::kernel::runtime_host::ThreadSignalKind::CheckpointCreated,
-        "failed" => crate::kernel::runtime_host::ThreadSignalKind::Failed,
-        other => panic!("unknown ts signal kind: {other}"),
-    }
 }

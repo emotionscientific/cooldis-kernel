@@ -325,7 +325,7 @@ fn invocation_event(event: &crate::EventRecord) -> verlet_abi::CouplingInvocatio
         stream_id: event.stream_id.to_string(),
         sequence: event.sequence.get(),
         kind: event.kind.to_string(),
-        origin: event.origin.as_str().to_string(),
+        origin: event.origin.to_string(),
         payload: event.payload.clone(),
     }
 }

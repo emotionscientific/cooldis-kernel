@@ -1185,31 +1185,19 @@ async fn sqlite_events_round_trip_stream_schema_v1_context_records() {
         sqlite_event_schema_columns(&path).await,
         vec![
             (
-                verlet_history::EventKind::TurnSubmitted
-                    .as_str()
-                    .to_string(),
+                verlet_history::EventKind::TurnSubmitted.to_string(),
                 verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
-                verlet_history::EventKind::TurnSubmitted
-                    .payload_schema_id()
-                    .to_string()
+                verlet_history::EventKind::TurnSubmitted.payload_schema_id()
             ),
             (
-                verlet_history::EventKind::ContextSummaryCompleted
-                    .as_str()
-                    .to_string(),
+                verlet_history::EventKind::ContextSummaryCompleted.to_string(),
                 verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
-                verlet_history::EventKind::ContextSummaryCompleted
-                    .payload_schema_id()
-                    .to_string()
+                verlet_history::EventKind::ContextSummaryCompleted.payload_schema_id()
             ),
             (
-                verlet_history::EventKind::ContextReadPlanSet
-                    .as_str()
-                    .to_string(),
+                verlet_history::EventKind::ContextReadPlanSet.to_string(),
                 verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
-                verlet_history::EventKind::ContextReadPlanSet
-                    .payload_schema_id()
-                    .to_string()
+                verlet_history::EventKind::ContextReadPlanSet.payload_schema_id()
             ),
         ]
     );
@@ -1340,11 +1328,9 @@ async fn sqlite_round_trips_declared_coupling_event_kinds() {
 
     let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     let events = reopened.read_events(&stream_id, None).await.unwrap();
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_ref()).collect();
     assert_eq!(
-        events
-            .iter()
-            .map(|event| event.kind.as_str())
-            .collect::<Vec<_>>(),
+        kinds,
         vec![
             "turn.submitted",
             "tool.call.suspended",
@@ -1604,7 +1590,7 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
                         coordinates.user_id.as_str(),
                         coordinates.session_id.as_str(),
                         verlet_history::now_ms(),
-                        kind.as_str(),
+                        kind.as_ref(),
                         payload_json,
                     ],
                 )
@@ -1661,31 +1647,19 @@ async fn sqlite_migrates_legacy_event_records_origin_and_provenance() {
         sqlite_event_schema_columns(&path).await,
         vec![
             (
-                verlet_history::EventKind::SessionEntryAppended
-                    .as_str()
-                    .to_string(),
+                verlet_history::EventKind::SessionEntryAppended.to_string(),
                 verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
-                verlet_history::EventKind::SessionEntryAppended
-                    .payload_schema_id()
-                    .to_string()
+                verlet_history::EventKind::SessionEntryAppended.payload_schema_id()
             ),
             (
-                verlet_history::EventKind::SessionEntryAppended
-                    .as_str()
-                    .to_string(),
+                verlet_history::EventKind::SessionEntryAppended.to_string(),
                 verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
-                verlet_history::EventKind::SessionEntryAppended
-                    .payload_schema_id()
-                    .to_string()
+                verlet_history::EventKind::SessionEntryAppended.payload_schema_id()
             ),
             (
-                verlet_history::EventKind::ContextCompileCompleted
-                    .as_str()
-                    .to_string(),
+                verlet_history::EventKind::ContextCompileCompleted.to_string(),
                 verlet_history::STREAM_RECORD_SCHEMA_V1.to_string(),
-                verlet_history::EventKind::ContextCompileCompleted
-                    .payload_schema_id()
-                    .to_string()
+                verlet_history::EventKind::ContextCompileCompleted.payload_schema_id()
             ),
         ]
     );

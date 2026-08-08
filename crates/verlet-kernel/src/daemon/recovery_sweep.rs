@@ -173,7 +173,7 @@ impl StartupRecoverySweep {
                     terminal.outcome_reason,
                     format!(
                         "startup recovery re-observed durable child terminal {} after daemon restart",
-                        terminal.kind.as_str()
+                        terminal.kind
                     ),
                     Some((terminal.stream_id, terminal.event_id)),
                 ),

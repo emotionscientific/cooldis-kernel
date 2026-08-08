@@ -261,14 +261,15 @@ async fn load_debug_bind_daemon_events(
     let mut client = crate::cli::debug_rpc::connect_debug_rpc_client(&url).await?;
     let mut cursor: Option<String> = None;
     let mut events = Vec::new();
+    let compile_kind = crate::EventKind::ManifestCompileCompleted;
+    let bind_kind = crate::EventKind::ManifestBindCompleted;
+    let compile_kind_name: &str = compile_kind.as_ref();
+    let bind_kind_name: &str = bind_kind.as_ref();
     loop {
         let mut params = serde_json::json!({
             "threadId": thread_id,
             "limit": 500,
-            "kinds": [
-                crate::EventKind::ManifestCompileCompleted.as_str(),
-                crate::EventKind::ManifestBindCompleted.as_str(),
-            ],
+            "kinds": [compile_kind_name, bind_kind_name],
         });
         if let Some(cursor) = cursor.as_ref() {
             params["cursor"] = serde_json::Value::String(cursor.clone());
@@ -362,9 +363,13 @@ fn recorded_receipt_event_from_rpc(
 fn active_receipt_events(
     events: &[RecordedReceiptEvent],
 ) -> crate::VerletResult<(&RecordedReceiptEvent, &RecordedReceiptEvent)> {
+    let compile_kind = crate::EventKind::ManifestCompileCompleted;
+    let bind_kind = crate::EventKind::ManifestBindCompleted;
+    let compile_kind_name: &str = compile_kind.as_ref();
+    let bind_kind_name: &str = bind_kind.as_ref();
     let bind = events
         .iter()
-        .filter(|event| event.kind == crate::EventKind::ManifestBindCompleted.as_str())
+        .filter(|event| event.kind == bind_kind_name)
         .max_by_key(|event| event.sequence)
         .ok_or_else(|| {
             crate::cli::usage_error("manifest.bind.completed receipt event was not found")
@@ -374,10 +379,7 @@ fn active_receipt_events(
     })?;
     let compile = events
         .iter()
-        .find(|event| {
-            event.event_id == *compile_id
-                && event.kind == crate::EventKind::ManifestCompileCompleted.as_str()
-        })
+        .find(|event| event.event_id == *compile_id && event.kind == compile_kind_name)
         .ok_or_else(|| {
             crate::cli::usage_error(
                 "active manifest bind receipt references an unavailable compile receipt",
@@ -794,20 +796,19 @@ fn short_hash(value: &str) -> String {
     }
 }
 
+const UNRECORDED_ORIGIN: &str = "unrecorded";
+
 fn model_origin_text(origin: Option<crate::AgentManifestModelProfileOrigin>) -> &'static str {
     match origin {
-        Some(crate::AgentManifestModelProfileOrigin::ManifestDefault) => "manifest-default",
-        Some(crate::AgentManifestModelProfileOrigin::SelectedAtStart) => "selected-at-start",
-        None => "unrecorded",
+        Some(origin) => origin.into(),
+        None => UNRECORDED_ORIGIN,
     }
 }
 
 fn binding_origin_text(origin: Option<crate::AgentManifestBindingOrigin>) -> &'static str {
     match origin {
-        Some(crate::AgentManifestBindingOrigin::DaemonDefault) => "daemon-default",
-        Some(crate::AgentManifestBindingOrigin::BindOverride) => "bind-override",
-        Some(crate::AgentManifestBindingOrigin::Manifest) => "manifest",
-        None => "unrecorded",
+        Some(origin) => origin.into(),
+        None => UNRECORDED_ORIGIN,
     }
 }
 

@@ -17,35 +17,31 @@ pub enum SecretStoreError {
     Storage(String),
     #[error("secret store codec failed: {0}")]
     Codec(String),
+    #[error("stored secret source kind {kind:?} is not known")]
+    UnknownSourceKind {
+        kind: String,
+        #[source]
+        source: strum::ParseError,
+    },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum SecretSourceKind {
     Env,
     Stdin,
     Local,
-}
-
-impl SecretSourceKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Env => "env",
-            Self::Stdin => "stdin",
-            Self::Local => "local",
-        }
-    }
-
-    fn from_str(value: &str) -> SecretStoreResult<Self> {
-        match value {
-            "env" => Ok(Self::Env),
-            "stdin" => Ok(Self::Stdin),
-            "local" => Ok(Self::Local),
-            other => Err(SecretStoreError::Codec(format!(
-                "unknown secret source kind {other:?}"
-            ))),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -137,6 +133,7 @@ impl SqliteSecretStore {
             return Err(SecretStoreError::EmptyValue(name));
         }
         let now = verlet_history::now_ms();
+        let source_kind_name: &str = source_kind.as_ref();
         let connection = self.inner.connect().await.map_err(storage_error)?;
         connection
             .execute(
@@ -153,7 +150,7 @@ impl SqliteSecretStore {
                 verlet_sqlite::params![
                     name.as_str(),
                     value,
-                    source_kind.as_str(),
+                    source_kind_name,
                     source_label,
                     now,
                     now
@@ -250,7 +247,12 @@ impl SecretResolver for SqliteSecretStore {
                 Ok(ResolvedSecret {
                     name: row.get(0).map_err(storage_error)?,
                     value: row.get(1).map_err(storage_error)?,
-                    source_kind: SecretSourceKind::from_str(&source_kind)?,
+                    source_kind: source_kind.parse().map_err(|err| {
+                        SecretStoreError::UnknownSourceKind {
+                            kind: source_kind.clone(),
+                            source: err,
+                        }
+                    })?,
                     source_label: row.get(3).map_err(storage_error)?,
                     updated_at_ms: row.get(4).map_err(storage_error)?,
                 })
@@ -362,7 +364,12 @@ fn sqlite_secret_status_from_row(row: &verlet_sqlite::Row) -> SecretStoreResult<
     let source_kind: String = row.get(1).map_err(storage_error)?;
     Ok(SecretStatus {
         name: row.get(0).map_err(storage_error)?,
-        source_kind: SecretSourceKind::from_str(&source_kind)?,
+        source_kind: source_kind
+            .parse()
+            .map_err(|err| SecretStoreError::UnknownSourceKind {
+                kind: source_kind.clone(),
+                source: err,
+            })?,
         source_label: row.get(2).map_err(storage_error)?,
         created_at_ms: row.get(3).map_err(storage_error)?,
         updated_at_ms: row.get(4).map_err(storage_error)?,

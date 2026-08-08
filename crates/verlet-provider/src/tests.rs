@@ -144,7 +144,7 @@ fn openai_responses_budget_thinking_fails_closed() {
         .unwrap();
     assert_eq!(
         body["reasoning"]["effort"],
-        serde_json::json!(crate::ThinkingEffort::High.as_openai_wire())
+        serde_json::json!(crate::ThinkingEffort::High.as_ref())
     );
 
     request.thinking = None;
@@ -211,7 +211,7 @@ fn openai_chat_thinking_request_mapping_covers_efforts_and_provider_gate() {
                 .unwrap();
 
             for body in [complete_body, stream_body] {
-                assert_eq!(body["reasoning_effort"], effort.as_openai_wire());
+                assert_eq!(body["reasoning_effort"], effort.as_ref());
                 if zhipu_convention {
                     assert_eq!(body["thinking"], serde_json::json!({"type": "enabled"}));
                 } else {
@@ -1442,4 +1442,35 @@ fn test_content_text(content: &[verlet_history::CanonicalContent]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// These are live OpenAI/Anthropic request-field values. `XHigh` must stay
+/// `xhigh`; the enum's serde representation says `x_high` and is unrelated.
+#[test]
+fn thinking_effort_and_reasoning_summary_wire_spellings_are_pinned() {
+    let all_efforts = [
+        crate::ThinkingEffort::Low,
+        crate::ThinkingEffort::Medium,
+        crate::ThinkingEffort::High,
+        crate::ThinkingEffort::XHigh,
+        crate::ThinkingEffort::Max,
+        crate::ThinkingEffort::Other("extreme".to_string()),
+    ];
+    let efforts: Vec<&str> = all_efforts.iter().map(|effort| effort.as_ref()).collect();
+    assert_eq!(
+        efforts,
+        vec!["low", "medium", "high", "xhigh", "max", "extreme"]
+    );
+
+    let all_summaries = [
+        crate::OpenAIReasoningSummary::Auto,
+        crate::OpenAIReasoningSummary::Concise,
+        crate::OpenAIReasoningSummary::Detailed,
+        crate::OpenAIReasoningSummary::Other("verbose".to_string()),
+    ];
+    let summaries: Vec<&str> = all_summaries
+        .iter()
+        .map(|summary| summary.as_ref())
+        .collect();
+    assert_eq!(summaries, vec!["auto", "concise", "detailed", "verbose"]);
 }

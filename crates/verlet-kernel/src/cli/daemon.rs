@@ -453,10 +453,8 @@ pub(super) async fn daemon_config(mut args: Vec<std::ffi::OsString>) -> crate::V
                     .unwrap_or_else(|| "<defaults>".to_string())
             );
             println!("app_server.listen {}", loaded.config.app_server.listen);
-            println!(
-                "io.ingress.persistence {}",
-                ingress_persistence_mode_name(loaded.config.io.ingress.persistence.mode)
-            );
+            let mode_name: &'static str = loaded.config.io.ingress.persistence.mode.into();
+            println!("io.ingress.persistence {mode_name}");
             println!("io.routes {}", loaded.config.io.routes.len());
             Ok(())
         }
@@ -610,7 +608,7 @@ pub(super) fn parse_daemon_service_print_args(
         match arg.to_string_lossy().as_ref() {
             "--target" => {
                 let value = crate::cli::tool::required_string_value(&mut iter, "--target")?;
-                target = crate::VerletDaemonServiceTarget::parse(&value)?;
+                target = parse_daemon_service_target(&value)?;
             }
             "--config" => {
                 config_path = Some(crate::cli::tool::required_path_value(
@@ -669,7 +667,7 @@ pub(super) fn parse_daemon_service_uninstall_args(
         match arg.to_string_lossy().as_ref() {
             "--target" => {
                 let value = crate::cli::tool::required_string_value(&mut iter, "--target")?;
-                target = crate::VerletDaemonServiceTarget::parse(&value)?;
+                target = parse_daemon_service_target(&value)?;
             }
             "--label" => label = crate::cli::tool::required_string_value(&mut iter, "--label")?,
             other => {
@@ -683,20 +681,21 @@ pub(super) fn parse_daemon_service_uninstall_args(
     Ok(DaemonServiceUninstallArgs { target, label })
 }
 
+fn parse_daemon_service_target(
+    value: &str,
+) -> crate::VerletResult<crate::VerletDaemonServiceTarget> {
+    value.parse().map_err(|_| {
+        crate::VerletError::RuntimeFactory(format!(
+            "unknown daemon service target {value:?}; expected launchd or systemd"
+        ))
+    })
+}
+
 pub(super) fn default_daemon_service_target() -> crate::VerletDaemonServiceTarget {
     if cfg!(target_os = "macos") {
         crate::VerletDaemonServiceTarget::Launchd
     } else {
         crate::VerletDaemonServiceTarget::Systemd
-    }
-}
-
-pub(super) fn ingress_persistence_mode_name(
-    mode: verlet_io_core::IngressPersistenceMode,
-) -> &'static str {
-    match mode {
-        verlet_io_core::IngressPersistenceMode::DurableQueue => "durable_queue",
-        verlet_io_core::IngressPersistenceMode::BestEffortDirect => "best_effort_direct",
     }
 }
 

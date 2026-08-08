@@ -1907,11 +1907,9 @@ fn model_request_id(
     attempt: u32,
 ) -> String {
     format!(
-        "{}:{}:{}:{}:{}:candidate{}:attempt{}",
+        "{}:{}:{purpose}:{mode}:{}:candidate{}:attempt{}",
         turn_context.trace_id,
         turn_context.turn_id,
-        purpose.as_str(),
-        mode.as_str(),
         message_count,
         endpoint_index + 1,
         attempt

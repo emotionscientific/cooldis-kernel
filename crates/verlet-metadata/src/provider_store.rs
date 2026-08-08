@@ -590,7 +590,7 @@ impl ThreadMetadataStore for SqliteMetadataStore {
         let user_id = record.coordinates.user_id.clone();
         let session_id = record.coordinates.session_id.clone();
         let parent_thread_id = record.parent_thread_id.map(|id| id.to_string());
-        let status = thread_lifecycle_status_string(record.status);
+        let status: &str = record.status.as_ref();
         let record_json = serde_json::to_string(&record).map_err(metadata_codec_error)?;
         connection
             .execute(
@@ -1143,19 +1143,6 @@ fn decode_thread_lifecycle_record(
     json: &str,
 ) -> MetadataStoreResult<verlet_runtime_contracts::ThreadLifecycleRecord> {
     serde_json::from_str(json).map_err(metadata_codec_error)
-}
-
-fn thread_lifecycle_status_string(
-    status: verlet_runtime_contracts::ThreadLifecycleStatus,
-) -> &'static str {
-    match status {
-        verlet_runtime_contracts::ThreadLifecycleStatus::Starting => "starting",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Idle => "idle",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Running => "running",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Cancelling => "cancelling",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Stopped => "stopped",
-        verlet_runtime_contracts::ThreadLifecycleStatus::Failed => "failed",
-    }
 }
 
 fn now_ms_u64() -> MetadataStoreResult<u64> {
