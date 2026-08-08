@@ -2,6 +2,12 @@
 pub struct SqliteSessionStore {
     inner: verlet_sqlite::Db,
     writer: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// The placement-lease epoch every append through this handle presents
+    /// (EMO-533). 0 is the unplaced/single-instance default. Clones share
+    /// the value; a daemon must open every handle onto its store with the
+    /// one epoch its provisioning gave it — a 0-epoch side handle against a
+    /// store already fenced higher fails closed by design.
+    lease_epoch: u64,
 }
 
 async fn cancellation_safe<T>(
@@ -38,6 +44,7 @@ impl SqliteSessionStore {
         Ok(Self {
             inner,
             writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            lease_epoch: 0,
         })
     }
 
@@ -58,6 +65,7 @@ impl SqliteSessionStore {
             let store = Self {
                 inner,
                 writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                lease_epoch: 0,
             };
             {
                 let _writer = store.write_guard().await;
@@ -67,6 +75,15 @@ impl SqliteSessionStore {
             Ok(store)
         })
         .await
+    }
+
+    /// The epoch this handle presents on every journal append (EMO-533).
+    /// Fences are per stream and durable (`journal_lease_epochs`); the epoch
+    /// is per handle. See [`verlet_history::HistoryError::StaleLeaseEpoch`]
+    /// for the rejection contract.
+    pub fn with_lease_epoch(mut self, lease_epoch: u64) -> Self {
+        self.lease_epoch = lease_epoch;
+        self
     }
 
     async fn connect(&self) -> verlet_history::HistoryResult<verlet_sqlite::Connection> {
@@ -730,6 +747,14 @@ async fn init_sqlite_schema(
 
             CREATE INDEX IF NOT EXISTS idx_observation_records_scope
                 ON observation_records(tenant_id, user_id, session_id, thread_id, kind, created_at_ms);
+
+            -- Placement-lease write fence (EMO-533): the highest lease epoch
+            -- ever presented per stream. Rows exist only once a non-zero
+            -- epoch is presented; single-instance stores never write here.
+            CREATE TABLE IF NOT EXISTS journal_lease_epochs (
+                stream_id TEXT PRIMARY KEY NOT NULL,
+                minimum_epoch INTEGER NOT NULL
+            );
             "#,
         )
         .await
@@ -1159,6 +1184,25 @@ async fn sqlite_insert_entry_with_optional_provenance(
     )
     .await?;
     Ok(())
+}
+
+/// Enforce the placement-lease write fence for one append transaction
+/// (EMO-533). Call once per write transaction, before the first
+/// [`sqlite_insert_event`] for the stream — the check and any raise must
+/// commit or roll back with the appends they guard.
+///
+/// Contract: `presented_epoch` below the recorded `minimum_epoch` for the
+/// stream returns [`verlet_history::HistoryError::StaleLeaseEpoch`] and the
+/// caller appends nothing. Presenting a higher epoch raises the row in the
+/// same transaction. Presenting 0 against an absent row is the
+/// single-instance fast path: no row is written, the table stays empty.
+async fn sqlite_enforce_lease_epoch(
+    connection: &verlet_sqlite::Connection,
+    stream_id: &verlet_history::EventStreamId,
+    presented_epoch: u64,
+) -> verlet_history::HistoryResult<()> {
+    let (_, _, _) = (connection, stream_id, presented_epoch);
+    todo!("EMO-533: fence check + raise inside the append transaction")
 }
 
 async fn sqlite_insert_event(

@@ -174,6 +174,14 @@ pub struct VerletRuntimeConfig {
     /// workspace requirement. Bind-time RPC input may override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    /// The placement-lease epoch this daemon instance presents on every
+    /// journal append (EMO-533; orchestrator law: one writer per agent
+    /// journal is fenced, never assumed). Source of truth is the
+    /// orchestrator's placement stream; provisioning writes the bound
+    /// epoch here when it (re)homes the daemon. Default 0 = unplaced /
+    /// single-instance; the store fence stays inert at 0.
+    #[serde(default)]
+    pub lease_epoch: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

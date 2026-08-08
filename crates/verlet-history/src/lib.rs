@@ -96,6 +96,20 @@ pub enum HistoryError {
     },
     #[error("this event store does not support fenced appends")]
     FencedAppendUnsupported,
+    /// A write presented a placement-lease epoch below the highest epoch this
+    /// store has ever seen for the stream (EMO-533; orchestrator law: one
+    /// writer per agent journal is fenced, never assumed). The presenting
+    /// runtime's lease was superseded — it must stop writing this journal.
+    /// Fail closed: nothing from the batch is appended. Terminal for the
+    /// presenting handle; retrying with the same epoch is never correct.
+    #[error(
+        "append to {stream_id} presented lease epoch {presented_epoch}, below the fenced minimum {minimum_epoch}"
+    )]
+    StaleLeaseEpoch {
+        stream_id: EventStreamId,
+        presented_epoch: u64,
+        minimum_epoch: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -2826,6 +2840,10 @@ impl<T> RuntimeStore for T where T: SessionStore + EventStore + ObservationStore
 #[derive(Clone, Default)]
 pub struct InMemorySessionStore {
     inner: std::sync::Arc<tokio::sync::RwLock<InMemorySessionStoreInner>>,
+    /// The placement-lease epoch every append through this handle presents
+    /// (EMO-533). 0 is the unplaced/single-instance default; the fence is
+    /// inert until some handle presents a higher epoch for a stream.
+    lease_epoch: u64,
 }
 
 #[derive(Default)]
@@ -2840,11 +2858,25 @@ struct InMemorySessionStoreInner {
     event_ids: std::collections::HashSet<EventRecordId>,
     observations:
         std::collections::HashMap<verlet_runtime_contracts::ThreadId, Vec<ObservationRecord>>,
+    /// Highest lease epoch ever presented per stream. Appends presenting a
+    /// lower epoch fail closed with [`HistoryError::StaleLeaseEpoch`];
+    /// epoch 0 against an absent entry writes nothing here (inert path).
+    /// Clones share this map through the store's inner lock, mirroring the
+    /// durable `journal_lease_epochs` table in the SQLite store.
+    lease_epoch_minimums: std::collections::HashMap<EventStreamId, u64>,
 }
 
 impl InMemorySessionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The epoch this handle presents on every journal append. Fences are
+    /// per stream and durable in the store; the epoch is per handle. See
+    /// [`HistoryError::StaleLeaseEpoch`] for the rejection contract.
+    pub fn with_lease_epoch(mut self, lease_epoch: u64) -> Self {
+        self.lease_epoch = lease_epoch;
+        self
     }
 }
 
