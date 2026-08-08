@@ -2,6 +2,12 @@
 pub struct SqliteSessionStore {
     inner: verlet_sqlite::Db,
     writer: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// The placement-lease epoch every journal event append through this
+    /// handle presents (EMO-533). 0 is the unplaced/single-instance default.
+    /// Cloning copies the value; a daemon must open every handle onto its store
+    /// with the one epoch its provisioning gave it — a 0-epoch side handle
+    /// against a store already fenced higher fails closed by design.
+    lease_epoch: u64,
 }
 
 async fn cancellation_safe<T>(
@@ -38,6 +44,7 @@ impl SqliteSessionStore {
         Ok(Self {
             inner,
             writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            lease_epoch: 0,
         })
     }
 
@@ -58,6 +65,7 @@ impl SqliteSessionStore {
             let store = Self {
                 inner,
                 writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                lease_epoch: 0,
             };
             {
                 let _writer = store.write_guard().await;
@@ -67,6 +75,15 @@ impl SqliteSessionStore {
             Ok(store)
         })
         .await
+    }
+
+    /// The epoch this handle presents on every journal append (EMO-533).
+    /// Fences are per stream and durable (`journal_lease_epochs`); the epoch
+    /// is per handle. See [`verlet_history::HistoryError::StaleLeaseEpoch`]
+    /// for the rejection contract.
+    pub fn with_lease_epoch(mut self, lease_epoch: u64) -> Self {
+        self.lease_epoch = lease_epoch;
+        self
     }
 
     async fn connect(&self) -> verlet_history::HistoryResult<verlet_sqlite::Connection> {
@@ -127,6 +144,7 @@ impl SqliteSessionStore {
         expected_next_sequence: verlet_history::EventSequence,
         records: Vec<verlet_history::NewEventRecord>,
     ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
+        sqlite_enforce_lease_epoch(transaction, stream_id, self.lease_epoch).await?;
         let actual_next_sequence = sqlite_next_event_sequence(transaction, stream_id).await?;
         if actual_next_sequence != expected_next_sequence.get() {
             return Err(verlet_history::HistoryError::AppendFenceConflict {
@@ -269,6 +287,12 @@ impl verlet_history::SessionStore for SqliteSessionStore {
                 turn_id,
                 kind,
             );
+            sqlite_enforce_lease_epoch(
+                &tx,
+                &verlet_history::EventStreamId::for_thread(coordinates),
+                store.lease_epoch,
+            )
+            .await?;
             sqlite_insert_entry(&tx, &entry).await?;
             tx.execute(
                 "INSERT INTO active_leaves (thread_id, entry_id)
@@ -331,9 +355,11 @@ impl verlet_history::SessionStore for SqliteSessionStore {
                 prior_entry_id,
             })
             .map_err(verlet_history::codec_error)?;
+            let stream_id = verlet_history::EventStreamId::for_thread(coordinates);
+            sqlite_enforce_lease_epoch(&tx, &stream_id, store.lease_epoch).await?;
             sqlite_insert_event(
                 &tx,
-                &verlet_history::EventStreamId::for_thread(coordinates),
+                &stream_id,
                 verlet_history::NewEventRecord::witnessed(
                     coordinates.clone(),
                     verlet_history::EventKind::ThreadBranchSelected,
@@ -417,6 +443,12 @@ impl verlet_history::SessionStore for SqliteSessionStore {
                 return Ok(None);
             };
             let entries = sqlite_branch_path(&tx, source_coordinates, source_leaf).await?;
+            sqlite_enforce_lease_epoch(
+                &tx,
+                &verlet_history::EventStreamId::for_thread(target_coordinates),
+                store.lease_epoch,
+            )
+            .await?;
             let mut parent_entry_id = None;
             let mut latest_entry_id = None;
             for source_entry in entries {
@@ -535,6 +567,12 @@ impl SqliteSessionStore {
 
             let entry =
                 verlet_history::SessionEntry::new(coordinates.clone(), parent_entry_id, kind);
+            sqlite_enforce_lease_epoch(
+                &tx,
+                &verlet_history::EventStreamId::for_thread(coordinates),
+                store.lease_epoch,
+            )
+            .await?;
             sqlite_insert_entry_with_optional_provenance(&tx, &entry, provenance).await?;
             tx.execute(
                 "INSERT INTO active_leaves (thread_id, entry_id)
@@ -571,6 +609,7 @@ impl verlet_history::EventStore for SqliteSessionStore {
                 .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
                 .await
                 .map_err(verlet_history::storage_error)?;
+            sqlite_enforce_lease_epoch(&tx, stream_id, store.lease_epoch).await?;
             let mut appended = Vec::with_capacity(records.len());
             for record in records {
                 appended.push(sqlite_insert_event(&tx, stream_id, record).await?);
@@ -730,6 +769,15 @@ async fn init_sqlite_schema(
 
             CREATE INDEX IF NOT EXISTS idx_observation_records_scope
                 ON observation_records(tenant_id, user_id, session_id, thread_id, kind, created_at_ms);
+
+            -- Placement-lease write fence (EMO-533): the highest lease epoch
+            -- committed by a successful append transaction per stream. Rows
+            -- exist only once a non-zero epoch is presented; single-instance
+            -- stores never write here.
+            CREATE TABLE IF NOT EXISTS journal_lease_epochs (
+                stream_id TEXT PRIMARY KEY NOT NULL,
+                minimum_epoch INTEGER NOT NULL
+            );
             "#,
         )
         .await
@@ -1158,6 +1206,76 @@ async fn sqlite_insert_entry_with_optional_provenance(
         },
     )
     .await?;
+    Ok(())
+}
+
+/// Enforce the placement-lease write fence for one append transaction
+/// (EMO-533). Call once per write transaction, before the first
+/// [`sqlite_insert_event`] for the stream — the check and any raise must
+/// commit or roll back with the appends they guard.
+///
+/// Contract: `presented_epoch` below the recorded `minimum_epoch` for the
+/// stream returns [`verlet_history::HistoryError::StaleLeaseEpoch`] and the
+/// caller appends nothing. Presenting a higher epoch raises the row in the
+/// same transaction. Presenting 0 against an absent row is the
+/// single-instance fast path: no row is written, the table stays empty.
+async fn sqlite_enforce_lease_epoch(
+    connection: &verlet_sqlite::Connection,
+    stream_id: &verlet_history::EventStreamId,
+    presented_epoch: u64,
+) -> verlet_history::HistoryResult<()> {
+    let mut rows = connection
+        .query(
+            "SELECT minimum_epoch FROM journal_lease_epochs WHERE stream_id = ?1",
+            verlet_sqlite::params![stream_id.as_str()],
+        )
+        .await
+        .map_err(verlet_history::storage_error)?;
+    let minimum_epoch = rows
+        .next()
+        .await
+        .map_err(verlet_history::storage_error)?
+        .map(|row| row.get::<i64>(0).map_err(verlet_history::storage_error))
+        .transpose()?
+        .map(|minimum_epoch| {
+            u64::try_from(minimum_epoch).map_err(|error| {
+                verlet_history::HistoryError::Storage(format!(
+                    "journal lease epoch for {stream_id} is invalid: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+    drop(rows);
+
+    if let Some(minimum_epoch) = minimum_epoch {
+        if presented_epoch < minimum_epoch {
+            return Err(verlet_history::HistoryError::StaleLeaseEpoch {
+                stream_id: stream_id.clone(),
+                presented_epoch,
+                minimum_epoch,
+            });
+        }
+        if presented_epoch == minimum_epoch {
+            return Ok(());
+        }
+    } else if presented_epoch == 0 {
+        return Ok(());
+    }
+
+    let presented_epoch = i64::try_from(presented_epoch).map_err(|error| {
+        verlet_history::HistoryError::Storage(format!(
+            "journal lease epoch for {stream_id} exceeds SQLite INTEGER range: {error}"
+        ))
+    })?;
+    connection
+        .execute(
+            "INSERT INTO journal_lease_epochs (stream_id, minimum_epoch)
+             VALUES (?1, ?2)
+             ON CONFLICT(stream_id) DO UPDATE SET minimum_epoch = excluded.minimum_epoch",
+            verlet_sqlite::params![stream_id.as_str(), presented_epoch],
+        )
+        .await
+        .map_err(verlet_history::storage_error)?;
     Ok(())
 }
 

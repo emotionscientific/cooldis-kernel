@@ -174,6 +174,14 @@ pub struct VerletRuntimeConfig {
     /// workspace requirement. Bind-time RPC input may override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    /// The placement-lease epoch this daemon instance presents on every
+    /// journal append (EMO-533; orchestrator law: one writer per agent
+    /// journal is fenced, never assumed). Source of truth is the
+    /// orchestrator's placement stream; provisioning writes the bound
+    /// epoch here when it (re)homes the daemon. Default 0 = unplaced /
+    /// single-instance; the store fence stays inert at 0.
+    #[serde(default)]
+    pub lease_epoch: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -923,6 +931,7 @@ struct RuntimePresence {
     cwd: bool,
     runtime_home: bool,
     state_home: bool,
+    lease_epoch: bool,
     placement: bool,
     workspace: bool,
 }
@@ -979,6 +988,7 @@ fn daemon_config_presence(
             cwd: section_has_key(table, "runtime", "cwd"),
             runtime_home: section_has_key(table, "runtime", "runtime_home"),
             state_home: section_has_key(table, "runtime", "state_home"),
+            lease_epoch: section_has_key(table, "runtime", "lease_epoch"),
             placement: section_has_key(table, "runtime", "placement"),
             workspace: section_has_key(table, "runtime", "workspace"),
         },
@@ -1051,6 +1061,9 @@ fn merge_daemon_config_layer(
     }
     if presence.runtime.state_home {
         config.runtime.state_home = layer.runtime.state_home.take();
+    }
+    if presence.runtime.lease_epoch {
+        config.runtime.lease_epoch = layer.runtime.lease_epoch;
     }
     if presence.runtime.placement {
         config.runtime.placement = layer.runtime.placement.take();

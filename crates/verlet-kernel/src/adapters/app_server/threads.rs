@@ -598,7 +598,8 @@ impl crate::adapters::app_server::VerletAppServer {
     )> {
         let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
             .await
-            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+            .with_lease_epoch(self.inner.lease_epoch);
         let context = store
             .build_context(&record.coordinates)
             .await
@@ -2084,6 +2085,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) metadata_store_path: Option<std::path::PathBuf>,
     pub(super) secret_store_path: Option<std::path::PathBuf>,
     pub(super) session_store_path: Option<std::path::PathBuf>,
+    pub(super) lease_epoch: u64,
     pub(super) agent_registry_root: Option<std::path::PathBuf>,
     pub(super) blob_registry_root: Option<std::path::PathBuf>,
     pub(super) skill_registry_root: Option<std::path::PathBuf>,
@@ -2549,9 +2551,8 @@ impl CapsuleBindingRuntimeFactory {
         let event_store: std::sync::Arc<dyn verlet_history::RuntimeStore> = std::sync::Arc::new(
             verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
                 .await
-                .map_err(|err| {
-                    crate::kernel::runtime_host::VerletError::History(err.to_string())
-                })?,
+                .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+                .with_lease_epoch(self.lease_epoch),
         );
         Ok(Some(
             crate::agent::tool_universe::ToolUniverseSearchSurface::new_with_runtime(

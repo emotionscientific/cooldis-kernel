@@ -85,10 +85,20 @@ struct Fixture {
 
 impl Fixture {
     async fn new(test_name: &str, now_ms: i64, lease_ttl_secs: u32) -> Self {
+        Self::new_with_lease_epoch(test_name, now_ms, lease_ttl_secs, 0).await
+    }
+
+    async fn new_with_lease_epoch(
+        test_name: &str,
+        now_ms: i64,
+        lease_ttl_secs: u32,
+        lease_epoch: u64,
+    ) -> Self {
         let path = temp_db_path(test_name);
         let store = verlet_history_sqlite::SqliteSessionStore::open(&path)
             .await
-            .unwrap();
+            .unwrap()
+            .with_lease_epoch(lease_epoch);
         let clock = std::sync::Arc::new(TestClock::new(now_ms));
         let config = verlet::daemon::remote_store::endpoint::VerletDaemonSyncConfig {
             lease_ttl_secs,
@@ -109,6 +119,57 @@ impl Fixture {
             clock,
         }
     }
+}
+
+#[tokio::test]
+async fn sequence_conflict_rolls_back_placement_epoch_raise() {
+    let fixture = Fixture::new_with_lease_epoch("sequence-epoch-rollback", 1_000, 60, 9).await;
+    let scope =
+        verlet::daemon::remote_store::lease::StreamPrefixScope::new("thread:epoch-rollback");
+    let stream_id = verlet_history::EventStreamId::new(scope.as_str());
+    let grant = fixture
+        .authority
+        .grant_lease(
+            &scope,
+            &verlet_runtime_contracts::handle::DispatchId::new("dispatch-epoch-rollback"),
+            verlet::daemon::remote_store::lease::StreamLeaseLineage::default(),
+        )
+        .await
+        .unwrap();
+
+    let conflict = fixture
+        .authority
+        .append_if_current(
+            &stream_id,
+            &grant.lease_id,
+            verlet_history::EventSequence::new(2),
+            vec![record("wrong-tail")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        conflict,
+        verlet::daemon::remote_store::lease::LeaseFencedAppendOutcome::SequenceFenceConflict {
+            actual_next_sequence: verlet_history::EventSequence::new(1)
+        }
+    );
+    assert!(
+        fixture
+            .store
+            .read_events(&stream_id, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let lower = verlet_history_sqlite::SqliteSessionStore::open(&fixture.path)
+        .await
+        .unwrap()
+        .with_lease_epoch(8);
+    lower
+        .append_events(&stream_id, vec![record("lower-epoch-remains-current")])
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

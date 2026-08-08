@@ -2437,7 +2437,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let mut events = if let Some(stream_cursor) = params.stream_cursor.as_ref() {
             store
                 .read_events_after_cursor(&stream_id, stream_cursor)
@@ -2497,7 +2498,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let Some((bind_event_id, receipt)) =
             crate::kernel::control_decision::active_manifest_bind_receipt(
                 &store,
@@ -2541,7 +2543,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let mut pending = crate::kernel::control_decision::list_pending_tool_call_suspensions(
             &store,
             &lifecycle.coordinates,
@@ -2569,7 +2572,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let control_stream = verlet_history::EventStreamId::new(format!(
             "control:{}",
             lifecycle.coordinates.thread_id
@@ -2676,7 +2680,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let control_stream = verlet_history::EventStreamId::new(format!(
             "control:{}",
             lifecycle.coordinates.thread_id
@@ -2772,7 +2777,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let receipt = crate::kernel::mandate_lifecycle::start_mandate(
             &store,
             &lifecycle.coordinates,
@@ -2812,7 +2818,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let receipt = crate::kernel::mandate_lifecycle::revoke_mandate(
             &store,
             &lifecycle.coordinates,
@@ -2841,7 +2848,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let data =
             crate::kernel::mandate_lifecycle::list_active_mandates(&store, &lifecycle.coordinates)
                 .await
@@ -2882,7 +2890,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?;
+            })?
+            .with_lease_epoch(self.inner.lease_epoch);
         let mut streams = Vec::new();
         let mut receipts = Vec::new();
         let mut redacted_keys = std::collections::BTreeSet::new();

@@ -96,6 +96,20 @@ pub enum HistoryError {
     },
     #[error("this event store does not support fenced appends")]
     FencedAppendUnsupported,
+    /// A write presented a placement-lease epoch below the committed minimum
+    /// this store records for the stream (EMO-533; orchestrator law: one
+    /// writer per agent journal is fenced, never assumed). The presenting
+    /// runtime's lease was superseded — it must stop writing this journal.
+    /// Fail closed: nothing from the batch is appended. Terminal for the
+    /// presenting handle; retrying with the same epoch is never correct.
+    #[error(
+        "append to {stream_id} presented lease epoch {presented_epoch}, below the fenced minimum {minimum_epoch}"
+    )]
+    StaleLeaseEpoch {
+        stream_id: EventStreamId,
+        presented_epoch: u64,
+        minimum_epoch: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -2826,6 +2840,11 @@ impl<T> RuntimeStore for T where T: SessionStore + EventStore + ObservationStore
 #[derive(Clone, Default)]
 pub struct InMemorySessionStore {
     inner: std::sync::Arc<tokio::sync::RwLock<InMemorySessionStoreInner>>,
+    /// The placement-lease epoch every journal event append through this
+    /// handle presents (EMO-533). 0 is the unplaced/single-instance default;
+    /// the fence is inert until some handle presents a higher epoch for a
+    /// stream.
+    lease_epoch: u64,
 }
 
 #[derive(Default)]
@@ -2840,11 +2859,27 @@ struct InMemorySessionStoreInner {
     event_ids: std::collections::HashSet<EventRecordId>,
     observations:
         std::collections::HashMap<verlet_runtime_contracts::ThreadId, Vec<ObservationRecord>>,
+    /// Highest lease epoch committed by a successful append transaction per
+    /// stream. Appends presenting a lower epoch fail closed with
+    /// [`HistoryError::StaleLeaseEpoch`];
+    /// epoch 0 against an absent entry writes nothing here (inert path).
+    /// Clones share this map through the store's inner lock, mirroring the
+    /// durable `journal_lease_epochs` table in the SQLite store.
+    lease_epoch_minimums: std::collections::HashMap<EventStreamId, u64>,
 }
 
 impl InMemorySessionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The epoch this handle presents on every journal append. Fences are
+    /// per stream and retained by the shared store state; the epoch is per
+    /// handle. See [`HistoryError::StaleLeaseEpoch`] for the rejection
+    /// contract.
+    pub fn with_lease_epoch(mut self, lease_epoch: u64) -> Self {
+        self.lease_epoch = lease_epoch;
+        self
     }
 }
 
@@ -2893,18 +2928,21 @@ impl SessionStore for InMemorySessionStore {
             return Ok(existing.clone());
         }
         let parent_entry_id = inner.active_leaf.get(&thread_id).copied();
+        let stream_id = EventStreamId::for_thread(coordinates);
+        check_in_memory_lease_epoch(&inner, &stream_id, self.lease_epoch)?;
         let entry = SessionEntry::for_turn(coordinates.clone(), parent_entry_id, turn_id, kind);
+        append_in_memory_events(
+            &mut inner,
+            &stream_id,
+            vec![session_entry_event(&entry)],
+            self.lease_epoch,
+        )?;
         inner
             .entries
             .entry(thread_id)
             .or_default()
             .insert(entry.entry_id, entry.clone());
         inner.active_leaf.insert(thread_id, entry.entry_id);
-        append_in_memory_event(
-            &mut inner,
-            &EventStreamId::for_thread(coordinates),
-            session_entry_event(&entry),
-        )?;
         Ok(entry)
     }
 
@@ -2945,14 +2983,17 @@ impl SessionStore for InMemorySessionStore {
             prior_entry_id,
         })
         .map_err(codec_error)?;
-        append_in_memory_event(
+        let stream_id = EventStreamId::for_thread(coordinates);
+        check_in_memory_lease_epoch(&inner, &stream_id, self.lease_epoch)?;
+        append_in_memory_events(
             &mut inner,
-            &EventStreamId::for_thread(coordinates),
-            NewEventRecord::witnessed(
+            &stream_id,
+            vec![NewEventRecord::witnessed(
                 coordinates.clone(),
                 EventKind::ThreadBranchSelected,
                 payload,
-            ),
+            )],
+            self.lease_epoch,
         )?;
         match leaf_entry_id {
             Some(leaf_entry_id) => {
@@ -2988,8 +3029,8 @@ impl SessionStore for InMemorySessionStore {
         target_coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     ) -> HistoryResult<Option<SessionEntryId>> {
         let mut inner = self.inner.write().await;
-        inner.bases.remove(&target_coordinates.thread_id);
         let Some(source_leaf) = source_leaf else {
+            inner.bases.remove(&target_coordinates.thread_id);
             inner.active_leaf.remove(&target_coordinates.thread_id);
             return Ok(None);
         };
@@ -2998,9 +3039,11 @@ impl SessionStore for InMemorySessionStore {
             .get(&source_coordinates.thread_id)
             .ok_or(HistoryError::EntryNotFound(source_leaf))?;
         let path = branch_path(entries_by_id, source_leaf, source_coordinates)?;
+        let stream_id = EventStreamId::for_thread(target_coordinates);
+        check_in_memory_lease_epoch(&inner, &stream_id, self.lease_epoch)?;
 
         let mut parent_entry_id = None;
-        let mut latest_entry_id = None;
+        let mut cloned_entries = Vec::with_capacity(path.len());
         for source_entry in path {
             let entry = SessionEntry::new(
                 target_coordinates.clone(),
@@ -3008,18 +3051,23 @@ impl SessionStore for InMemorySessionStore {
                 source_entry.kind.clone(),
             );
             parent_entry_id = Some(entry.entry_id);
-            latest_entry_id = Some(entry.entry_id);
+            cloned_entries.push(entry);
+        }
+        append_in_memory_events(
+            &mut inner,
+            &stream_id,
+            cloned_entries.iter().map(session_entry_event).collect(),
+            self.lease_epoch,
+        )?;
+        inner.bases.remove(&target_coordinates.thread_id);
+        for entry in &cloned_entries {
             inner
                 .entries
                 .entry(target_coordinates.thread_id)
                 .or_default()
                 .insert(entry.entry_id, entry.clone());
-            append_in_memory_event(
-                &mut inner,
-                &EventStreamId::for_thread(target_coordinates),
-                session_entry_event(&entry),
-            )?;
         }
+        let latest_entry_id = cloned_entries.last().map(|entry| entry.entry_id);
         if let Some(entry_id) = latest_entry_id {
             inner
                 .active_leaf
@@ -3068,7 +3116,10 @@ impl InMemorySessionStore {
         let thread_id = coordinates.thread_id;
         let parent_entry_id = match parent_entry_id {
             Some(parent) => {
-                let entries = inner.entries.entry(thread_id).or_default();
+                let entries = inner
+                    .entries
+                    .get(&thread_id)
+                    .ok_or(HistoryError::EntryNotFound(parent))?;
                 let parent_entry = entries
                     .get(&parent)
                     .ok_or(HistoryError::EntryNotFound(parent))?;
@@ -3078,18 +3129,23 @@ impl InMemorySessionStore {
             None => inner.active_leaf.get(&thread_id).copied(),
         };
 
+        let stream_id = EventStreamId::for_thread(coordinates);
+        check_in_memory_lease_epoch(&inner, &stream_id, self.lease_epoch)?;
         let entry = SessionEntry::new(coordinates.clone(), parent_entry_id, kind);
+        append_in_memory_events(
+            &mut inner,
+            &stream_id,
+            vec![session_entry_event_with_optional_provenance(
+                &entry, provenance,
+            )],
+            self.lease_epoch,
+        )?;
         inner
             .entries
             .entry(thread_id)
             .or_default()
             .insert(entry.entry_id, entry.clone());
         inner.active_leaf.insert(thread_id, entry.entry_id);
-        append_in_memory_event(
-            &mut inner,
-            &EventStreamId::for_thread(coordinates),
-            session_entry_event_with_optional_provenance(&entry, provenance),
-        )?;
         Ok(entry)
     }
 }
@@ -3102,7 +3158,8 @@ impl EventStore for InMemorySessionStore {
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>> {
         let mut inner = self.inner.write().await;
-        append_in_memory_events(&mut inner, stream_id, records)
+        check_in_memory_lease_epoch(&inner, stream_id, self.lease_epoch)?;
+        append_in_memory_events(&mut inner, stream_id, records, self.lease_epoch)
     }
 
     async fn append_events_fenced(
@@ -3112,6 +3169,7 @@ impl EventStore for InMemorySessionStore {
         records: Vec<NewEventRecord>,
     ) -> HistoryResult<Vec<EventRecord>> {
         let mut inner = self.inner.write().await;
+        check_in_memory_lease_epoch(&inner, stream_id, self.lease_epoch)?;
         let actual_next_sequence = inner
             .events
             .get(stream_id)
@@ -3125,7 +3183,7 @@ impl EventStore for InMemorySessionStore {
                 actual_next_sequence,
             });
         }
-        append_in_memory_events(&mut inner, stream_id, records)
+        append_in_memory_events(&mut inner, stream_id, records, self.lease_epoch)
     }
 
     async fn read_events(
@@ -3150,10 +3208,43 @@ impl EventStore for InMemorySessionStore {
     }
 }
 
+fn check_in_memory_lease_epoch(
+    inner: &InMemorySessionStoreInner,
+    stream_id: &EventStreamId,
+    presented_epoch: u64,
+) -> HistoryResult<()> {
+    match inner.lease_epoch_minimums.get(stream_id) {
+        Some(minimum_epoch) if presented_epoch < *minimum_epoch => {
+            return Err(HistoryError::StaleLeaseEpoch {
+                stream_id: stream_id.clone(),
+                presented_epoch,
+                minimum_epoch: *minimum_epoch,
+            });
+        }
+        Some(_) | None => {}
+    }
+    Ok(())
+}
+
+fn raise_in_memory_lease_epoch(
+    inner: &mut InMemorySessionStoreInner,
+    stream_id: &EventStreamId,
+    presented_epoch: u64,
+) {
+    if presented_epoch > 0 {
+        inner
+            .lease_epoch_minimums
+            .entry(stream_id.clone())
+            .and_modify(|minimum_epoch| *minimum_epoch = (*minimum_epoch).max(presented_epoch))
+            .or_insert(presented_epoch);
+    }
+}
+
 fn append_in_memory_events(
     inner: &mut InMemorySessionStoreInner,
     stream_id: &EventStreamId,
     records: Vec<NewEventRecord>,
+    lease_epoch: u64,
 ) -> HistoryResult<Vec<EventRecord>> {
     let mut batch_ids = std::collections::HashSet::with_capacity(records.len());
     for record in &records {
@@ -3169,7 +3260,6 @@ fn append_in_memory_events(
         .unwrap_or_default();
     let mut appended = Vec::with_capacity(records.len());
     for (index, record) in records.into_iter().enumerate() {
-        validate_new_event(&record)?;
         let event = EventRecord::from_new(
             stream_id.clone(),
             EventSequence::new(current_len + index as i64 + 1),
@@ -3178,6 +3268,7 @@ fn append_in_memory_events(
         event.validate_stream_record_v1()?;
         appended.push(event);
     }
+    raise_in_memory_lease_epoch(inner, stream_id, lease_epoch);
     inner
         .events
         .entry(stream_id.clone())
@@ -3423,34 +3514,6 @@ pub fn strip_thread_start_identity_entries(
             .retain(|entry_id| !identity_entry_ids.contains(entry_id));
     }
     source_cuts.retain(|cut| !cut.entry_ids.is_empty());
-}
-
-fn append_in_memory_event(
-    inner: &mut InMemorySessionStoreInner,
-    stream_id: &EventStreamId,
-    record: NewEventRecord,
-) -> HistoryResult<EventRecord> {
-    validate_new_event(&record)?;
-    if inner.event_ids.contains(&record.id) {
-        return Err(HistoryError::DuplicateEventId(record.id));
-    }
-    let sequence = EventSequence::new(
-        inner
-            .events
-            .get(stream_id)
-            .map(|events| events.len() as i64)
-            .unwrap_or_default()
-            + 1,
-    );
-    let event = EventRecord::from_new(stream_id.clone(), sequence, record);
-    event.validate_stream_record_v1()?;
-    inner
-        .events
-        .entry(stream_id.clone())
-        .or_default()
-        .push(event.clone());
-    inner.event_ids.insert(event.id);
-    Ok(event)
 }
 
 pub fn session_entry_event(entry: &SessionEntry) -> NewEventRecord {

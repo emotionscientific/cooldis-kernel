@@ -77,6 +77,7 @@ pub(super) fn daemon_app_server_config_from_loaded(
     }
     config.default_placement = loaded.config.runtime.placement.clone().unwrap_or_default();
     config.default_workspace = loaded.config.runtime.workspace.clone();
+    config.lease_epoch = loaded.config.runtime.lease_epoch;
     if let Some(operations) = loaded.config.registries.operations.clone() {
         let operations = daemon_app_server_registry_root(operations)?;
         // lexicon-allow: capsule - existing app-server config field
@@ -179,7 +180,8 @@ pub(super) async fn start_daemon_sync(
     };
     let store = verlet_history_sqlite::SqliteSessionStore::open(app_server.session_store_path())
         .await
-        .map_err(|error| crate::kernel::runtime_host::VerletError::History(error.to_string()))?;
+        .map_err(|error| crate::kernel::runtime_host::VerletError::History(error.to_string()))?
+        .with_lease_epoch(app_server.lease_epoch());
     let clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock> =
         std::sync::Arc::new(crate::daemon::clock_route::SystemDaemonClock);
     let authority = std::sync::Arc::new(
@@ -284,7 +286,8 @@ pub(super) async fn start_thread_handle_ingress(
     );
     let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
-        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+        .with_lease_epoch(server.lease_epoch());
     let worker = crate::daemon::daemon_io::VerletDaemonQueueWorker::new(
         queue.clone(),
         bridge.clone(),
@@ -355,7 +358,8 @@ pub(super) async fn start_clock_route(
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let store = verlet_history_sqlite::SqliteSessionStore::open(server.session_store_path())
         .await
-        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+        .with_lease_epoch(server.lease_epoch());
     let clock = crate::daemon::clock_route::VerletDaemonClockRoute::new(
         route.id.clone(),
         store,

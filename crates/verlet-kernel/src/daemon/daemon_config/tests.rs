@@ -834,6 +834,41 @@ stream = true
 }
 
 #[test]
+fn layered_runtime_lease_epoch_is_presence_tracked_and_last_value_wins() {
+    let root = temp_root("layered-lease-epoch");
+    std::fs::create_dir_all(&root).unwrap();
+    let lower = root.join("lower.toml");
+    let omitted = root.join("omitted.toml");
+    let higher = root.join("higher.toml");
+    std::fs::write(&lower, "[daemon.runtime]\nlease_epoch = 7\n").unwrap();
+    std::fs::write(&omitted, "[daemon.runtime]\ncwd = \"work\"\n").unwrap();
+    std::fs::write(&higher, "[daemon.runtime]\nlease_epoch = 9\n").unwrap();
+
+    let defaulted = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
+        std::slice::from_ref(&omitted),
+        root.clone(),
+    )
+    .unwrap();
+    assert_eq!(defaulted.config.runtime.lease_epoch, 0);
+
+    let preserved = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
+        &[lower.clone(), omitted.clone()],
+        root.clone(),
+    )
+    .unwrap();
+    assert_eq!(preserved.config.runtime.lease_epoch, 7);
+
+    let overridden = crate::daemon::daemon_config::load_verlet_daemon_config_layers(
+        &[lower, omitted, higher],
+        root.clone(),
+    )
+    .unwrap();
+    assert_eq!(overridden.config.runtime.lease_epoch, 9);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn layered_placement_target_only_survives_higher_layer_omission() {
     let root = temp_root("layered-placement-omission");
     let lower_root = root.join("lower");

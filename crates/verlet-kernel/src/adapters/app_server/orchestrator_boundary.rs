@@ -311,13 +311,14 @@ impl crate::adapters::app_server::VerletAppServer {
         )?;
         let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
             .await
-            .map_err(history_internal_error)?;
+            .map_err(history_jsonrpc_error)?
+            .with_lease_epoch(self.inner.lease_epoch);
         let stream_id = crate::kernel::control_decision::control_stream_id(&coordinates);
         let ingress_event = loop {
             let events = store
                 .read_events(&stream_id, None)
                 .await
-                .map_err(history_internal_error)?;
+                .map_err(history_jsonrpc_error)?;
             if let Some(existing) = events.iter().find(|event| {
                 event.kind == verlet_history::EventKind::IoIngressReceived
                     && event
@@ -346,7 +347,7 @@ impl crate::adapters::app_server::VerletAppServer {
                     })?;
                 }
                 Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
-                Err(err) => return Err(history_internal_error(err)),
+                Err(err) => return Err(history_jsonrpc_error(err)),
             }
         };
 
@@ -446,7 +447,8 @@ impl crate::adapters::app_server::VerletAppServer {
             .collect::<Result<Vec<_>, _>>()?;
         let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
             .await
-            .map_err(history_internal_error)?;
+            .map_err(history_jsonrpc_error)?
+            .with_lease_epoch(self.inner.lease_epoch);
         let stream_id = verlet_history::EventStreamId::new(params.stream.clone());
         let appended = match params.expected_sequence {
             Some(expected) => {
@@ -485,13 +487,13 @@ impl crate::adapters::app_server::VerletAppServer {
                             message: "stream append fence conflict".to_string(),
                         });
                     }
-                    Err(err) => return Err(history_internal_error(err)),
+                    Err(err) => return Err(history_jsonrpc_error(err)),
                 }
             }
             None => store
                 .append_events(&stream_id, records)
                 .await
-                .map_err(history_internal_error)?,
+                .map_err(history_jsonrpc_error)?,
         };
         let records = appended
             .iter()
@@ -511,7 +513,8 @@ impl crate::adapters::app_server::VerletAppServer {
         let stream_id = verlet_history::EventStreamId::new(params.stream);
         let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
             .await
-            .map_err(history_internal_error)?;
+            .map_err(history_jsonrpc_error)?
+            .with_lease_epoch(self.inner.lease_epoch);
         let mut events = if let Some(cursor) = params.stream_cursor.as_ref() {
             store
                 .read_events_after_cursor(&stream_id, cursor)
@@ -521,7 +524,7 @@ impl crate::adapters::app_server::VerletAppServer {
             store
                 .read_events(&stream_id, None)
                 .await
-                .map_err(history_internal_error)?
+                .map_err(history_jsonrpc_error)?
         };
         if !params.kinds.is_empty() {
             let kinds = params
@@ -634,12 +637,27 @@ fn client_stream_record_json(
     Ok(value)
 }
 
-fn history_internal_error(
+fn history_jsonrpc_error(
     error: verlet_history::HistoryError,
 ) -> crate::adapters::app_server::connection::JsonRpcErrorError {
-    crate::adapters::app_server::connection::internal_error(
-        crate::kernel::runtime_host::VerletError::History(error.to_string()),
-    )
+    match error {
+        verlet_history::HistoryError::StaleLeaseEpoch {
+            stream_id,
+            presented_epoch,
+            minimum_epoch,
+        } => crate::adapters::app_server::connection::JsonRpcErrorError {
+            code: -32005,
+            data: Some(serde_json::json!({
+                "streamId": stream_id,
+                "presentedEpoch": presented_epoch,
+                "minimumEpoch": minimum_epoch,
+            })),
+            message: "journal lease epoch is stale".to_string(),
+        },
+        other => crate::adapters::app_server::connection::internal_error(
+            crate::kernel::runtime_host::VerletError::History(other.to_string()),
+        ),
+    }
 }
 
 fn stream_read_history_error(
@@ -659,7 +677,7 @@ fn stream_read_history_error(
                 format!("malformed stream/read cursor: {message}"),
             )
         }
-        other => history_internal_error(other),
+        other => history_jsonrpc_error(other),
     }
 }
 

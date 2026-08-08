@@ -108,6 +108,127 @@ async fn assert_fenced_append_conformance(
     stream_id
 }
 
+async fn assert_lease_epoch_fence_conformance(
+    higher: &dyn verlet_history::RuntimeStore,
+    stale: &dyn verlet_history::RuntimeStore,
+) -> verlet_runtime_contracts::ThreadCoordinates {
+    let plain_coordinates = coords("lease-tenant", "lease-user", "plain");
+    let plain_stream = verlet_history::EventStreamId::for_thread(&plain_coordinates);
+    let record = |coordinates: &verlet_runtime_contracts::ThreadCoordinates, label: &str| {
+        verlet_history::NewEventRecord::witnessed(
+            coordinates.clone(),
+            verlet_history::EventKind::TurnSubmitted,
+            serde_json::json!({"turn_id": label}),
+        )
+    };
+
+    higher
+        .append_events(
+            &plain_stream,
+            vec![record(&plain_coordinates, "plain-winner")],
+        )
+        .await
+        .unwrap();
+    let plain_before = higher.read_events(&plain_stream, None).await.unwrap();
+    let plain_error = stale
+        .append_events(
+            &plain_stream,
+            vec![record(&plain_coordinates, "plain-stale")],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        plain_error,
+        verlet_history::HistoryError::StaleLeaseEpoch {
+            stream_id,
+            presented_epoch: 8,
+            minimum_epoch: 9,
+        } if stream_id == plain_stream
+    ));
+    assert_eq!(
+        higher.read_events(&plain_stream, None).await.unwrap(),
+        plain_before
+    );
+
+    let fenced_coordinates = coords("lease-tenant", "lease-user", "fenced");
+    let fenced_stream = verlet_history::EventStreamId::for_thread(&fenced_coordinates);
+    higher
+        .append_events_fenced(
+            &fenced_stream,
+            verlet_history::EventSequence::new(1),
+            vec![record(&fenced_coordinates, "fenced-winner")],
+        )
+        .await
+        .unwrap();
+    let fenced_before = higher.read_events(&fenced_stream, None).await.unwrap();
+    let fenced_error = stale
+        .append_events_fenced(
+            &fenced_stream,
+            verlet_history::EventSequence::new(1),
+            vec![record(&fenced_coordinates, "fenced-stale")],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        fenced_error,
+        verlet_history::HistoryError::StaleLeaseEpoch {
+            stream_id,
+            presented_epoch: 8,
+            minimum_epoch: 9,
+        } if stream_id == fenced_stream
+    ));
+    assert_eq!(
+        higher.read_events(&fenced_stream, None).await.unwrap(),
+        fenced_before
+    );
+
+    let session_coordinates = coords("lease-tenant", "lease-user", "session-entry");
+    let session_stream = verlet_history::EventStreamId::for_thread(&session_coordinates);
+    higher
+        .append(
+            &session_coordinates,
+            None,
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text_at("winner", 1),
+            },
+        )
+        .await
+        .unwrap();
+    let session_before = higher.build_context(&session_coordinates).await.unwrap();
+    let session_error = stale
+        .append(
+            &session_coordinates,
+            None,
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text_at("stale", 2),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        session_error,
+        verlet_history::HistoryError::StaleLeaseEpoch {
+            stream_id,
+            presented_epoch: 8,
+            minimum_epoch: 9,
+        } if stream_id == session_stream
+    ));
+    assert_eq!(
+        higher.build_context(&session_coordinates).await.unwrap(),
+        session_before
+    );
+    assert_eq!(
+        higher
+            .read_events(&session_stream, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    plain_coordinates
+}
+
 #[tokio::test]
 async fn in_memory_store_honors_fenced_append_conformance() {
     assert_fenced_append_conformance(&verlet_history::InMemorySessionStore::new()).await;
@@ -126,6 +247,205 @@ async fn sqlite_store_honors_fenced_append_conformance() {
         reopened.read_events(&stream_id, None).await.unwrap().len(),
         3
     );
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn in_memory_store_honors_lease_epoch_fence_conformance() {
+    let store = verlet_history::InMemorySessionStore::new();
+    let higher = store.clone().with_lease_epoch(9);
+    let stale = store.with_lease_epoch(8);
+    assert_lease_epoch_fence_conformance(&higher, &stale).await;
+}
+
+#[tokio::test]
+async fn sqlite_store_honors_lease_epoch_fence_conformance_and_reopen() {
+    let path = temp_db_path("verlet-history-lease-epoch-fence");
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
+    let higher = store.clone().with_lease_epoch(9);
+    let stale = store.with_lease_epoch(8);
+
+    let coordinates = assert_lease_epoch_fence_conformance(&higher, &stale).await;
+    drop(higher);
+    drop(stale);
+
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let reopened = crate::SqliteSessionStore::open(&path)
+        .await
+        .unwrap()
+        .with_lease_epoch(8);
+    let error = reopened
+        .append_events(
+            &stream_id,
+            vec![verlet_history::NewEventRecord::witnessed(
+                coordinates,
+                verlet_history::EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "stale-after-reopen"}),
+            )],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        verlet_history::HistoryError::StaleLeaseEpoch {
+            stream_id: error_stream,
+            presented_epoch: 8,
+            minimum_epoch: 9,
+        } if error_stream == stream_id
+    ));
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn sqlite_failed_batch_rolls_back_events_and_lease_epoch_raise() {
+    let path = temp_db_path("verlet-history-lease-epoch-rollback");
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
+    let seed_coordinates = coords("lease-tenant", "lease-user", "rollback-seed");
+    let seed_stream = verlet_history::EventStreamId::for_thread(&seed_coordinates);
+    let duplicate = verlet_history::NewEventRecord::witnessed(
+        seed_coordinates,
+        verlet_history::EventKind::TurnSubmitted,
+        serde_json::json!({"turn_id": "duplicate"}),
+    );
+    store
+        .append_events(&seed_stream, vec![duplicate.clone()])
+        .await
+        .unwrap();
+
+    let coordinates = coords("lease-tenant", "lease-user", "rollback-target");
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let higher = store.clone().with_lease_epoch(9);
+    let lower = store.with_lease_epoch(8);
+    let valid = |turn_id: &str| {
+        verlet_history::NewEventRecord::witnessed(
+            coordinates.clone(),
+            verlet_history::EventKind::TurnSubmitted,
+            serde_json::json!({"turn_id": turn_id}),
+        )
+    };
+
+    let error = higher
+        .append_events(&stream_id, vec![valid("rolled-back"), duplicate])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        verlet_history::HistoryError::DuplicateEventId(_)
+    ));
+    assert!(
+        higher
+            .read_events(&stream_id, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let appended = lower
+        .append_events(&stream_id, vec![valid("lower-epoch-winner")])
+        .await
+        .unwrap();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].sequence.get(), 1);
+
+    drop(higher);
+    drop(lower);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_independent_handles_at_same_epoch_can_append_concurrently() {
+    let path = temp_db_path("verlet-history-lease-epoch-concurrent");
+    let first = crate::SqliteSessionStore::open(&path)
+        .await
+        .unwrap()
+        .with_lease_epoch(9);
+    let second = crate::SqliteSessionStore::open(&path)
+        .await
+        .unwrap()
+        .with_lease_epoch(9);
+    let coordinates = coords("lease-tenant", "lease-user", "concurrent");
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let record = |turn_id: &str| {
+        verlet_history::NewEventRecord::witnessed(
+            coordinates.clone(),
+            verlet_history::EventKind::TurnSubmitted,
+            serde_json::json!({"turn_id": turn_id}),
+        )
+    };
+
+    let (first_result, second_result) = tokio::join!(
+        first.append_events(&stream_id, vec![record("first")]),
+        second.append_events(&stream_id, vec![record("second")]),
+    );
+    first_result.unwrap();
+    second_result.unwrap();
+    let events = first.read_events(&stream_id, None).await.unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].sequence.get(), 1);
+    assert_eq!(events[1].sequence.get(), 2);
+
+    drop(first);
+    drop(second);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn sqlite_epoch_zero_writes_leave_lease_epoch_table_empty() {
+    let path = temp_db_path("verlet-history-lease-epoch-zero");
+    let store = crate::SqliteSessionStore::open(&path).await.unwrap();
+    let plain_coordinates = coords("zero-tenant", "zero-user", "plain");
+    store
+        .append_events(
+            &verlet_history::EventStreamId::for_thread(&plain_coordinates),
+            vec![verlet_history::NewEventRecord::witnessed(
+                plain_coordinates,
+                verlet_history::EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "plain"}),
+            )],
+        )
+        .await
+        .unwrap();
+    let fenced_coordinates = coords("zero-tenant", "zero-user", "fenced");
+    store
+        .append_events_fenced(
+            &verlet_history::EventStreamId::for_thread(&fenced_coordinates),
+            verlet_history::EventSequence::new(1),
+            vec![verlet_history::NewEventRecord::witnessed(
+                fenced_coordinates,
+                verlet_history::EventKind::TurnSubmitted,
+                serde_json::json!({"turn_id": "fenced"}),
+            )],
+        )
+        .await
+        .unwrap();
+    let session_coordinates = coords("zero-tenant", "zero-user", "session-entry");
+    store
+        .append(
+            &session_coordinates,
+            None,
+            verlet_history::SessionEntryKind::Message {
+                message: verlet_history::CanonicalMessage::user_text_at("session", 1),
+            },
+        )
+        .await
+        .unwrap();
+
+    let database = store.sqlite_database();
+    let connection = database.connect().await.unwrap();
+    let mut rows = connection
+        .query("SELECT COUNT(*) FROM journal_lease_epochs", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    assert!(rows.next().await.unwrap().is_none());
+    drop(rows);
+    drop(connection);
+    drop(database);
+    drop(store);
     let _ = std::fs::remove_file(path);
 }
 
