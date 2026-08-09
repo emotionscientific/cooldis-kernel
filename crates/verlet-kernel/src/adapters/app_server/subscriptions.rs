@@ -20,7 +20,7 @@ pub(super) struct AppServerSubscriber {
 
 pub(super) struct AppServerThreadWatcher {
     pub(super) id: u64,
-    pub(super) handle: tokio::task::JoinHandle<()>,
+    pub(super) cancellation: tokio_util::sync::CancellationToken,
 }
 
 enum ResyncedTurnItem {
@@ -121,25 +121,28 @@ impl crate::adapters::app_server::VerletAppServer {
         let should_spawn = subscriptions
             .watchers
             .get(&thread_id)
-            .is_none_or(|watcher| watcher.handle.is_finished());
+            .is_none_or(|watcher| watcher.cancellation.is_cancelled());
         if should_spawn {
             subscriptions.watchers.remove(&thread_id);
             let watcher_id = subscriptions.next_watcher_id;
             subscriptions.next_watcher_id = subscriptions.next_watcher_id.saturating_add(1);
             let app = self.clone();
             let watcher_thread_id = thread_id.clone();
-            let watcher = tokio::spawn(async move {
-                watch_thread(app.clone(), handle).await;
+            let watcher_cancellation = self.inner.tasks.cancellation();
+            let task_cancellation = watcher_cancellation.clone();
+            if self.inner.tasks.spawn(async move {
+                watch_thread(app.clone(), handle, task_cancellation).await;
                 app.finish_thread_watcher(&watcher_thread_id, watcher_id)
                     .await;
-            });
-            subscriptions.watchers.insert(
-                thread_id,
-                AppServerThreadWatcher {
-                    id: watcher_id,
-                    handle: watcher,
-                },
-            );
+            }) {
+                subscriptions.watchers.insert(
+                    thread_id,
+                    AppServerThreadWatcher {
+                        id: watcher_id,
+                        cancellation: watcher_cancellation,
+                    },
+                );
+            }
         }
         subscriber_id
     }
@@ -168,7 +171,7 @@ impl crate::adapters::app_server::VerletAppServer {
             }
         };
         if let Some(watcher) = watcher {
-            watcher.handle.abort();
+            watcher.cancellation.cancel();
         }
     }
 
@@ -208,7 +211,7 @@ impl crate::adapters::app_server::VerletAppServer {
             }
         };
         if let Some(watcher) = watcher {
-            watcher.handle.abort();
+            watcher.cancellation.cancel();
         }
     }
 
@@ -251,6 +254,7 @@ impl AppServerSubscriber {
 pub(super) async fn watch_thread(
     app: crate::adapters::app_server::VerletAppServer,
     handle: crate::kernel::runtime_host::RuntimeThreadHandle,
+    cancellation: tokio_util::sync::CancellationToken,
 ) {
     let thread_id = handle.context().coordinates.thread_id.to_string();
     let mut events = handle.subscribe_events();
@@ -263,6 +267,7 @@ pub(super) async fn watch_thread(
     loop {
         tokio::select! {
             biased;
+            _ = cancellation.cancelled() => break,
             event = events.recv() => {
                 match event {
                     Ok(event) => {
@@ -885,10 +890,9 @@ pub(super) async fn handle_thread_status(
 
     if let Some(turn_id) = completion_to_schedule {
         let app = app.clone();
+        let tasks = std::sync::Arc::clone(&app.inner.tasks);
         let thread_id = thread_id.to_string();
-        tokio::spawn(async move {
-            complete_turn_after_settle(app, thread_id, turn_id).await;
-        });
+        tasks.spawn_cancellable(complete_turn_after_settle(app, thread_id, turn_id));
     }
     if matches!(
         status,

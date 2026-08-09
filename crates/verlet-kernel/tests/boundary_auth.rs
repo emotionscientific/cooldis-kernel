@@ -931,7 +931,9 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
 
     let record_path = root.join("state").join("console-credential-id");
     assert!(record_path.is_file());
-    drop(generations);
+    for app in generations {
+        app.shutdown().await.unwrap();
+    }
     assert_eq!(
         active_credential_count(&store_path, OPERATOR_ID).await,
         baseline,

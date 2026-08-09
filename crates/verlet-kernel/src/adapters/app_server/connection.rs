@@ -1137,8 +1137,31 @@ impl crate::adapters::app_server::VerletAppServer {
                     "local JSON-RPC requires the local-mode operator principal".to_string(),
                 )
             })?;
+        self.authenticated_json_rpc_request(
+            resolved_principal,
+            crate::daemon::identity::BoundarySurface::UnixSocket,
+            "local-json-rpc",
+            method,
+            params,
+        )
+        .await
+    }
+
+    pub(super) async fn authenticated_json_rpc_request(
+        &self,
+        resolved_principal: crate::daemon::identity::ResolvedPrincipal,
+        surface: crate::daemon::identity::BoundarySurface,
+        client_name: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        let _dispatch = self.inner.dispatch_gate.read().await;
+        if self.inner.tasks.is_shutdown() {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "Verlet app-server instance is shut down".to_string(),
+            ));
+        }
         let session_id = format!("session_{}", uuid::Uuid::now_v7());
-        let surface = crate::daemon::identity::BoundarySurface::UnixSocket;
         self.inner
             .identity_authority
             .witness_session_opened(&crate::daemon::identity::IdentitySessionV1 {
@@ -1157,6 +1180,7 @@ impl crate::adapters::app_server::VerletAppServer {
         let mut close_witness = crate::adapters::app_server::SessionCloseWitness::new(
             std::sync::Arc::clone(&self.inner.identity_authority),
             std::sync::Arc::clone(&self.inner.identity_clock),
+            std::sync::Arc::clone(&self.inner.tasks),
             session_id.clone(),
         );
         let (outbound, _rx) = tokio::sync::mpsc::unbounded_channel::<JsonRpcMessage>();
@@ -1180,7 +1204,7 @@ impl crate::adapters::app_server::VerletAppServer {
         connection
             .handle_initialize(Some(serde_json::json!({
                 "clientInfo": {
-                    "name": "local-json-rpc",
+                    "name": client_name,
                     "title": null,
                     "version": env!("CARGO_PKG_VERSION"),
                 },
@@ -1196,7 +1220,7 @@ impl crate::adapters::app_server::VerletAppServer {
         match (dispatch_result, close_result) {
             (Err(error), Err(close_error)) => {
                 eprintln!(
-                    "failed to witness closing a failed local JSON-RPC session: {close_error}"
+                    "failed to witness closing a failed authenticated JSON-RPC session: {close_error}"
                 );
                 Err(error)
             }
@@ -1234,30 +1258,39 @@ impl crate::adapters::app_server::VerletAppServer {
         let mut close_witness = crate::adapters::app_server::SessionCloseWitness::new(
             std::sync::Arc::clone(&self.inner.identity_authority),
             std::sync::Arc::clone(&self.inner.identity_clock),
+            std::sync::Arc::clone(&self.inner.tasks),
             session_id.clone(),
         );
         let (mut sink, mut stream) = websocket.split();
         let (outbound, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel::<JsonRpcMessage>();
-        let writer = tokio::spawn(async move {
-            while let Some(message) = outbound_rx.recv().await {
-                let payload = match serde_json::to_string(&message) {
-                    Ok(payload) => payload,
-                    Err(err) => {
-                        eprintln!("failed to encode Verlet app-server JSON-RPC message: {err}");
-                        continue;
+        let tasks = std::sync::Arc::clone(&self.inner.tasks);
+        let writer_cancellation = tasks.cancellation();
+        tasks.spawn(async move {
+                loop {
+                    let message = tokio::select! {
+                        _ = writer_cancellation.cancelled() => break,
+                        message = outbound_rx.recv() => message,
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
+                    let payload = match serde_json::to_string(&message) {
+                        Ok(payload) => payload,
+                        Err(err) => {
+                            eprintln!("failed to encode Verlet app-server JSON-RPC message: {err}");
+                            continue;
+                        }
+                    };
+                    let sent = tokio::select! {
+                        _ = writer_cancellation.cancelled() => break,
+                        sent = sink.send(tokio_tungstenite::tungstenite::Message::Text(payload.into())) => sent,
+                    };
+                    if let Err(err) = sent {
+                        eprintln!("failed to write Verlet app-server websocket message: {err}");
+                        break;
                     }
-                };
-                if let Err(err) = sink
-                    .send(tokio_tungstenite::tungstenite::Message::Text(
-                        payload.into(),
-                    ))
-                    .await
-                {
-                    eprintln!("failed to write Verlet app-server websocket message: {err}");
-                    break;
                 }
-            }
-        });
+            });
 
         let connection = ConnectionState {
             app: self.clone(),
@@ -1278,7 +1311,15 @@ impl crate::adapters::app_server::VerletAppServer {
         };
 
         let mut read_result = Ok(());
-        while let Some(message) = stream.next().await {
+        let cancellation = self.inner.tasks.cancellation();
+        loop {
+            let message = tokio::select! {
+                _ = cancellation.cancelled() => break,
+                message = stream.next() => message,
+            };
+            let Some(message) = message else {
+                break;
+            };
             match message {
                 Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
                     if let Err(err) = handle_inbound_text(&connection, &text).await {
@@ -1300,7 +1341,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }
 
         connection.abort_subscriptions().await;
-        writer.abort();
+        drop(connection);
         let close_result = close_witness.close().await;
         finish_websocket_session(read_result, close_result)
     }
@@ -2207,29 +2248,40 @@ impl crate::adapters::app_server::VerletAppServer {
         let metadata_store = self.inner.metadata_store.clone();
         let user_metadata_store = self.inner.user_metadata_store.clone();
         let delete_provider_id = provider_id.clone();
-        tokio::spawn(async move {
-            metadata_store
-                .delete_provider(&delete_provider_id)
-                .await
-                .map_err(|err| {
-                    internal_error(crate::adapters::app_server::provider_store_error(err))
-                })?;
-            user_metadata_store
-                .delete_credential(&delete_provider_id)
-                .await
-                .map_err(|err| {
-                    internal_error(crate::adapters::app_server::provider_store_error(err))
-                })?;
-            metadata_store
-                .delete_credential(&delete_provider_id)
-                .await
-                .map_err(|err| {
-                    internal_error(crate::adapters::app_server::provider_store_error(err))
-                })?;
-            Ok::<(), JsonRpcErrorError>(())
-        })
-        .await
-        .map_err(|error| {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        if !self.inner.tasks.spawn(async move {
+            let result = async {
+                metadata_store
+                    .delete_provider(&delete_provider_id)
+                    .await
+                    .map_err(|err| {
+                        internal_error(crate::adapters::app_server::provider_store_error(err))
+                    })?;
+                user_metadata_store
+                    .delete_credential(&delete_provider_id)
+                    .await
+                    .map_err(|err| {
+                        internal_error(crate::adapters::app_server::provider_store_error(err))
+                    })?;
+                metadata_store
+                    .delete_credential(&delete_provider_id)
+                    .await
+                    .map_err(|err| {
+                        internal_error(crate::adapters::app_server::provider_store_error(err))
+                    })?;
+                Ok::<(), JsonRpcErrorError>(())
+            }
+            .await;
+            let _ = completion_tx.send(result);
+        }) {
+            return Err(internal_error(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    "Verlet app-server instance shut down before model provider deletion started"
+                        .to_string(),
+                ),
+            ));
+        }
+        completion_rx.await.map_err(|error| {
             internal_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!("model provider deletion task failed: {error}"),
             ))
@@ -4088,7 +4140,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 .map(|thread| thread.cwd.clone())
                 .unwrap_or_else(|| self.inner.cwd.clone())
         };
-        tokio::spawn(async move {
+        if !self.inner.tasks.spawn_cancellable(
             crate::adapters::app_server::subscriptions::complete_shell_command(
                 connection,
                 params.thread_id,
@@ -4096,9 +4148,15 @@ impl crate::adapters::app_server::VerletAppServer {
                 item_id,
                 command,
                 cwd,
-            )
-            .await;
-        });
+            ),
+        ) {
+            return Err(internal_error(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    "Verlet app-server instance shut down before shell command execution started"
+                        .to_string(),
+                ),
+            ));
+        }
 
         Ok(serde_json::json!({}))
     }
@@ -4892,8 +4950,22 @@ impl crate::adapters::app_server::VerletAppServer {
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let source = absolute_path(params.source_path)?;
         let destination = absolute_path(params.destination_path)?;
-        tokio::task::spawn_blocking(move || copy_path(&source, &destination, params.recursive))
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        if !self.inner.tasks.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                copy_path(&source, &destination, params.recursive)
+            })
+            .await;
+            let _ = completion_tx.send(result);
+        }) {
+            return Err(jsonrpc_error(
+                -32000,
+                "Verlet app-server instance shut down before fs/copy started",
+            ));
+        }
+        completion_rx
             .await
+            .map_err(|err| jsonrpc_error(-32000, format!("fs/copy task failed: {err}")))?
             .map_err(|err| jsonrpc_error(-32000, format!("fs/copy task failed: {err}")))?
             .map_err(fs_error)?;
         Ok(serde_json::json!({}))

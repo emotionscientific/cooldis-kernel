@@ -11,6 +11,35 @@ struct TenantRuntime {
     tenant_id: String,
     context: TenantRuntimeContext,
     host: crate::kernel::runtime_host::RuntimeHost,
+    retiring: std::sync::atomic::AtomicBool,
+}
+
+struct TenantRetirementGuard {
+    tenant: std::sync::Arc<TenantRuntime>,
+    armed: bool,
+}
+
+impl TenantRetirementGuard {
+    fn new(tenant: std::sync::Arc<TenantRuntime>) -> Self {
+        Self {
+            tenant,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TenantRetirementGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.tenant
+                .retiring
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
 }
 
 pub struct TenantRegistration {
@@ -228,6 +257,7 @@ impl VerletSupervisor {
                 context.execution_policy().clone(),
             ),
             context,
+            retiring: std::sync::atomic::AtomicBool::new(false),
         };
         tenants.insert(tenant_id, std::sync::Arc::new(tenant));
         Ok(())
@@ -679,8 +709,34 @@ impl VerletSupervisor {
         &self,
         tenant_id: &str,
     ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_runtime_contracts::ThreadId>> {
-        let _ = tenant_id;
-        unimplemented!("EMO-551: atomic tenant shutdown-and-unregister")
+        let tenant = self.tenant(tenant_id).await?;
+        tenant
+            .retiring
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "tenant {tenant_id} is already shutting down"
+                ))
+            })?;
+        let mut retirement = TenantRetirementGuard::new(std::sync::Arc::clone(&tenant));
+        let stopped = tenant.host.shutdown_all().await?;
+        let mut tenants = self.inner.tenants.write().await;
+        if !tenants
+            .get(tenant_id)
+            .is_some_and(|registered| std::sync::Arc::ptr_eq(registered, &tenant))
+        {
+            return Err(crate::kernel::runtime_host::VerletError::TenantNotFound(
+                tenant_id.to_string(),
+            ));
+        }
+        tenants.remove(tenant_id);
+        retirement.disarm();
+        Ok(stopped)
     }
 
     pub async fn shutdown_all(
@@ -887,7 +943,8 @@ impl VerletSupervisor {
         &self,
         tenant_id: &str,
     ) -> crate::kernel::runtime_host::VerletResult<std::sync::Arc<TenantRuntime>> {
-        self.inner
+        let tenant = self
+            .inner
             .tenants
             .read()
             .await
@@ -895,7 +952,13 @@ impl VerletSupervisor {
             .cloned()
             .ok_or_else(|| {
                 crate::kernel::runtime_host::VerletError::TenantNotFound(tenant_id.to_string())
-            })
+            })?;
+        if tenant.retiring.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("tenant {tenant_id} is shutting down"),
+            ));
+        }
+        Ok(tenant)
     }
 
     fn validate_thread_scope(
