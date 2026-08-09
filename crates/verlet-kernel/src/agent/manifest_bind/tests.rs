@@ -315,7 +315,7 @@ async fn bind_rejects_streaming_when_provider_cannot_stream() {
 [agent]
 name = "streaming"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -373,7 +373,7 @@ async fn blob_static_source_binds_prompt_text_and_hash() {
 [agent]
 name = "blob-runner"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -450,7 +450,7 @@ async fn missing_blob_resource_fails_bind_with_publish_hint() {
 [agent]
 name = "missing-blob"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -827,7 +827,7 @@ async fn bind_receipt_keeps_each_pinned_universe_import_correspondence() {
 [agent]
 name = "multiple-pinned-universes"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -916,7 +916,7 @@ async fn bind_receipt_does_not_record_operation_rows_by_manifest_tool_id() {
 [agent]
 name = "operation-tool-correspondence"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -992,7 +992,7 @@ async fn protocol_tool_import_unconfigured_server_ref_error_is_preserved() {
 [agent]
 name = "mcp"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -3405,6 +3405,52 @@ async fn operation_bind_requires_published_operation() {
 }
 
 #[tokio::test]
+async fn pinned_legacy_kernel_package_ref_resolves_only_preserved_legacy_record() {
+    let root = temp_dir("manifest-bind-pinned-legacy-kernel-package");
+    let legacy_name = concat!("cool", "dis-threads");
+    let legacy = publish_multi_operation_record(
+        &root,
+        legacy_name,
+        &[("thread_spawn", vec!["threads.spawn"])],
+    )
+    .await;
+    crate::operations::kernel_packages::ensure_verlet_threads_published(Some(&root)).unwrap();
+
+    let verification = crate::agent::manifest_bind::verify_operation_ref(
+        "spawn",
+        &format!(
+            "op://{legacy_name}/thread_spawn@sha256:{}",
+            legacy.active_artifact_hash
+        ),
+        &["threads.spawn".to_string()],
+        &root,
+    )
+    .unwrap();
+    assert_eq!(verification.name, legacy_name);
+    assert_eq!(verification.record, legacy);
+
+    let fresh_root = temp_dir("manifest-bind-pinned-legacy-kernel-package-fresh");
+    let canonical =
+        crate::operations::kernel_packages::ensure_verlet_threads_published(Some(&fresh_root))
+            .unwrap()
+            .unwrap();
+    let err = crate::agent::manifest_bind::verify_operation_ref(
+        "spawn",
+        &format!(
+            "op://{legacy_name}/thread_spawn@sha256:{}",
+            canonical.active_artifact_hash
+        ),
+        &["threads.spawn".to_string()],
+        &fresh_root,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("was not found"));
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(fresh_root);
+}
+
+#[tokio::test]
 async fn operation_bind_requires_content_addressed_ref() {
     let root = temp_dir("manifest-bind-unpinned-operation");
     let mut granted = std::collections::BTreeSet::new();
@@ -3449,7 +3495,7 @@ fn minimal_manifest(name: &str) -> String {
 [agent]
 name = "{name}"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]

@@ -435,7 +435,7 @@ impl KernelProcessOperationProvider {
                 let request =
                     verlet_process::live::AsyncProcessStartRequest::host_command(args.command, cwd)
                         .with_owner(
-                            self.process_owner("kernel-operation:cooldis-process/process_exec"),
+                            self.process_owner("kernel-operation:verlet-process/process_exec"),
                         )
                         .with_env(env)
                         .pipe_stdin(args.stream_stdin)

@@ -33,6 +33,52 @@ fn verlet_cli_tool_help_is_canonical() {
 }
 
 #[test]
+fn verlet_cli_tool_list_and_legacy_bare_lookup_use_canonical_kernel_package_names() {
+    let registry_root = temp_dir("canonical-kernel-package-list");
+    verlet::operations::kernel_packages::ensure_verlet_threads_published(Some(&registry_root))
+        .unwrap();
+    verlet::operations::kernel_packages::ensure_verlet_schedule_published(Some(&registry_root))
+        .unwrap();
+    verlet::operations::kernel_packages::ensure_verlet_process_published(Some(&registry_root))
+        .unwrap();
+    verlet::operations::kernel_packages::ensure_verlet_notify_published(Some(&registry_root))
+        .unwrap();
+
+    let list = run_verlet([
+        "tool",
+        "list",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    for canonical in [
+        "verlet-threads",
+        "verlet-schedule",
+        "verlet-process",
+        "verlet-notify",
+    ] {
+        assert!(list.contains(canonical), "tool list:\n{list}");
+    }
+    for legacy in [
+        concat!("cool", "dis-threads"),
+        concat!("cool", "dis-schedule"),
+        concat!("cool", "dis-process"),
+        concat!("cool", "dis-notify"),
+    ] {
+        assert!(!list.contains(legacy), "tool list:\n{list}");
+    }
+
+    let manual = run_verlet([
+        "tool",
+        "manual",
+        concat!("cool", "dis-threads"),
+        "thread_spawn",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    assert!(manual.contains("verlet-threads thread_spawn"), "{manual}");
+}
+
+#[test]
 fn verlet_cli_import_help_is_canonical() {
     let help = run_verlet(["import", "--help"]);
     assert!(help.contains("verlet import build"));
@@ -369,6 +415,7 @@ fn verlet_cli_init_creates_folder_first_agent_project() {
 
     let manifest = std::fs::read_to_string(&manifest_path).unwrap();
     assert!(manifest.contains("name = \"release-verifier\""));
+    assert!(manifest.contains("kind = \"verlet.agent-manifest\""));
     assert!(manifest.contains("provider_ref = \"provider://local_offline\""));
     assert!(!manifest.contains("0000000000000000000000000000000000000000000000000000000000000000"));
     let prompt = std::fs::read_to_string(&prompt_path).unwrap();
@@ -439,7 +486,7 @@ fn verlet_cli_agent_plan_publish_accepts_explicit_folder_first_context() {
 name = "explicit-runner"
 version = "0.1.0"
 description = "Uses an explicit folder-first context pipeline."
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -635,7 +682,7 @@ fn verlet_cli_agent_init_out_toml_keeps_single_file_compatibility() {
 
     let manifest = std::fs::read_to_string(&manifest_path).unwrap();
     assert!(manifest.contains("name = \"single-agent\""));
-    assert!(manifest.contains("cooldis.agent-manifest"));
+    assert!(manifest.contains("verlet.agent-manifest"));
 }
 
 #[test]
@@ -1971,6 +2018,72 @@ operation_ref = "op://analytics/export@latest"
     let record = agent_record(&registry_root, "resolve-ops");
     assert_eq!(record.tool_refs[0].reference, tailcat_ref);
     assert_eq!(record.tool_refs[1].reference, analytics_ref);
+}
+
+#[test]
+fn verlet_cli_agent_publish_resolve_ops_canonicalizes_legacy_kernel_package_alias() {
+    let workspace = temp_dir("agent-resolve-legacy-kernel-package");
+    let manifest_path = workspace.join("resolve-legacy.verlet.agent.toml");
+    let legacy_name = concat!("cool", "dis-threads");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "resolve-legacy"
+version = "0.1.0"
+kind = "verlet.agent-manifest"
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "direct_tool"
+id = "spawn"
+tool_name = "thread_spawn"
+operation_ref = "op://{legacy_name}/thread_spawn"
+grants = ["threads.spawn"]
+"#
+        ),
+    )
+    .unwrap();
+    let registry_root = temp_dir("agent-resolve-legacy-kernel-package-agents");
+    let operation_registry_root = temp_dir("agent-resolve-legacy-kernel-package-operations");
+    let record = verlet::operations::kernel_packages::ensure_verlet_threads_published(Some(
+        &operation_registry_root,
+    ))
+    .unwrap()
+    .unwrap();
+
+    let publish = run_verlet([
+        "agent",
+        "publish",
+        manifest_path.to_str().unwrap(),
+        "--resolve-ops",
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        operation_registry_root.to_str().unwrap(),
+    ]);
+    let canonical_ref = format!(
+        "op://verlet-threads/thread_spawn@sha256:{}",
+        record.active_artifact_hash
+    );
+
+    assert!(publish.contains(&format!(
+        "resolved operation_ref: op://{legacy_name}/thread_spawn -> {canonical_ref}"
+    )));
+    assert!(
+        std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .contains(&format!("operation_ref = \"{canonical_ref}\""))
+    );
+    assert_eq!(
+        agent_record(&registry_root, "resolve-legacy").tool_refs[0].reference,
+        canonical_ref
+    );
 }
 
 #[test]

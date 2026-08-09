@@ -214,7 +214,7 @@ name = "workbench-runner"
 version = "0.1.0"
 display_name = "Workbench Runner"
 description = "Smoke-test agent for the app-server query surface"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]

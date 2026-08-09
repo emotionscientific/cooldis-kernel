@@ -1868,7 +1868,7 @@ fn publish_route_agent_manifest(
 [agent]
 name = "daemon-route-runner"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -1908,7 +1908,7 @@ fn publish_route_agent_manifest_with_missing_blob(
 [agent]
 name = "daemon-missing-blob"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]

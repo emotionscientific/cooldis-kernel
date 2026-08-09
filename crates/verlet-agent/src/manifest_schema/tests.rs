@@ -13,7 +13,7 @@ namespace = "verlet/labs"
 version = "1.0.0"
 display_name = "Release Verifier"
 description = "Checks a release."
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 labels = {{ role = "review" }}
 publisher = {{ id = "verlet", display_name = "Verlet" }}
@@ -170,6 +170,31 @@ fn full_fixture_manifest_parses_and_validates() {
         !toml::to_string(&manifest).unwrap().contains("effect_class"),
         "legacy manifests must not acquire defaulted effect_class fields when re-encoded"
     );
+}
+
+#[test]
+fn agent_manifest_kind_accepts_verlet_and_legacy_forms() {
+    let canonical = valid_manifest();
+    assert_eq!(
+        parse(&canonical).unwrap().identity.kind.as_deref(),
+        Some("verlet.agent-manifest")
+    );
+
+    let legacy = canonical.replace(
+        "kind = \"verlet.agent-manifest\"",
+        &format!("kind = \"{}\"", concat!("cool", "dis.agent-manifest")),
+    );
+    assert_eq!(
+        parse(&legacy).unwrap().identity.kind.as_deref(),
+        Some(concat!("cool", "dis.agent-manifest"))
+    );
+
+    let unsupported = canonical.replace(
+        "kind = \"verlet.agent-manifest\"",
+        "kind = \"other.agent-manifest\"",
+    );
+    let err = parse(&unsupported).unwrap_err();
+    assert!(err.to_string().contains("verlet.agent-manifest"));
 }
 
 #[test]

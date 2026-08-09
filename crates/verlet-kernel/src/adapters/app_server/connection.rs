@@ -4418,17 +4418,27 @@ impl crate::adapters::app_server::VerletAppServer {
         let registry = verlet_operations::operation_store::LocalOperationRegistry::new(
             self.capsule_registry_root()?,
         );
-        let artifact_hash = match params.artifact_hash {
-            Some(artifact_hash) => artifact_hash,
+        let (operation_name, artifact_hash) = match params.artifact_hash {
+            Some(artifact_hash) => {
+                crate::operations::kernel_packages::warn_if_legacy_kernel_package_name(
+                    &params.operation_name,
+                );
+                (params.operation_name.as_str(), artifact_hash)
+            }
             None => {
-                registry
-                    .load_record(&params.operation_name)
+                let operation_name =
+                    crate::operations::kernel_packages::canonical_kernel_package_name(
+                        &params.operation_name,
+                    );
+                let artifact_hash = registry
+                    .load_record(operation_name)
                     .map_err(|err| internal_error(err.into()))?
-                    .active_artifact_hash
+                    .active_artifact_hash;
+                (operation_name, artifact_hash)
             }
         };
         let binding = registry
-            .bind_capsule_operation(params.scope, &params.operation_name, &artifact_hash)
+            .bind_capsule_operation(params.scope, operation_name, &artifact_hash)
             .map_err(|err| internal_error(err.into()))?;
         Ok(serde_json::json!({ "binding": binding }))
     }
@@ -4440,8 +4450,11 @@ impl crate::adapters::app_server::VerletAppServer {
         let registry = verlet_operations::operation_store::LocalOperationRegistry::new(
             self.capsule_registry_root()?,
         );
+        let operation_name = crate::operations::kernel_packages::canonical_kernel_package_name(
+            &params.operation_name,
+        );
         let binding = registry
-            .unbind_capsule_operation(params.scope, &params.operation_name)
+            .unbind_capsule_operation(params.scope, operation_name)
             .map_err(|err| internal_error(err.into()))?;
         Ok(serde_json::json!({ "binding": binding }))
     }
@@ -4474,6 +4487,13 @@ impl crate::adapters::app_server::VerletAppServer {
         let tenant_id = params
             .tenant_id
             .unwrap_or_else(|| self.inner.tenant_id.clone());
+        let operation_names = params
+            .operation_names
+            .iter()
+            .map(|name| {
+                crate::operations::kernel_packages::canonical_kernel_package_name(name).to_string()
+            })
+            .collect::<Vec<_>>();
         let request = if let Some(thread_id) = params.thread_id {
             // lexicon-allow: capsule - preserves existing app-server operation binding API.
             verlet_operations::operation_store::CapsuleBindingResolutionRequest::for_thread(
@@ -4485,7 +4505,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 tenant_id,
             )
         }
-        .with_active_operation_names(params.operation_names)
+        .with_active_operation_names(operation_names)
         .load_all_active_when_unbound(params.load_all_active_when_unbound.unwrap_or(false));
         let snapshot = registry
             // lexicon-allow: capsule - preserves existing app-server operation binding API.

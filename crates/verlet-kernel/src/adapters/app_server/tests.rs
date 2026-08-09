@@ -2116,7 +2116,7 @@ name = "planner"
 version = "0.1.1"
 display_name = "Planner v2"
 description = "Plans without writes, still"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -2258,7 +2258,7 @@ name = "publisher"
 version = "0.1.2"
 display_name = "Stale Publisher"
 description = "Should fail stale base"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -3141,7 +3141,7 @@ async fn thread_start_model_param_selects_declared_manifest_profile() {
 [agent]
 name = "profiles"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -3319,7 +3319,7 @@ async fn thread_start_rejects_undeclared_model_provider_with_declared_profiles()
 [agent]
 name = "profiles"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -3547,7 +3547,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     let operation_record =
         verlet_operations::operation_store::LocalOperationRegistry::new(&operation_registry_root)
             .load_record(crate::operations::kernel_packages::VERLET_THREADS_PACKAGE)
-            .expect("startup should publish cooldis-threads");
+            .expect("startup should publish verlet-threads");
     assert!(matches!(
         &operation_record.source,
         verlet_operations::operation_store::PublishedOperationSource::Kernel { package } if package == crate::operations::kernel_packages::VERLET_THREADS_PACKAGE
@@ -3572,7 +3572,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     let schedule_record =
         verlet_operations::operation_store::LocalOperationRegistry::new(&operation_registry_root)
             .load_record(crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE)
-            .expect("startup should publish cooldis-schedule");
+            .expect("startup should publish verlet-schedule");
     assert!(matches!(
         &schedule_record.source,
         verlet_operations::operation_store::PublishedOperationSource::Kernel { package } if package == crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE
@@ -3607,7 +3607,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     let process_record =
         verlet_operations::operation_store::LocalOperationRegistry::new(&operation_registry_root)
             .load_record(crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE)
-            .expect("startup should publish cooldis-process");
+            .expect("startup should publish verlet-process");
     assert!(matches!(
         &process_record.source,
         verlet_operations::operation_store::PublishedOperationSource::Kernel { package } if package == crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE
@@ -3636,7 +3636,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
     let notify_record =
         verlet_operations::operation_store::LocalOperationRegistry::new(&operation_registry_root)
             .load_record(crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE)
-            .expect("startup should publish cooldis-notify");
+            .expect("startup should publish verlet-notify");
     assert!(matches!(
         &notify_record.source,
         verlet_operations::operation_store::PublishedOperationSource::Kernel { package } if package == crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE
@@ -3810,7 +3810,7 @@ async fn manifest_with_child_agents_disabled_gets_no_thread_tools_without_rows()
 [agent]
 name = "researcher"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -3907,7 +3907,7 @@ Alpha body marker.
 [agent]
 name = "skill-runner"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -4156,7 +4156,7 @@ Original discovery body.
 [agent]
 name = "workspace-skill-runner"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -4401,7 +4401,7 @@ async fn explicit_context_folder_first_prompt_reaches_route_bound_agent_provider
 [agent]
 name = "prompt-runner"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -4585,7 +4585,7 @@ async fn child_agent_policy_rejects_manifest_thread_spawn_row() {
 [agent]
 name = "blocked-spawn"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -4597,7 +4597,7 @@ model_ref = "model://local_offline/echo"
 type = "direct_tool"
 id = "thread_spawn"
 tool_name = "thread_spawn"
-operation_ref = "op://cooldis-threads/thread_spawn@sha256:{}"
+operation_ref = "op://verlet-threads/thread_spawn@sha256:{}"
 grants = ["threads.spawn"]
 
 [policies]
@@ -4662,7 +4662,7 @@ async fn schedule_manifest_direct_tool_starts_mandate_and_requires_grant() {
 [agent]
 name = "scheduler"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -4674,7 +4674,7 @@ model_ref = "model://local_offline/echo"
 type = "direct_tool"
 id = "mandate_start"
 tool_name = "mandate_start"
-operation_ref = "op://cooldis-schedule/mandate_start@sha256:{}"
+operation_ref = "op://verlet-schedule/mandate_start@sha256:{}"
 grants = ["{}"]
 
 [runtime]
@@ -4698,7 +4698,7 @@ streaming = false
 [agent]
 name = "scheduler-no-grant"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -4710,7 +4710,7 @@ model_ref = "model://local_offline/echo"
 type = "direct_tool"
 id = "mandate_start"
 tool_name = "mandate_start"
-operation_ref = "op://cooldis-schedule/mandate_start@sha256:{}"
+operation_ref = "op://verlet-schedule/mandate_start@sha256:{}"
 grants = []
 
 [runtime]
@@ -4799,7 +4799,7 @@ async fn thread_spawn_agent_ref_binds_child_manifest() {
 [agent]
 name = "worker"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -5280,7 +5280,7 @@ async fn thread_start_with_agent_ref_records_manifest_receipts_before_turns() {
 [agent]
 name = "local-runner"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -5565,7 +5565,7 @@ async fn thread_start_witnesses_workspace_before_waiting_for_initial_status() {
 [agent]
 name = "starting-workspace"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -7552,7 +7552,7 @@ async fn thread_start_with_agent_ref_lowers_cwd_and_rejects_operation_injection(
 [agent]
 name = "closed-runner"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -7580,7 +7580,7 @@ allow = ["default_cwd", "max_tool_rounds"]
 [agent]
 name = "closed-no-cwd"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -7835,7 +7835,7 @@ async fn manifest_threads_do_not_inherit_global_or_unbound_capsule_operations() 
 [agent]
 name = "no-tools"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -7936,7 +7936,7 @@ async fn manifest_operation_bindings_pin_artifact_hashes() {
 [agent]
 name = "pinned"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -8048,7 +8048,7 @@ async fn manifest_rw_workspace_binding_round_trips_real_files_and_blocks_host_es
 [agent]
 name = "workspace-agent"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -8220,7 +8220,7 @@ async fn manifest_bound_coupling_set_is_persisted_to_thread_metadata() {
 [agent]
 name = "coupled"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -8410,7 +8410,7 @@ async fn manifest_operation_binding_filters_two_segment_ref_from_thread_catalog(
 [agent]
 name = "operation-segment"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -9448,7 +9448,7 @@ async fn reload_recovers_absent_or_corrupt_workspace_metadata_as_unbound() {
 [agent]
 name = "workspace-reload"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -13754,7 +13754,7 @@ name = "{name}"
 version = "0.1.0"
 display_name = "{title}"
 description = "{summary}"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]

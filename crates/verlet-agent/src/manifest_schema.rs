@@ -10,6 +10,9 @@
 //! plumbing, and alias resolution live in `agent::manifest`; the compiled
 //! plan produced from this schema is recorded there as well.
 
+pub const AGENT_MANIFEST_KIND: &str = "verlet.agent-manifest";
+pub const LEGACY_AGENT_MANIFEST_KIND: &str = concat!("cool", "dis.agent-manifest");
+
 use serde::Deserialize as _;
 
 /// Top-level sections reserved by the ontology but deferred from the V1
@@ -156,10 +159,11 @@ impl AgentManifestSchema {
             validate_version(version)?;
         }
         if let Some(kind) = &self.identity.kind
-            && kind != "cooldis.agent-manifest"
+            && kind != AGENT_MANIFEST_KIND
+            && kind != LEGACY_AGENT_MANIFEST_KIND
         {
             return Err(crate::VerletAgentError::RuntimeFactory(format!(
-                "agent manifest kind must be \"cooldis.agent-manifest\", got {kind:?}"
+                "agent manifest kind must be {AGENT_MANIFEST_KIND:?} (or deprecated {LEGACY_AGENT_MANIFEST_KIND:?} through v0.3.x), got {kind:?}"
             )));
         }
         if let Some(schema_version) = self.identity.schema_version
@@ -446,7 +450,7 @@ pub fn default_context_pipeline() -> AgentManifestContextPipeline {
 }
 
 /// Durable name and version envelope (audit section 1). `kind` is the object
-/// discriminator `cooldis.agent-manifest`, never the agent's role; roles live
+/// discriminator `verlet.agent-manifest`, never the agent's role; roles live
 /// in `labels`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

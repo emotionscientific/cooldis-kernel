@@ -196,7 +196,7 @@ fn synthesize_default_manifest_with_version(
             version: Some(version.to_string()),
             display_name: None,
             description: None,
-            kind: Some("cooldis.agent-manifest".to_string()),
+            kind: Some(verlet_agent::manifest_schema::AGENT_MANIFEST_KIND.to_string()),
             schema_version: Some(1),
             labels: Default::default(),
             publisher: None,
@@ -301,7 +301,9 @@ fn default_manifest_tools(
     let registry = verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
     let mut records = std::collections::BTreeMap::new();
     for operation_name in &bindings.global_operation_names {
-        let record = registry.load_record(operation_name).map_err(|err| {
+        let canonical_name =
+            crate::operations::kernel_packages::canonical_kernel_package_name(operation_name);
+        let record = registry.load_record(canonical_name).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "default manifest global operation {operation_name:?} was not found: {err}"
             ))

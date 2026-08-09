@@ -280,6 +280,7 @@ pub(super) async fn resolve_replay_artifact(
 ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     if artifact.starts_with("op://") {
         let parsed = parse_pinned_operation_ref(artifact)?;
+        crate::operations::kernel_packages::warn_if_legacy_kernel_package_name(&parsed.name);
         let root = registry_root.unwrap_or_else(crate::cli::tool::default_registry_root);
         let record = verlet_operations::operation_store::LocalOperationRegistry::new(&root)
             .load_version_record(&parsed.name, &parsed.artifact_hash)

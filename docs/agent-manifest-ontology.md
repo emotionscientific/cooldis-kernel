@@ -153,8 +153,8 @@ Tools should be referenced as published artifacts. The manifest should not copy
 tool artifacts into itself.
 
 First-party kernel tools are still operation artifacts. For example,
-`cooldis-threads/thread_spawn` is bound as
-`op://cooldis-threads/thread_spawn@sha256:<record-hash>` and requires the
+`verlet-threads/thread_spawn` is bound as
+`op://verlet-threads/thread_spawn@sha256:<record-hash>` and requires the
 `threads.spawn` grant. The manifest binds published operation records by
 artifact hash rather than copying tool implementations into itself.
 
@@ -555,7 +555,7 @@ operation registry root so synthesis can resolve the declared rows; with no
 operation-binding config, registries remain optional.
 
 Thread-control tools follow the same rule. At startup, a daemon with an
-operation registry root publishes the kernel-native `cooldis-threads` record and
+operation registry root publishes the kernel-native `verlet-threads` record and
 the default manifest declares five `direct_tool` rows pinned to it:
 `thread_spawn`, `thread_submit`, `thread_wait`, `thread_status`, and
 `thread_cancel`. Those rows carry the `threads.spawn`, `threads.control`, and

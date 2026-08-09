@@ -4,10 +4,14 @@
 //! but their artifact bytes are the canonical serialized interface contract and
 //! execution is dispatched back into kernel code by record and operation name.
 
-pub const VERLET_THREADS_PACKAGE: &str = "cooldis-threads";
-pub const VERLET_SCHEDULE_PACKAGE: &str = "cooldis-schedule";
-pub const VERLET_PROCESS_PACKAGE: &str = "cooldis-process";
-pub const VERLET_NOTIFY_PACKAGE: &str = "cooldis-notify";
+pub const VERLET_THREADS_PACKAGE: &str = "verlet-threads";
+pub const VERLET_SCHEDULE_PACKAGE: &str = "verlet-schedule";
+pub const VERLET_PROCESS_PACKAGE: &str = "verlet-process";
+pub const VERLET_NOTIFY_PACKAGE: &str = "verlet-notify";
+const LEGACY_THREADS_PACKAGE: &str = concat!("cool", "dis-threads");
+const LEGACY_SCHEDULE_PACKAGE: &str = concat!("cool", "dis-schedule");
+const LEGACY_PROCESS_PACKAGE: &str = concat!("cool", "dis-process");
+const LEGACY_NOTIFY_PACKAGE: &str = concat!("cool", "dis-notify");
 pub const THREAD_SPAWN_OPERATION: &str = "thread_spawn";
 pub const THREAD_SUBMIT_OPERATION: &str = "thread_submit";
 pub const THREAD_WAIT_OPERATION: &str = "thread_wait";
@@ -36,6 +40,43 @@ pub const CHANNEL_EMIT_CAPABILITY: &str = "channel.emit";
 pub const KERNEL_RUNTIME_KIND: &str = "kernel";
 pub const OPERATION_METADATA_RUNTIME_KIND: &str = "cooldis.runtime.kind";
 
+pub(crate) fn canonical_kernel_package_name(name: &str) -> &str {
+    let canonical = match name {
+        LEGACY_THREADS_PACKAGE => VERLET_THREADS_PACKAGE,
+        LEGACY_SCHEDULE_PACKAGE => VERLET_SCHEDULE_PACKAGE,
+        LEGACY_PROCESS_PACKAGE => VERLET_PROCESS_PACKAGE,
+        LEGACY_NOTIFY_PACKAGE => VERLET_NOTIFY_PACKAGE,
+        _ => return name,
+    };
+    warn_legacy_kernel_package_name(name, canonical);
+    canonical
+}
+
+pub(crate) fn warn_if_legacy_kernel_package_name(name: &str) {
+    let canonical = match name {
+        LEGACY_THREADS_PACKAGE => VERLET_THREADS_PACKAGE,
+        LEGACY_SCHEDULE_PACKAGE => VERLET_SCHEDULE_PACKAGE,
+        LEGACY_PROCESS_PACKAGE => VERLET_PROCESS_PACKAGE,
+        LEGACY_NOTIFY_PACKAGE => VERLET_NOTIFY_PACKAGE,
+        _ => return,
+    };
+    warn_legacy_kernel_package_name(name, canonical);
+}
+
+fn warn_legacy_kernel_package_name(name: &str, canonical: &str) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let warned = WARNED.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    let mut warned = warned
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if warned.insert(name.to_string()) {
+        eprintln!(
+            "warning: kernel package {name} is deprecated; use {canonical} (compatibility will be removed in v0.4.0)"
+        );
+    }
+}
+
 pub fn ensure_verlet_threads_published(
     registry_root: Option<&std::path::Path>,
 ) -> crate::kernel::runtime_host::VerletResult<
@@ -43,7 +84,7 @@ pub fn ensure_verlet_threads_published(
 > {
     let Some(registry_root) = registry_root else {
         eprintln!(
-            "verlet app-server: no operation registry root configured; skipping cooldis-threads kernel package"
+            "verlet app-server: no operation registry root configured; skipping verlet-threads kernel package"
         );
         return Ok(None);
     };
@@ -81,7 +122,7 @@ pub fn ensure_verlet_schedule_published(
 > {
     let Some(registry_root) = registry_root else {
         eprintln!(
-            "verlet app-server: no operation registry root configured; skipping cooldis-schedule kernel package"
+            "verlet app-server: no operation registry root configured; skipping verlet-schedule kernel package"
         );
         return Ok(None);
     };
@@ -119,7 +160,7 @@ pub fn ensure_verlet_process_published(
 > {
     let Some(registry_root) = registry_root else {
         eprintln!(
-            "verlet app-server: no operation registry root configured; skipping cooldis-process kernel package"
+            "verlet app-server: no operation registry root configured; skipping verlet-process kernel package"
         );
         return Ok(None);
     };
@@ -157,7 +198,7 @@ pub fn ensure_verlet_notify_published(
 > {
     let Some(registry_root) = registry_root else {
         eprintln!(
-            "verlet app-server: no operation registry root configured; skipping cooldis-notify kernel package"
+            "verlet app-server: no operation registry root configured; skipping verlet-notify kernel package"
         );
         return Ok(None);
     };

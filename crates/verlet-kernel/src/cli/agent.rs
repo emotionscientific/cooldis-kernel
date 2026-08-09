@@ -221,7 +221,9 @@ pub(super) fn resolve_manifest_operation_refs(
         let Some(parsed) = parse_resolvable_operation_ref(&operation_ref.reference)? else {
             continue;
         };
-        let record = registry.load_record(&parsed.record_name).map_err(|err| {
+        let record_name =
+            crate::operations::kernel_packages::canonical_kernel_package_name(&parsed.record_name);
+        let record = registry.load_record(record_name).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "tool {:?} operation_ref {:?} was not found in the local operation registry: {err}; seed the operation registry or fix the op:// record name",
                 operation_ref.tool_id,
@@ -230,7 +232,7 @@ pub(super) fn resolve_manifest_operation_refs(
         })?;
         let resolved = format!(
             "op://{}{}@sha256:{}",
-            parsed.record_name,
+            record_name,
             parsed
                 .operation_name
                 .as_deref()
@@ -1269,7 +1271,7 @@ pub(super) fn render_agent_manifest_template(
 name = {name:?}\n\
 version = \"0.1.0\"\n\
 description = \"Describe what this agent is responsible for.\"\n\
-kind = \"cooldis.agent-manifest\"\n\
+kind = \"verlet.agent-manifest\"\n\
 schema_version = 1\n\
 \n\
 [[model_profiles]]\n\

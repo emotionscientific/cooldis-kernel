@@ -52,7 +52,7 @@ fn manifest_source_with_tool(
 name = "{name}"
 version = "{version}"
 description = "Checks a release branch."
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -93,8 +93,34 @@ fn legacy_string_grants_keep_the_resolved_manifest_hash_and_wire_shape() {
     );
     assert_eq!(
         plan.manifest_hash,
-        "sha256:15b5cbea672ebc3ea41bfae24532f608dd762533e2e9f37b28ff72f08aee5c16"
+        "sha256:fa815a6a1fced2b03eb645bb9092c82d2fb51143f1896ecb110b3efe96bf13d0"
     );
+}
+
+#[test]
+fn legacy_manifest_kind_is_normalized_for_new_records() {
+    let source = manifest_source("legacy-kind", "1.0.0", false).replace(
+        "kind = \"verlet.agent-manifest\"",
+        &format!("kind = \"{}\"", concat!("cool", "dis.agent-manifest")),
+    );
+
+    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
+
+    assert_eq!(plan.kind, "verlet.agent-manifest");
+    assert_eq!(
+        plan.resolved_manifest["identity"]["kind"],
+        serde_json::json!("verlet.agent-manifest")
+    );
+}
+
+#[test]
+fn persisted_legacy_agent_record_kind_remains_valid() {
+    let source = manifest_source("persisted-legacy-kind", "1.0.0", false);
+    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
+    let mut record = plan.into_record(1);
+    record.kind = concat!("cool", "dis.agent-manifest").to_string();
+
+    record.validate().unwrap();
 }
 
 fn manifest_source_with_all_grant_positions(name: &str, grant: &str) -> String {
@@ -104,7 +130,7 @@ fn manifest_source_with_all_grant_positions(name: &str, grant: &str) -> String {
 name = "{name}"
 version = "1.0.0"
 description = "Pins every manifest grant position."
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
@@ -172,7 +198,7 @@ fn legacy_string_grants_pin_all_four_positions_in_one_manifest_hash() {
     assert_eq!(grants, vec![serde_json::json!(["stream.read:thread"]); 4]);
     assert_eq!(
         plan.manifest_hash,
-        "sha256:68c68f12a4a5897127a9d3b6b59067625080273b0f801c2c91c6f925568c57b6"
+        "sha256:91a428458b19f8fc6de326c47b70091adca00738196158b8991c00af985cd67d"
     );
 }
 
@@ -225,7 +251,7 @@ fn folder_first_manifest_source(name: &str, context: &str) -> String {
 name = "{name}"
 version = "1.0.0"
 description = "Checks a release branch."
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]

@@ -2,7 +2,6 @@ use sha2::Digest as _;
 use std::io::Write as _;
 
 const AGENT_RECORD_SCHEMA_VERSION: u32 = 1;
-const AGENT_MANIFEST_KIND: &str = "cooldis.agent-manifest";
 const FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE: &str = "identity";
 const FOLDER_FIRST_SYSTEM_PROMPT_PREFLIGHT_REF: &str =
     "resource://artifact/sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -625,7 +624,13 @@ impl AgentPublishPlan {
                 "invalid agent manifest: {err}"
             ))
         })?;
-        let manifest = manifest_fn(&value)?;
+        let mut manifest = manifest_fn(&value)?;
+        if manifest.identity.kind.as_deref()
+            == Some(verlet_agent::manifest_schema::LEGACY_AGENT_MANIFEST_KIND)
+        {
+            manifest.identity.kind =
+                Some(verlet_agent::manifest_schema::AGENT_MANIFEST_KIND.to_string());
+        }
         let name =
             verlet_operations::operation_store::validate_record_name(&manifest.identity.name)?;
         let namespace = manifest
@@ -647,7 +652,7 @@ impl AgentPublishPlan {
         let ref_uri = agent_ref_uri(namespace.as_deref(), &name, &version);
         Ok(Self {
             schema_version: AGENT_RECORD_SCHEMA_VERSION,
-            kind: AGENT_MANIFEST_KIND.to_string(),
+            kind: verlet_agent::manifest_schema::AGENT_MANIFEST_KIND.to_string(),
             name,
             namespace,
             version,
@@ -937,11 +942,15 @@ impl PublishedAgentRecord {
                 ),
             ));
         }
-        if self.kind != AGENT_MANIFEST_KIND {
+        if self.kind != verlet_agent::manifest_schema::AGENT_MANIFEST_KIND
+            && self.kind != verlet_agent::manifest_schema::LEGACY_AGENT_MANIFEST_KIND
+        {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
-                    "agent record kind must be {AGENT_MANIFEST_KIND:?}, got {:?}",
-                    self.kind
+                    "agent record kind must be {:?} (or deprecated {:?} through v0.3.x), got {:?}",
+                    verlet_agent::manifest_schema::AGENT_MANIFEST_KIND,
+                    verlet_agent::manifest_schema::LEGACY_AGENT_MANIFEST_KIND,
+                    self.kind,
                 ),
             ));
         }

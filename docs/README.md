@@ -16,6 +16,8 @@ provider adapters, and release gates.
   runtime contracts live.
 - [Kernel Invariants](kernel-invariants.md): public vocabulary for the runtime
   rules that other docs rely on.
+- [Frozen Format IDs](format-ids.md): durable identifiers that intentionally
+  keep their pre-rename namespace.
 - [Roadmap](roadmap.md): V1 runtime-primitives release and V2 direction.
 
 ## Core Concepts
@@ -27,6 +29,7 @@ provider adapters, and release gates.
 ## Runtime Surfaces
 
 - [ABI: Verlet Operation Boundary](abi.md)
+- [Frozen Format IDs](format-ids.md)
 - [Verlet CLI](cli.md)
 - [Command Contracts](command-contracts.md)
 - [Verlet Daemon](daemon.md)

@@ -18,7 +18,8 @@ pub(super) async fn tool_manual(
         .ok_or_else(|| crate::cli::usage_error("tool manual requires <published-tool>"))?;
     let registry_root = options.registry_root.unwrap_or_else(default_registry_root);
     let registry = verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
-    let record = registry.load_record(&tool_name)?;
+    let tool_name = crate::operations::kernel_packages::canonical_kernel_package_name(&tool_name);
+    let record = registry.load_record(tool_name)?;
     let manuals = manuals_for_record(&record, options.operation.as_deref())?;
     if options.json {
         serde_json::to_writer_pretty(std::io::stdout(), &manuals).map_err(|err| {
@@ -710,7 +711,9 @@ pub(super) async fn tool_run(
         (None, None, Some(registered_name)) => {
             let registry =
                 verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
-            let record = registry.load_record(&registered_name)?;
+            let registered_name =
+                crate::operations::kernel_packages::canonical_kernel_package_name(&registered_name);
+            let record = registry.load_record(registered_name)?;
             let resolved_secrets = if !verlet_metadata::secret_store::required_secret_names(
                 &record.manifest,
             )

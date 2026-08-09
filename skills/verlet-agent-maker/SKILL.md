@@ -69,7 +69,7 @@ anywhere fail closed with an error naming the offender.
 name = "my-agent"            # required; lowercase kebab/snake record name
 version = "0.1.0"            # semantic version
 description = "One line of responsibility."
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 # optional: namespace, display_name, labels (string map),
 #           publisher { id, display_name }
@@ -156,7 +156,7 @@ direct row. With `expose` empty the universe is searchable in-context only.
 
 **Thread control is declared, not ambient.** Spawning and supervising child
 threads requires (a) `allow_child_agents = true` in policies and (b) rows
-binding the kernel-published `cooldis-threads` operations — `thread_spawn`
+binding the kernel-published `verlet-threads` operations — `thread_spawn`
 (grant `threads.spawn`), `thread_submit`/`thread_cancel` (`threads.control`),
 `thread_wait`/`thread_status` (`threads.read`). An agent with no such rows
 has no thread powers, full stop.
@@ -164,15 +164,15 @@ has no thread powers, full stop.
 ```toml
 [[tools]]
 type = "direct_tool"
-id = "cooldis-threads.thread_spawn"
+id = "verlet-threads.thread_spawn"
 tool_name = "thread_spawn"
-operation_ref = "op://cooldis-threads/thread_spawn@sha256:<hash>"
+operation_ref = "op://verlet-threads/thread_spawn@sha256:<hash>"
 grants = ["threads.spawn"]
 ```
 
 A `threads.spawn`-granting row with `allow_child_agents = false` is rejected
 at bind with a teaching error — fix the policy or drop the row. The
-`cooldis-threads` record is kernel-published at daemon startup; read its
+`verlet-threads` record is kernel-published at daemon startup; read its
 hash from the registry like any other operation.
 
 ### `[[resources]]` — declared read-only artifacts
