@@ -467,3 +467,148 @@ pub fn filter_manifest_operations(
         .retain(|operation| operation_names.contains(&operation.name));
     Ok(manifest)
 }
+
+/// Per-caller overlay of kernel-operation dispatchers (EMO-550).
+///
+/// A dynamic kernel dispatcher captures one thread's control and context.
+/// Registries are shared — across threads today, across instances on the
+/// multi-tenant host — so such a dispatcher must never be written into a
+/// registry slot after registration: the last writer silently redirects
+/// every other thread's kernel operations. The overlay rides with the
+/// invoking side instead (agent tool router, bash execution config) and is
+/// consulted per invocation, before the dispatcher optionally supplied at
+/// registration time (immutable after registration, safe to share).
+#[derive(Clone, Default)]
+pub struct KernelDispatchOverlay {
+    dispatchers: std::collections::BTreeMap<String, std::sync::Arc<dyn KernelOperationDispatcher>>,
+}
+
+impl KernelDispatchOverlay {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the dispatcher for a kernel package name (normalized like
+    /// registration names); replaces any previous overlay entry.
+    pub fn with_dispatcher(
+        mut self,
+        package: impl Into<String>,
+        dispatcher: std::sync::Arc<dyn KernelOperationDispatcher>,
+    ) -> Self {
+        self.dispatchers.insert(package.into(), dispatcher);
+        self
+    }
+
+    pub fn dispatcher(
+        &self,
+        package: &str,
+    ) -> Option<std::sync::Arc<dyn KernelOperationDispatcher>> {
+        self.dispatchers.get(package).cloned()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dispatchers.is_empty()
+    }
+}
+
+/// An operation-registry view scoped to one invoking context (EMO-550):
+/// the shared registration state plus this caller's dispatch overlay.
+///
+/// All kernel-operation invocation goes through this view. Kernel dispatch
+/// resolves from the overlay first, then from the dispatcher supplied at
+/// registration, and fails with the existing "has no dispatcher in this
+/// runtime" error when neither exists. Wasm entries are unaffected by the
+/// overlay. Registration, listing, and describe stay on the underlying
+/// [`OperationRegistry`].
+#[derive(Clone)]
+pub struct ScopedOperationRegistry {
+    registry: std::sync::Arc<OperationRegistry>,
+    overlay: KernelDispatchOverlay,
+}
+
+impl ScopedOperationRegistry {
+    pub fn new(
+        registry: std::sync::Arc<OperationRegistry>,
+        overlay: KernelDispatchOverlay,
+    ) -> Self {
+        Self { registry, overlay }
+    }
+
+    /// The shared registration state (register/list/describe surfaces).
+    pub fn registry(&self) -> &std::sync::Arc<OperationRegistry> {
+        &self.registry
+    }
+
+    pub fn overlay(&self) -> &KernelDispatchOverlay {
+        &self.overlay
+    }
+
+    pub async fn invoke_bytes(
+        &self,
+        registered_name: &str,
+        operation_name: &str,
+        input: impl Into<Vec<u8>>,
+    ) -> crate::VerletResult<verlet_process::process::WasmOperationOutput> {
+        self.invoke_bytes_with_kernel_metadata(
+            registered_name,
+            operation_name,
+            input,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+    }
+
+    pub async fn invoke_bytes_with_kernel_metadata(
+        &self,
+        registered_name: &str,
+        operation_name: &str,
+        input: impl Into<Vec<u8>>,
+        kernel_metadata: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> crate::VerletResult<verlet_process::process::WasmOperationOutput> {
+        let _ = (
+            registered_name,
+            operation_name,
+            input.into(),
+            kernel_metadata,
+        );
+        unimplemented!("EMO-550: overlay-first kernel dispatch")
+    }
+
+    pub async fn invoke_process(
+        &self,
+        registered_name: &str,
+        operation_name: &str,
+        input: impl Into<Vec<u8>>,
+    ) -> crate::VerletResult<verlet_process::process::VerletProcessHandle> {
+        self.invoke_process_with_kernel_metadata(
+            registered_name,
+            operation_name,
+            input,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+    }
+
+    pub async fn invoke_process_with_kernel_metadata(
+        &self,
+        registered_name: &str,
+        operation_name: &str,
+        input: impl Into<Vec<u8>>,
+        kernel_metadata: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> crate::VerletResult<verlet_process::process::VerletProcessHandle> {
+        let output = self
+            .invoke_bytes_with_kernel_metadata(
+                registered_name,
+                operation_name,
+                input,
+                kernel_metadata,
+            )
+            .await?;
+        Ok(
+            verlet_process::process::VerletProcessHandle::from_wasm_operation_output(
+                Some(registered_name.to_string()),
+                output,
+            ),
+        )
+    }
+}
