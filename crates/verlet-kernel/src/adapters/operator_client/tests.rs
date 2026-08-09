@@ -1,8 +1,8 @@
 #[test]
-fn codex_tui_connect_config_redacts_bearer_token() {
-    let config = crate::adapters::codex_tui::CodexTuiConnectConfig {
+fn operator_client_connect_config_redacts_bearer_token() {
+    let config = crate::adapters::operator_client::OperatorConnectConfig {
         bearer_token: Some("do-not-log-this-token".to_string()),
-        ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
+        ..crate::adapters::operator_client::OperatorConnectConfig::default()
     };
     let debug = format!("{config:?}");
     assert!(debug.contains("<redacted>"));
@@ -12,7 +12,7 @@ fn codex_tui_connect_config_redacts_bearer_token() {
 #[test]
 fn rpc_client_errors_render_without_the_runtime_factory_prefix() {
     assert_eq!(
-        crate::adapters::codex_tui::tui_error(
+        crate::adapters::operator_client::tui_error(
             "failed to connect to the Verlet RPC endpoint `ws://127.0.0.1:1/rpc`"
         )
         .to_string(),
@@ -26,7 +26,7 @@ fn rpc_client_errors_render_without_the_runtime_factory_prefix() {
 }
 
 #[test]
-fn codex_tui_initialize_request_uses_codex_remote_shape() {
+fn operator_client_initialize_request_uses_codex_remote_shape() {
     let message = crate::adapters::app_server::connection::JsonRpcMessage::Request(
         crate::adapters::app_server::connection::JsonRpcRequest {
             id: crate::adapters::app_server::connection::RequestId::String(
@@ -72,7 +72,7 @@ fn codex_tui_initialize_request_uses_codex_remote_shape() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn codex_tui_driver_runs_prompt_against_app_server() {
+async fn operator_client_driver_runs_prompt_against_app_server() {
     let root = std::path::PathBuf::from("/tmp")
         .join(format!("cdis-tui-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
@@ -91,9 +91,9 @@ async fn codex_tui_driver_runs_prompt_against_app_server() {
 
     wait_for_socket(&socket).await.unwrap();
 
-    let mut client = crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+    let mut client = crate::adapters::operator_client::OperatorClient::connect_unix(
         &socket,
-        crate::adapters::codex_tui::CodexTuiConnectConfig::default(),
+        crate::adapters::operator_client::OperatorConnectConfig::default(),
     )
     .await
     .unwrap();
@@ -160,7 +160,7 @@ async fn codex_tui_driver_runs_prompt_against_app_server() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn codex_tui_operator_client_covers_thread_lifecycle_methods() {
+async fn operator_client_covers_thread_lifecycle_methods() {
     let root = std::path::PathBuf::from("/tmp")
         .join(format!("cdis-operator-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app.sock");
@@ -179,9 +179,9 @@ async fn codex_tui_operator_client_covers_thread_lifecycle_methods() {
 
     wait_for_socket(&socket).await.unwrap();
 
-    let mut client = crate::adapters::codex_tui::VerletOperatorClient::connect_unix(
+    let mut client = crate::adapters::operator_client::OperatorClient::connect_unix(
         &socket,
-        crate::adapters::codex_tui::CodexTuiConnectConfig::default(),
+        crate::adapters::operator_client::OperatorConnectConfig::default(),
     )
     .await
     .unwrap();
@@ -227,7 +227,7 @@ async fn wait_for_socket(
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    Err(crate::adapters::codex_tui::tui_error(format!(
+    Err(crate::adapters::operator_client::tui_error(format!(
         "timed out waiting for socket {}",
         path.display()
     )))

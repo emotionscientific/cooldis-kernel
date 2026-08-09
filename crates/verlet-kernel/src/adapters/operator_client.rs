@@ -2,16 +2,16 @@ use futures_util::SinkExt as _;
 use futures_util::StreamExt as _;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
-pub const CODEX_TUI_UDS_WEBSOCKET_HANDSHAKE_URL: &str = "ws://localhost/rpc";
-pub const CODEX_TUI_TEST_CLIENT_NAME: &str = "verlet-codex-tui-test";
+pub const OPERATOR_CLIENT_UDS_WEBSOCKET_HANDSHAKE_URL: &str = "ws://localhost/rpc";
+pub const OPERATOR_CLIENT_NAME: &str = "verlet-codex-tui-test";
 
-const CODEX_TUI_MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
-const CODEX_TUI_INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const OPERATOR_CLIENT_MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
+const OPERATOR_CLIENT_INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Verlet-owned copy of the Codex TUI remote-client path, trimmed to a
-/// headless driver for app-server tests.
+/// Verlet-owned operator client, trimmed to a headless driver for app-server
+/// tests.
 #[derive(Clone)]
-pub struct CodexTuiConnectConfig {
+pub struct OperatorConnectConfig {
     pub client_name: String,
     pub client_version: String,
     pub experimental_api: bool,
@@ -19,7 +19,7 @@ pub struct CodexTuiConnectConfig {
     pub bearer_token: Option<String>,
 }
 
-impl Default for CodexTuiConnectConfig {
+impl Default for OperatorConnectConfig {
     fn default() -> Self {
         // MCP, ACP, debug RPC, and other daemon clients inherit this config.
         // Managed callers provide their boundary credential via
@@ -28,7 +28,7 @@ impl Default for CodexTuiConnectConfig {
             .ok()
             .filter(|token| !token.trim().is_empty());
         Self {
-            client_name: CODEX_TUI_TEST_CLIENT_NAME.to_string(),
+            client_name: OPERATOR_CLIENT_NAME.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             experimental_api: true,
             opt_out_notification_methods: Vec::new(),
@@ -37,9 +37,9 @@ impl Default for CodexTuiConnectConfig {
     }
 }
 
-impl std::fmt::Debug for CodexTuiConnectConfig {
+impl std::fmt::Debug for OperatorConnectConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CodexTuiConnectConfig")
+        f.debug_struct("OperatorConnectConfig")
             .field("client_name", &self.client_name)
             .field("client_version", &self.client_version)
             .field("experimental_api", &self.experimental_api)
@@ -56,19 +56,19 @@ impl std::fmt::Debug for CodexTuiConnectConfig {
 }
 
 #[derive(Clone, Debug)]
-pub struct CodexTuiThread {
+pub struct OperatorThread {
     pub id: String,
     pub raw: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
-pub struct CodexTuiTurn {
+pub struct OperatorTurn {
     pub id: String,
     pub raw: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
-pub struct CodexTuiCompletedTurn {
+pub struct OperatorCompletedTurn {
     pub thread_id: String,
     pub turn_id: String,
     pub assistant_text: String,
@@ -76,31 +76,29 @@ pub struct CodexTuiCompletedTurn {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum CodexTuiEvent {
+pub enum OperatorEvent {
     Notification(crate::adapters::app_server::connection::JsonRpcNotification),
     Request(crate::adapters::app_server::connection::JsonRpcRequest),
     Response(crate::adapters::app_server::connection::JsonRpcResponse),
     Error(crate::adapters::app_server::connection::JsonRpcError),
 }
 
-pub struct CodexTuiTestClient<S> {
+pub struct OperatorClient<S> {
     websocket: tokio_tungstenite::WebSocketStream<S>,
     next_request_id: i64,
-    pending_events: std::collections::VecDeque<CodexTuiEvent>,
+    pending_events: std::collections::VecDeque<OperatorEvent>,
     initialize_result: serde_json::Value,
 }
 
-pub type VerletOperatorClient<S> = CodexTuiTestClient<S>;
-
 #[cfg(unix)]
-impl CodexTuiTestClient<tokio::net::UnixStream> {
+impl OperatorClient<tokio::net::UnixStream> {
     pub async fn connect_unix(
         socket_path: impl Into<std::path::PathBuf>,
-        config: CodexTuiConnectConfig,
+        config: OperatorConnectConfig,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let socket_path = socket_path.into();
         let endpoint = format!("unix://{}", socket_path.display());
-        let mut request = CODEX_TUI_UDS_WEBSOCKET_HANDSHAKE_URL
+        let mut request = OPERATOR_CLIENT_UDS_WEBSOCKET_HANDSHAKE_URL
             .into_client_request()
             .map_err(|err| tui_error(format!("invalid Verlet RPC handshake URL: {err}")))?;
         set_bearer_token(&mut request, config.bearer_token.as_deref())?;
@@ -114,7 +112,7 @@ impl CodexTuiTestClient<tokio::net::UnixStream> {
         let (websocket, _) = tokio_tungstenite::client_async_with_config(
             request,
             stream,
-            Some(codex_tui_websocket_config()),
+            Some(operator_client_websocket_config()),
         )
         .await
         .map_err(|err| {
@@ -126,10 +124,10 @@ impl CodexTuiTestClient<tokio::net::UnixStream> {
     }
 }
 
-impl CodexTuiTestClient<tokio::net::TcpStream> {
+impl OperatorClient<tokio::net::TcpStream> {
     pub async fn connect_websocket(
         url: &str,
-        config: CodexTuiConnectConfig,
+        config: OperatorConnectConfig,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let endpoint = url.to_string();
         let authority = websocket_tcp_authority(url)?;
@@ -147,7 +145,7 @@ impl CodexTuiTestClient<tokio::net::TcpStream> {
         let (websocket, _) = tokio_tungstenite::client_async_with_config(
             request,
             stream,
-            Some(codex_tui_websocket_config()),
+            Some(operator_client_websocket_config()),
         )
         .await
         .map_err(|err| {
@@ -176,14 +174,14 @@ fn set_bearer_token(
     Ok(())
 }
 
-impl<S> CodexTuiTestClient<S>
+impl<S> OperatorClient<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     pub async fn connect_with_websocket(
         mut websocket: tokio_tungstenite::WebSocketStream<S>,
         endpoint: impl Into<String>,
-        config: CodexTuiConnectConfig,
+        config: OperatorConnectConfig,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let endpoint = endpoint.into();
         let (initialize_result, pending_events) =
@@ -229,7 +227,7 @@ where
     pub async fn thread_start(
         &mut self,
         params: serde_json::Value,
-    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiThread> {
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorThread> {
         let result = self.request("thread/start", params).await?;
         thread_from_result(result, "thread/start")
     }
@@ -238,7 +236,7 @@ where
         &mut self,
         thread_id: &str,
         include_turns: bool,
-    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiThread> {
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorThread> {
         let result = self
             .request(
                 "thread/resume",
@@ -254,7 +252,7 @@ where
     pub async fn thread_fork(
         &mut self,
         thread_id: &str,
-    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiThread> {
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorThread> {
         let result = self
             .request(
                 "thread/fork",
@@ -338,7 +336,7 @@ where
         &mut self,
         thread_id: &str,
         text: &str,
-    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiTurn> {
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorTurn> {
         let result = self
             .request(
                 "turn/start",
@@ -353,7 +351,7 @@ where
             .cloned()
             .ok_or_else(|| tui_error("turn/start response missing turn"))?;
         let id = string_field(&turn, "id", "turn/start turn")?;
-        Ok(CodexTuiTurn { id, raw: turn })
+        Ok(OperatorTurn { id, raw: turn })
     }
 
     pub async fn turn_steer_text(
@@ -392,7 +390,7 @@ where
         &mut self,
         prompt: &str,
         timeout: std::time::Duration,
-    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiCompletedTurn> {
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorCompletedTurn> {
         let thread = self.thread_start(serde_json::json!({})).await?;
         let turn = self.turn_start_text(&thread.id, prompt).await?;
         self.wait_for_turn_completed(&thread.id, &turn.id, timeout)
@@ -404,7 +402,7 @@ where
         thread_id: &str,
         turn_id: &str,
         timeout_duration: std::time::Duration,
-    ) -> crate::kernel::runtime_host::VerletResult<CodexTuiCompletedTurn> {
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorCompletedTurn> {
         let deadline = tokio::time::sleep(timeout_duration);
         tokio::pin!(deadline);
         let mut assistant_text = String::new();
@@ -418,7 +416,7 @@ where
                 }
                 event = self.next_event() => {
                     match event? {
-                        CodexTuiEvent::Notification(notification) => {
+                        OperatorEvent::Notification(notification) => {
                             if notification.method == "item/agentMessage/delta"
                                 && notification.params.as_ref()
                                     .and_then(|params| params.get("threadId"))
@@ -440,7 +438,7 @@ where
                                     .and_then(serde_json::Value::as_str) == Some(turn_id);
                             notifications.push(notification);
                             if completed {
-                                return Ok(CodexTuiCompletedTurn {
+                                return Ok(OperatorCompletedTurn {
                                     thread_id: thread_id.to_string(),
                                     turn_id: turn_id.to_string(),
                                     assistant_text,
@@ -448,14 +446,14 @@ where
                                 });
                             }
                         }
-                        CodexTuiEvent::Error(error) => {
+                        OperatorEvent::Error(error) => {
                             return Err(tui_error(format!(
                                 "Verlet RPC client received JSON-RPC error {}: {}",
                                 error.error.code,
                                 error.error.message
                             )));
                         }
-                        CodexTuiEvent::Request(_) | CodexTuiEvent::Response(_) => {}
+                        OperatorEvent::Request(_) | OperatorEvent::Response(_) => {}
                     }
                 }
             }
@@ -493,10 +491,10 @@ where
 
         loop {
             match self.read_event().await? {
-                CodexTuiEvent::Response(response) if response.id == id => {
+                OperatorEvent::Response(response) if response.id == id => {
                     return Ok(response.result);
                 }
-                CodexTuiEvent::Error(error) if error.id == id => {
+                OperatorEvent::Error(error) if error.id == id => {
                     return Err(tui_error(format!(
                         "request `{method}` was refused: {}",
                         error.error.message
@@ -524,14 +522,14 @@ where
         .await
     }
 
-    pub async fn next_event(&mut self) -> crate::kernel::runtime_host::VerletResult<CodexTuiEvent> {
+    pub async fn next_event(&mut self) -> crate::kernel::runtime_host::VerletResult<OperatorEvent> {
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(event);
         }
         self.read_event().await
     }
 
-    async fn read_event(&mut self) -> crate::kernel::runtime_host::VerletResult<CodexTuiEvent> {
+    async fn read_event(&mut self) -> crate::kernel::runtime_host::VerletResult<OperatorEvent> {
         loop {
             let message = self
                 .websocket
@@ -572,10 +570,10 @@ where
 async fn initialize_remote_connection<S>(
     websocket: &mut tokio_tungstenite::WebSocketStream<S>,
     endpoint: &str,
-    config: CodexTuiConnectConfig,
+    config: OperatorConnectConfig,
 ) -> crate::kernel::runtime_host::VerletResult<(
     serde_json::Value,
-    std::collections::VecDeque<CodexTuiEvent>,
+    std::collections::VecDeque<OperatorEvent>,
 )>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -609,13 +607,13 @@ where
     .await?;
 
     let mut pending_events = std::collections::VecDeque::new();
-    let initialize_result = tokio::time::timeout(CODEX_TUI_INITIALIZE_TIMEOUT, async {
+    let initialize_result = tokio::time::timeout(OPERATOR_CLIENT_INITIALIZE_TIMEOUT, async {
         loop {
             match read_jsonrpc_event(websocket).await? {
-                CodexTuiEvent::Response(response) if response.id == initialize_request_id => {
+                OperatorEvent::Response(response) if response.id == initialize_request_id => {
                     break Ok(response.result);
                 }
-                CodexTuiEvent::Error(error) if error.id == initialize_request_id => {
+                OperatorEvent::Error(error) if error.id == initialize_request_id => {
                     break Err(tui_error(format!(
                         "Verlet RPC endpoint `{endpoint}` refused initialization: {}",
                         error.error.message
@@ -665,7 +663,7 @@ where
 
 async fn read_jsonrpc_event<S>(
     websocket: &mut tokio_tungstenite::WebSocketStream<S>,
-) -> crate::kernel::runtime_host::VerletResult<CodexTuiEvent>
+) -> crate::kernel::runtime_host::VerletResult<OperatorEvent>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -697,21 +695,21 @@ where
     }
 }
 
-fn jsonrpc_event_from_text(text: &str) -> crate::kernel::runtime_host::VerletResult<CodexTuiEvent> {
+fn jsonrpc_event_from_text(text: &str) -> crate::kernel::runtime_host::VerletResult<OperatorEvent> {
     match serde_json::from_str::<crate::adapters::app_server::connection::JsonRpcMessage>(text)
         .map_err(|err| tui_error(format!("invalid Verlet RPC message: {err}")))?
     {
         crate::adapters::app_server::connection::JsonRpcMessage::Notification(notification) => {
-            Ok(CodexTuiEvent::Notification(notification))
+            Ok(OperatorEvent::Notification(notification))
         }
         crate::adapters::app_server::connection::JsonRpcMessage::Request(request) => {
-            Ok(CodexTuiEvent::Request(request))
+            Ok(OperatorEvent::Request(request))
         }
         crate::adapters::app_server::connection::JsonRpcMessage::Response(response) => {
-            Ok(CodexTuiEvent::Response(response))
+            Ok(OperatorEvent::Response(response))
         }
         crate::adapters::app_server::connection::JsonRpcMessage::Error(error) => {
-            Ok(CodexTuiEvent::Error(error))
+            Ok(OperatorEvent::Error(error))
         }
     }
 }
@@ -739,19 +737,19 @@ fn string_field(
 fn thread_from_result(
     result: serde_json::Value,
     method: &str,
-) -> crate::kernel::runtime_host::VerletResult<CodexTuiThread> {
+) -> crate::kernel::runtime_host::VerletResult<OperatorThread> {
     let thread = result
         .get("thread")
         .cloned()
         .ok_or_else(|| tui_error(format!("{method} response missing thread")))?;
     let id = string_field(&thread, "id", &format!("{method} thread"))?;
-    Ok(CodexTuiThread { id, raw: thread })
+    Ok(OperatorThread { id, raw: thread })
 }
 
-fn codex_tui_websocket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+fn operator_client_websocket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
     tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-        .max_frame_size(Some(CODEX_TUI_MAX_WEBSOCKET_MESSAGE_SIZE))
-        .max_message_size(Some(CODEX_TUI_MAX_WEBSOCKET_MESSAGE_SIZE))
+        .max_frame_size(Some(OPERATOR_CLIENT_MAX_WEBSOCKET_MESSAGE_SIZE))
+        .max_message_size(Some(OPERATOR_CLIENT_MAX_WEBSOCKET_MESSAGE_SIZE))
 }
 
 fn websocket_tcp_authority(url: &str) -> crate::kernel::runtime_host::VerletResult<&str> {

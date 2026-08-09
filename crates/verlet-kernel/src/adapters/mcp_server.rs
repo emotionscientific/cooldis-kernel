@@ -68,7 +68,7 @@ struct VerletMcpServer {
     initialized_seen: bool,
     client_info: Option<serde_json::Value>,
     #[cfg(unix)]
-    daemon_client: Option<crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>>,
+    daemon_client: Option<crate::adapters::operator_client::OperatorClient<tokio::net::UnixStream>>,
 }
 
 impl VerletMcpServer {
@@ -399,14 +399,14 @@ impl VerletMcpServer {
     #[cfg(unix)]
     async fn client(
         &mut self,
-    ) -> Result<&mut crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>, String>
+    ) -> Result<&mut crate::adapters::operator_client::OperatorClient<tokio::net::UnixStream>, String>
     {
         if self.daemon_client.is_none() {
-            let mut client = crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+            let mut client = crate::adapters::operator_client::OperatorClient::connect_unix(
                 self.config.daemon_socket.clone(),
-                crate::adapters::codex_tui::CodexTuiConnectConfig {
+                crate::adapters::operator_client::OperatorConnectConfig {
                     client_name: "verlet-mcp-server".to_string(),
-                    ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
+                    ..crate::adapters::operator_client::OperatorConnectConfig::default()
                 },
             )
             .await
@@ -563,7 +563,7 @@ fn timeout_from_ms(timeout_ms: Option<u64>, default: std::time::Duration) -> std
 }
 
 fn completed_turn_json(
-    completed: crate::adapters::codex_tui::CodexTuiCompletedTurn,
+    completed: crate::adapters::operator_client::OperatorCompletedTurn,
     submitted_turn: Option<serde_json::Value>,
 ) -> serde_json::Value {
     serde_json::json!({

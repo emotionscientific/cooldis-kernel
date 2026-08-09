@@ -471,12 +471,12 @@ fn unused_loopback_addr() -> std::net::SocketAddr {
 async fn wait_for_websocket(url: &str, token: &str) {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match verlet::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
+        match verlet::adapters::operator_client::OperatorClient::connect_websocket(
             url,
-            verlet::adapters::codex_tui::CodexTuiConnectConfig {
+            verlet::adapters::operator_client::OperatorConnectConfig {
                 client_name: "verlet-debug-rpc-test-wait".to_string(),
                 bearer_token: Some(token.to_string()),
-                ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
+                ..verlet::adapters::operator_client::OperatorConnectConfig::default()
             },
         )
         .await

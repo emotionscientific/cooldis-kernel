@@ -26,7 +26,7 @@ pub(super) async fn run_debug(
 }
 
 /// `verlet debug rpc` — protocol-level debug client for a RUNNING daemon's
-/// app-server websocket. Connects with `CodexTuiTestClient::connect_websocket`,
+/// app-server websocket. Connects with `OperatorClient::connect_websocket`,
 /// performs the initialize handshake, then dispatches a subcommand.
 pub(super) async fn run_debug_rpc(
     mut args: Vec<std::ffi::OsString>,
@@ -179,18 +179,18 @@ pub(super) async fn run_debug_rpc_tail(
         .await?;
     loop {
         match client.next_event().await {
-            Ok(crate::adapters::codex_tui::CodexTuiEvent::Notification(notification)) => {
+            Ok(crate::adapters::operator_client::OperatorEvent::Notification(notification)) => {
                 print_jsonl_notification(&notification)?;
             }
-            Ok(crate::adapters::codex_tui::CodexTuiEvent::Error(error)) => {
+            Ok(crate::adapters::operator_client::OperatorEvent::Error(error)) => {
                 return Err(crate::cli::usage_error(format!(
                     "JSON-RPC error {}: {}",
                     error.error.code, error.error.message
                 )));
             }
             Ok(
-                crate::adapters::codex_tui::CodexTuiEvent::Request(_)
-                | crate::adapters::codex_tui::CodexTuiEvent::Response(_),
+                crate::adapters::operator_client::OperatorEvent::Request(_)
+                | crate::adapters::operator_client::OperatorEvent::Response(_),
             ) => {}
             Err(err) if rpc_connection_was_closed(&err) => return Ok(()),
             Err(err) => return Err(err),
@@ -419,20 +419,20 @@ pub(super) fn resolve_debug_rpc_endpoint(
 pub(super) async fn connect_debug_rpc_client(
     url: &str,
 ) -> crate::kernel::runtime_host::VerletResult<
-    crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream>,
+    crate::adapters::operator_client::OperatorClient<tokio::net::TcpStream>,
 > {
-    crate::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
+    crate::adapters::operator_client::OperatorClient::connect_websocket(
         url,
-        crate::adapters::codex_tui::CodexTuiConnectConfig {
+        crate::adapters::operator_client::OperatorConnectConfig {
             client_name: "verlet-debug-rpc".to_string(),
-            ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
+            ..crate::adapters::operator_client::OperatorConnectConfig::default()
         },
     )
     .await
 }
 
 pub(super) async fn stream_debug_rpc_turn(
-    client: &mut crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream>,
+    client: &mut crate::adapters::operator_client::OperatorClient<tokio::net::TcpStream>,
     thread_id: &str,
     turn_id: &str,
     json_output: bool,
@@ -452,7 +452,7 @@ pub(super) async fn stream_debug_rpc_turn(
             }
             event = client.next_event() => {
                 match event? {
-                    crate::adapters::codex_tui::CodexTuiEvent::Notification(notification) => {
+                    crate::adapters::operator_client::OperatorEvent::Notification(notification) => {
                         if json_output && notification_thread_id(&notification) == Some(thread_id) {
                             print_jsonl_notification(&notification)?;
                         }
@@ -481,7 +481,7 @@ pub(super) async fn stream_debug_rpc_turn(
                             return Ok(DebugRpcTurnStreamResult::Completed);
                         }
                     }
-                    crate::adapters::codex_tui::CodexTuiEvent::Error(error) => {
+                    crate::adapters::operator_client::OperatorEvent::Error(error) => {
                         if !json_output {
                             println!();
                         }
@@ -490,7 +490,7 @@ pub(super) async fn stream_debug_rpc_turn(
                             error.error.code, error.error.message
                         )));
                     }
-                    crate::adapters::codex_tui::CodexTuiEvent::Request(_) | crate::adapters::codex_tui::CodexTuiEvent::Response(_) => {}
+                    crate::adapters::operator_client::OperatorEvent::Request(_) | crate::adapters::operator_client::OperatorEvent::Response(_) => {}
                 }
             }
         }

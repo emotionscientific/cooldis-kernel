@@ -172,17 +172,17 @@ async fn connect_client(
     url: &str,
     token: &str,
 ) -> Result<
-    verlet::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream>,
+    verlet::adapters::operator_client::OperatorClient<tokio::net::TcpStream>,
     Box<dyn std::error::Error>,
 > {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match verlet::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
+        match verlet::adapters::operator_client::OperatorClient::connect_websocket(
             url,
-            verlet::adapters::codex_tui::CodexTuiConnectConfig {
+            verlet::adapters::operator_client::OperatorConnectConfig {
                 client_name: "verlet-workbench-smoke".to_string(),
                 bearer_token: Some(token.to_string()),
-                ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
+                ..verlet::adapters::operator_client::OperatorConnectConfig::default()
             },
         )
         .await
