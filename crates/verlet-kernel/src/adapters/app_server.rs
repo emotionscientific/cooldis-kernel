@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt as _;
 use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 pub mod connection;
 mod default_manifest;
+pub mod lifecycle;
 mod orchestrator_boundary;
 mod subscriptions;
 #[cfg(test)]
@@ -995,6 +996,37 @@ impl VerletAppServer {
             AppServerListenAddr::Unix(path) => self.serve_unix(path).await,
             AppServerListenAddr::WebSocket(addr) => self.serve_websocket(addr).await,
         }
+    }
+
+    /// Transport-independent RPC dispatch (EMO-551): serve one JSON-RPC
+    /// request for an already-authenticated principal, without a socket,
+    /// session witness derivation from process identity, or listener. This
+    /// is the seam the multi-tenant host facade routes into (EMO-553): the
+    /// facade authenticates the connection, resolves exactly one instance,
+    /// and calls this per request. Session open/close witnessing happens
+    /// here against the supplied principal — never from process UID (that
+    /// derivation stays in `local_json_rpc_request`, which remains the
+    /// standalone local-operator path).
+    pub async fn dispatch_authenticated_json_rpc(
+        &self,
+        principal: crate::daemon::identity::ResolvedPrincipal,
+        method: &str,
+        params: serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        let _ = (principal, method, params);
+        unimplemented!("EMO-551: transport-independent authenticated dispatch")
+    }
+
+    /// Instance-owned async shutdown (EMO-551). Cancels and awaits every
+    /// background task this instance spawned (subscription watchers,
+    /// recovery/daemon-I/O workers, connection tasks when this instance
+    /// owns a listener), retires the console credential (moving that work
+    /// out of `VerletAppServerInner::drop`, which stops constructing a
+    /// runtime), and shuts down + unregisters the supervisor tenant so the
+    /// id can be reused. Idempotent; after it resolves, dropping the
+    /// instance is inert and a co-resident instance is unaffected.
+    pub async fn shutdown(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        unimplemented!("EMO-551: instance-owned shutdown")
     }
 
     pub fn supervisor(&self) -> crate::kernel::supervisor::VerletSupervisor {

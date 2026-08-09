@@ -670,6 +670,19 @@ impl VerletSupervisor {
         self.tenant(tenant_id).await?.host.shutdown_all().await
     }
 
+    /// Shut down a tenant's threads AND remove its registration atomically
+    /// (EMO-551), so the tenant id can be re-registered — `shutdown_tenant`
+    /// alone leaves the id claimed and `register_tenant` then rejects it.
+    /// The multi-tenant host uses this to replace or retire one instance
+    /// while co-resident tenants keep running.
+    pub async fn shutdown_and_unregister_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_runtime_contracts::ThreadId>> {
+        let _ = tenant_id;
+        unimplemented!("EMO-551: atomic tenant shutdown-and-unregister")
+    }
+
     pub async fn shutdown_all(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<
