@@ -92,6 +92,11 @@ packageable local agents.
 The managed cloud, public package registry, private marketplace, and stateful
 harness product layer are V2 direction.
 
+The embeddable runtime also exposes a multi-tenant host facade: one loopback
+listener selects an instance from an explicit credential-digest route, while
+the selected instance remains responsible for authentication, witnessing, and
+its own shutdown boundary.
+
 ## Read Next
 
 - [Getting Started](getting-started.md)

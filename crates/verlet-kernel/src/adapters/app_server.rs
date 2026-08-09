@@ -211,9 +211,10 @@ impl VerletAppServerConfig {
 
     /// Hosted-instance config (EMO-552): explicit absolute roots + fully
     /// injected environment; no listener (`listen` is set but the host
-    /// never binds it — RPC arrives through
-    /// `dispatch_authenticated_json_rpc`). Construction canonicalizes the
-    /// roots and reserves them process-wide before any store opens;
+    /// never binds it — the host either hands over a selected TCP stream or
+    /// uses `dispatch_authenticated_json_rpc` for an already-authenticated
+    /// in-process request). Construction canonicalizes the roots and reserves
+    /// them process-wide before any store opens;
     /// overlapping a live instance's roots is a loud error. None of the
     /// cwd/XDG defaulting of [`VerletAppServerConfig::local`] applies.
     pub fn hosted(
@@ -473,6 +474,10 @@ impl VerletAppServerConfig {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn is_hosted(&self) -> bool {
+        self.root_reservation.is_some()
     }
 }
 
@@ -1172,10 +1177,12 @@ impl VerletAppServer {
     /// Transport-independent RPC dispatch (EMO-551): serve one JSON-RPC
     /// request for an already-authenticated principal, without a socket,
     /// session witness derivation from process identity, or listener. This
-    /// is the seam the multi-tenant host facade routes into (EMO-553): the
-    /// facade authenticates the connection, resolves exactly one instance,
-    /// and calls this per request. Session open/close witnessing happens
-    /// here against the supplied principal — never from process UID (that
+    /// is the in-process seam an embedding host may route into (EMO-553): the
+    /// caller supplies an already-authenticated principal, resolves exactly
+    /// one instance, and calls this per request. Socket routing remains
+    /// selection rather than authentication: the selected instance verifies
+    /// that connection itself. Session open/close witnessing happens here
+    /// against the supplied principal — never from process UID (that
     /// derivation stays in `local_json_rpc_request`, which remains the
     /// standalone local-operator path).
     pub async fn dispatch_authenticated_json_rpc(
@@ -1186,10 +1193,64 @@ impl VerletAppServer {
     ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.authenticated_json_rpc_request(
             principal,
-            crate::daemon::identity::BoundarySurface::Console,
+            crate::daemon::identity::BoundarySurface::Host,
             "in-process-host",
             method,
             params,
+        )
+        .await
+    }
+
+    /// Serve one host-routed TCP connection (EMO-553): the host facade
+    /// selected this instance from its credential route table and hands
+    /// over the stream with the HTTP request still un-consumed (routing
+    /// peeks, it does not read). This instance's own identity authority
+    /// verifies the token — routing is selection, not authentication — and
+    /// a rejected token is refused here exactly like on the standalone
+    /// path, with the rejection witnessed by this instance. Sessions and
+    /// rejections are witnessed on
+    /// [`crate::daemon::identity::BoundarySurface::Host`], never the
+    /// `Websocket`/`Console` surface the bearer header shape would
+    /// suggest. Unlike the standalone accept path, the caller owns the
+    /// task this runs on (the host task set); dispatch inside still holds
+    /// this instance's dispatch gate, so instance shutdown ends the
+    /// connection's requests.
+    pub(crate) async fn serve_host_routed_tcp_stream(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
+        let mut stream = stream;
+        let authentication = async {
+            let Some((resolved_principal, _)) = self
+                .authenticate_tcp_websocket_on_surface(
+                    &mut stream,
+                    Some(crate::daemon::identity::BoundarySurface::Host),
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            let websocket = accept_authenticated_websocket(stream)
+                .await
+                .map_err(|error| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "failed to upgrade Verlet host-routed websocket: {error}"
+                    ))
+                })?;
+            Ok::<_, crate::kernel::runtime_host::VerletError>(Some((websocket, resolved_principal)))
+        };
+        let cancellation = self.inner.tasks.cancellation();
+        let authenticated = tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            authenticated = authentication => authenticated?,
+        };
+        let Some((websocket, resolved_principal)) = authenticated else {
+            return Ok(());
+        };
+        self.handle_websocket(
+            websocket,
+            resolved_principal,
+            crate::daemon::identity::BoundarySurface::Host,
         )
         .await
     }
@@ -1209,6 +1270,7 @@ impl VerletAppServer {
             return Ok(());
         }
 
+        self.inner.tasks.cancel();
         let _dispatch = self.inner.dispatch_gate.write().await;
         self.inner.tasks.shutdown().await;
         let mut console_credential = self.inner.console_credential.lock().await;
@@ -1545,16 +1607,33 @@ impl VerletAppServer {
             crate::daemon::identity::BoundarySurface,
         )>,
     > {
+        self.authenticate_tcp_websocket_on_surface(stream, None)
+            .await
+    }
+
+    async fn authenticate_tcp_websocket_on_surface(
+        &self,
+        stream: &mut tokio::net::TcpStream,
+        forced_surface: Option<crate::daemon::identity::BoundarySurface>,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Option<(
+            crate::daemon::identity::ResolvedPrincipal,
+            crate::daemon::identity::BoundarySurface,
+        )>,
+    > {
         let request = peek_http_request(stream).await?;
         let token_and_surface = request.as_ref().and_then(request_bearer_token);
-        if let Some((token, surface)) = token_and_surface
+        if let Some((token, derived_surface)) = token_and_surface
             && let Some(principal) = self.inner.identity_authority.verify_token(token).await?
         {
+            let surface = forced_surface.unwrap_or(derived_surface);
             return Ok(Some((principal, surface)));
         }
-        let surface = token_and_surface
-            .map(|(_, surface)| surface)
-            .unwrap_or(crate::daemon::identity::BoundarySurface::Websocket);
+        let surface = forced_surface.unwrap_or_else(|| {
+            token_and_surface
+                .map(|(_, surface)| surface)
+                .unwrap_or(crate::daemon::identity::BoundarySurface::Websocket)
+        });
         let reason = match token_and_surface {
             Some((token, _)) => self.token_rejection_reason(token).await?,
             None => crate::daemon::identity::IdentityAuthRejectionReason::CredentialUnknown,
@@ -1686,6 +1765,19 @@ impl VerletAppServer {
         )
         .await
     }
+}
+
+pub(crate) async fn refuse_host_tcp_stream(
+    mut stream: tokio::net::TcpStream,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    consume_http_request_headers(&mut stream).await?;
+    write_http_response(
+        &mut stream,
+        "401 Unauthorized",
+        "text/plain; charset=utf-8",
+        HTTP_UNAUTHORIZED_BODY.as_bytes(),
+    )
+    .await
 }
 
 async fn initialize_boundary_identity(
@@ -2610,13 +2702,13 @@ async fn bind_websocket_listener(
     })
 }
 
-struct HttpRequestHead {
+pub(crate) struct HttpRequestHead {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
 }
 
-async fn peek_http_request(
+pub(crate) async fn peek_http_request(
     stream: &tokio::net::TcpStream,
 ) -> crate::kernel::runtime_host::VerletResult<Option<HttpRequestHead>> {
     let mut request = [0_u8; MAX_HTTP_REQUEST_HEADER_BYTES];
@@ -2763,7 +2855,7 @@ fn inject_console_config(html: &str, session_token: &str) -> String {
     }
 }
 
-fn request_bearer_token(
+pub(crate) fn request_bearer_token(
     request: &HttpRequestHead,
 ) -> Option<(&str, crate::daemon::identity::BoundarySurface)> {
     if let Some(token) = request

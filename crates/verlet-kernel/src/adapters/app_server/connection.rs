@@ -1239,6 +1239,10 @@ impl crate::adapters::app_server::VerletAppServer {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let dispatch = self.inner.dispatch_gate.read().await;
+        if self.inner.tasks.is_shutdown() {
+            return Ok(());
+        }
         let session_id = format!("session_{}", uuid::Uuid::now_v7());
         self.inner
             .identity_authority
@@ -1261,6 +1265,7 @@ impl crate::adapters::app_server::VerletAppServer {
             std::sync::Arc::clone(&self.inner.tasks),
             session_id.clone(),
         );
+        drop(dispatch);
         let (mut sink, mut stream) = websocket.split();
         let (outbound, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel::<JsonRpcMessage>();
         let tasks = std::sync::Arc::clone(&self.inner.tasks);
@@ -1359,8 +1364,26 @@ impl crate::adapters::app_server::VerletAppServer {
                 "connection must send initialize before app-server requests",
             ))
         } else {
-            self.dispatch_request(connection, &request.method, request.params.clone())
-                .await
+            let _dispatch = self.inner.dispatch_gate.read().await;
+            if self.inner.tasks.is_shutdown() {
+                Err(jsonrpc_error(
+                    -32603,
+                    "Verlet app-server instance is shut down",
+                ))
+            } else {
+                let cancellation = self.inner.tasks.cancellation();
+                tokio::select! {
+                    _ = cancellation.cancelled() => Err(jsonrpc_error(
+                        -32603,
+                        "Verlet app-server instance is shut down",
+                    )),
+                    result = self.dispatch_request(
+                        connection,
+                        &request.method,
+                        request.params.clone(),
+                    ) => result,
+                }
+            }
         };
 
         let message = match result {
@@ -4470,6 +4493,7 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: CapsuleBindingSetParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        self.validate_capsule_binding_scope(&params.scope)?;
         let registry = verlet_operations::operation_store::LocalOperationRegistry::new(
             self.capsule_registry_root()?,
         );
@@ -4502,6 +4526,7 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: CapsuleBindingOperationParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        self.validate_capsule_binding_scope(&params.scope)?;
         let registry = verlet_operations::operation_store::LocalOperationRegistry::new(
             self.capsule_registry_root()?,
         );
@@ -4514,10 +4539,14 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "binding": binding }))
     }
 
+    // lexicon-allow: capsule - existing app-server capsule-binding RPC contract
     pub(super) fn capsule_binding_list(
         &self,
+        // lexicon-allow: capsule - existing app-server capsule-binding RPC contract
         params: CapsuleBindingListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        // lexicon-allow: capsule - validates the existing capsule-binding RPC scope
+        self.validate_capsule_binding_scope(&params.scope)?;
         let registry = verlet_operations::operation_store::LocalOperationRegistry::new(
             // lexicon-allow: capsule - existing app-server capsule-binding surface
             self.capsule_registry_root()?,
@@ -4539,9 +4568,17 @@ impl crate::adapters::app_server::VerletAppServer {
             // lexicon-allow: capsule - preserves existing app-server operation binding API
             self.capsule_registry_root()?,
         );
-        let tenant_id = params
+        if params
             .tenant_id
-            .unwrap_or_else(|| self.inner.tenant_id.clone());
+            .as_deref()
+            .is_some_and(|tenant_id| tenant_id != self.inner.tenant_id)
+        {
+            return Err(jsonrpc_error(
+                -32602,
+                "tenantId must match the serving instance",
+            ));
+        }
+        let tenant_id = self.inner.tenant_id.clone();
         let operation_names = params
             .operation_names
             .iter()
@@ -4567,6 +4604,31 @@ impl crate::adapters::app_server::VerletAppServer {
             .resolve_capsule_binding_snapshot(request)
             .map_err(|err| internal_error(err.into()))?;
         Ok(serde_json::json!({ "snapshot": snapshot }))
+    }
+
+    // lexicon-allow: capsule - validates the existing capsule-binding RPC scope
+    fn validate_capsule_binding_scope(
+        &self,
+        // lexicon-allow: capsule - existing app-server capsule-binding RPC contract
+        scope: &verlet_operations::operation_store::CapsuleBindingScope,
+    ) -> Result<(), JsonRpcErrorError> {
+        let tenant_id = match scope {
+            // lexicon-allow: capsule - existing app-server capsule-binding RPC contract
+            verlet_operations::operation_store::CapsuleBindingScope::Global => return Ok(()),
+            // lexicon-allow: capsule - existing app-server capsule-binding RPC contract
+            verlet_operations::operation_store::CapsuleBindingScope::Tenant { tenant_id }
+            // lexicon-allow: capsule - existing app-server capsule-binding RPC contract
+            | verlet_operations::operation_store::CapsuleBindingScope::Thread {
+                tenant_id, ..
+            } => tenant_id,
+        };
+        if tenant_id != &self.inner.tenant_id {
+            return Err(jsonrpc_error(
+                -32602,
+                "tenantId must match the serving instance",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) async fn command_exec(

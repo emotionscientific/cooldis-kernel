@@ -18,6 +18,20 @@ The runtime owns:
 - CLI, RPC, MCP, HTTP, and model-tool projections;
 - daemon and app-server surfaces.
 
+## Multi-Tenant Host Facade
+
+`VerletHost` embeds multiple exclusively rooted `VerletAppServer` instances
+behind one loopback listener. A credential digest selects one instance at
+connection setup; it does not authenticate the caller. The selected instance's
+identity authority verifies the credential and records accepted sessions or
+rejections on the `host` boundary surface. Credentials without a live route are
+refused by the host without creating an instance witness.
+
+The host owns its listener and connection tasks. Each instance continues to own
+its runtime background tasks and dispatch gate, so either global host shutdown
+or instance shutdown ends routed work without transferring product policy into
+the kernel.
+
 ## Boundary Rule
 
 Product systems configure and call Verlet. They should not become part of the

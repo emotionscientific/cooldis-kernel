@@ -256,6 +256,13 @@ pub enum BoundarySurface {
     UnixSocket,
     Websocket,
     Console,
+    /// Dispatch through the multi-tenant host facade (EMO-553): the host
+    /// selected exactly one routed instance, then that instance's authority
+    /// authenticated the connection and resolved the principal.
+    /// Compatibility: identity-session and rejection witnesses serialize
+    /// this enum, so `"host"` is an addition to the stored witness schema —
+    /// readers built before it must tolerate the value.
+    Host,
 }
 
 /// A witnessed boundary session (ADR 0008 D6): open and close of one
