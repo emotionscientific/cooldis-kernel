@@ -224,6 +224,7 @@ agents = "agents"
         "console initialization did not mint for the configured managed principal"
     );
 
+    app.shutdown().await.unwrap();
     drop(app);
     assert_eq!(
         authority

@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt as _;
 use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 pub mod connection;
 mod default_manifest;
+pub mod lifecycle;
 mod orchestrator_boundary;
 mod subscriptions;
 #[cfg(test)]
@@ -474,6 +475,9 @@ pub struct VerletAppServer {
 
 struct VerletAppServerInner {
     supervisor: crate::kernel::supervisor::VerletSupervisor,
+    tasks: std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
+    shutdown: tokio::sync::Mutex<bool>,
+    dispatch_gate: tokio::sync::RwLock<()>,
     tenant_id: String,
     user_id: String,
     identity_mode: crate::daemon::identity::IdentityMode,
@@ -491,7 +495,7 @@ struct VerletAppServerInner {
     console_assets: Option<ConsoleAssetConfig>,
     identity_authority: std::sync::Arc<dyn crate::daemon::identity::IdentityAuthority>,
     identity_clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
-    console_credential: Option<ConsoleCredentialLease>,
+    console_credential: tokio::sync::Mutex<Option<ConsoleCredentialLease>>,
     cwd: std::path::PathBuf,
     codex_home: std::path::PathBuf,
     metadata_store_path: std::path::PathBuf,
@@ -517,6 +521,7 @@ struct ConsoleCredentialLease {
 struct SessionCloseWitness {
     authority: std::sync::Arc<dyn crate::daemon::identity::IdentityAuthority>,
     clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
+    tasks: std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
     session_id: String,
     armed: bool,
 }
@@ -525,11 +530,13 @@ impl SessionCloseWitness {
     fn new(
         authority: std::sync::Arc<dyn crate::daemon::identity::IdentityAuthority>,
         clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock>,
+        tasks: std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
         session_id: String,
     ) -> Self {
         Self {
             authority,
             clock,
+            tasks,
             session_id,
             armed: true,
         }
@@ -559,46 +566,30 @@ impl Drop for SessionCloseWitness {
         let authority = std::sync::Arc::clone(&self.authority);
         let session_id = self.session_id.clone();
         let closed_at_ms = self.clock.now().timestamp_millis();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                if let Err(error) = authority
-                    .witness_session_closed(&session_id, closed_at_ms)
-                    .await
-                {
-                    eprintln!("failed to witness aborted Verlet app-server session: {error}");
-                }
-            });
+        if !self.tasks.spawn_from_drop(async move {
+            if let Err(error) = authority
+                .witness_session_closed(&session_id, closed_at_ms)
+                .await
+            {
+                eprintln!("failed to witness aborted Verlet app-server session: {error}");
+            }
+        }) {
+            eprintln!(
+                "could not schedule aborted Verlet app-server session cleanup after instance shutdown"
+            );
         }
     }
 }
 
 impl Drop for VerletAppServerInner {
     fn drop(&mut self) {
-        let Some(credential) = self.console_credential.take() else {
+        let Some(credential) = self.console_credential.get_mut().take() else {
             return;
         };
-        let authority = std::sync::Arc::clone(&self.identity_authority);
-        let cleanup = std::thread::Builder::new()
-            .name("verlet-console-credential-cleanup".to_string())
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| error.to_string())?;
-                runtime
-                    .block_on(retire_console_credential(authority, &credential))
-                    .map_err(|error| error.to_string())
-            });
-        match cleanup {
-            Ok(cleanup) => match cleanup.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    eprintln!("failed to retire Verlet console credential: {error}")
-                }
-                Err(_) => eprintln!("Verlet console credential cleanup thread panicked"),
-            },
-            Err(error) => eprintln!("failed to start Verlet console credential cleanup: {error}"),
-        }
+        eprintln!(
+            "Verlet app-server dropped before shutdown completed; console credential {} cleanup may be incomplete",
+            credential.credential_id
+        );
     }
 }
 
@@ -884,6 +875,11 @@ impl VerletAppServer {
         let app = Self {
             inner: std::sync::Arc::new(VerletAppServerInner {
                 supervisor,
+                tasks: std::sync::Arc::new(
+                    crate::adapters::app_server::lifecycle::InstanceTaskSet::new(),
+                ),
+                shutdown: tokio::sync::Mutex::new(false),
+                dispatch_gate: tokio::sync::RwLock::new(()),
                 tenant_id: config.tenant_id,
                 user_id: config.user_id,
                 identity_mode: config.identity_mode,
@@ -901,7 +897,7 @@ impl VerletAppServer {
                 console_assets: config.console_assets,
                 identity_authority,
                 identity_clock,
-                console_credential,
+                console_credential: tokio::sync::Mutex::new(console_credential),
                 cwd: config.cwd,
                 codex_home,
                 metadata_store_path,
@@ -920,64 +916,89 @@ impl VerletAppServer {
                 ),
             }),
         };
-        let process_ingress: std::sync::Arc<
-            dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink,
-        > = std::sync::Arc::new(AppServerProcessHandleIngress {
-            app: std::sync::Arc::downgrade(&app.inner),
-        });
-        let runtime_store = app
-            .inner
-            .supervisor
-            .runtime_store(&app.inner.tenant_id)
-            .await?;
-        let process_dispatcher =
-            crate::kernel::process_handle_dispatch::ProcessHandleDispatcher::new(
+        let initialization = async {
+            let process_ingress: std::sync::Arc<
+                dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink,
+            > = std::sync::Arc::new(AppServerProcessHandleIngress {
+                app: std::sync::Arc::downgrade(&app.inner),
+            });
+            let runtime_store = app
+                .inner
+                .supervisor
+                .runtime_store(&app.inner.tenant_id)
+                .await?;
+            let process_tasks = std::sync::Arc::downgrade(&app.inner.tasks);
+            let process_dispatcher = crate::kernel::process_handle_dispatch::ProcessHandleDispatcher::new_with_task_owner(
                 runtime_store,
                 std::sync::Arc::clone(&process_ingress),
+                app.inner.tasks.cancellation(),
+                std::sync::Arc::new(move |task| {
+                    process_tasks
+                        .upgrade()
+                        .is_some_and(|tasks| tasks.spawn(task))
+                }),
             );
-        app.inner
-            .process_dispatcher
-            .set(process_dispatcher.clone())
-            .map_err(|_| {
-                crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                    "app-server process dispatcher initialized twice".to_string(),
+            app.inner
+                .process_dispatcher
+                .set(process_dispatcher.clone())
+                .map_err(|_| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                        "app-server process dispatcher initialized twice".to_string(),
+                    )
+                })?;
+            app.inner
+                .supervisor
+                .set_process_handle_ingress(&app.inner.tenant_id, Some(process_ingress))
+                .await?;
+            app.inner
+                .supervisor
+                .set_process_handle_dispatcher(
+                    &app.inner.tenant_id,
+                    Some(process_dispatcher.clone()),
                 )
-            })?;
-        app.inner
-            .supervisor
-            .set_process_handle_ingress(&app.inner.tenant_id, Some(process_ingress))
-            .await?;
-        app.inner
-            .supervisor
-            .set_process_handle_dispatcher(&app.inner.tenant_id, Some(process_dispatcher.clone()))
-            .await?;
-        app.inner
-            .supervisor
-            .set_thread_lifecycle_sink(
+                .await?;
+            app.inner
+                .supervisor
+                .set_thread_lifecycle_sink(
+                    &app.inner.tenant_id,
+                    Some(std::sync::Arc::new(
+                        threads::AppServerThreadLifecycleSink::new(&app),
+                    )),
+                )
+                .await?;
+            app.load_threads_from_metadata().await?;
+            // Construction is the earliest common boundary for daemon listeners,
+            // standalone app-server serving, and in-process/local JSON-RPC users.
+            // Run recovery before returning the first callable surface.
+            process_dispatcher.assert_startup_registry_empty().await?;
+            let recovery_store =
+                verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+                    .await
+                    .map_err(|err| {
+                        crate::kernel::runtime_host::VerletError::History(err.to_string())
+                    })?
+                    .with_lease_epoch(app.inner.lease_epoch);
+            crate::daemon::recovery_sweep::StartupRecoverySweep::new(
+                recovery_store,
+                process_dispatcher,
                 &app.inner.tenant_id,
-                Some(std::sync::Arc::new(
-                    threads::AppServerThreadLifecycleSink::new(&app),
-                )),
+                &app.inner.user_id,
             )
-            .await?;
-        app.load_threads_from_metadata().await?;
-        // Construction is the earliest common boundary for daemon listeners,
-        // standalone app-server serving, and in-process/local JSON-RPC users.
-        // Run recovery before returning the first callable surface.
-        process_dispatcher.assert_startup_registry_empty().await?;
-        let recovery_store =
-            verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
-                .await
-                .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
-                .with_lease_epoch(app.inner.lease_epoch);
-        let recovery = crate::daemon::recovery_sweep::StartupRecoverySweep::new(
-            recovery_store,
-            process_dispatcher,
-            &app.inner.tenant_id,
-            &app.inner.user_id,
-        )
-        .run_once()
-        .await?;
+            .run_once()
+            .await
+        }
+        .await;
+        let recovery = match initialization {
+            Ok(recovery) => recovery,
+            Err(error) => {
+                if let Err(shutdown_error) = app.shutdown().await {
+                    eprintln!(
+                        "failed to shut down partially initialized Verlet app-server after {error}: {shutdown_error}"
+                    );
+                }
+                return Err(error);
+            }
+        };
         if recovery.thread_joins > 0 || recovery.process_outcomes > 0 {
             eprintln!(
                 "verlet startup recovery appended {} thread join(s) and submitted {} process outcome(s)",
@@ -995,6 +1016,66 @@ impl VerletAppServer {
             AppServerListenAddr::Unix(path) => self.serve_unix(path).await,
             AppServerListenAddr::WebSocket(addr) => self.serve_websocket(addr).await,
         }
+    }
+
+    /// Transport-independent RPC dispatch (EMO-551): serve one JSON-RPC
+    /// request for an already-authenticated principal, without a socket,
+    /// session witness derivation from process identity, or listener. This
+    /// is the seam the multi-tenant host facade routes into (EMO-553): the
+    /// facade authenticates the connection, resolves exactly one instance,
+    /// and calls this per request. Session open/close witnessing happens
+    /// here against the supplied principal — never from process UID (that
+    /// derivation stays in `local_json_rpc_request`, which remains the
+    /// standalone local-operator path).
+    pub async fn dispatch_authenticated_json_rpc(
+        &self,
+        principal: crate::daemon::identity::ResolvedPrincipal,
+        method: &str,
+        params: serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.authenticated_json_rpc_request(
+            principal,
+            crate::daemon::identity::BoundarySurface::Console,
+            "in-process-host",
+            method,
+            params,
+        )
+        .await
+    }
+
+    /// Instance-owned async shutdown (EMO-551). Cancels and awaits every
+    /// background task this instance spawned (subscription watchers,
+    /// connection tasks, websocket writers, process-settlement monitors, and
+    /// persistence one-shots),
+    /// retires the console credential (moving that work out of
+    /// `VerletAppServerInner::drop`, which stops constructing a runtime), and
+    /// shuts down + unregisters the supervisor tenant so the id can be
+    /// reused. Idempotent; after it resolves, dropping the instance is inert
+    /// and a co-resident instance is unaffected.
+    pub async fn shutdown(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        let mut shutdown = self.inner.shutdown.lock().await;
+        if *shutdown {
+            return Ok(());
+        }
+
+        let _dispatch = self.inner.dispatch_gate.write().await;
+        self.inner.tasks.shutdown().await;
+        let mut console_credential = self.inner.console_credential.lock().await;
+        if let Some(credential) = console_credential.as_ref() {
+            retire_console_credential(
+                std::sync::Arc::clone(&self.inner.identity_authority),
+                credential,
+            )
+            .await?;
+        }
+        console_credential.take();
+        drop(console_credential);
+        self.inner
+            .supervisor
+            .shutdown_and_unregister_tenant(&self.inner.tenant_id)
+            .await?;
+        *shutdown = true;
+        Ok(())
     }
 
     pub fn supervisor(&self) -> crate::kernel::supervisor::VerletSupervisor {
@@ -1075,8 +1156,13 @@ impl VerletAppServer {
             ))
         })?;
 
+        let cancellation = self.inner.tasks.cancellation();
         loop {
-            let (stream, _) = listener.accept().await.map_err(|err| {
+            let accepted = tokio::select! {
+                _ = cancellation.cancelled() => return Ok(()),
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, _) = accepted.map_err(|err| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to accept Verlet app-server connection: {err}"
                 ))
@@ -1090,7 +1176,7 @@ impl VerletAppServer {
                 })?
                 .uid();
             let app = self.clone();
-            tokio::spawn(async move {
+            self.inner.tasks.spawn(async move {
                 if let Err(err) = app.handle_unix_stream(stream, peer_uid).await {
                     eprintln!("verlet app-server connection failed: {err}");
                 }
@@ -1133,14 +1219,19 @@ impl VerletAppServer {
             ));
         }
 
+        let cancellation = self.inner.tasks.cancellation();
         loop {
-            let (stream, peer) = listener.accept().await.map_err(|err| {
+            let accepted = tokio::select! {
+                _ = cancellation.cancelled() => return Ok(()),
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, peer) = accepted.map_err(|err| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to accept Verlet app-server websocket connection: {err}"
                 ))
             })?;
             let app = self.clone();
-            tokio::spawn(async move {
+            self.inner.tasks.spawn(async move {
                 if let Err(err) = app.handle_tcp_stream(stream).await {
                     eprintln!("verlet app-server websocket connection from {peer} failed: {err}");
                 }
@@ -1154,19 +1245,30 @@ impl VerletAppServer {
         mut stream: tokio::net::UnixStream,
         peer_uid: u32,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
-        let Some(resolved_principal) = self
-            .authenticate_unix_websocket(&mut stream, peer_uid)
-            .await?
-        else {
+        let authentication = async {
+            let Some(resolved_principal) = self
+                .authenticate_unix_websocket(&mut stream, peer_uid)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let websocket = accept_authenticated_websocket(stream)
+                .await
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "failed to upgrade Verlet app-server unix socket websocket: {err}"
+                    ))
+                })?;
+            Ok::<_, crate::kernel::runtime_host::VerletError>(Some((websocket, resolved_principal)))
+        };
+        let cancellation = self.inner.tasks.cancellation();
+        let authenticated = tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            authenticated = authentication => authenticated?,
+        };
+        let Some((websocket, resolved_principal)) = authenticated else {
             return Ok(());
         };
-        let websocket = accept_authenticated_websocket(stream)
-            .await
-            .map_err(|err| {
-                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "failed to upgrade Verlet app-server unix socket websocket: {err}"
-                ))
-            })?;
         self.handle_websocket(
             websocket,
             resolved_principal,
@@ -1180,21 +1282,36 @@ impl VerletAppServer {
         stream: tokio::net::TcpStream,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
         let mut stream = stream;
-        if self.handle_http_request(&mut stream).await? {
-            return Ok(());
-        }
-        let Some((resolved_principal, surface)) =
-            self.authenticate_tcp_websocket(&mut stream).await?
-        else {
+        let authentication = async {
+            if self.handle_http_request(&mut stream).await? {
+                return Ok(None);
+            }
+            let Some((resolved_principal, surface)) =
+                self.authenticate_tcp_websocket(&mut stream).await?
+            else {
+                return Ok(None);
+            };
+            let websocket = accept_authenticated_websocket(stream)
+                .await
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "failed to upgrade Verlet app-server tcp websocket: {err}"
+                    ))
+                })?;
+            Ok::<_, crate::kernel::runtime_host::VerletError>(Some((
+                websocket,
+                resolved_principal,
+                surface,
+            )))
+        };
+        let cancellation = self.inner.tasks.cancellation();
+        let authenticated = tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            authenticated = authentication => authenticated?,
+        };
+        let Some((websocket, resolved_principal, surface)) = authenticated else {
             return Ok(());
         };
-        let websocket = accept_authenticated_websocket(stream)
-            .await
-            .map_err(|err| {
-                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "failed to upgrade Verlet app-server tcp websocket: {err}"
-                ))
-            })?;
         self.handle_websocket(websocket, resolved_principal, surface)
             .await
     }

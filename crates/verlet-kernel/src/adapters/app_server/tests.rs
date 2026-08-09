@@ -12096,6 +12096,555 @@ async fn local_dispatch_error_still_witnesses_its_session_close() {
 }
 
 #[tokio::test]
+async fn unbound_instances_dispatch_and_shutdown_independently() {
+    let first = test_app_at_root(&unique_test_root("app-server-instance-first")).await;
+    let second = test_app_at_root(&unique_test_root("app-server-instance-second")).await;
+    let first_principal = operator_principal(&first);
+    let second_principal = operator_principal(&second);
+
+    assert_eq!(
+        first
+            .dispatch_authenticated_json_rpc(
+                first_principal.clone(),
+                "account/read",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap()["requiresOpenaiAuth"],
+        false
+    );
+    assert_eq!(
+        second
+            .dispatch_authenticated_json_rpc(
+                second_principal.clone(),
+                "account/read",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap()["requiresOpenaiAuth"],
+        false
+    );
+
+    let (second_connection, mut second_outbound) = test_connection(second.clone()).await;
+    initialize_for_test(&second_connection).await;
+    let thread = second
+        .dispatch_request(
+            &second_connection,
+            "thread/start",
+            Some(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    assert!(second.inner.tasks.task_count() > 0);
+
+    first.shutdown().await.unwrap();
+    assert_eq!(first.inner.tasks.task_count(), 0);
+    let error = first
+        .dispatch_authenticated_json_rpc(first_principal, "account/read", serde_json::json!({}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("shut down"));
+
+    let turn = second
+        .dispatch_request(
+            &second_connection,
+            "turn/start",
+            Some(serde_json::json!({
+                "threadId": thread_id.clone(),
+                "input": [{
+                    "type": "text",
+                    "text": "second instance remains live",
+                    "text_elements": [],
+                }],
+            })),
+        )
+        .await
+        .unwrap();
+    let turn_id = turn["turn"]["id"].as_str().unwrap().to_string();
+    wait_for_turn_completed_notification(&mut second_outbound, &thread_id, &turn_id).await;
+    assert_eq!(
+        second
+            .dispatch_authenticated_json_rpc(
+                second_principal.clone(),
+                "account/read",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap()["requiresOpenaiAuth"],
+        false
+    );
+    assert!(second.inner.tasks.task_count() > 0);
+
+    let watcher_cancellation = second
+        .inner
+        .subscriptions
+        .lock()
+        .await
+        .watchers
+        .get(&thread_id)
+        .unwrap()
+        .cancellation
+        .clone();
+    watcher_cancellation.cancel();
+    for _ in 0..10_000 {
+        if !second
+            .inner
+            .subscriptions
+            .lock()
+            .await
+            .watchers
+            .contains_key(&thread_id)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !second
+            .inner
+            .subscriptions
+            .lock()
+            .await
+            .watchers
+            .contains_key(&thread_id),
+        "cancelled thread watcher did not remove its map entry"
+    );
+    assert!(!second.inner.tasks.is_shutdown());
+    second
+        .dispatch_authenticated_json_rpc(second_principal, "account/read", serde_json::json!({}))
+        .await
+        .unwrap();
+
+    first.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
+    assert_eq!(second.inner.tasks.task_count(), 0);
+}
+
+#[tokio::test]
+async fn shutdown_then_drop_inside_runtime_is_inert() {
+    let root = unique_test_root("app-server-shutdown-drop");
+    let config = test_config_at_root(&root)
+        .with_console_assets(root.join("console"), "initial-console-token");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    assert!(app.inner.console_credential.lock().await.is_some());
+
+    app.shutdown().await.unwrap();
+    app.shutdown().await.unwrap();
+    drop(app);
+}
+
+#[tokio::test]
+async fn failed_console_retirement_can_be_retried_to_completion() {
+    let root = unique_test_root("app-server-shutdown-retry");
+    let config = test_config_at_root(&root)
+        .with_console_assets(root.join("console"), "initial-console-token");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let record_path = app
+        .inner
+        .console_credential
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .record_path
+        .clone();
+    std::fs::remove_file(&record_path).unwrap();
+    std::fs::create_dir(&record_path).unwrap();
+
+    let error = app.shutdown().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("failed to read Verlet console credential record")
+    );
+    assert!(app.inner.tasks.is_shutdown());
+    assert!(app.inner.console_credential.lock().await.is_some());
+    assert!(
+        app.inner
+            .supervisor
+            .runtime_store(app.tenant_id())
+            .await
+            .is_ok(),
+        "a retirement failure must leave the tenant registered for retry"
+    );
+
+    std::fs::remove_dir(&record_path).unwrap();
+    app.shutdown().await.unwrap();
+    app.shutdown().await.unwrap();
+    assert!(app.inner.console_credential.lock().await.is_none());
+    assert!(
+        app.inner
+            .supervisor
+            .runtime_store(app.tenant_id())
+            .await
+            .is_err(),
+        "a successful retry must unregister the tenant"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_console_retirement_preserves_the_lease_for_retry() {
+    let root = unique_test_root("app-server-shutdown-cancelled-retirement");
+    let config = test_config_at_root(&root)
+        .with_console_assets(root.join("console"), "initial-console-token");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let database =
+        verlet_sqlite::Db::open(app.session_store_path(), verlet_sqlite::DbConfig::default())
+            .await
+            .unwrap();
+    let mut database_connection = database.connect().await.unwrap();
+    let blocker = database_connection
+        .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+
+    let shutdown_app = app.clone();
+    let shutdown = tokio::spawn(async move { shutdown_app.shutdown().await });
+    while !app.inner.tasks.is_shutdown() {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+    }
+    shutdown.abort();
+    assert!(shutdown.await.unwrap_err().is_cancelled());
+    assert!(
+        app.inner.console_credential.lock().await.is_some(),
+        "cancelled retirement lost the credential lease needed by a retry"
+    );
+
+    blocker.rollback().await.unwrap();
+    app.shutdown().await.unwrap();
+    assert!(app.inner.console_credential.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_in_flight_authenticated_dispatch_and_closes_its_session() {
+    let root = unique_test_root("app-server-dispatch-shutdown-race");
+    let config = test_config_at_root(&root);
+    let metadata_path = config.metadata_store_path();
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let store_path = app.session_store_path().to_path_buf();
+    let principal = operator_principal(&app);
+    let expected_principal_id = principal.principal_id.to_string();
+    let database = verlet_sqlite::Db::open(&metadata_path, verlet_sqlite::DbConfig::default())
+        .await
+        .unwrap();
+    let mut database_connection = database.connect().await.unwrap();
+    let blocker = database_connection
+        .transaction_with_behavior(verlet_sqlite::TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+
+    let dispatch_app = app.clone();
+    let dispatch = tokio::spawn(async move {
+        dispatch_app
+            .dispatch_authenticated_json_rpc(
+                principal,
+                "modelProvider/upsert",
+                serde_json::json!({
+                    "provider": {
+                        "providerId": "blocked-upsert",
+                        "api": "open_ai_chat_completions",
+                        "baseUrl": "https://example.invalid/v1"
+                    }
+                }),
+            )
+            .await
+    });
+    wait_for_identity_sql_count(
+        &store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NULL",
+        1,
+    )
+    .await;
+
+    let shutdown_app = app.clone();
+    let shutdown = tokio::spawn(async move { shutdown_app.shutdown().await });
+    for _ in 0..128 {
+        if shutdown.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown completed while authenticated dispatch still held an in-flight request"
+    );
+
+    blocker.rollback().await.unwrap();
+    dispatch.await.unwrap().unwrap();
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(
+        identity_sql_count(
+            &store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_sessions WHERE closed_at_ms IS NOT NULL",
+        )
+        .await,
+        1
+    );
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&store_path)
+        .await
+        .unwrap();
+    let connection = store.sqlite_database().connect().await.unwrap();
+    let mut rows = connection
+        .query(
+            "SELECT principal_id FROM cooldis_identity_sessions ORDER BY opened_at_ms DESC LIMIT 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), expected_principal_id);
+}
+
+struct FailingReloadRuntimeFactory;
+
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for FailingReloadRuntimeFactory {
+    async fn build(
+        &self,
+        _context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
+        Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            "injected constructor reload failure".to_string(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn constructor_failure_after_console_mint_retires_the_credential() {
+    let root = unique_test_root("app-server-constructor-cleanup");
+    let first = test_app_at_root(&root).await;
+    let (connection, _outbound_rx) = test_connection(first.clone()).await;
+    initialize_for_test(&connection).await;
+    let started = first
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str(started["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let mut lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    first.shutdown().await.unwrap();
+    lifecycle.status = verlet_runtime_contracts::ThreadLifecycleStatus::Idle;
+    first
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(lifecycle)
+        .await
+        .unwrap();
+    assert!(first.inner.console_credential.lock().await.is_none());
+    let session_store_path = first.session_store_path().to_path_buf();
+    let active_credentials_before = identity_sql_count(
+        &session_store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_credentials WHERE revoked_at_ms IS NULL",
+    )
+    .await;
+    let revoked_credentials_before = identity_sql_count(
+        &session_store_path,
+        "SELECT COUNT(*) FROM cooldis_identity_credentials WHERE revoked_at_ms IS NOT NULL",
+    )
+    .await;
+    let metadata_store = first.inner.metadata_store.clone();
+    drop(first);
+
+    let config = test_config_at_root(&root)
+        .with_console_assets(root.join("console"), "initial-console-token");
+    let error =
+        match crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            std::sync::Arc::new(FailingReloadRuntimeFactory),
+            metadata_store,
+        )
+        .await
+        {
+            Ok(_) => panic!("constructor unexpectedly succeeded"),
+            Err(error) => error,
+        };
+    assert!(
+        error
+            .to_string()
+            .contains("injected constructor reload failure")
+    );
+    assert_eq!(
+        identity_sql_count(
+            &session_store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_credentials WHERE revoked_at_ms IS NULL",
+        )
+        .await,
+        active_credentials_before
+    );
+    assert_eq!(
+        identity_sql_count(
+            &session_store_path,
+            "SELECT COUNT(*) FROM cooldis_identity_credentials WHERE revoked_at_ms IS NOT NULL",
+        )
+        .await,
+        revoked_credentials_before + 1
+    );
+    assert!(
+        !root
+            .join("state")
+            .join(crate::adapters::app_server::CONSOLE_CREDENTIAL_ID_FILE)
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn post_shutdown_one_shots_are_rejected_without_polling_or_partial_delete() {
+    let app = test_app().await;
+    let provider_id = "post-shutdown-provider";
+    app.inner
+        .metadata_store
+        .upsert_provider(verlet_metadata::provider_store::LlmProviderRecord::new(
+            provider_id,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://example.invalid/v1",
+        ))
+        .await
+        .unwrap();
+    app.inner
+        .metadata_store
+        .set_credential(
+            provider_id,
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "project-key".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    app.inner
+        .user_metadata_store
+        .set_credential(
+            provider_id,
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "user-key".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let started = app
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str(started["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let handle = app
+        .inner
+        .supervisor
+        .get_thread(app.tenant_id(), thread_id)
+        .await
+        .unwrap();
+    app.shutdown().await.unwrap();
+
+    let delete_error = app
+        .model_provider_delete(
+            crate::adapters::app_server::connection::ModelProviderDeleteParams {
+                provider_id: provider_id.to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(delete_error.message.contains("instance shut down"));
+    assert!(
+        app.inner
+            .metadata_store
+            .get_provider(provider_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        app.inner
+            .metadata_store
+            .get_credential(provider_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        app.inner
+            .user_metadata_store
+            .get_credential(provider_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let operation_polled = std::sync::Arc::clone(&polled);
+    let witness_error = app
+        .witness_and_persist_lifecycle(handle, move |_| async move {
+            operation_polled.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(witness_error.message.contains("instance shut down"));
+    assert!(!polled.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn shutdown_stops_an_instance_owned_listener() {
+    let app = test_app().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = app.clone();
+    let serve = tokio::spawn(async move { server.serve_websocket_listener(listener).await });
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    for _ in 0..10_000 {
+        if app.inner.tasks.task_count() > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(app.inner.tasks.task_count() > 0);
+
+    app.shutdown().await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), serve)
+        .await
+        .expect("listener did not stop after instance shutdown")
+        .unwrap()
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(std::time::Duration::from_secs(30), client.read(&mut byte))
+        .await
+        .expect("mid-handshake connection remained open after shutdown");
+    match read {
+        Ok(0) => {}
+        Ok(len) => panic!("mid-handshake connection emitted {len} unexpected byte(s)"),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ) => {}
+        Err(error) => panic!("mid-handshake connection closed unexpectedly: {error}"),
+    }
+}
+
+#[tokio::test]
 async fn failed_session_close_rearms_the_drop_witness() {
     let app = test_app().await;
     let store_path = app.session_store_path().to_path_buf();
@@ -12103,6 +12652,7 @@ async fn failed_session_close_rearms_the_drop_witness() {
     let mut close_witness = crate::adapters::app_server::SessionCloseWitness::new(
         std::sync::Arc::clone(&app.inner.identity_authority),
         std::sync::Arc::clone(&app.inner.identity_clock),
+        std::sync::Arc::clone(&app.inner.tasks),
         connection_state.witnessed_session_id.clone(),
     );
     let store = verlet_history_sqlite::SqliteSessionStore::open(&store_path)
@@ -12605,6 +13155,47 @@ async fn command_exec_streaming_start_returns_running_process_id_then_poll_compl
     assert_eq!(completed["processId"].as_str(), Some(process_id.as_str()));
     assert_eq!(completed["stdout"].as_str(), Some("done"));
     assert_eq!(completed["exitCode"].as_i64(), Some(0));
+}
+
+#[tokio::test]
+async fn process_terminal_monitor_is_owned_by_the_app_server_instance() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let task_count_before = app.inner.tasks.task_count();
+
+    let started = app
+        .dispatch_request(
+            &connection,
+            "command/exec",
+            Some(serde_json::json!({
+                "command": ["/bin/sh", "-c", "sleep 30"],
+                "streamStdoutStderr": true,
+                "yieldTimeMs": 1,
+                "timeoutMs": 60_000,
+                "threadId": thread_id,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started["status"].as_str(), Some("running"));
+    let task_count_with_monitor = app.inner.tasks.task_count();
+
+    // tight-timeout: shutdown must cancel and join the monitor before returning
+    tokio::time::timeout(std::time::Duration::from_secs(5), app.shutdown())
+        .await
+        .expect("shutdown left the process terminal monitor detached")
+        .unwrap();
+    assert!(
+        task_count_with_monitor > task_count_before,
+        "the process terminal monitor was not registered with the instance task set"
+    );
+    assert_eq!(app.inner.tasks.task_count(), 0);
 }
 
 #[tokio::test]
@@ -13358,6 +13949,15 @@ async fn test_app() -> crate::adapters::app_server::VerletAppServer {
 }
 
 async fn test_app_at_root(root: &std::path::Path) -> crate::adapters::app_server::VerletAppServer {
+    let config = test_config_at_root(root);
+    crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap()
+}
+
+fn test_config_at_root(
+    root: &std::path::Path,
+) -> crate::adapters::app_server::VerletAppServerConfig {
     let listen =
         crate::adapters::app_server::AppServerListenAddr::Unix(root.join("app-server.sock"));
     let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
@@ -13372,9 +13972,7 @@ async fn test_app_at_root(root: &std::path::Path) -> crate::adapters::app_server
     config.agent_registry_root = root.join("agents");
     config.blob_registry_root = root.join("blobs");
     config.skill_registry_root = root.join("skills");
-    crate::adapters::app_server::VerletAppServer::new_local(config)
-        .await
-        .unwrap()
+    config
 }
 
 async fn test_connection(
@@ -13386,13 +13984,7 @@ async fn test_connection(
     let (outbound, rx) = tokio::sync::mpsc::unbounded_channel::<
         crate::adapters::app_server::connection::JsonRpcMessage,
     >();
-    let resolved_principal = crate::daemon::identity::ResolvedPrincipal {
-        principal_id: crate::daemon::identity::PrincipalId::new(app.user_id()),
-        kind: crate::daemon::identity::PrincipalKind::Operator,
-        auth: crate::daemon::identity::AuthenticationPath::PeerUid {
-            uid: crate::adapters::app_server::current_effective_uid(),
-        },
-    };
+    let resolved_principal = operator_principal(&app);
     let witnessed_session_id = format!("test-session-{}", uuid::Uuid::now_v7());
     app.inner
         .identity_authority
@@ -13430,6 +14022,18 @@ async fn test_connection(
         },
         rx,
     )
+}
+
+fn operator_principal(
+    app: &crate::adapters::app_server::VerletAppServer,
+) -> crate::daemon::identity::ResolvedPrincipal {
+    crate::daemon::identity::ResolvedPrincipal {
+        principal_id: crate::daemon::identity::PrincipalId::new(app.user_id()),
+        kind: crate::daemon::identity::PrincipalKind::Operator,
+        auth: crate::daemon::identity::AuthenticationPath::PeerUid {
+            uid: crate::adapters::app_server::current_effective_uid(),
+        },
+    }
 }
 
 async fn initialize_for_test(

@@ -685,7 +685,8 @@ impl crate::adapters::app_server::VerletAppServer {
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
     ) {
         let app = self.clone();
-        tokio::spawn(async move {
+        let tasks = std::sync::Arc::clone(&self.inner.tasks);
+        tasks.spawn_cancellable(async move {
             let mut status = handle.subscribe_status();
             let _ = status.borrow_and_update();
             loop {
@@ -709,7 +710,8 @@ impl crate::adapters::app_server::VerletAppServer {
                     let mut state = app.inner.state.write().await;
                     if let Some(thread) = state.threads.get_mut(&thread_id) {
                         thread.status = status_value;
-                        thread.updated_at_ms = crate::adapters::app_server::connection::now_ms();
+                        thread.updated_at_ms =
+                            crate::adapters::app_server::connection::now_ms();
                     }
                 }
                 if matches!(
@@ -1826,15 +1828,24 @@ impl crate::adapters::app_server::VerletAppServer {
     {
         let supervisor = self.inner.supervisor.clone();
         let coordinates = handle.context().coordinates.clone();
-        tokio::spawn(async move {
-            if let Err(err) = operation(handle.clone()).await {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        if !self.inner.tasks.spawn(async move {
+            let result = if let Err(err) = operation(handle.clone()).await {
                 let _ = supervisor.shutdown_thread_at(&coordinates).await;
-                return Err(crate::adapters::app_server::connection::internal_error(err));
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|err| {
+                Err(crate::adapters::app_server::connection::internal_error(err))
+            } else {
+                Ok(())
+            };
+            let _ = completion_tx.send(result);
+        }) {
+            return Err(crate::adapters::app_server::connection::internal_error(
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    "Verlet app-server instance shut down before manifest lifecycle witnessing started"
+                        .to_string(),
+                ),
+            ));
+        }
+        completion_rx.await.map_err(|err| {
             crate::adapters::app_server::connection::internal_error(
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "manifest lifecycle witness task failed: {err}"

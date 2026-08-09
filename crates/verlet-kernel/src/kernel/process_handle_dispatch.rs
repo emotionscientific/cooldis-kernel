@@ -17,6 +17,11 @@
 const TERMINAL_MONITOR_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 const SETUP_FAILURE_MAX_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+pub(crate) type ProcessHandleTask =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+pub(crate) type ProcessHandleTaskSpawner =
+    std::sync::Arc<dyn Fn(ProcessHandleTask) -> bool + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ProcessHandleDispatcher {
     inner: std::sync::Arc<ProcessHandleDispatcherInner>,
@@ -36,6 +41,13 @@ struct ProcessHandleDispatcherInner {
             verlet_runtime_contracts::handle::HandleDispatchEnvelope,
         >,
     >,
+    task_owner: Option<ProcessHandleTaskOwner>,
+}
+
+#[derive(Clone)]
+struct ProcessHandleTaskOwner {
+    cancellation: tokio_util::sync::CancellationToken,
+    spawn: ProcessHandleTaskSpawner,
 }
 
 impl ProcessHandleDispatcher {
@@ -45,6 +57,34 @@ impl ProcessHandleDispatcher {
             dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink,
         >,
     ) -> Self {
+        Self::new_inner(store, ingress, None)
+    }
+
+    pub(crate) fn new_with_task_owner(
+        store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+        ingress: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink,
+        >,
+        cancellation: tokio_util::sync::CancellationToken,
+        spawn: ProcessHandleTaskSpawner,
+    ) -> Self {
+        Self::new_inner(
+            store,
+            ingress,
+            Some(ProcessHandleTaskOwner {
+                cancellation,
+                spawn,
+            }),
+        )
+    }
+
+    fn new_inner(
+        store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
+        ingress: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink,
+        >,
+        task_owner: Option<ProcessHandleTaskOwner>,
+    ) -> Self {
         Self {
             inner: std::sync::Arc::new(ProcessHandleDispatcherInner {
                 store,
@@ -52,7 +92,21 @@ impl ProcessHandleDispatcher {
                 locks: tokio::sync::Mutex::new(std::collections::BTreeMap::new()),
                 terminal_monitors: tokio::sync::Mutex::new(std::collections::HashSet::new()),
                 live_bindings: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+                task_owner,
             }),
+        }
+    }
+
+    async fn await_while_owned<F>(&self, future: F) -> Option<F::Output>
+    where
+        F: std::future::Future,
+    {
+        let Some(owner) = &self.inner.task_owner else {
+            return Some(future.await);
+        };
+        tokio::select! {
+            _ = owner.cancellation.cancelled() => None,
+            output = future => Some(output),
         }
     }
 
@@ -338,9 +392,15 @@ impl ProcessHandleDispatcher {
             return;
         }
         let this = self.clone();
-        tokio::spawn(async move {
+        let monitor = async move {
             loop {
-                match manager.snapshot(process_id, output_cap_bytes).await {
+                let Some(snapshot) = this
+                    .await_while_owned(manager.snapshot(process_id, output_cap_bytes))
+                    .await
+                else {
+                    break;
+                };
+                match snapshot {
                     Ok(outcome)
                         if outcome.snapshot.status
                             != verlet_process::live::ProcessSnapshotStatus::Running =>
@@ -352,7 +412,15 @@ impl ProcessHandleDispatcher {
                                     "verlet process settlement {} encode failed: {err}",
                                     binding.dispatch_id
                                 );
-                                tokio::time::sleep(TERMINAL_MONITOR_INTERVAL).await;
+                                if this
+                                    .await_while_owned(tokio::time::sleep(
+                                        TERMINAL_MONITOR_INTERVAL,
+                                    ))
+                                    .await
+                                    .is_none()
+                                {
+                                    break;
+                                }
                                 continue;
                             }
                         };
@@ -368,7 +436,15 @@ impl ProcessHandleDispatcher {
                                         "verlet process settlement {} could not release terminal entry: {err}",
                                         binding.dispatch_id
                                     );
-                                    tokio::time::sleep(TERMINAL_MONITOR_INTERVAL).await;
+                                    if this
+                                        .await_while_owned(tokio::time::sleep(
+                                            TERMINAL_MONITOR_INTERVAL,
+                                        ))
+                                        .await
+                                        .is_none()
+                                    {
+                                        break;
+                                    }
                                     continue;
                                 }
                                 this.forget_settled_binding(&binding, process_id, &dispatch_lock)
@@ -389,14 +465,34 @@ impl ProcessHandleDispatcher {
                         );
                     }
                 }
-                tokio::time::sleep(TERMINAL_MONITOR_INTERVAL).await;
+                if this
+                    .await_while_owned(tokio::time::sleep(TERMINAL_MONITOR_INTERVAL))
+                    .await
+                    .is_none()
+                {
+                    break;
+                }
             }
             this.inner
                 .terminal_monitors
                 .lock()
                 .await
                 .remove(&process_id);
-        });
+        };
+        let accepted = match &self.inner.task_owner {
+            Some(owner) => (owner.spawn)(Box::pin(monitor)),
+            None => {
+                tokio::spawn(monitor);
+                true
+            }
+        };
+        if !accepted {
+            self.inner
+                .terminal_monitors
+                .lock()
+                .await
+                .remove(&process_id);
+        }
     }
 
     async fn deliver_setup_failure(
@@ -407,12 +503,17 @@ impl ProcessHandleDispatcher {
         let envelope = setup_failure_envelope(binding, reason);
         let mut retry_interval = TERMINAL_MONITOR_INTERVAL;
         loop {
-            match self
-                .inner
-                .ingress
-                .submit_process_handle_envelope(envelope.clone())
+            let Some(delivery) = self
+                .await_while_owned(
+                    self.inner
+                        .ingress
+                        .submit_process_handle_envelope(envelope.clone()),
+                )
                 .await
-            {
+            else {
+                return;
+            };
+            match delivery {
                 Ok(()) => break,
                 Err(err) => eprintln!(
                     "verlet process setup failure {} retrying after ingress failure in {}ms: {err}",
@@ -420,7 +521,13 @@ impl ProcessHandleDispatcher {
                     retry_interval.as_millis()
                 ),
             }
-            tokio::time::sleep(retry_interval).await;
+            if self
+                .await_while_owned(tokio::time::sleep(retry_interval))
+                .await
+                .is_none()
+            {
+                return;
+            }
             retry_interval = retry_interval
                 .saturating_mul(2)
                 .min(SETUP_FAILURE_MAX_RETRY_INTERVAL);

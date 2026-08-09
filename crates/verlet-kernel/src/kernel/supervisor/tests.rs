@@ -86,6 +86,62 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntime for EchoRuntime {
     }
 }
 
+#[derive(Default)]
+struct GatedShutdownFactory {
+    shutdown_received: std::sync::Arc<tokio::sync::Notify>,
+    release_shutdown: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for GatedShutdownFactory {
+    async fn build(
+        &self,
+        _context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
+        Ok(Box::new(GatedShutdownRuntime {
+            shutdown_received: std::sync::Arc::clone(&self.shutdown_received),
+            release_shutdown: std::sync::Arc::clone(&self.release_shutdown),
+        }))
+    }
+}
+
+struct GatedShutdownRuntime {
+    shutdown_received: std::sync::Arc<tokio::sync::Notify>,
+    release_shutdown: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::runtime_api::AgentRuntime for GatedShutdownRuntime {
+    async fn run(
+        self: Box<Self>,
+        _context: verlet_runtime_contracts::ThreadContext,
+        _services: crate::kernel::runtime_host::runtime_services::RuntimeServices,
+        mut commands: tokio::sync::mpsc::Receiver<
+            crate::kernel::runtime_host::runtime_api::ThreadCommand,
+        >,
+        _events: tokio::sync::broadcast::Sender<
+            crate::kernel::runtime_host::runtime_api::ThreadEvent,
+        >,
+        status: tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) {
+        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
+        while let Some(command) = commands.recv().await {
+            if matches!(
+                command,
+                crate::kernel::runtime_host::runtime_api::ThreadCommand::Shutdown
+            ) {
+                self.shutdown_received.notify_one();
+                self.release_shutdown.notified().await;
+                let _ = status.send(verlet_runtime_contracts::ThreadStatus::Stopped);
+                return;
+            }
+        }
+    }
+}
+
 async fn supervisor() -> crate::kernel::supervisor::VerletSupervisor {
     supervisor_with_root(&unique_temp_dir("verlet-supervisor")).await
 }
@@ -611,6 +667,92 @@ async fn supervisor_can_shutdown_one_tenant_without_stopping_others() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn supervisor_only_releases_tenant_id_when_shutdown_unregisters_it() {
+    let root = unique_temp_dir("verlet-supervisor-unregister");
+    let supervisor = supervisor_with_root(&root).await;
+
+    supervisor.shutdown_tenant("tenant_a").await.unwrap();
+    let error = supervisor
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
+            context: tenant_context(&root, "tenant_a"),
+            runtime_factory: std::sync::Arc::new(EchoRuntimeFactory),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::kernel::runtime_host::VerletError::TenantAlreadyExists(tenant_id)
+            if tenant_id == "tenant_a"
+    ));
+
+    supervisor
+        .shutdown_and_unregister_tenant("tenant_a")
+        .await
+        .unwrap();
+    supervisor
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
+            context: tenant_context(&root, "tenant_a"),
+            runtime_factory: std::sync::Arc::new(EchoRuntimeFactory),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn unregistering_one_tenant_does_not_block_co_resident_tenant_work() {
+    let root = unique_temp_dir("verlet-supervisor-unregister-isolation");
+    let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
+    let gated = std::sync::Arc::new(GatedShutdownFactory::default());
+    supervisor
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
+            context: tenant_context(&root, "tenant_a"),
+            runtime_factory: gated.clone(),
+        })
+        .await
+        .unwrap();
+    supervisor
+        .register_tenant(crate::kernel::supervisor::TenantRegistration {
+            context: tenant_context(&root, "tenant_b"),
+            runtime_factory: std::sync::Arc::new(EchoRuntimeFactory),
+        })
+        .await
+        .unwrap();
+    supervisor
+        .start_thread(start_request("tenant_a"))
+        .await
+        .unwrap();
+
+    let shutdown = {
+        let supervisor = supervisor.clone();
+        tokio::spawn(async move { supervisor.shutdown_and_unregister_tenant("tenant_a").await })
+    };
+    gated.shutdown_received.notified().await;
+
+    let co_resident_start = {
+        let supervisor = supervisor.clone();
+        tokio::spawn(async move { supervisor.start_thread(start_request("tenant_b")).await })
+    };
+    for _ in 0..10_000 {
+        if co_resident_start.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        co_resident_start.is_finished(),
+        "tenant_a shutdown held the supervisor registry lock across runtime teardown"
+    );
+    let tenant_b = co_resident_start.await.unwrap().unwrap();
+
+    gated.release_shutdown.notify_one();
+    shutdown.await.unwrap().unwrap();
+    supervisor
+        .shutdown_thread("tenant_b", tenant_b.context().coordinates.thread_id)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
