@@ -451,11 +451,11 @@ async fn tcp_boundary_authenticates_before_upgrade_and_witnesses_sessions() {
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve_websocket_listener(listener).await });
 
-    let mut client = verlet::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
+    let mut client = verlet::adapters::operator_client::OperatorClient::connect_websocket(
         &format!("ws://{addr}/rpc"),
-        verlet::adapters::codex_tui::CodexTuiConnectConfig {
+        verlet::adapters::operator_client::OperatorConnectConfig {
             bearer_token: Some(accepted_token.clone()),
-            ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
+            ..verlet::adapters::operator_client::OperatorConnectConfig::default()
         },
     )
     .await
@@ -651,9 +651,9 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
         0o600
     );
 
-    let mut local_client = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+    let mut local_client = verlet::adapters::operator_client::OperatorClient::connect_unix(
         &local_socket,
-        verlet::adapters::codex_tui::CodexTuiConnectConfig::default(),
+        verlet::adapters::operator_client::OperatorConnectConfig::default(),
     )
     .await
     .unwrap();
@@ -742,11 +742,11 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
         0o600
     );
 
-    let no_token = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+    let no_token = verlet::adapters::operator_client::OperatorClient::connect_unix(
         &managed_socket,
-        verlet::adapters::codex_tui::CodexTuiConnectConfig {
+        verlet::adapters::operator_client::OperatorConnectConfig {
             bearer_token: None,
-            ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
+            ..verlet::adapters::operator_client::OperatorConnectConfig::default()
         },
     )
     .await;
@@ -756,11 +756,11 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     };
     assert!(no_token.to_string().contains("401"));
 
-    let unknown_token = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+    let unknown_token = verlet::adapters::operator_client::OperatorClient::connect_unix(
         &managed_socket,
-        verlet::adapters::codex_tui::CodexTuiConnectConfig {
+        verlet::adapters::operator_client::OperatorConnectConfig {
             bearer_token: Some("unknown-token".to_string()),
-            ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
+            ..verlet::adapters::operator_client::OperatorConnectConfig::default()
         },
     )
     .await;
@@ -771,11 +771,11 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
     assert!(unknown_token.to_string().contains("401"));
 
     for rejected_token in [expired_token, revoked_token, revoked_operator_token] {
-        let rejected = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+        let rejected = verlet::adapters::operator_client::OperatorClient::connect_unix(
             &managed_socket,
-            verlet::adapters::codex_tui::CodexTuiConnectConfig {
+            verlet::adapters::operator_client::OperatorConnectConfig {
                 bearer_token: Some(rejected_token),
-                ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
+                ..verlet::adapters::operator_client::OperatorConnectConfig::default()
             },
         )
         .await;
@@ -786,11 +786,11 @@ async fn unix_boundary_maps_same_uid_only_in_local_mode_and_secures_socket() {
         assert!(rejected.to_string().contains("401"));
     }
 
-    let mut token_client = verlet::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+    let mut token_client = verlet::adapters::operator_client::OperatorClient::connect_unix(
         &managed_socket,
-        verlet::adapters::codex_tui::CodexTuiConnectConfig {
+        verlet::adapters::operator_client::OperatorConnectConfig {
             bearer_token: Some(token.clone()),
-            ..verlet::adapters::codex_tui::CodexTuiConnectConfig::default()
+            ..verlet::adapters::operator_client::OperatorConnectConfig::default()
         },
     )
     .await

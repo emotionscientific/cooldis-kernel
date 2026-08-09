@@ -413,7 +413,7 @@ cargo test -p verlet clock_route
 ```
 
 The first smoke starts the real `verlet daemon run` binary on a configured
-Unix socket and drives it with the Verlet-owned Codex TUI remote client. The
+Unix socket and drives it with the Verlet-owned operator client. The
 second queues an ingress envelope into SQLite, drops the first queue/bridge,
 reopens the queue, and proves the restarted worker can submit it into the
 runtime.

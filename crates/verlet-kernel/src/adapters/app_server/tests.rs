@@ -11543,7 +11543,7 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
         .await;
         let server = app.clone();
         let server_task = tokio::spawn(async move { server.serve(listen).await });
-        let mut client = connect_tui_test_client(&socket, "socket-load-first").await;
+        let mut client = connect_operator_client(&socket, "socket-load-first").await;
 
         let thread = client
             .thread_start(serde_json::json!({ "cwd": crate::adapters::app_server::connection::cwd_string(&first_cwd), "ephemeral": true }))
@@ -11583,7 +11583,7 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
     .await;
     let server = restarted.clone();
     let server_task = tokio::spawn(async move { server.serve(listen).await });
-    let mut client = connect_tui_test_client(&socket, "socket-load-second").await;
+    let mut client = connect_operator_client(&socket, "socket-load-second").await;
 
     let loaded = client.loaded_thread_list().await.unwrap();
     let loaded_ids = loaded["data"]
@@ -11640,7 +11640,7 @@ async fn app_server_unix_socket_restart_loads_saved_session_and_continues_thread
 }
 
 #[tokio::test]
-async fn app_server_websocket_listen_accepts_codex_tui_client() {
+async fn app_server_websocket_listen_accepts_operator_client() {
     let root = unique_test_root("app-server-websocket-listen");
     let addr = unused_loopback_addr();
     let listen =
@@ -11660,7 +11660,7 @@ async fn app_server_websocket_listen_accepts_codex_tui_client() {
     let token = mint_app_server_test_token(&app).await;
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve(listen).await });
-    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &token).await;
+    let mut client = connect_ws_operator_client(&format!("ws://{addr}/rpc"), &token).await;
 
     assert_eq!(
         client.initialize_result()["userAgent"],
@@ -11715,7 +11715,7 @@ async fn app_server_websocket_query_methods_are_callable() {
     let token = mint_app_server_test_token(&app).await;
     let server = app.clone();
     let server_task = tokio::spawn(async move { server.serve(listen).await });
-    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &token).await;
+    let mut client = connect_ws_operator_client(&format!("ws://{addr}/rpc"), &token).await;
 
     let agents = client
         .request("agent/list", serde_json::json!({}))
@@ -11946,7 +11946,7 @@ async fn app_server_websocket_listen_requires_console_session_token() {
         "unexpected wrong-token response: {wrong:?}"
     );
 
-    let mut client = connect_ws_tui_test_client(&format!("ws://{addr}/rpc"), &session_token).await;
+    let mut client = connect_ws_operator_client(&format!("ws://{addr}/rpc"), &session_token).await;
     assert_eq!(
         client.initialize_result()["userAgent"],
         "verlet-app-server/0.1"
@@ -15526,17 +15526,17 @@ fn item_text(item: &serde_json::Value) -> Option<String> {
 }
 
 #[cfg(unix)]
-async fn connect_tui_test_client(
+async fn connect_operator_client(
     socket: &std::path::Path,
     client_name: &str,
-) -> crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream> {
+) -> crate::adapters::operator_client::OperatorClient<tokio::net::UnixStream> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+        match crate::adapters::operator_client::OperatorClient::connect_unix(
             socket,
-            crate::adapters::codex_tui::CodexTuiConnectConfig {
+            crate::adapters::operator_client::OperatorConnectConfig {
                 client_name: client_name.to_string(),
-                ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
+                ..crate::adapters::operator_client::OperatorConnectConfig::default()
             },
         )
         .await
@@ -15555,18 +15555,18 @@ async fn connect_tui_test_client(
     );
 }
 
-async fn connect_ws_tui_test_client(
+async fn connect_ws_operator_client(
     url: &str,
     token: &str,
-) -> crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::TcpStream> {
+) -> crate::adapters::operator_client::OperatorClient<tokio::net::TcpStream> {
     let mut last_error = None;
     for _ in 0..1_500 {
-        match crate::adapters::codex_tui::CodexTuiTestClient::connect_websocket(
+        match crate::adapters::operator_client::OperatorClient::connect_websocket(
             url,
-            crate::adapters::codex_tui::CodexTuiConnectConfig {
+            crate::adapters::operator_client::OperatorConnectConfig {
                 client_name: "websocket-listen-test".to_string(),
                 bearer_token: Some(token.to_string()),
-                ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
+                ..crate::adapters::operator_client::OperatorConnectConfig::default()
             },
         )
         .await

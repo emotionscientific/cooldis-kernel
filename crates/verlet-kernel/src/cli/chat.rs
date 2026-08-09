@@ -64,7 +64,7 @@ async fn run_chat_console(
     let result = async {
         #[cfg(unix)]
         {
-            let client = crate::adapters::codex_tui::VerletOperatorClient::connect_unix(
+            let client = crate::adapters::operator_client::OperatorClient::connect_unix(
                 socket_path,
                 chat_connect_config(invocation),
             )
@@ -99,7 +99,7 @@ async fn run_attached_chat(
             #[cfg(unix)]
             {
                 let label = format!("attach unix://{}", path.display());
-                let client = crate::adapters::codex_tui::VerletOperatorClient::connect_unix(
+                let client = crate::adapters::operator_client::OperatorClient::connect_unix(
                     path,
                     chat_connect_config(invocation),
                 )
@@ -116,7 +116,7 @@ async fn run_attached_chat(
         }
         ChatAttachTarget::WebSocket(url) => {
             let label = format!("attach {url}");
-            let client = crate::adapters::codex_tui::VerletOperatorClient::<tokio::net::TcpStream>::connect_websocket(
+            let client = crate::adapters::operator_client::OperatorClient::<tokio::net::TcpStream>::connect_websocket(
                 &url,
                 chat_connect_config(invocation),
             )
@@ -128,10 +128,10 @@ async fn run_attached_chat(
 
 fn chat_connect_config(
     invocation: ChatInvocation,
-) -> crate::adapters::codex_tui::CodexTuiConnectConfig {
-    crate::adapters::codex_tui::CodexTuiConnectConfig {
+) -> crate::adapters::operator_client::OperatorConnectConfig {
+    crate::adapters::operator_client::OperatorConnectConfig {
         client_name: invocation.client_name().to_string(),
-        ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
+        ..crate::adapters::operator_client::OperatorConnectConfig::default()
     }
 }
 
@@ -163,7 +163,7 @@ struct ChatSessionInfo {
 }
 
 async fn run_chat_client<S>(
-    mut client: crate::adapters::codex_tui::VerletOperatorClient<S>,
+    mut client: crate::adapters::operator_client::OperatorClient<S>,
     initial_prompt: Option<String>,
     connection_label: String,
 ) -> crate::kernel::runtime_host::VerletResult<()>
@@ -216,7 +216,7 @@ where
 }
 
 async fn bootstrap_chat_client<S>(
-    client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
+    client: &mut crate::adapters::operator_client::OperatorClient<S>,
     connection_label: String,
 ) -> crate::kernel::runtime_host::VerletResult<ChatSessionInfo>
 where
@@ -267,7 +267,7 @@ impl ChatDriver {
     /// into the transcript and are not fatal.
     async fn drive<S>(
         &mut self,
-        client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
+        client: &mut crate::adapters::operator_client::OperatorClient<S>,
         mut actions: tokio::sync::mpsc::UnboundedReceiver<verlet_chat::Action>,
         events: tokio::sync::mpsc::UnboundedSender<verlet_chat::ChatEvent>,
     ) -> crate::kernel::runtime_host::VerletResult<()>
@@ -296,7 +296,7 @@ impl ChatDriver {
 
     async fn execute<S>(
         &mut self,
-        client: &mut crate::adapters::codex_tui::VerletOperatorClient<S>,
+        client: &mut crate::adapters::operator_client::OperatorClient<S>,
         events: &tokio::sync::mpsc::UnboundedSender<verlet_chat::ChatEvent>,
         action: verlet_chat::Action,
     ) -> crate::kernel::runtime_host::VerletResult<()>
@@ -372,7 +372,7 @@ impl ChatDriver {
     fn switch_thread(
         &mut self,
         events: &tokio::sync::mpsc::UnboundedSender<verlet_chat::ChatEvent>,
-        thread: crate::adapters::codex_tui::CodexTuiThread,
+        thread: crate::adapters::operator_client::OperatorThread,
         reason: &str,
     ) {
         self.thread_id = thread.id.clone();
@@ -388,16 +388,16 @@ impl ChatDriver {
     /// Translate one client event into zero or more UI events.
     fn project(
         &mut self,
-        event: crate::adapters::codex_tui::CodexTuiEvent,
+        event: crate::adapters::operator_client::OperatorEvent,
         events: &tokio::sync::mpsc::UnboundedSender<verlet_chat::ChatEvent>,
     ) {
         match event {
-            crate::adapters::codex_tui::CodexTuiEvent::Notification(notification) => {
+            crate::adapters::operator_client::OperatorEvent::Notification(notification) => {
                 for event in self.project_notification(&notification) {
                     let _ = events.send(event);
                 }
             }
-            crate::adapters::codex_tui::CodexTuiEvent::Error(error) => {
+            crate::adapters::operator_client::OperatorEvent::Error(error) => {
                 self.active_turn_id = None;
                 let _ = events.send(verlet_chat::ChatEvent::Error {
                     title: format!(
@@ -408,8 +408,8 @@ impl ChatDriver {
                 });
                 let _ = events.send(verlet_chat::ChatEvent::TurnCompleted { error: None });
             }
-            crate::adapters::codex_tui::CodexTuiEvent::Request(_)
-            | crate::adapters::codex_tui::CodexTuiEvent::Response(_) => {}
+            crate::adapters::operator_client::OperatorEvent::Request(_)
+            | crate::adapters::operator_client::OperatorEvent::Response(_) => {}
         }
     }
 

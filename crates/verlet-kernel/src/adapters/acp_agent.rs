@@ -121,7 +121,7 @@ struct VerletAcpAgent {
     state: std::sync::Arc<tokio::sync::Mutex<AcpAgentState>>,
     outbound: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
     #[cfg(unix)]
-    daemon_client: Option<crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>>,
+    daemon_client: Option<crate::adapters::operator_client::OperatorClient<tokio::net::UnixStream>>,
 }
 
 impl VerletAcpAgent {
@@ -532,7 +532,7 @@ impl VerletAcpAgent {
     #[cfg(unix)]
     async fn client(
         &mut self,
-    ) -> Result<&mut crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>, String>
+    ) -> Result<&mut crate::adapters::operator_client::OperatorClient<tokio::net::UnixStream>, String>
     {
         if self.daemon_client.is_none() {
             self.daemon_client = Some(connect_acp_client(&self.config).await?);
@@ -544,12 +544,12 @@ impl VerletAcpAgent {
 #[cfg(unix)]
 async fn connect_acp_client(
     config: &VerletAcpAgentConfig,
-) -> Result<crate::adapters::codex_tui::CodexTuiTestClient<tokio::net::UnixStream>, String> {
-    let mut client = crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+) -> Result<crate::adapters::operator_client::OperatorClient<tokio::net::UnixStream>, String> {
+    let mut client = crate::adapters::operator_client::OperatorClient::connect_unix(
         config.daemon_socket.clone(),
-        crate::adapters::codex_tui::CodexTuiConnectConfig {
+        crate::adapters::operator_client::OperatorConnectConfig {
             client_name: "verlet-acp-agent".to_string(),
-            ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
+            ..crate::adapters::operator_client::OperatorConnectConfig::default()
         },
     )
     .await
@@ -564,11 +564,11 @@ async fn connect_acp_client(
 }
 
 async fn turn_start_text_with_config<S>(
-    client: &mut crate::adapters::codex_tui::CodexTuiTestClient<S>,
+    client: &mut crate::adapters::operator_client::OperatorClient<S>,
     thread_id: &str,
     text: &str,
     config: &AcpSessionConfig,
-) -> crate::kernel::runtime_host::VerletResult<crate::adapters::codex_tui::CodexTuiTurn>
+) -> crate::kernel::runtime_host::VerletResult<crate::adapters::operator_client::OperatorTurn>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -599,7 +599,7 @@ where
             )
         })?
         .to_string();
-    Ok(crate::adapters::codex_tui::CodexTuiTurn { id, raw: turn })
+    Ok(crate::adapters::operator_client::OperatorTurn { id, raw: turn })
 }
 
 async fn clear_active_turn(
@@ -618,7 +618,7 @@ async fn clear_active_turn(
 fn prompt_completed_responses(
     request_id: serde_json::Value,
     session_id: &str,
-    completed: crate::adapters::codex_tui::CodexTuiCompletedTurn,
+    completed: crate::adapters::operator_client::OperatorCompletedTurn,
     turn: serde_json::Value,
 ) -> Vec<serde_json::Value> {
     let completed_thread_id = completed.thread_id.clone();
@@ -1434,11 +1434,11 @@ mod tests {
         assert_eq!(session["result"]["verlet"]["threadId"], session_id);
         assert_eq!(session["result"]["verlet"]["thread"]["id"], session_id);
 
-        let mut inspector = crate::adapters::codex_tui::CodexTuiTestClient::connect_unix(
+        let mut inspector = crate::adapters::operator_client::OperatorClient::connect_unix(
             socket.clone(),
-            crate::adapters::codex_tui::CodexTuiConnectConfig {
+            crate::adapters::operator_client::OperatorConnectConfig {
                 client_name: "verlet-acp-agent-test-inspector".to_string(),
-                ..crate::adapters::codex_tui::CodexTuiConnectConfig::default()
+                ..crate::adapters::operator_client::OperatorConnectConfig::default()
             },
         )
         .await

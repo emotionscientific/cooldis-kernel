@@ -66,7 +66,7 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Status: MITIGATED
 - Severity: Medium
 - Threat: The debug client can call an arbitrary JSON-RPC method on a configurable WebSocket endpoint; if the endpoint accepted unauthenticated connections, treating the client as a harmless diagnostic would expose the full control plane.
-- Affected surface: `crates/verlet-kernel/src/cli/debug_rpc.rs`, `crates/verlet-kernel/src/adapters/codex_tui.rs`
+- Affected surface: `crates/verlet-kernel/src/cli/debug_rpc.rs`, `crates/verlet-kernel/src/adapters/operator_client.rs`
 - Mitigation: Existing: the app-server endpoint authenticates every connection, so the debug client succeeds only with a valid credential (supplied via `VERLET_APP_SERVER_TOKEN` or explicit configuration) and acts with exactly that principal's authority under the dispatcher gate.
 - Deterministic guard: `crates/verlet-kernel/tests/boundary_auth.rs` pins the unauthenticated 401 on the WebSocket endpoint the debug client targets.
 
