@@ -1186,12 +1186,35 @@ impl VerletAppServer {
     ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.authenticated_json_rpc_request(
             principal,
-            crate::daemon::identity::BoundarySurface::Console,
+            crate::daemon::identity::BoundarySurface::Host,
             "in-process-host",
             method,
             params,
         )
         .await
+    }
+
+    /// Serve one host-routed TCP connection (EMO-553): the host facade
+    /// selected this instance from its credential route table and hands
+    /// over the stream with the HTTP request still un-consumed (routing
+    /// peeks, it does not read). This instance's own identity authority
+    /// verifies the token — routing is selection, not authentication — and
+    /// a rejected token is refused here exactly like on the standalone
+    /// path, with the rejection witnessed by this instance. Sessions and
+    /// rejections are witnessed on
+    /// [`crate::daemon::identity::BoundarySurface::Host`], never the
+    /// `Websocket`/`Console` surface the bearer header shape would
+    /// suggest. Unlike the standalone accept path, the caller owns the
+    /// task this runs on (the host task set); dispatch inside still holds
+    /// this instance's dispatch gate, so instance shutdown ends the
+    /// connection's requests.
+    #[allow(dead_code)]
+    pub(crate) async fn serve_host_routed_tcp_stream(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
+        let _ = stream;
+        todo!("EMO-553: authenticate against this instance's authority, serve the websocket")
     }
 
     /// Instance-owned async shutdown (EMO-551). Cancels and awaits every
@@ -2610,13 +2633,13 @@ async fn bind_websocket_listener(
     })
 }
 
-struct HttpRequestHead {
+pub(crate) struct HttpRequestHead {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
 }
 
-async fn peek_http_request(
+pub(crate) async fn peek_http_request(
     stream: &tokio::net::TcpStream,
 ) -> crate::kernel::runtime_host::VerletResult<Option<HttpRequestHead>> {
     let mut request = [0_u8; MAX_HTTP_REQUEST_HEADER_BYTES];
@@ -2763,7 +2786,7 @@ fn inject_console_config(html: &str, session_token: &str) -> String {
     }
 }
 
-fn request_bearer_token(
+pub(crate) fn request_bearer_token(
     request: &HttpRequestHead,
 ) -> Option<(&str, crate::daemon::identity::BoundarySurface)> {
     if let Some(token) = request

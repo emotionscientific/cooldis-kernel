@@ -418,6 +418,48 @@ pub async fn run_crash_cut<H: CrashCutHost>(name: &str, mut host: H) -> H {
     rebuilt
 }
 
+/// Where the surviving instance stands relative to its co-resident's cut
+/// (EMO-553 two-instance ratchet).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairedCutPhase {
+    BeforeCut,
+    VictimDown,
+    AfterRecovery,
+}
+
+/// The surviving instance's side of a paired cut: one unit of
+/// invariant-checked progress per call. Implementations panic on any
+/// invariant violation (test context), so a completed run IS the check
+/// that one instance's death and recovery never blocked or corrupted its
+/// co-resident.
+#[async_trait::async_trait]
+pub trait PeerProgress {
+    async fn step(&mut self, phase: PairedCutPhase);
+}
+
+/// Two-instance extension of [`run_crash_cut`] (EMO-553): the victim is
+/// cut and recovered exactly as in the single-instance harness, while the
+/// peer — a co-resident instance of the same host — is driven through
+/// invariant-checked progress before the cut, during the victim's
+/// downtime, and after recovery. The victim's teardown stays
+/// instance-scoped by construction: `CrashCutHost::tear_down` consumes
+/// only the victim's handle, never the process.
+pub async fn run_paired_crash_cut<H: CrashCutHost, P: PeerProgress>(
+    name: &str,
+    mut victim: H,
+    peer: &mut P,
+) -> H {
+    let registration = crash_cut(name).unwrap_or_else(|| panic!("unregistered crash cut {name:?}"));
+    peer.step(PairedCutPhase::BeforeCut).await;
+    victim.run_to_cut(registration.seam).await;
+    let store = victim.tear_down();
+    peer.step(PairedCutPhase::VictimDown).await;
+    let mut rebuilt = H::rebuild(store).await;
+    rebuilt.recover().await;
+    peer.step(PairedCutPhase::AfterRecovery).await;
+    rebuilt
+}
+
 #[cfg(test)]
 mod tests {
 

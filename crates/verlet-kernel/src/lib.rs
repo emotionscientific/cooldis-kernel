@@ -20,6 +20,7 @@ pub mod adapters {
     pub mod acp_agent;
     pub mod agent_loop;
     pub mod app_server;
+    pub mod host;
     pub mod mcp_client;
     pub mod mcp_server;
     pub mod operator_client;
