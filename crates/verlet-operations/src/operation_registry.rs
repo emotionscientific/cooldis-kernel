@@ -97,6 +97,8 @@ impl KernelOperationRegistration {
         self
     }
 
+    /// Set an immutable fallback dispatcher shared by every caller. Dispatchers
+    /// that capture a thread or caller belong in [`KernelDispatchOverlay`].
     pub fn with_dispatcher(
         mut self,
         dispatcher: std::sync::Arc<dyn KernelOperationDispatcher>,
@@ -141,7 +143,7 @@ enum OperationRegistryEntryRuntime {
         factory: std::sync::Arc<verlet_wasm::runner::WasmRuntimeFactory>,
     },
     Kernel {
-        dispatcher: tokio::sync::RwLock<Option<std::sync::Arc<dyn KernelOperationDispatcher>>>,
+        dispatcher: Option<std::sync::Arc<dyn KernelOperationDispatcher>>,
     },
 }
 
@@ -225,7 +227,7 @@ impl OperationRegistry {
         let entry = std::sync::Arc::new(OperationRegistryEntry {
             record: record.clone(),
             runtime: OperationRegistryEntryRuntime::Kernel {
-                dispatcher: tokio::sync::RwLock::new(registration.dispatcher),
+                dispatcher: registration.dispatcher,
             },
         });
         self.entries
@@ -233,32 +235,6 @@ impl OperationRegistry {
             .await
             .insert(record.name.clone(), entry);
         Ok(record)
-    }
-
-    pub async fn set_kernel_dispatcher(
-        &self,
-        name: &str,
-        dispatcher: std::sync::Arc<dyn KernelOperationDispatcher>,
-    ) -> crate::VerletResult<bool> {
-        let name = normalize_registration_name(name)?;
-        let entry = {
-            let entries = self.entries.read().await;
-            entries.get(&name).cloned()
-        };
-        let Some(entry) = entry else {
-            return Ok(false);
-        };
-        match &entry.runtime {
-            OperationRegistryEntryRuntime::Kernel { dispatcher: slot } => {
-                *slot.write().await = Some(dispatcher);
-                Ok(true)
-            }
-            OperationRegistryEntryRuntime::Wasm { .. } => {
-                Err(crate::VerletOperationsError::RuntimeFactory(format!(
-                    "registered operation {name:?} is not kernel-native"
-                )))
-            }
-        }
     }
 
     pub async fn describe(&self, name: &str) -> Option<crate::RegisteredOperation> {
@@ -308,6 +284,24 @@ impl OperationRegistry {
         input: impl Into<Vec<u8>>,
         kernel_metadata: std::collections::BTreeMap<String, serde_json::Value>,
     ) -> crate::VerletResult<verlet_process::process::WasmOperationOutput> {
+        self.invoke_entry_bytes_with_kernel_metadata(
+            registered_name,
+            operation_name,
+            input.into(),
+            kernel_metadata,
+            None,
+        )
+        .await
+    }
+
+    async fn invoke_entry_bytes_with_kernel_metadata(
+        &self,
+        registered_name: &str,
+        operation_name: &str,
+        input: Vec<u8>,
+        kernel_metadata: std::collections::BTreeMap<String, serde_json::Value>,
+        overlay_dispatcher: Option<std::sync::Arc<dyn KernelOperationDispatcher>>,
+    ) -> crate::VerletResult<verlet_process::process::WasmOperationOutput> {
         let entry = self
             .entries
             .read()
@@ -326,20 +320,18 @@ impl OperationRegistry {
         }
         match &entry.runtime {
             OperationRegistryEntryRuntime::Wasm { factory } => Ok(factory
-                .invoke_operation_bytes(operation_name, input.into())
+                .invoke_operation_bytes(operation_name, input)
                 .await?),
             OperationRegistryEntryRuntime::Kernel { dispatcher } => {
-                let dispatcher = dispatcher.read().await.clone().ok_or_else(|| {
-                    crate::VerletOperationsError::RuntimeExecution(format!(
-                        "kernel operation {registered_name:?}/{operation_name:?} has no dispatcher in this runtime"
-                    ))
-                })?;
+                let dispatcher = overlay_dispatcher
+                    .or_else(|| dispatcher.clone())
+                    .ok_or_else(|| {
+                        crate::VerletOperationsError::RuntimeExecution(format!(
+                            "kernel operation {registered_name:?}/{operation_name:?} has no dispatcher in this runtime"
+                        ))
+                    })?;
                 let output = dispatcher
-                    .invoke_kernel_operation_with_metadata(
-                        operation_name,
-                        input.into(),
-                        kernel_metadata,
-                    )
+                    .invoke_kernel_operation_with_metadata(operation_name, input, kernel_metadata)
                     .await?;
                 let operation = entry
                     .record
@@ -477,7 +469,8 @@ pub fn filter_manifest_operations(
 /// every other thread's kernel operations. The overlay rides with the
 /// invoking side instead (agent tool router, bash execution config) and is
 /// consulted per invocation, before the dispatcher optionally supplied at
-/// registration time (immutable after registration, safe to share).
+/// registration time (immutable after registration and required to be safe to
+/// share across callers).
 #[derive(Clone, Default)]
 pub struct KernelDispatchOverlay {
     dispatchers: std::collections::BTreeMap<String, std::sync::Arc<dyn KernelOperationDispatcher>>,
@@ -488,8 +481,8 @@ impl KernelDispatchOverlay {
         Self::default()
     }
 
-    /// Set the dispatcher for a kernel package name (normalized like
-    /// registration names); replaces any previous overlay entry.
+    /// Set the dispatcher for an exact registered kernel package name; replaces
+    /// any previous overlay entry.
     pub fn with_dispatcher(
         mut self,
         package: impl Into<String>,
@@ -514,9 +507,9 @@ impl KernelDispatchOverlay {
 /// An operation-registry view scoped to one invoking context (EMO-550):
 /// the shared registration state plus this caller's dispatch overlay.
 ///
-/// All kernel-operation invocation goes through this view. Kernel dispatch
-/// resolves from the overlay first, then from the dispatcher supplied at
-/// registration, and fails with the existing "has no dispatcher in this
+/// Caller-scoped kernel-operation invocation goes through this view. Kernel
+/// dispatch resolves from the overlay first, then from the dispatcher supplied
+/// at registration, and fails with the existing "has no dispatcher in this
 /// runtime" error when neither exists. Wasm entries are unaffected by the
 /// overlay. Registration, listing, and describe stay on the underlying
 /// [`OperationRegistry`].
@@ -565,13 +558,15 @@ impl ScopedOperationRegistry {
         input: impl Into<Vec<u8>>,
         kernel_metadata: std::collections::BTreeMap<String, serde_json::Value>,
     ) -> crate::VerletResult<verlet_process::process::WasmOperationOutput> {
-        let _ = (
-            registered_name,
-            operation_name,
-            input.into(),
-            kernel_metadata,
-        );
-        unimplemented!("EMO-550: overlay-first kernel dispatch")
+        self.registry
+            .invoke_entry_bytes_with_kernel_metadata(
+                registered_name,
+                operation_name,
+                input.into(),
+                kernel_metadata,
+                self.overlay.dispatcher(registered_name),
+            )
+            .await
     }
 
     pub async fn invoke_process(
@@ -610,5 +605,147 @@ impl ScopedOperationRegistry {
                 output,
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    struct ThreadDispatcher {
+        thread_id: &'static str,
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::KernelOperationDispatcher for ThreadDispatcher {
+        async fn invoke_kernel_operation(
+            &self,
+            _operation_name: &str,
+            _input: Vec<u8>,
+        ) -> crate::VerletResult<Vec<u8>> {
+            self.barrier.wait();
+            Ok(self.thread_id.as_bytes().to_vec())
+        }
+    }
+
+    #[test]
+    fn scoped_registries_isolate_concurrent_kernel_dispatch() {
+        let registry = std::sync::Arc::new(super::OperationRegistry::new());
+        block_on(
+            registry.register_kernel(super::KernelOperationRegistration::new(
+                "kernel-package",
+                kernel_manifest(),
+            )),
+        )
+        .unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let thread_a = super::ScopedOperationRegistry::new(
+            std::sync::Arc::clone(&registry),
+            super::KernelDispatchOverlay::new().with_dispatcher(
+                "kernel-package",
+                std::sync::Arc::new(ThreadDispatcher {
+                    thread_id: "thread-a",
+                    barrier: std::sync::Arc::clone(&barrier),
+                }),
+            ),
+        );
+        let thread_b = super::ScopedOperationRegistry::new(
+            registry,
+            super::KernelDispatchOverlay::new().with_dispatcher(
+                "kernel-package",
+                std::sync::Arc::new(ThreadDispatcher {
+                    thread_id: "thread-b",
+                    barrier,
+                }),
+            ),
+        );
+
+        let thread_a = std::thread::spawn(move || {
+            block_on(thread_a.invoke_bytes("kernel-package", "identify-thread", Vec::new()))
+                .unwrap()
+                .output
+        });
+        let thread_b = std::thread::spawn(move || {
+            block_on(thread_b.invoke_bytes("kernel-package", "identify-thread", Vec::new()))
+                .unwrap()
+                .output
+        });
+
+        assert_eq!(thread_a.join().unwrap(), b"thread-a");
+        assert_eq!(thread_b.join().unwrap(), b"thread-b");
+    }
+
+    #[test]
+    fn scoped_registry_prefers_overlay_then_falls_back_to_registration_dispatcher() {
+        let registry = std::sync::Arc::new(super::OperationRegistry::new());
+        block_on(
+            registry.register_kernel(
+                super::KernelOperationRegistration::new("kernel-package", kernel_manifest())
+                    .with_dispatcher(std::sync::Arc::new(ThreadDispatcher {
+                        thread_id: "registration",
+                        barrier: std::sync::Arc::new(std::sync::Barrier::new(1)),
+                    })),
+            ),
+        )
+        .unwrap();
+        let scoped = super::ScopedOperationRegistry::new(
+            std::sync::Arc::clone(&registry),
+            super::KernelDispatchOverlay::new().with_dispatcher(
+                "kernel-package",
+                std::sync::Arc::new(ThreadDispatcher {
+                    thread_id: "overlay",
+                    barrier: std::sync::Arc::new(std::sync::Barrier::new(1)),
+                }),
+            ),
+        );
+
+        let overlay_output =
+            block_on(scoped.invoke_bytes("kernel-package", "identify-thread", Vec::new())).unwrap();
+        let registration_output =
+            block_on(registry.invoke_bytes("kernel-package", "identify-thread", Vec::new()))
+                .unwrap();
+
+        assert_eq!(overlay_output.output, b"overlay");
+        assert_eq!(registration_output.output, b"registration");
+    }
+
+    fn kernel_manifest() -> verlet_abi::WasmOperationManifest {
+        verlet_abi::WasmOperationManifest {
+            abi: verlet_wasm::runner::OPERATION_ABI.to_string(),
+            operations: vec![verlet_abi::WasmOperationDefinition {
+                id: 1,
+                name: "identify-thread".to_string(),
+                input: verlet_abi::WasmOperationValueKind::Bytes,
+                output: verlet_abi::WasmOperationValueKind::Bytes,
+                events: verlet_abi::WasmOperationEventKind::None,
+                mode: verlet_abi::WasmOperationMode::Sync,
+                required_capabilities: Vec::new(),
+            }],
+        }
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        struct ThreadWaker(std::thread::Thread);
+
+        impl std::task::Wake for ThreadWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.unpark();
+            }
+
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+
+        let waker =
+            std::task::Waker::from(std::sync::Arc::new(ThreadWaker(std::thread::current())));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(output) => return output,
+                std::task::Poll::Pending => std::thread::park(),
+            }
+        }
     }
 }

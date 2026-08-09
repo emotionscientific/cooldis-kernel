@@ -1,6 +1,7 @@
 #[derive(Clone)]
 pub struct AgentToolRouter {
     operation_registry: std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>,
+    kernel_dispatch_overlay: verlet_operations::operation_registry::KernelDispatchOverlay,
     kernel_tool_providers: Vec<std::sync::Arc<dyn AgentKernelToolProvider>>,
     capability_grants: std::collections::BTreeSet<String>,
     capability_grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
@@ -165,6 +166,8 @@ impl AgentToolRouter {
     ) -> Self {
         Self {
             operation_registry,
+            kernel_dispatch_overlay:
+                verlet_operations::operation_registry::KernelDispatchOverlay::new(),
             kernel_tool_providers: Vec::new(),
             capability_grants: std::collections::BTreeSet::new(),
             capability_grant_expiries: Vec::new(),
@@ -177,6 +180,14 @@ impl AgentToolRouter {
         kernel_tool_provider: std::sync::Arc<dyn AgentKernelToolProvider>,
     ) -> Self {
         self.kernel_tool_providers.push(kernel_tool_provider);
+        self
+    }
+
+    pub fn with_kernel_dispatch_overlay(
+        mut self,
+        overlay: verlet_operations::operation_registry::KernelDispatchOverlay,
+    ) -> Self {
+        self.kernel_dispatch_overlay = overlay;
         self
     }
 
@@ -503,8 +514,12 @@ impl AgentToolRouter {
                 now_ms,
             )?;
             let input = encode_tool_input(call_id, tool_name, &projection, arguments)?;
-            let process = self
-                .operation_registry
+            let operation_registry =
+                verlet_operations::operation_registry::ScopedOperationRegistry::new(
+                    std::sync::Arc::clone(&self.operation_registry),
+                    self.kernel_dispatch_overlay.clone(),
+                );
+            let process = operation_registry
                 .invoke_process_with_kernel_metadata(
                     &projection.registered_name,
                     &projection.operation_name,
