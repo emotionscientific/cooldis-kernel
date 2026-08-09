@@ -49,6 +49,8 @@ pub struct VirtualBashRuntimeConfig {
     pub mounts: Vec<verlet_vbash::VirtualMount>,
     pub operation_registry:
         Option<std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>>,
+    /// Per-caller kernel dispatchers applied when the registry is projected into bash.
+    pub kernel_dispatch_overlay: verlet_operations::operation_registry::KernelDispatchOverlay,
     /// Thread workspace VFS shared with catalog-loaded operations when both surfaces
     /// must re-present one filesystem tree.
     pub workspace_vfs: Option<std::sync::Arc<verlet_vfs::VerletVfs>>,
@@ -75,6 +77,14 @@ impl std::fmt::Debug for VirtualBashRuntimeConfig {
                     .operation_registry
                     .as_ref()
                     .map(|_| "<OperationRegistry>"),
+            )
+            .field(
+                "kernel_dispatch_overlay",
+                &if self.kernel_dispatch_overlay.is_empty() {
+                    "<empty>"
+                } else {
+                    "<configured>"
+                },
             )
             .field(
                 "workspace_vfs",
@@ -105,6 +115,8 @@ impl Default for VirtualBashRuntimeConfig {
             max_output_bytes: 1_048_576,
             mounts: verlet_vbash::default_virtual_mounts(),
             operation_registry: None,
+            kernel_dispatch_overlay:
+                verlet_operations::operation_registry::KernelDispatchOverlay::new(),
             workspace_vfs: None,
             capability_grants: std::collections::BTreeSet::new(),
             capability_grant_expiries: Vec::new(),
@@ -183,6 +195,14 @@ impl VirtualBashRuntimeConfig {
         self
     }
 
+    pub fn with_kernel_dispatch_overlay(
+        mut self,
+        overlay: verlet_operations::operation_registry::KernelDispatchOverlay,
+    ) -> Self {
+        self.kernel_dispatch_overlay = overlay;
+        self
+    }
+
     /// Reuse a thread workspace VFS instead of constructing a private bash tree.
     pub fn with_workspace_vfs(mut self, vfs: std::sync::Arc<verlet_vfs::VerletVfs>) -> Self {
         self.workspace_vfs = Some(vfs);
@@ -242,6 +262,10 @@ impl From<VirtualBashRuntimeConfig> for verlet_vbash::harness::BashkitExecutionC
             max_output_bytes: config.max_output_bytes,
             mounts: config.mounts,
             operation_registry: config.operation_registry.map(|registry| {
+                let registry = verlet_operations::operation_registry::ScopedOperationRegistry::new(
+                    registry,
+                    config.kernel_dispatch_overlay.clone(),
+                );
                 std::sync::Arc::new(KernelVbashOperationRegistry::new(registry))
                     as std::sync::Arc<dyn verlet_vbash::harness::VbashOperationRegistry>
             }),
@@ -256,11 +280,11 @@ impl From<VirtualBashRuntimeConfig> for verlet_vbash::harness::BashkitExecutionC
 #[async_trait::async_trait]
 impl verlet_vbash::harness::VbashOperationRegistry for KernelVbashOperationRegistry {
     async fn describe(&self, name: &str) -> Option<verlet_operations::RegisteredOperation> {
-        self.registry.describe(name).await
+        self.registry.registry().describe(name).await
     }
 
     async fn list(&self) -> Vec<verlet_operations::RegisteredOperation> {
-        self.registry.list().await
+        self.registry.registry().list().await
     }
 
     async fn invoke_process_output(
@@ -281,13 +305,11 @@ impl verlet_vbash::harness::VbashOperationRegistry for KernelVbashOperationRegis
 }
 
 struct KernelVbashOperationRegistry {
-    registry: std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>,
+    registry: verlet_operations::operation_registry::ScopedOperationRegistry,
 }
 
 impl KernelVbashOperationRegistry {
-    fn new(
-        registry: std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>,
-    ) -> Self {
+    fn new(registry: verlet_operations::operation_registry::ScopedOperationRegistry) -> Self {
         Self { registry }
     }
 }
@@ -332,8 +354,12 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for BashToolProvid
         if let Some(registry) = &self.config.operation_registry {
             let reserved_commands =
                 verlet_vbash::operation_shell_reserved_commands(&self.config.execution_policy);
-            let registry_adapter =
-                KernelVbashOperationRegistry::new(std::sync::Arc::clone(registry));
+            let registry_adapter = KernelVbashOperationRegistry::new(
+                verlet_operations::operation_registry::ScopedOperationRegistry::new(
+                    std::sync::Arc::clone(registry),
+                    self.config.kernel_dispatch_overlay.clone(),
+                ),
+            );
             let shell_commands = verlet_vbash::harness::operation_shell_command_names(
                 &registry_adapter,
                 &reserved_commands,

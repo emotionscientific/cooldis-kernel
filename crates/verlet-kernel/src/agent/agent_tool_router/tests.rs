@@ -49,6 +49,70 @@ async fn router_invokes_registry_operation_and_returns_tool_result() {
 }
 
 #[tokio::test]
+async fn routers_with_shared_registry_isolate_concurrent_kernel_dispatch_overlays() {
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
+    registry
+        .register_kernel(
+            verlet_operations::operation_registry::KernelOperationRegistration::new(
+                "thread-identity",
+                verlet_abi::WasmOperationManifest {
+                    abi: verlet_wasm::runner::OPERATION_ABI.to_string(),
+                    operations: vec![verlet_abi::WasmOperationDefinition {
+                        id: 1,
+                        name: "identify-thread".to_string(),
+                        input: verlet_abi::WasmOperationValueKind::Bytes,
+                        output: verlet_abi::WasmOperationValueKind::Bytes,
+                        events: verlet_abi::WasmOperationEventKind::None,
+                        mode: verlet_abi::WasmOperationMode::Sync,
+                        required_capabilities: Vec::new(),
+                    }],
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let router_a = kernel_identity_router(
+        std::sync::Arc::clone(&registry),
+        "thread-a",
+        std::sync::Arc::clone(&barrier),
+    );
+    let router_b = kernel_identity_router(registry, "thread-b", barrier);
+
+    let (thread_a, thread_b) = tokio::join!(
+        router_a.invoke_tool_call(
+            "call-a",
+            "identify-thread",
+            serde_json::json!({"input": ""}),
+        ),
+        router_b.invoke_tool_call(
+            "call-b",
+            "identify-thread",
+            serde_json::json!({"input": ""}),
+        ),
+    );
+
+    assert!(matches!(
+        thread_a,
+        verlet_history::CanonicalMessage::ToolResult {
+            is_error: false,
+            content,
+            ..
+        } if tool_result_text(&content) == "thread-a"
+    ));
+    assert!(matches!(
+        thread_b,
+        verlet_history::CanonicalMessage::ToolResult {
+            is_error: false,
+            content,
+            ..
+        } if tool_result_text(&content) == "thread-b"
+    ));
+}
+
+#[tokio::test]
 async fn router_invokes_kernel_tool_provider() {
     let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
         verlet_operations::operation_registry::OperationRegistry::new(),
@@ -865,6 +929,46 @@ fn wat_bytes(bytes: &[u8]) -> String {
             _ => format!("\\{byte:02x}"),
         })
         .collect()
+}
+
+fn kernel_identity_router(
+    registry: std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>,
+    thread_id: &'static str,
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+) -> crate::agent::agent_tool_router::AgentToolRouter {
+    let dispatcher: std::sync::Arc<
+        dyn verlet_operations::operation_registry::KernelOperationDispatcher,
+    > = std::sync::Arc::new(ThreadIdentityKernelDispatcher { thread_id, barrier });
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
+        .with_kernel_dispatch_overlay(
+            verlet_operations::operation_registry::KernelDispatchOverlay::new()
+                .with_dispatcher("thread-identity", dispatcher),
+        )
+        .with_tool_aliases(vec![crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: "identify-thread".to_string(),
+            registered_name: "thread-identity".to_string(),
+            operation_name: "identify-thread".to_string(),
+            grant_expiries: Vec::new(),
+        }])
+}
+
+struct ThreadIdentityKernelDispatcher {
+    thread_id: &'static str,
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[async_trait::async_trait]
+impl verlet_operations::operation_registry::KernelOperationDispatcher
+    for ThreadIdentityKernelDispatcher
+{
+    async fn invoke_kernel_operation(
+        &self,
+        _operation_name: &str,
+        _input: Vec<u8>,
+    ) -> verlet_operations::VerletResult<Vec<u8>> {
+        self.barrier.wait().await;
+        Ok(self.thread_id.as_bytes().to_vec())
+    }
 }
 
 struct FakeKernelToolProvider;

@@ -599,6 +599,8 @@ impl AgentLoop {
         if !had_explicit_router && self.bash_tool_config.is_none() {
             self.strict_tool_router_unknowns = false;
         }
+        let mut kernel_dispatch_overlay =
+            verlet_operations::operation_registry::KernelDispatchOverlay::new();
         if let Some(control) = control.clone() {
             let mut provider = crate::agent::agent_process::KernelThreadOperationProvider::new(
                 control.clone(),
@@ -610,23 +612,10 @@ impl AgentLoop {
             let dispatcher: std::sync::Arc<
                 dyn verlet_operations::operation_registry::KernelOperationDispatcher,
             > = std::sync::Arc::new(provider);
-            let _ = router
-                .operation_registry()
-                .set_kernel_dispatcher(
-                    crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
-                    std::sync::Arc::clone(&dispatcher),
-                )
-                .await;
-            if let Some(config) = &self.bash_tool_config
-                && let Some(registry) = &config.operation_registry
-            {
-                let _ = registry
-                    .set_kernel_dispatcher(
-                        crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
-                        std::sync::Arc::clone(&dispatcher),
-                    )
-                    .await;
-            }
+            kernel_dispatch_overlay = kernel_dispatch_overlay.with_dispatcher(
+                crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
+                dispatcher,
+            );
             let schedule_dispatcher: std::sync::Arc<
                 dyn verlet_operations::operation_registry::KernelOperationDispatcher,
             > = std::sync::Arc::new(
@@ -635,23 +624,10 @@ impl AgentLoop {
                     context.clone(),
                 ),
             );
-            let _ = router
-                .operation_registry()
-                .set_kernel_dispatcher(
-                    crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
-                    std::sync::Arc::clone(&schedule_dispatcher),
-                )
-                .await;
-            if let Some(config) = &self.bash_tool_config
-                && let Some(registry) = &config.operation_registry
-            {
-                let _ = registry
-                    .set_kernel_dispatcher(
-                        crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
-                        std::sync::Arc::clone(&schedule_dispatcher),
-                    )
-                    .await;
-            }
+            kernel_dispatch_overlay = kernel_dispatch_overlay.with_dispatcher(
+                crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
+                schedule_dispatcher,
+            );
         }
         let process_cwd = self
             .bash_tool_config
@@ -676,42 +652,22 @@ impl AgentLoop {
         let process_dispatcher: std::sync::Arc<
             dyn verlet_operations::operation_registry::KernelOperationDispatcher,
         > = std::sync::Arc::new(process_provider);
-        let _ = router
-            .operation_registry()
-            .set_kernel_dispatcher(
-                crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE,
-                std::sync::Arc::clone(&process_dispatcher),
-            )
-            .await;
-        if let Some(config) = &self.bash_tool_config
-            && let Some(registry) = &config.operation_registry
-        {
-            let _ = registry
-                .set_kernel_dispatcher(
-                    crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE,
-                    std::sync::Arc::clone(&process_dispatcher),
-                )
-                .await;
-        }
+        kernel_dispatch_overlay = kernel_dispatch_overlay.with_dispatcher(
+            crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE,
+            process_dispatcher,
+        );
         let notify_dispatcher: std::sync::Arc<
             dyn verlet_operations::operation_registry::KernelOperationDispatcher,
         > = std::sync::Arc::new(crate::agent::agent_process::KernelNotifyOperationProvider);
-        let _ = router
-            .operation_registry()
-            .set_kernel_dispatcher(
-                crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE,
-                std::sync::Arc::clone(&notify_dispatcher),
-            )
-            .await;
-        if let Some(config) = &self.bash_tool_config
-            && let Some(registry) = &config.operation_registry
-        {
-            let _ = registry
-                .set_kernel_dispatcher(
-                    crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE,
-                    std::sync::Arc::clone(&notify_dispatcher),
-                )
-                .await;
+        kernel_dispatch_overlay = kernel_dispatch_overlay.with_dispatcher(
+            crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE,
+            notify_dispatcher,
+        );
+        router = router.with_kernel_dispatch_overlay(kernel_dispatch_overlay.clone());
+        if let Some(config) = &mut self.bash_tool_config {
+            *config = config
+                .clone()
+                .with_kernel_dispatch_overlay(kernel_dispatch_overlay);
         }
         if let Some(config) = &self.bash_tool_config {
             let mut provider =

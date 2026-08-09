@@ -47,6 +47,10 @@ struct StreamingClient {
     events: std::sync::Mutex<std::collections::VecDeque<Vec<verlet_provider::ProviderStreamEvent>>>,
 }
 
+struct BashMandateListClient {
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+}
+
 struct TurnContextRecordingKernelToolProvider {
     snapshots:
         std::sync::Mutex<Vec<Option<crate::kernel::runtime_host::turn::TurnContextSnapshot>>>,
@@ -1502,6 +1506,34 @@ impl verlet_provider::ProviderClient for RecordingClient {
         self.responses.lock().unwrap().pop().ok_or_else(|| {
             verlet_provider::ProviderError::Decode("no test response queued".to_string())
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl verlet_provider::ProviderClient for BashMandateListClient {
+    async fn complete(
+        &self,
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        if request
+            .messages
+            .iter()
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }))
+        {
+            Ok(response_text("listed mandates"))
+        } else {
+            self.barrier.wait().await;
+            Ok(response_tool_call_named(
+                verlet_vbash::BASH_TOOL,
+                serde_json::json!({
+                    "command": format!(
+                        "printf '{{}}' | verlet run {} {}",
+                        crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
+                        crate::operations::kernel_packages::MANDATE_LIST_OPERATION,
+                    ),
+                }),
+            ))
+        }
     }
 }
 
@@ -7422,6 +7454,97 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
     host.shutdown_all().await.unwrap();
 }
 
+#[tokio::test]
+async fn concurrent_thread_mounts_isolate_bash_kernel_dispatch_on_shared_registry() {
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+        std::sync::Arc::new(BashMandateListClient {
+            barrier: std::sync::Arc::new(tokio::sync::Barrier::new(2)),
+        });
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    config.max_tokens = 128;
+    let registry = kernel_schedule_registry().await;
+    let capability_grants =
+        crate::operations::kernel_packages::verlet_schedule_kernel_package().capability_grants;
+    let factory = crate::adapters::agent_loop::AgentLoopFactory::new(config, provider_client)
+        .with_bash_tool(
+            crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+                .with_operation_registry(registry)
+                .with_capability_grants(capability_grants),
+        );
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(factory));
+
+    let (thread_a, thread_b) = tokio::join!(
+        host.start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "overlay-a",),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        ),
+        host.start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "overlay-b",),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        ),
+    );
+    let thread_a = thread_a.unwrap();
+    let thread_b = thread_b.unwrap();
+    let thread_a_id = thread_a.context().coordinates.thread_id.to_string();
+    let thread_b_id = thread_b.context().coordinates.thread_id.to_string();
+    let mut status_a = thread_a.subscribe_status();
+    let mut status_b = thread_b.subscribe_status();
+    tokio::join!(
+        wait_for_status(&mut status_a, verlet_runtime_contracts::ThreadStatus::Idle),
+        wait_for_status(&mut status_b, verlet_runtime_contracts::ThreadStatus::Idle),
+    );
+    let mut events_a = thread_a.subscribe_events();
+    let mut events_b = thread_b.subscribe_events();
+
+    let (submit_a, submit_b) = tokio::join!(
+        host.submit(
+            thread_a.context().coordinates.thread_id,
+            "turn-a",
+            "list mandates",
+        ),
+        host.submit(
+            thread_b.context().coordinates.thread_id,
+            "turn-b",
+            "list mandates",
+        ),
+    );
+    submit_a.unwrap();
+    submit_b.unwrap();
+    let (runtime_events_a, runtime_events_b) = tokio::join!(
+        assert_output_with_runtime_events(&mut events_a, "listed mandates"),
+        assert_output_with_runtime_events(&mut events_b, "listed mandates"),
+    );
+
+    let output_a = successful_tool_output(&runtime_events_a);
+    let output_b = successful_tool_output(&runtime_events_b);
+    assert!(output_a.contains(&thread_a_id));
+    assert!(!output_a.contains(&thread_b_id));
+    assert!(output_b.contains(&thread_b_id));
+    assert!(!output_b.contains(&thread_a_id));
+
+    host.shutdown_all().await.unwrap();
+}
+
+fn successful_tool_output(
+    events: &[crate::kernel::runtime_host::runtime_events::RuntimeEventKind],
+) -> &str {
+    events
+        .iter()
+        .find_map(|event| match event {
+            crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallResult {
+                output,
+                success: true,
+                ..
+            } => Some(output.as_str()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("successful tool result in {events:#?}"))
+}
+
 async fn kernel_thread_registry()
 -> std::sync::Arc<verlet_operations::operation_registry::OperationRegistry> {
     let registry =
@@ -7453,6 +7576,26 @@ async fn kernel_thread_router() -> crate::agent::agent_tool_router::AgentToolRou
             operation_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             grant_expiries: Vec::new(),
         }])
+}
+
+async fn kernel_schedule_registry()
+-> std::sync::Arc<verlet_operations::operation_registry::OperationRegistry> {
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
+    let package = crate::operations::kernel_packages::verlet_schedule_kernel_package();
+    let mut registration = verlet_operations::operation_registry::KernelOperationRegistration::new(
+        crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
+        package.manifest.clone(),
+    )
+    .with_capability_grants(package.capability_grants.clone());
+    registration.metadata.insert(
+        crate::operations::kernel_packages::OPERATION_METADATA_RUNTIME_KIND.to_string(),
+        serde_json::Value::String(
+            crate::operations::kernel_packages::KERNEL_RUNTIME_KIND.to_string(),
+        ),
+    );
+    registry.register_kernel(registration).await.unwrap();
+    registry
 }
 
 async fn append_tool_controller_bind_receipt(

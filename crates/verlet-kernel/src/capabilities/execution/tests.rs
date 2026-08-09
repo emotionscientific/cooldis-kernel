@@ -353,6 +353,36 @@ async fn named_echo_operation_registry_with_required(
     registry
 }
 
+struct FixedKernelDispatcher(&'static str);
+
+#[async_trait::async_trait]
+impl verlet_operations::operation_registry::KernelOperationDispatcher for FixedKernelDispatcher {
+    async fn invoke_kernel_operation(
+        &self,
+        _operation_name: &str,
+        _input: Vec<u8>,
+    ) -> verlet_operations::VerletResult<Vec<u8>> {
+        Ok(self.0.as_bytes().to_vec())
+    }
+}
+
+struct BarrierKernelDispatcher {
+    output: &'static str,
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[async_trait::async_trait]
+impl verlet_operations::operation_registry::KernelOperationDispatcher for BarrierKernelDispatcher {
+    async fn invoke_kernel_operation(
+        &self,
+        _operation_name: &str,
+        _input: Vec<u8>,
+    ) -> verlet_operations::VerletResult<Vec<u8>> {
+        self.barrier.wait().await;
+        Ok(self.output.as_bytes().to_vec())
+    }
+}
+
 #[tokio::test]
 async fn harness_runs_virtual_file_commands_pipes_and_patch() {
     let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
@@ -454,6 +484,127 @@ async fn virtual_bash_verlet_run_invokes_registered_operation_from_pipe() {
 }
 
 #[tokio::test]
+async fn virtual_bash_kernel_operation_uses_dispatch_overlay() {
+    let registry = kernel_identity_operation_registry().await;
+    let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+        .with_operation_registry(registry)
+        .with_kernel_dispatch_overlay(
+            verlet_operations::operation_registry::KernelDispatchOverlay::new().with_dispatcher(
+                "thread-identity",
+                std::sync::Arc::new(FixedKernelDispatcher("bash-thread")),
+            ),
+        );
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
+        .await
+        .unwrap();
+
+    let output = harness
+        .execute("printf ignored | verlet run thread-identity identify-thread")
+        .await
+        .unwrap();
+
+    assert!(output.success(), "{output:?}");
+    assert_eq!(output.stdout, "bash-thread");
+}
+
+#[tokio::test]
+async fn virtual_bash_dispatch_overlay_builder_is_order_independent() {
+    let registry = kernel_identity_operation_registry().await;
+    let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+        .with_kernel_dispatch_overlay(
+            verlet_operations::operation_registry::KernelDispatchOverlay::new().with_dispatcher(
+                "thread-identity",
+                std::sync::Arc::new(FixedKernelDispatcher("overlay-first")),
+            ),
+        )
+        .with_operation_registry(registry);
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
+        .await
+        .unwrap();
+
+    let output = harness
+        .execute("printf ignored | verlet run thread-identity identify-thread")
+        .await
+        .unwrap();
+
+    assert!(output.success(), "{output:?}");
+    assert_eq!(output.stdout, "overlay-first");
+}
+
+#[tokio::test]
+async fn virtual_bash_shared_registry_isolates_concurrent_kernel_dispatch_overlays() {
+    let registry = kernel_identity_operation_registry().await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let config_a = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+        .with_operation_registry(std::sync::Arc::clone(&registry))
+        .with_kernel_dispatch_overlay(
+            verlet_operations::operation_registry::KernelDispatchOverlay::new().with_dispatcher(
+                "thread-identity",
+                std::sync::Arc::new(BarrierKernelDispatcher {
+                    output: "bash-thread-a",
+                    barrier: std::sync::Arc::clone(&barrier),
+                }),
+            ),
+        );
+    let config_b = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+        .with_operation_registry(registry)
+        .with_kernel_dispatch_overlay(
+            verlet_operations::operation_registry::KernelDispatchOverlay::new().with_dispatcher(
+                "thread-identity",
+                std::sync::Arc::new(BarrierKernelDispatcher {
+                    output: "bash-thread-b",
+                    barrier,
+                }),
+            ),
+        );
+    let (harness_a, harness_b) = tokio::join!(
+        verlet_vbash::harness::BashkitExecutionHarness::new(config_a),
+        verlet_vbash::harness::BashkitExecutionHarness::new(config_b),
+    );
+    let mut harness_a = harness_a.unwrap();
+    let mut harness_b = harness_b.unwrap();
+
+    let (output_a, output_b) = tokio::join!(
+        harness_a.execute("printf ignored | verlet run thread-identity identify-thread"),
+        harness_b.execute("printf ignored | verlet run thread-identity identify-thread"),
+    );
+    let output_a = output_a.unwrap();
+    let output_b = output_b.unwrap();
+
+    assert!(output_a.success(), "{output_a:?}");
+    assert!(output_b.success(), "{output_b:?}");
+    assert_eq!(output_a.stdout, "bash-thread-a");
+    assert_eq!(output_b.stdout, "bash-thread-b");
+}
+
+async fn kernel_identity_operation_registry()
+-> std::sync::Arc<verlet_operations::operation_registry::OperationRegistry> {
+    let registry =
+        std::sync::Arc::new(verlet_operations::operation_registry::OperationRegistry::new());
+    registry
+        .register_kernel(
+            verlet_operations::operation_registry::KernelOperationRegistration::new(
+                "thread-identity",
+                verlet_abi::WasmOperationManifest {
+                    abi: verlet_wasm::runner::OPERATION_ABI.to_string(),
+                    operations: vec![verlet_abi::WasmOperationDefinition {
+                        id: 1,
+                        name: "identify-thread".to_string(),
+                        input: verlet_abi::WasmOperationValueKind::Bytes,
+                        output: verlet_abi::WasmOperationValueKind::Bytes,
+                        events: verlet_abi::WasmOperationEventKind::None,
+                        mode: verlet_abi::WasmOperationMode::Sync,
+                        required_capabilities: Vec::new(),
+                    }],
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    registry
+}
+
+#[tokio::test]
 async fn virtual_bash_projects_registry_operations_as_host_builtins() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(named_echo_operation_registry("search", "search").await);
@@ -536,7 +687,10 @@ async fn virtual_bash_host_builtins_reflect_registry_add_and_remove_without_rebu
 async fn virtual_bash_reserved_operation_names_are_not_projected_as_shell_commands() {
     let registry = named_echo_operation_registry("capsule", "type").await;
     let registry_adapter = crate::capabilities::execution::KernelVbashOperationRegistry::new(
-        std::sync::Arc::clone(&registry),
+        verlet_operations::operation_registry::ScopedOperationRegistry::new(
+            std::sync::Arc::clone(&registry),
+            verlet_operations::operation_registry::KernelDispatchOverlay::new(),
+        ),
     );
     let shell_commands = verlet_vbash::harness::operation_shell_command_names(
         &registry_adapter,
