@@ -211,6 +211,23 @@ where
         self.request("model/list", serde_json::json!({})).await
     }
 
+    /// `model/select` (EMO-558): switch the app-server's active
+    /// provider+model for turns started after the call.
+    pub async fn model_select(
+        &mut self,
+        provider_id: &str,
+        model: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "model/select",
+            serde_json::json!({
+                "providerId": provider_id,
+                "model": model,
+            }),
+        )
+        .await
+    }
+
     pub async fn config_read(
         &mut self,
         include_layers: bool,

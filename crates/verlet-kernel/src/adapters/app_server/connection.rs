@@ -251,6 +251,13 @@ pub(super) struct ModelProviderReadParams {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct ModelSelectParams {
+    pub(super) provider_id: String,
+    pub(super) model: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct ModelProviderUpsertParams {
     pub(super) provider: ModelProviderUpsertRecord,
 }
@@ -828,6 +835,10 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
     ),
     (
         "model/list",
+        crate::daemon::identity::AuthorityClass::Interactive,
+    ),
+    (
+        "model/select",
         crate::daemon::identity::AuthorityClass::Interactive,
     ),
     (
@@ -1538,6 +1549,10 @@ impl crate::adapters::app_server::VerletAppServer {
                 "data": self.model_list_json().await?,
                 "nextCursor": null,
             })),
+            "model/select" => {
+                let params: ModelSelectParams = parse_params(params)?;
+                self.model_select(params).await
+            }
             "modelProvider/capabilities/read" => Ok(self.model_provider_capabilities_json().await),
             "modelProvider/list" => self.model_provider_list().await,
             "modelProvider/read" => {
@@ -5078,6 +5093,29 @@ impl crate::adapters::app_server::VerletAppServer {
             Ok(handle) => Ok(handle),
             Err(_) => self.load_thread_from_metadata(thread_id, parsed).await,
         }
+    }
+
+    /// `model/select` (EMO-558): switch the runtime-active provider+model.
+    ///
+    /// Contract (see the EMO-558 spec): validate the requested pair against
+    /// the `model/list` entries and the provider's auth status (provider
+    /// store; env-satisfied counts as configured), then swap
+    /// `inner.active_model` so turns started after this call use it. An
+    /// in-flight turn is unaffected. Unknown pairs and unauthenticated
+    /// providers return invalid-params errors naming the problem and change
+    /// nothing. The response echoes the new active selection as
+    /// `{ "active": { "providerId": ..., "model": ... } }`.
+    pub(super) async fn model_select(
+        &self,
+        params: ModelSelectParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let ModelSelectParams { provider_id, model } = params;
+        let _ = (provider_id, model);
+        Err(internal_error(
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "model/select is not implemented yet (EMO-558)".to_string(),
+            ),
+        ))
     }
 
     pub(super) async fn model_list_json(

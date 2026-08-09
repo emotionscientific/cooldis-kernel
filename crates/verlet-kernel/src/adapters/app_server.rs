@@ -11,6 +11,7 @@ pub mod connection;
 mod default_manifest;
 pub mod instance;
 pub mod lifecycle;
+pub(crate) mod model_catalog;
 mod orchestrator_boundary;
 mod subscriptions;
 #[cfg(test)]
@@ -602,6 +603,21 @@ pub struct VerletAppServer {
     inner: std::sync::Arc<VerletAppServerInner>,
 }
 
+/// Runtime-active provider+model selection (EMO-558).
+///
+/// Initialized from `VerletAppServerConfig` at construction and swapped by
+/// the `model/select` RPC. Never persisted: a restart returns to the
+/// configured defaults. Turn starts read this instead of the construction
+/// fields; a turn already in flight keeps the selection it started with.
+// Fields are unread until EMO-558 migrates the consuming sites; the
+// implementation removes this allow together with the one on `active_model`.
+#[allow(dead_code)]
+pub(crate) struct ActiveModelSelection {
+    pub(crate) model: String,
+    pub(crate) model_provider: String,
+    pub(crate) provider: AppServerProviderConfig,
+}
+
 struct VerletAppServerInner {
     supervisor: crate::kernel::supervisor::VerletSupervisor,
     tasks: std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
@@ -624,6 +640,13 @@ struct VerletAppServerInner {
     model: String,
     model_provider: String,
     provider: AppServerProviderConfig,
+    /// EMO-558: the live selection. The `model`/`model_provider`/`provider`
+    /// fields above stay as the launch defaults; every read that must follow
+    /// `model/select` (turn starts, `model/list` active flag, banner state)
+    /// goes through this lock instead. Migrating those reads is EMO-558
+    /// implementation work; remove this allow with the migration.
+    #[allow(dead_code)]
+    active_model: tokio::sync::RwLock<ActiveModelSelection>,
     capsule_bindings: CapsuleBindingsConfig,
     agent_registry_root: std::path::PathBuf,
     blob_registry_root: std::path::PathBuf,
@@ -1040,9 +1063,14 @@ impl VerletAppServer {
                 user_id: config.user_id,
                 identity_mode: config.identity_mode,
                 console_principal: config.console_principal,
-                model: config.model,
-                model_provider: config.model_provider,
-                provider: config.provider,
+                model: config.model.clone(),
+                model_provider: config.model_provider.clone(),
+                provider: config.provider.clone(),
+                active_model: tokio::sync::RwLock::new(ActiveModelSelection {
+                    model: config.model,
+                    model_provider: config.model_provider,
+                    provider: config.provider,
+                }),
                 capsule_bindings: config.capsule_bindings,
                 agent_registry_root: config.agent_registry_root,
                 blob_registry_root: config.blob_registry_root,
