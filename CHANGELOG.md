@@ -1,6 +1,25 @@
 # Changelog
 
-## Unreleased
+## v0.3.2 (2026-08-08)
+
+### Changes
+
+- Rebuilt the `verlet chat` terminal console on the tuika UI framework:
+  streaming markdown answers, distinct thinking rows, live tool and command
+  output cells with wrap-then-elide previews, a slash-command popup with tab
+  completion, a multiline composer with paste and history recall, and
+  scrollback that follows the tail only while at the bottom. The console
+  remains a pure RPC client of the app-server; the UI lives in the new
+  `verlet-chat` crate.
+- Kernel operation dispatchers are now immutable at registration and
+  resolved per thread through dispatch overlays, removing the mutable
+  shared-registry slot.
+- Journal appends are fenced by the placement-lease epoch, so a superseded
+  host can no longer write after its lease moves.
+- Added a Nix flake for the dev shell and binary packaging.
+- Documented the frozen `cooldis.*` format identifiers in
+  `docs/format-ids.md`; the repository name lint now closes Rust source over
+  an explicit frozen-identifier allowlist.
 
 ### Deprecations
 
@@ -15,6 +34,18 @@
   `cooldis.agent-manifest` kind remains accepted through v0.3.x and is
   scheduled for removal in v0.4.0. Already-persisted agent records are not
   rewritten.
+
+## v0.3.1 (2026-08-05)
+
+### Changes
+
+- Added the v0 orchestrator boundary on the app-server (ADR 0009): a
+  record-client surface for external orchestrators, with the client-stream
+  boundary documented.
+- The daemon egress drain now maintains incremental per-thread views instead
+  of replaying the full journal on every drain.
+- The frozen V1 stream schema registry is cached instead of being rebuilt on
+  each validation.
 
 ## v0.3.0 (2026-08-04)
 
