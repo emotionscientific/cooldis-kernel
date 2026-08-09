@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt as _;
 use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 pub mod connection;
 mod default_manifest;
+pub mod instance;
 pub mod lifecycle;
 mod orchestrator_boundary;
 mod subscriptions;
@@ -150,6 +151,9 @@ pub struct VerletAppServerConfig {
     /// configured sync listener has bound successfully.
     pub remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub console_assets: Option<ConsoleAssetConfig>,
+    /// Per-instance replacements for process-state reads at depth
+    /// (EMO-552): provider auth, hook shell, process-id source.
+    pub instance_environment: instance::InstanceEnvironment,
 }
 
 impl VerletAppServerConfig {
@@ -196,9 +200,27 @@ impl VerletAppServerConfig {
                 false,
             )),
             console_assets: None,
+            instance_environment: instance::InstanceEnvironment::standalone(),
         };
         config.apply_daemon_identity_config(&identity);
         config
+    }
+
+    /// Hosted-instance config (EMO-552): explicit absolute roots + fully
+    /// injected environment; no listener (`listen` is set but the host
+    /// never binds it — RPC arrives through
+    /// `dispatch_authenticated_json_rpc`). Construction canonicalizes the
+    /// roots and reserves them process-wide before any store opens;
+    /// overlapping a live instance's roots is a loud error. None of the
+    /// cwd/XDG defaulting of [`VerletAppServerConfig::local`] applies.
+    pub fn hosted(
+        roots: instance::InstanceRoots,
+        environment: instance::InstanceEnvironment,
+        cwd: impl Into<std::path::PathBuf>,
+        identity: &crate::daemon::identity::VerletDaemonIdentityConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let _ = (roots, environment, cwd, identity);
+        unimplemented!("EMO-552: hosted config from explicit roots + injected environment")
     }
 
     /// Project a daemon identity config onto this app-server config. This is
@@ -478,6 +500,16 @@ struct VerletAppServerInner {
     tasks: std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
     shutdown: tokio::sync::Mutex<bool>,
     dispatch_gate: tokio::sync::RwLock<()>,
+    /// Process-wide claim on this instance's roots (EMO-552). `None` for
+    /// standalone-daemon construction; hosted construction holds it so the
+    /// claim releases when the instance is dropped after shutdown.
+    #[allow(dead_code)]
+    root_reservation: Option<instance::InstanceRootReservation>,
+    /// Injected environment (EMO-552): provider auth, hook shell,
+    /// process-id source. The deep process-state reads resolve through
+    /// this instead of `std::env`/globals.
+    #[allow(dead_code)]
+    instance_environment: instance::InstanceEnvironment,
     tenant_id: String,
     user_id: String,
     identity_mode: crate::daemon::identity::IdentityMode,
@@ -880,6 +912,8 @@ impl VerletAppServer {
                 ),
                 shutdown: tokio::sync::Mutex::new(false),
                 dispatch_gate: tokio::sync::RwLock::new(()),
+                root_reservation: None,
+                instance_environment: config.instance_environment,
                 tenant_id: config.tenant_id,
                 user_id: config.user_id,
                 identity_mode: config.identity_mode,

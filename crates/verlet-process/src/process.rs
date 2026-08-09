@@ -3,26 +3,49 @@ use futures_util::StreamExt as _;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct VerletProcessId(uuid::Uuid);
 
-static FORCE_DETERMINISTIC_PROCESS_IDS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static NEXT_DETERMINISTIC_PROCESS_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+/// Source of process ids for one process manager (EMO-552). Replaces the
+/// former process-global deterministic-ids switch so co-resident kernel
+/// instances can each carry their own source (random in production, a
+/// per-instance deterministic counter under simulation).
+pub trait ProcessIdSource: Send + Sync {
+    fn next_process_id(&self) -> VerletProcessId;
+}
 
-pub fn set_deterministic_process_ids_for_tests(enabled: bool) {
-    FORCE_DETERMINISTIC_PROCESS_IDS.store(enabled, std::sync::atomic::Ordering::SeqCst);
-    if enabled {
-        NEXT_DETERMINISTIC_PROCESS_ID.store(1, std::sync::atomic::Ordering::SeqCst);
+/// Production source: time-ordered random ids.
+pub struct RandomProcessIds;
+
+impl ProcessIdSource for RandomProcessIds {
+    fn next_process_id(&self) -> VerletProcessId {
+        VerletProcessId(uuid::Uuid::now_v7())
+    }
+}
+
+/// Deterministic per-source counter (1, 2, 3, ...). One instance of this
+/// type per simulated harness; two harnesses with separate sources produce
+/// identical id sequences independently.
+#[derive(Default)]
+pub struct DeterministicProcessIds {
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl DeterministicProcessIds {
+    pub fn new() -> Self {
+        Self {
+            next: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+}
+
+impl ProcessIdSource for DeterministicProcessIds {
+    fn next_process_id(&self) -> VerletProcessId {
+        let next = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        VerletProcessId(uuid::Uuid::from_u128(u128::from(next)))
     }
 }
 
 impl VerletProcessId {
     pub fn new() -> Self {
-        if FORCE_DETERMINISTIC_PROCESS_IDS.load(std::sync::atomic::Ordering::SeqCst) {
-            let next =
-                NEXT_DETERMINISTIC_PROCESS_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            return Self(uuid::Uuid::from_u128(u128::from(next)));
-        }
-        Self(uuid::Uuid::now_v7())
+        RandomProcessIds.next_process_id()
     }
 }
 
