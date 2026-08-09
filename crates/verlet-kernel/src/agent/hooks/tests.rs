@@ -37,6 +37,49 @@ async fn command_hook_handler_reads_json_stdin_and_returns_pre_tool_output() {
     assert_eq!(outcome.additional_contexts, vec!["ctx"]);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn command_hook_handler_prefers_injected_shell() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = std::env::temp_dir().join(format!(
+        "verlet-injected-hook-shell-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let shell = root.join("injected-shell");
+    std::fs::write(
+        &shell,
+        "#!/bin/sh\nprintf '%s' '{\"additional_context\":\"injected shell\"}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let hook = crate::agent::hooks::CommandHookHandler::new(
+        "injected-shell",
+        crate::agent::hooks::HookEventName::SessionStart,
+        "exit 99",
+    );
+    let request = crate::agent::hooks::SessionStartHookRequest {
+        coordinates: verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session"),
+        parent_thread_id: None,
+        source: "test".to_string(),
+        cwd: None,
+        provider: "test".to_string(),
+        model: "test".to_string(),
+        permission_profile: None,
+    };
+
+    let outcome = crate::agent::hooks::HookPipeline::new()
+        .with_shell(Some(shell.to_string_lossy().into_owned()))
+        .with_handler(std::sync::Arc::new(hook))
+        .run_session_start(request, |_| {})
+        .await;
+
+    assert_eq!(outcome.additional_contexts, ["injected shell"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn hook_request_serializes_stable_shape() {
     let coordinates =

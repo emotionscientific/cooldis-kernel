@@ -28,7 +28,8 @@ pub(super) fn ensure_default_manifest_published(
     supports_streaming: bool,
 ) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest::PublishedAgentRecord> {
     let registry =
-        crate::agent::manifest::LocalAgentRegistry::new(config.agent_registry_root.clone());
+        crate::agent::manifest::LocalAgentRegistry::new(config.agent_registry_root.clone())
+            .with_blob_registry_root(config.blob_registry_root.clone());
     let _lock = DefaultManifestPublishLock::acquire(&registry)?;
     let existing = load_existing_default_manifest(&registry)?;
     if let Some(record) = existing.record() {
@@ -484,18 +485,15 @@ fn invalid_default_version(version: &str) -> crate::kernel::runtime_host::Verlet
 fn absolute_path_string(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|err| {
-                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "failed to resolve current directory for default manifest cwd: {err}"
-                ))
-            })?
-            .join(path)
-    };
-    Ok(path_string(&absolute))
+    if !path.is_absolute() {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "configured instance cwd must be absolute when resolving default manifest path {}",
+                path.display(),
+            ),
+        ));
+    }
+    Ok(path_string(path))
 }
 
 fn path_string(path: &std::path::Path) -> String {

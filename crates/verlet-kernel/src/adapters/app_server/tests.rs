@@ -9,6 +9,35 @@ use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 use verlet_metadata::provider_store::ThreadMetadataStore as _;
 use verlet_metadata::secret_store::SecretResolver as _;
 
+static PROCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct ProcessEnvGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ProcessEnvGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        // SAFETY: env-mutating tests in this module serialize through
+        // `PROCESS_ENV_LOCK`, and the guard restores the prior value.
+        unsafe { std::env::set_var(name, value) };
+        Self { name, previous }
+    }
+}
+
+impl Drop for ProcessEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `ProcessEnvGuard::set`.
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+}
+
 #[test]
 fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
     const EXPECTED: &[(&str, crate::daemon::identity::AuthorityClass)] = &[
@@ -1016,7 +1045,7 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .unwrap();
     drop(metadata_store);
 
-    let app = crate::adapters::app_server::VerletAppServer::new_local(config.clone())
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -1249,7 +1278,7 @@ async fn model_provider_upsert_creates_and_updates_endpoint_records() {
     config.state_home = root.join("state");
     config.agent_registry_root = root.join("agents");
     let metadata_path = config.metadata_store_path();
-    let app = crate::adapters::app_server::VerletAppServer::new_local(config.clone())
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -3479,13 +3508,20 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
         format!("verlet-default-manifest-idem-{}.sock", uuid::Uuid::now_v7()),
     ));
-    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
-    config.runtime_home = root.join("runtime");
-    config.state_home = root.join("state");
-    config.agent_registry_root = agent_registry_root.clone();
-    let _ = crate::adapters::app_server::VerletAppServer::new_local(config.clone())
-        .await
-        .unwrap();
+    let config = |model: &str| {
+        let mut config =
+            crate::adapters::app_server::VerletAppServerConfig::local(listen.clone(), &workspace);
+        config.runtime_home = root.join("runtime");
+        config.state_home = root.join("state");
+        config.agent_registry_root = agent_registry_root.clone();
+        config.model = model.to_string();
+        config
+    };
+    let _ = crate::adapters::app_server::VerletAppServer::new_local(config(
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
+    ))
+    .await
+    .unwrap();
 
     let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
     let first = registry
@@ -3500,9 +3536,11 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
     );
     assert_eq!(default_agent_version_count(&agent_registry_root), 1);
 
-    let _ = crate::adapters::app_server::VerletAppServer::new_local(config.clone())
-        .await
-        .unwrap();
+    let _ = crate::adapters::app_server::VerletAppServer::new_local(config(
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
+    ))
+    .await
+    .unwrap();
     let second = registry
         .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
         .unwrap();
@@ -3510,8 +3548,7 @@ async fn default_manifest_publish_is_idempotent_and_patch_bumps_on_model_change(
     assert_eq!(second.manifest_hash, first.manifest_hash);
     assert_eq!(default_agent_version_count(&agent_registry_root), 1);
 
-    config.model = "echo-v2".to_string();
-    let _ = crate::adapters::app_server::VerletAppServer::new_local(config)
+    let _ = crate::adapters::app_server::VerletAppServer::new_local(config("echo-v2"))
         .await
         .unwrap();
     let third = registry
@@ -12221,6 +12258,756 @@ async fn unbound_instances_dispatch_and_shutdown_independently() {
     assert_eq!(second.inner.tasks.task_count(), 0);
 }
 
+#[test]
+fn hosted_roots_reject_duplicate_and_nested_paths_before_sqlite_open() {
+    let duplicate_root = unique_test_root("hosted-duplicate-roots");
+    let mut duplicate =
+        crate::adapters::app_server::instance::InstanceRoots::under(&duplicate_root);
+    duplicate.state_home = duplicate.runtime_home.clone();
+    let duplicate_db = duplicate.state_home.join("metadata.sqlite3");
+    let duplicate_path = duplicate.runtime_home.display().to_string();
+
+    let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        duplicate,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .err()
+    .expect("duplicate roots must fail");
+    assert!(error.to_string().contains("runtime_home"));
+    assert!(error.to_string().contains("state_home"));
+    assert!(error.to_string().contains(&duplicate_path));
+    assert!(!duplicate_db.exists());
+
+    let reclaim = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        crate::adapters::app_server::instance::InstanceRoots::under(&duplicate_root),
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .expect("a failed reservation must not leave any root claimed");
+    drop(reclaim);
+
+    let nested_root = unique_test_root("hosted-nested-roots");
+    let mut nested = crate::adapters::app_server::instance::InstanceRoots::under(&nested_root);
+    nested.state_home = nested.runtime_home.join("nested-state");
+    let nested_db = nested.state_home.join("metadata.sqlite3");
+    let runtime_path = nested.runtime_home.display().to_string();
+    let state_path = nested.state_home.display().to_string();
+    let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        nested,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .err()
+    .expect("nested roots must fail");
+    assert!(error.to_string().contains(&runtime_path));
+    assert!(error.to_string().contains(&state_path));
+    assert!(!nested_db.exists());
+
+    let _ = std::fs::remove_dir_all(duplicate_root);
+    let _ = std::fs::remove_dir_all(nested_root);
+}
+
+#[test]
+fn hosted_roots_reject_relative_paths_without_creating_them() {
+    let relative_root =
+        std::path::PathBuf::from(format!("verlet-relative-instance-{}", uuid::Uuid::now_v7()));
+    let relative = crate::adapters::app_server::instance::InstanceRoots::under(&relative_root);
+
+    let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        relative,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .err()
+    .expect("relative roots must fail");
+
+    assert!(error.to_string().contains("absolute"));
+    assert!(
+        error
+            .to_string()
+            .contains(&relative_root.display().to_string())
+    );
+    assert!(!relative_root.exists());
+}
+
+#[test]
+fn hosted_config_rejects_ambient_environment_before_creating_roots() {
+    let provider_root = unique_test_root("hosted-ambient-provider-environment");
+    let provider_error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        crate::adapters::app_server::instance::InstanceRoots::under(&provider_root),
+        crate::adapters::app_server::instance::InstanceEnvironment::standalone(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .err()
+    .expect("hosted provider auth must not resolve from process env");
+    assert!(provider_error.to_string().contains("provider auth"));
+    assert!(!provider_root.exists());
+
+    let shell_root = unique_test_root("hosted-ambient-shell-environment");
+    let shell_error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        crate::adapters::app_server::instance::InstanceRoots::under(&shell_root),
+        crate::adapters::app_server::instance::InstanceEnvironment {
+            provider_auth: crate::adapters::app_server::instance::ProviderAuthSource::Injected(
+                verlet_metadata::provider_store::LlmProviderAuthContext::new(),
+            ),
+            hook_shell: None,
+            process_ids: std::sync::Arc::new(verlet_process::process::RandomProcessIds),
+        },
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .err()
+    .expect("hosted hook execution must not resolve its shell from process env");
+    assert!(shell_error.to_string().contains("hook shell"));
+    assert!(!shell_root.exists());
+}
+
+#[test]
+fn hosted_config_rejects_relative_cwd_before_creating_roots() {
+    let root = unique_test_root("hosted-relative-cwd");
+    let relative_cwd = std::path::PathBuf::from("relative-hosted-cwd");
+    let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        crate::adapters::app_server::instance::InstanceRoots::under(&root),
+        hosted_test_environment(),
+        &relative_cwd,
+        &hosted_test_identity(),
+    )
+    .err()
+    .expect("hosted cwd must be absolute");
+    assert!(error.to_string().contains("cwd must be absolute"));
+    assert!(
+        error
+            .to_string()
+            .contains(&relative_cwd.display().to_string())
+    );
+    assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn hosted_config_rejects_environment_mutation_before_sqlite_open() {
+    let environment_root = unique_test_root("hosted-mutated-environment");
+    let environment_roots =
+        crate::adapters::app_server::instance::InstanceRoots::under(&environment_root);
+    let environment_db = environment_roots.state_home.join("metadata.sqlite3");
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        environment_roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .unwrap();
+    config.instance_environment =
+        crate::adapters::app_server::instance::InstanceEnvironment::standalone();
+    let error = crate::adapters::app_server::VerletAppServer::new(config)
+        .await
+        .err()
+        .expect("hosted environment mutation must fail");
+    assert!(error.to_string().contains("provider auth"));
+    assert!(!environment_db.exists());
+
+    let cwd_root = unique_test_root("hosted-mutated-cwd");
+    let cwd_roots = crate::adapters::app_server::instance::InstanceRoots::under(&cwd_root);
+    let cwd_db = cwd_roots.state_home.join("metadata.sqlite3");
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        cwd_roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .unwrap();
+    config.cwd = std::path::PathBuf::from("mutated-relative-cwd");
+    let error = crate::adapters::app_server::VerletAppServer::new(config)
+        .await
+        .err()
+        .expect("hosted cwd mutation must fail");
+    assert!(error.to_string().contains("cwd must be absolute"));
+    assert!(!cwd_db.exists());
+
+    let _ = std::fs::remove_dir_all(environment_root);
+    let _ = std::fs::remove_dir_all(cwd_root);
+}
+
+#[test]
+fn dropping_unconsumed_hosted_config_releases_its_roots() {
+    let root = unique_test_root("hosted-config-drop");
+    let roots = crate::adapters::app_server::instance::InstanceRoots::under(&root);
+    let config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots.clone(),
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .unwrap();
+    let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots.clone(),
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .err()
+    .expect("an unconsumed config must retain its reservation");
+    assert!(error.to_string().contains("overlaps reserved root"));
+
+    drop(config);
+
+    let successor = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .expect("dropping an unconsumed config must release its reservation");
+    drop(successor);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn concurrent_overlapping_root_reservations_admit_exactly_one_owner() {
+    let root = unique_test_root("hosted-concurrent-reservation");
+    let first_roots =
+        crate::adapters::app_server::instance::InstanceRoots::under(root.join("first"));
+    let mut second_roots =
+        crate::adapters::app_server::instance::InstanceRoots::under(root.join("second"));
+    second_roots.skill_registry_root = first_roots.runtime_home.clone();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let finish = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let spawn_reserver = |roots| {
+        let start = std::sync::Arc::clone(&start);
+        let finish = std::sync::Arc::clone(&finish);
+        std::thread::spawn(move || {
+            start.wait();
+            let reservation = crate::adapters::app_server::VerletAppServerConfig::hosted(
+                roots,
+                hosted_test_environment(),
+                std::env::temp_dir(),
+                &hosted_test_identity(),
+            );
+            let admitted = reservation.is_ok();
+            finish.wait();
+            drop(reservation);
+            admitted
+        })
+    };
+    let first = spawn_reserver(first_roots.clone());
+    let second = spawn_reserver(second_roots.clone());
+
+    start.wait();
+    finish.wait();
+
+    let admitted = usize::from(first.join().unwrap()) + usize::from(second.join().unwrap());
+    assert_eq!(admitted, 1);
+    let first_successor = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        first_roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .expect("the concurrent winner must release its roots on drop");
+    drop(first_successor);
+    let second_successor = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        second_roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .expect("the concurrent loser must not leave a partial reservation");
+    drop(second_successor);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn hosted_config_rejects_root_mutation_before_sqlite_open() {
+    let root = unique_test_root("hosted-mutated-root");
+    let roots = crate::adapters::app_server::instance::InstanceRoots::under(&root);
+    let reserved_state = roots.state_home.clone();
+    let configured_state = root.join("changed-state");
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .unwrap();
+    config.state_home = configured_state.clone();
+
+    let error = crate::adapters::app_server::VerletAppServer::new(config)
+        .await
+        .err()
+        .expect("a hosted root changed after reservation must fail");
+
+    assert!(error.to_string().contains("state_home"));
+    assert!(
+        error
+            .to_string()
+            .contains(&configured_state.display().to_string())
+    );
+    assert!(
+        error
+            .to_string()
+            .contains(&reserved_state.display().to_string())
+    );
+    assert!(!configured_state.join("metadata.sqlite3").exists());
+    assert!(!reserved_state.join("metadata.sqlite3").exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn hosted_config_rejects_operation_registry_escape_before_writing() {
+    let root = unique_test_root("hosted-mutated-operation-root");
+    let roots = crate::adapters::app_server::instance::InstanceRoots::under(root.join("instance"));
+    let escaped_operation_root = root.join("escaped-operations");
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .unwrap();
+    // lexicon-allow: capsule - existing app-server operation binding field.
+    config.capsule_bindings.registry_root = Some(escaped_operation_root.clone());
+
+    let error = crate::adapters::app_server::VerletAppServer::new(config)
+        .await
+        .err()
+        .expect("a hosted operation registry outside runtime_home must fail");
+
+    assert!(error.to_string().contains("operation registry root"));
+    assert!(
+        error
+            .to_string()
+            .contains(&escaped_operation_root.display().to_string())
+    );
+    assert!(!escaped_operation_root.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn live_hosted_instance_rejects_overlapping_root_and_releases_on_drop() {
+    let first_root = unique_test_root("hosted-live-first");
+    let second_root = unique_test_root("hosted-live-second");
+    let first_roots = crate::adapters::app_server::instance::InstanceRoots::under(&first_root);
+    let first_config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        first_roots.clone(),
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .unwrap();
+    let first = crate::adapters::app_server::VerletAppServer::new(first_config)
+        .await
+        .unwrap();
+
+    for (index, reserved_root) in [
+        &first_roots.runtime_home,
+        &first_roots.state_home,
+        &first_roots.user_state_home,
+        &first_roots.agent_registry_root,
+        &first_roots.blob_registry_root,
+        &first_roots.skill_registry_root,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut second_roots = crate::adapters::app_server::instance::InstanceRoots::under(
+            second_root.join(index.to_string()),
+        );
+        second_roots.skill_registry_root = reserved_root.clone();
+        let second_db = second_roots.state_home.join("metadata.sqlite3");
+        let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+            second_roots,
+            hosted_test_environment(),
+            std::env::temp_dir(),
+            &hosted_test_identity(),
+        )
+        .err()
+        .expect("a live instance must keep every root reserved");
+        assert!(
+            error
+                .to_string()
+                .contains(&reserved_root.display().to_string())
+        );
+        assert!(!second_db.exists());
+    }
+
+    first.shutdown().await.unwrap();
+    drop(first);
+
+    let successor = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        first_roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .expect("dropping the first instance must release its roots");
+    drop(successor);
+
+    let _ = std::fs::remove_dir_all(first_root);
+    let _ = std::fs::remove_dir_all(second_root);
+}
+
+#[tokio::test]
+async fn panicking_hosted_instance_owner_releases_its_roots() {
+    let root = unique_test_root("hosted-panicking-owner");
+    let roots = crate::adapters::app_server::instance::InstanceRoots::under(&root);
+    let app = crate::adapters::app_server::VerletAppServer::new(
+        crate::adapters::app_server::VerletAppServerConfig::hosted(
+            roots.clone(),
+            hosted_test_environment(),
+            std::env::temp_dir(),
+            &hosted_test_identity(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let panic = tokio::spawn(async move {
+        let _app = app;
+        panic!("injected hosted-instance owner panic");
+    })
+    .await
+    .expect_err("the owner task must panic");
+    assert!(panic.is_panic());
+
+    let successor = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .expect("unwinding the only instance owner must release its roots");
+    drop(successor);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_hosted_instance_rejects_symlinked_root_alias_before_sqlite_open() {
+    let root = unique_test_root("hosted-symlink-overlap");
+    let first_root = root.join("first");
+    let second_root = root.join("second");
+    let alias_root = root.join("first-alias");
+    let first_roots = crate::adapters::app_server::instance::InstanceRoots::under(&first_root);
+    let first = crate::adapters::app_server::VerletAppServer::new(
+        crate::adapters::app_server::VerletAppServerConfig::hosted(
+            first_roots.clone(),
+            hosted_test_environment(),
+            std::env::temp_dir(),
+            &hosted_test_identity(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    std::os::unix::fs::symlink(&first_root, &alias_root).unwrap();
+
+    let mut second_roots =
+        crate::adapters::app_server::instance::InstanceRoots::under(&second_root);
+    second_roots.blob_registry_root = alias_root.join("blobs");
+    let second_db = second_roots.state_home.join("metadata.sqlite3");
+    let alias_path = second_roots.blob_registry_root.display().to_string();
+    let reserved_path = first_roots.blob_registry_root.display().to_string();
+    let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        second_roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .err()
+    .expect("a symlinked alias of a live root must fail");
+    assert!(error.to_string().contains(&alias_path));
+    assert!(error.to_string().contains(&reserved_path));
+    assert!(!second_db.exists());
+
+    first.shutdown().await.unwrap();
+    drop(first);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn hosted_instance_keeps_mutable_registries_out_of_cwd_defaults() {
+    let root = unique_test_root("hosted-no-cwd-defaults");
+    let cwd = root.join("cwd");
+    let cwd_defaults = cwd.join(".verlet");
+    std::fs::create_dir_all(&cwd_defaults).unwrap();
+    std::fs::write(cwd_defaults.join("sentinel"), "unchanged").unwrap();
+    let mut roots =
+        crate::adapters::app_server::instance::InstanceRoots::under(root.join("instance"));
+    roots.blob_registry_root = root.join("instance-artifacts");
+    let config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots.clone(),
+        hosted_test_environment(),
+        &cwd,
+        &hosted_test_identity(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.agent_registry_root,
+        std::fs::canonicalize(&roots.agent_registry_root).unwrap()
+    );
+    assert_eq!(
+        config.blob_registry_root,
+        std::fs::canonicalize(&roots.blob_registry_root).unwrap()
+    );
+    assert_eq!(
+        config.skill_registry_root,
+        std::fs::canonicalize(&roots.skill_registry_root).unwrap()
+    );
+    assert_eq!(
+        // lexicon-allow: capsule - existing app-server operation binding field.
+        config.capsule_bindings.registry_root.as_deref(),
+        Some(
+            std::fs::canonicalize(&roots.runtime_home)
+                .unwrap()
+                .join("operations")
+                .as_path()
+        )
+    );
+
+    let app = crate::adapters::app_server::VerletAppServer::new(config)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.inner.agent_registry().blob_registry_root(),
+        std::fs::canonicalize(&roots.blob_registry_root)
+            .unwrap()
+            .as_path()
+    );
+    assert!(
+        !roots
+            .agent_registry_root
+            .parent()
+            .unwrap()
+            .join("blobs")
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd_defaults.join("sentinel")).unwrap(),
+        "unchanged"
+    );
+    assert_eq!(std::fs::read_dir(&cwd_defaults).unwrap().count(), 1);
+
+    app.shutdown().await.unwrap();
+    drop(app);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn hosted_provider_auth_uses_injected_context_and_ignores_process_env() {
+    const AMBIENT_NAME: &str = "VERLET_EMO_552_AMBIENT_PROVIDER_AUTH";
+    const INJECTED_NAME: &str = "VERLET_EMO_552_INJECTED_PROVIDER_AUTH";
+    const PROVIDER_ID: &str = "emo_552_injected_provider";
+    const AMBIENT_PROVIDER_ID: &str = "emo_552_ambient_provider";
+
+    let _env_lock = PROCESS_ENV_LOCK.lock().await;
+    let _env = ProcessEnvGuard::set(AMBIENT_NAME, "ambient-secret-must-be-invisible");
+    let root = unique_test_root("hosted-injected-provider-auth");
+    let environment = crate::adapters::app_server::instance::InstanceEnvironment {
+        provider_auth: crate::adapters::app_server::instance::ProviderAuthSource::Injected(
+            verlet_metadata::provider_store::LlmProviderAuthContext::new()
+                .with_env(INJECTED_NAME, "injected-secret"),
+        ),
+        hook_shell: Some(hosted_test_hook_shell()),
+        process_ids: std::sync::Arc::new(verlet_process::process::RandomProcessIds),
+    };
+    let config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        crate::adapters::app_server::instance::InstanceRoots::under(root.join("instance")),
+        environment,
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .unwrap()
+    .with_catalog_openai_chat_completions(PROVIDER_ID, Some("fixture-model".to_string()));
+    assert!(!format!("{:?}", config.instance_environment).contains("injected-secret"));
+
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    for (provider_id, env_name) in [
+        (PROVIDER_ID, INJECTED_NAME),
+        (AMBIENT_PROVIDER_ID, AMBIENT_NAME),
+    ] {
+        metadata_store
+            .upsert_provider(
+                verlet_metadata::provider_store::LlmProviderRecord::new(
+                    provider_id,
+                    verlet_history::ProviderApi::OpenAIChatCompletions,
+                    "https://example.invalid/v1",
+                )
+                .with_auth(
+                    verlet_metadata::provider_store::LlmProviderAuthConfig::Env {
+                        name: env_name.to_string(),
+                    },
+                )
+                .with_auth_header(true)
+                .with_model(
+                    verlet_metadata::provider_store::LlmProviderModelRecord::new("fixture-model")
+                        .with_metadata("default", "true"),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    drop(metadata_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new(config)
+        .await
+        .expect("catalog provider dispatch must resolve the injected API key");
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let injected = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": PROVIDER_ID })),
+        )
+        .await
+        .unwrap();
+    let ambient = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": AMBIENT_PROVIDER_ID })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(injected["auth"]["configured"], true);
+    assert_eq!(injected["auth"]["source"], "environment");
+    assert_eq!(ambient["auth"]["configured"], false);
+
+    app.shutdown().await.unwrap();
+    drop(connection);
+    drop(app);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn hosted_process_managers_use_independent_injected_id_sources() {
+    let root = unique_test_root("hosted-process-id-sources");
+    let first = hosted_test_app_with_process_ids(
+        root.join("first"),
+        std::sync::Arc::new(verlet_process::process::DeterministicProcessIds::new()),
+    )
+    .await;
+    let second = hosted_test_app_with_process_ids(
+        root.join("second"),
+        std::sync::Arc::new(verlet_process::process::DeterministicProcessIds::new()),
+    )
+    .await;
+    let backend = std::sync::Arc::new(verlet_process::live::HostBashLiveBackend);
+    let request = || {
+        verlet_process::live::AsyncProcessStartRequest::host_command(
+            vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
+            std::env::temp_dir(),
+        )
+    };
+
+    let first_outcome = first
+        .inner
+        .process_manager
+        .start(backend.clone(), request())
+        .await
+        .unwrap();
+    let second_outcome = second
+        .inner
+        .process_manager
+        .start(backend, request())
+        .await
+        .unwrap();
+    assert_eq!(
+        first_outcome.snapshot.process_id,
+        second_outcome.snapshot.process_id
+    );
+    assert_eq!(
+        first_outcome.snapshot.process_id.unwrap().to_string(),
+        "00000000-0000-0000-0000-000000000001"
+    );
+
+    first.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
+    drop(first);
+    drop(second);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn hosted_default_manifest_aliases_are_isolated_by_instance_registry() {
+    let root = unique_test_root("hosted-default-alias-isolation");
+    let cwd = root.join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let first_roots =
+        crate::adapters::app_server::instance::InstanceRoots::under(root.join("first"));
+    let second_roots =
+        crate::adapters::app_server::instance::InstanceRoots::under(root.join("second"));
+    let first = crate::adapters::app_server::VerletAppServer::new(
+        crate::adapters::app_server::VerletAppServerConfig::hosted(
+            first_roots.clone(),
+            hosted_test_environment(),
+            &cwd,
+            &hosted_test_identity(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let second = crate::adapters::app_server::VerletAppServer::new(
+        crate::adapters::app_server::VerletAppServerConfig::hosted(
+            second_roots.clone(),
+            hosted_test_environment(),
+            &cwd,
+            &hosted_test_identity(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let first_registry =
+        crate::agent::manifest::LocalAgentRegistry::new(&first_roots.agent_registry_root);
+    let second_registry =
+        crate::agent::manifest::LocalAgentRegistry::new(&second_roots.agent_registry_root);
+    let second_before = second_registry
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
+        .unwrap();
+
+    let mut overwrite = crate::adapters::app_server::VerletAppServerConfig::local(
+        crate::adapters::app_server::AppServerListenAddr::Unix(root.join("overwrite.sock")),
+        &cwd,
+    );
+    // lexicon-allow: capsule - existing app-server operation binding field.
+    overwrite.capsule_bindings.registry_root = Some(first_roots.runtime_home.join("operations"));
+    overwrite.agent_registry_root = first_roots.agent_registry_root.clone();
+    overwrite.model = "instance-a-overwrite".to_string();
+    crate::adapters::app_server::default_manifest::ensure_default_manifest_published(
+        &overwrite, false,
+    )
+    .unwrap();
+
+    let first_after = first_registry
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
+        .unwrap();
+    let second_after = second_registry
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
+        .unwrap();
+    assert_eq!(first_after.version, "1.0.1");
+    assert_ne!(first_after.manifest_hash, second_after.manifest_hash);
+    assert_eq!(second_after.ref_uri, second_before.ref_uri);
+    assert_eq!(second_after.manifest_hash, second_before.manifest_hash);
+
+    first.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
+    drop(first);
+    drop(second);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn shutdown_then_drop_inside_runtime_is_inert() {
     let root = unique_test_root("app-server-shutdown-drop");
@@ -12421,6 +13208,84 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for FailingRe
             "injected constructor reload failure".to_string(),
         ))
     }
+}
+
+#[tokio::test]
+async fn hosted_constructor_failure_after_inner_build_releases_roots() {
+    let root = unique_test_root("hosted-constructor-cleanup");
+    let roots = crate::adapters::app_server::instance::InstanceRoots::under(root.join("instance"));
+    let first = crate::adapters::app_server::VerletAppServer::new(
+        crate::adapters::app_server::VerletAppServerConfig::hosted(
+            roots.clone(),
+            hosted_test_environment(),
+            std::env::temp_dir(),
+            &hosted_test_identity(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let (connection, _outbound_rx) = test_connection(first.clone()).await;
+    initialize_for_test(&connection).await;
+    let started = first
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id =
+        verlet_runtime_contracts::ThreadId::parse_str(started["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let mut lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    first.shutdown().await.unwrap();
+    lifecycle.status = verlet_runtime_contracts::ThreadLifecycleStatus::Idle;
+    first
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(lifecycle)
+        .await
+        .unwrap();
+    let metadata_store = first.inner.metadata_store.clone();
+    drop(connection);
+    drop(first);
+
+    let failing_config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots.clone(),
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .unwrap();
+    let error =
+        match crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            failing_config,
+            std::sync::Arc::new(FailingReloadRuntimeFactory),
+            metadata_store,
+        )
+        .await
+        {
+            Ok(_) => panic!("constructor unexpectedly succeeded"),
+            Err(error) => error,
+        };
+    assert!(
+        error
+            .to_string()
+            .contains("injected constructor reload failure")
+    );
+
+    let successor = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        roots,
+        hosted_test_environment(),
+        std::env::temp_dir(),
+        &hosted_test_identity(),
+    )
+    .expect("a constructor failure after inner build must release its roots exactly once");
+    drop(successor);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -13955,6 +14820,49 @@ async fn test_app_at_root(root: &std::path::Path) -> crate::adapters::app_server
         .unwrap()
 }
 
+fn hosted_test_identity() -> crate::daemon::identity::VerletDaemonIdentityConfig {
+    crate::daemon::daemon_config::synthesized_local_daemon_identity_config()
+}
+
+fn hosted_test_environment() -> crate::adapters::app_server::instance::InstanceEnvironment {
+    crate::adapters::app_server::instance::InstanceEnvironment {
+        provider_auth: crate::adapters::app_server::instance::ProviderAuthSource::Injected(
+            verlet_metadata::provider_store::LlmProviderAuthContext::new(),
+        ),
+        hook_shell: Some(hosted_test_hook_shell()),
+        process_ids: std::sync::Arc::new(verlet_process::process::RandomProcessIds),
+    }
+}
+
+fn hosted_test_hook_shell() -> String {
+    if cfg!(windows) {
+        r"C:\Windows\System32\cmd.exe".to_string()
+    } else {
+        "/bin/sh".to_string()
+    }
+}
+
+async fn hosted_test_app_with_process_ids(
+    root: std::path::PathBuf,
+    process_ids: std::sync::Arc<dyn verlet_process::process::ProcessIdSource>,
+) -> crate::adapters::app_server::VerletAppServer {
+    let environment = crate::adapters::app_server::instance::InstanceEnvironment {
+        process_ids,
+        ..hosted_test_environment()
+    };
+    crate::adapters::app_server::VerletAppServer::new(
+        crate::adapters::app_server::VerletAppServerConfig::hosted(
+            crate::adapters::app_server::instance::InstanceRoots::under(&root),
+            environment,
+            std::env::temp_dir(),
+            &hosted_test_identity(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
 fn test_config_at_root(
     root: &std::path::Path,
 ) -> crate::adapters::app_server::VerletAppServerConfig {
@@ -14424,6 +15332,7 @@ where
         config.default_placement.clone(),
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        None,
     );
     crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, factory)
         .await

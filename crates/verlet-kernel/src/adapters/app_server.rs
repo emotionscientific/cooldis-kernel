@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt as _;
 use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 pub mod connection;
 mod default_manifest;
+pub mod instance;
 pub mod lifecycle;
 mod orchestrator_boundary;
 mod subscriptions;
@@ -121,7 +122,7 @@ impl AppServerListenAddr {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct VerletAppServerConfig {
     pub listen: AppServerListenAddr,
     pub runtime_home: std::path::PathBuf,
@@ -150,6 +151,10 @@ pub struct VerletAppServerConfig {
     /// configured sync listener has bound successfully.
     pub remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub console_assets: Option<ConsoleAssetConfig>,
+    root_reservation: Option<instance::InstanceRootReservation>,
+    /// Per-instance replacements for process-state reads at depth
+    /// (EMO-552): provider auth, hook shell, process-id source.
+    pub instance_environment: instance::InstanceEnvironment,
 }
 
 impl VerletAppServerConfig {
@@ -183,6 +188,7 @@ impl VerletAppServerConfig {
             model: APP_SERVER_LOCAL_MODEL.to_string(),
             model_provider: APP_SERVER_LOCAL_PROVIDER.to_string(),
             provider: AppServerProviderConfig::LocalOffline,
+            // lexicon-allow: capsule - existing app-server operation binding field.
             capsule_bindings: CapsuleBindingsConfig::default()
                 .with_registry_root(project_storage_root.join("operations")),
             agent_registry_root: project_storage_root.join("agents"),
@@ -196,9 +202,72 @@ impl VerletAppServerConfig {
                 false,
             )),
             console_assets: None,
+            root_reservation: None,
+            instance_environment: instance::InstanceEnvironment::standalone(),
         };
         config.apply_daemon_identity_config(&identity);
         config
+    }
+
+    /// Hosted-instance config (EMO-552): explicit absolute roots + fully
+    /// injected environment; no listener (`listen` is set but the host
+    /// never binds it — RPC arrives through
+    /// `dispatch_authenticated_json_rpc`). Construction canonicalizes the
+    /// roots and reserves them process-wide before any store opens;
+    /// overlapping a live instance's roots is a loud error. None of the
+    /// cwd/XDG defaulting of [`VerletAppServerConfig::local`] applies.
+    pub fn hosted(
+        roots: instance::InstanceRoots,
+        environment: instance::InstanceEnvironment,
+        cwd: impl Into<std::path::PathBuf>,
+        identity: &crate::daemon::identity::VerletDaemonIdentityConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let cwd = cwd.into();
+        environment.validate_hosted()?;
+        if !cwd.is_absolute() {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("hosted instance cwd must be absolute: {}", cwd.display()),
+            ));
+        }
+        let reservation = instance::reserve_instance_roots(&roots)?;
+        let canonical_roots = reservation.canonical_roots();
+        let runtime_home = canonical_roots[0].clone();
+        let state_home = canonical_roots[1].clone();
+        let user_state_home = canonical_roots[2].clone();
+        let agent_registry_root = canonical_roots[3].clone();
+        let blob_registry_root = canonical_roots[4].clone();
+        let skill_registry_root = canonical_roots[5].clone();
+        let mut config = Self {
+            listen: AppServerListenAddr::Unix(runtime_home.join("app-server.unbound.sock")),
+            runtime_home: runtime_home.clone(),
+            state_home,
+            user_state_home,
+            cwd,
+            tenant_id: String::new(),
+            user_id: String::new(),
+            identity_mode: crate::daemon::identity::IdentityMode::Local,
+            console_principal: None,
+            model: APP_SERVER_LOCAL_MODEL.to_string(),
+            model_provider: APP_SERVER_LOCAL_PROVIDER.to_string(),
+            provider: AppServerProviderConfig::LocalOffline,
+            capsule_bindings: CapsuleBindingsConfig::default()
+                .with_registry_root(runtime_home.join("operations")),
+            agent_registry_root,
+            blob_registry_root,
+            skill_registry_root,
+            lease_epoch: 0,
+            default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding::default(
+            ),
+            default_workspace: None,
+            remote_event_store_served: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            console_assets: None,
+            root_reservation: Some(reservation),
+            instance_environment: environment,
+        };
+        config.apply_daemon_identity_config(identity);
+        Ok(config)
     }
 
     /// Project a daemon identity config onto this app-server config. This is
@@ -350,6 +419,61 @@ impl VerletAppServerConfig {
     pub fn provider_metadata_store_path(&self) -> std::path::PathBuf {
         self.user_metadata_store_path()
     }
+
+    fn validate_root_reservation(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        let Some(reservation) = &self.root_reservation else {
+            return Ok(());
+        };
+        self.instance_environment.validate_hosted()?;
+        if !self.cwd.is_absolute() {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "hosted instance cwd must be absolute: {}",
+                    self.cwd.display()
+                ),
+            ));
+        }
+        let configured_roots = [
+            ("runtime_home", &self.runtime_home),
+            ("state_home", &self.state_home),
+            ("user_state_home", &self.user_state_home),
+            ("agent_registry_root", &self.agent_registry_root),
+            ("blob_registry_root", &self.blob_registry_root),
+            ("skill_registry_root", &self.skill_registry_root),
+        ];
+        for ((name, configured), reserved) in configured_roots
+            .into_iter()
+            .zip(reservation.canonical_roots())
+        {
+            if configured != reserved {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "hosted instance root {name} changed after reservation: configured {}, reserved {}",
+                        configured.display(),
+                        reserved.display()
+                    ),
+                ));
+            }
+        }
+        let expected_operation_registry_root = self.runtime_home.join("operations");
+        if self.capsule_bindings.registry_root.as_deref()
+            != Some(expected_operation_registry_root.as_path())
+        {
+            let configured = self
+                .capsule_bindings
+                .registry_root
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "hosted instance operation registry root changed after reservation: configured {configured}, expected {}",
+                    expected_operation_registry_root.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -478,6 +602,16 @@ struct VerletAppServerInner {
     tasks: std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
     shutdown: tokio::sync::Mutex<bool>,
     dispatch_gate: tokio::sync::RwLock<()>,
+    /// Process-wide claim on this instance's roots (EMO-552). `None` for
+    /// standalone-daemon construction; hosted construction holds it so the
+    /// claim releases when the instance is dropped after shutdown.
+    #[allow(dead_code)]
+    root_reservation: Option<instance::InstanceRootReservation>,
+    /// Injected environment (EMO-552): provider auth, hook shell,
+    /// process-id source. The deep process-state reads resolve through
+    /// this instead of `std::env`/globals.
+    #[allow(dead_code)]
+    instance_environment: instance::InstanceEnvironment,
     tenant_id: String,
     user_id: String,
     identity_mode: crate::daemon::identity::IdentityMode,
@@ -510,6 +644,13 @@ struct VerletAppServerInner {
     subscriptions:
         tokio::sync::Mutex<crate::adapters::app_server::subscriptions::AppServerSubscriptions>,
     state: tokio::sync::RwLock<crate::adapters::app_server::threads::AppServerState>,
+}
+
+impl VerletAppServerInner {
+    fn agent_registry(&self) -> crate::agent::manifest::LocalAgentRegistry {
+        crate::agent::manifest::LocalAgentRegistry::new(self.agent_registry_root.clone())
+            .with_blob_registry_root(self.blob_registry_root.clone())
+    }
 }
 
 struct ConsoleCredentialLease {
@@ -692,6 +833,7 @@ impl VerletAppServer {
     pub async fn new(
         mut config: VerletAppServerConfig,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        config.validate_root_reservation()?;
         let metadata_store = open_and_seed_metadata_store(config.metadata_store_path()).await?;
         let user_metadata_store =
             open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
@@ -714,6 +856,7 @@ impl VerletAppServer {
             dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
         >,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        config.validate_root_reservation()?;
         let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
             .await
             .map_err(metadata_store_error)?;
@@ -810,6 +953,7 @@ impl VerletAppServer {
             >,
         >,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        config.validate_root_reservation()?;
         crate::adapters::app_server::threads::normalize_registry_roots(&mut config);
         let provider_surface =
             agent_manifest_provider_surface_for_config(&config, &metadata_store).await?;
@@ -872,6 +1016,11 @@ impl VerletAppServer {
             &console_credential_record_path,
         )
         .await?;
+        let process_manager =
+            verlet_process::live::AsyncExecutionManager::new_with_process_id_source(
+                verlet_process::live::AsyncExecutionManagerConfig::default(),
+                std::sync::Arc::clone(&config.instance_environment.process_ids),
+            );
         let app = Self {
             inner: std::sync::Arc::new(VerletAppServerInner {
                 supervisor,
@@ -880,6 +1029,8 @@ impl VerletAppServer {
                 ),
                 shutdown: tokio::sync::Mutex::new(false),
                 dispatch_gate: tokio::sync::RwLock::new(()),
+                root_reservation: config.root_reservation,
+                instance_environment: config.instance_environment,
                 tenant_id: config.tenant_id,
                 user_id: config.user_id,
                 identity_mode: config.identity_mode,
@@ -906,7 +1057,7 @@ impl VerletAppServer {
                 lease_epoch: config.lease_epoch,
                 metadata_store,
                 user_metadata_store,
-                process_manager: verlet_process::live::AsyncExecutionManager::default(),
+                process_manager,
                 process_dispatcher: tokio::sync::OnceCell::new(),
                 subscriptions: tokio::sync::Mutex::new(
                     crate::adapters::app_server::subscriptions::AppServerSubscriptions::default(),
@@ -2235,10 +2386,11 @@ async fn runtime_factory_from_config(
             max_tokens,
             stream,
         } => {
+            let auth_context = config.instance_environment.provider_auth.resolve();
             let resolved = resolve_catalog_openai_chat_completions_provider(
                 provider_store,
                 auth_store,
-                &verlet_metadata::provider_store::LlmProviderAuthContext::from_process_env(),
+                &auth_context,
                 provider_id,
                 model.as_deref(),
                 *max_tokens,
@@ -2272,6 +2424,7 @@ async fn runtime_factory_from_config(
 pub(crate) fn runtime_factory_from_provider_parts(
     runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
     client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+    // lexicon-allow: capsule - existing app-server config API names
     capsule_bindings: CapsuleBindingsConfig,
 ) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
     runtime_factory_from_provider_parts_with_secret_resolver(
@@ -2307,6 +2460,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         crate::agent::manifest_bind::AgentManifestPlacementBinding::default(),
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        None,
     )
 }
 
@@ -2335,6 +2489,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
         config.default_placement.clone(),
         config.default_workspace.clone(),
         std::sync::Arc::clone(&config.remote_event_store_served),
+        config.instance_environment.hook_shell.clone(),
     )
 }
 
@@ -2355,6 +2510,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
     default_workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
     remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hook_shell: Option<String>,
 ) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
     // lexicon-allow: capsule - existing app-server runtime factory name
     std::sync::Arc::new(threads::CapsuleBindingRuntimeFactory {
@@ -2371,6 +2527,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         blob_registry_root,
         skill_registry_root,
         cwd,
+        hook_shell,
         default_placement,
         default_workspace,
         remote_event_store_served,

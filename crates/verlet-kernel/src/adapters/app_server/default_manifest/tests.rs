@@ -32,6 +32,28 @@ fn synthesized_default_manifest_preserves_slash_bearing_model_ids() {
 }
 
 #[test]
+fn synthesized_default_manifest_uses_configured_cwd_without_trailing_separator() {
+    let cwd = std::env::temp_dir().join(format!(
+        "verlet-default-manifest-cwd-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let config = crate::adapters::app_server::VerletAppServerConfig::local(
+        crate::adapters::app_server::AppServerListenAddr::Unix(
+            std::env::temp_dir().join("verlet-test.sock"),
+        ),
+        &cwd,
+    );
+
+    let manifest =
+        crate::adapters::app_server::default_manifest::synthesize_default_manifest_with_version(
+            &config, false, "0.1.0",
+        )
+        .unwrap();
+
+    assert_eq!(manifest.runtime.default_cwd, cwd.to_string_lossy());
+}
+
+#[test]
 fn existing_legacy_default_agent_record_is_migrated_in_place() {
     let root = std::env::temp_dir().join(format!(
         "verlet-default-manifest-legacy-{}",

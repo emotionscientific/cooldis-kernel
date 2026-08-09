@@ -239,12 +239,21 @@ pub trait HookHandler: Send + Sync + 'static {
         &self,
         request: HookRequest,
     ) -> crate::kernel::runtime_host::VerletResult<HookHandlerOutput>;
+
+    async fn run_with_shell(
+        &self,
+        request: HookRequest,
+        _shell: Option<&str>,
+    ) -> crate::kernel::runtime_host::VerletResult<HookHandlerOutput> {
+        self.run(request).await
+    }
 }
 
 #[derive(Clone, Default)]
 // lexicon-allow: hook - existing host debug hook pipeline API name retained for compatibility.
 pub struct HookPipeline {
     handlers: Vec<std::sync::Arc<dyn HookHandler>>,
+    shell: Option<String>,
 }
 
 impl HookPipeline {
@@ -257,9 +266,13 @@ impl HookPipeline {
         self
     }
 
-    pub fn with_command_handler(mut self, handler: CommandHookHandler) -> Self {
-        self.handlers.push(std::sync::Arc::new(handler));
+    pub(crate) fn with_shell(mut self, shell: Option<String>) -> Self {
+        self.shell = shell;
         self
+    }
+
+    pub fn with_command_handler(self, handler: CommandHookHandler) -> Self {
+        self.with_handler(std::sync::Arc::new(handler))
     }
 
     pub async fn run_session_start(
@@ -469,7 +482,10 @@ impl HookPipeline {
             on_started(&spec);
             let started_at_ms = unix_timestamp_ms();
             let started = std::time::Instant::now();
-            match handler.run(request.clone()).await {
+            match handler
+                .run_with_shell(request.clone(), self.shell.as_deref())
+                .await
+            {
                 Ok(output) => {
                     let status = status_for_output(&output);
                     let message = message_for_output(&output);
@@ -565,26 +581,16 @@ impl CommandHookHandler {
             HookRequest::Stop(request) => request.turn_context.cwd.clone(),
         }
     }
-}
 
-#[async_trait::async_trait]
-impl HookHandler for CommandHookHandler {
-    fn spec(&self) -> HookHandlerSpec {
-        self.spec.clone()
-    }
-
-    fn command_sha256(&self) -> Option<String> {
-        Some(verlet_agent::contracts::sha256_hex(self.command.as_bytes()))
-    }
-
-    async fn run(
+    async fn run_with_shell_override(
         &self,
         request: HookRequest,
+        shell: Option<&str>,
     ) -> crate::kernel::runtime_host::VerletResult<HookHandlerOutput> {
         let input = serde_json::to_string(&request).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeExecution(err.to_string())
         })?;
-        let mut command = default_shell_command();
+        let mut command = default_shell_command(shell);
         command.arg(&self.command);
         command
             .stdin(std::process::Stdio::piped())
@@ -640,6 +646,32 @@ impl HookHandler for CommandHookHandler {
                 "failed to parse hook stdout: {err}"
             ))
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl HookHandler for CommandHookHandler {
+    fn spec(&self) -> HookHandlerSpec {
+        self.spec.clone()
+    }
+
+    fn command_sha256(&self) -> Option<String> {
+        Some(verlet_agent::contracts::sha256_hex(self.command.as_bytes()))
+    }
+
+    async fn run(
+        &self,
+        request: HookRequest,
+    ) -> crate::kernel::runtime_host::VerletResult<HookHandlerOutput> {
+        self.run_with_shell_override(request, None).await
+    }
+
+    async fn run_with_shell(
+        &self,
+        request: HookRequest,
+        shell: Option<&str>,
+    ) -> crate::kernel::runtime_host::VerletResult<HookHandlerOutput> {
+        self.run_with_shell_override(request, shell).await
     }
 }
 
@@ -810,11 +842,13 @@ fn unix_timestamp_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn default_shell_command() -> tokio::process::Command {
+fn default_shell_command(shell: Option<&str>) -> tokio::process::Command {
     #[cfg(windows)]
     {
-        let comspec = verlet_runtime_contracts::env_compat::var("COMSPEC")
-            .unwrap_or_else(|_| "cmd.exe".to_string());
+        let comspec = shell.map(str::to_string).unwrap_or_else(|| {
+            verlet_runtime_contracts::env_compat::var("COMSPEC")
+                .unwrap_or_else(|_| "cmd.exe".to_string())
+        });
         let mut command = tokio::process::Command::new(comspec);
         command.arg("/C");
         command
@@ -822,8 +856,10 @@ fn default_shell_command() -> tokio::process::Command {
 
     #[cfg(not(windows))]
     {
-        let shell = verlet_runtime_contracts::env_compat::var("SHELL")
-            .unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = shell.map(str::to_string).unwrap_or_else(|| {
+            verlet_runtime_contracts::env_compat::var("SHELL")
+                .unwrap_or_else(|_| "/bin/sh".to_string())
+        });
         let mut command = tokio::process::Command::new(shell);
         command.arg("-lc");
         command

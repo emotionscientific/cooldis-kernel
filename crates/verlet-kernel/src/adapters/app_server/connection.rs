@@ -2052,8 +2052,7 @@ impl crate::adapters::app_server::VerletAppServer {
         import_id: &str,
         server_ref: &str,
     ) -> Result<Vec<serde_json::Value>, JsonRpcErrorError> {
-        let registry =
-            crate::agent::manifest::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let registry = self.inner.agent_registry();
         crate::agent::manifest::AgentRecordRef::parse(agent_ref)
             .map_err(|err| malformed_agent_ref(agent_ref, err))?;
         let (record, _) = registry
@@ -2111,8 +2110,7 @@ impl crate::adapters::app_server::VerletAppServer {
     }
 
     pub(super) fn agent_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let registry =
-            crate::agent::manifest::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let registry = self.inner.agent_registry();
         let data = registry
             .list_records()
             .map_err(internal_error)?
@@ -2126,8 +2124,7 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: AgentReadParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let registry =
-            crate::agent::manifest::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let registry = self.inner.agent_registry();
         crate::agent::manifest::AgentRecordRef::parse(&params.ref_uri)
             .map_err(|err| malformed_agent_ref(&params.ref_uri, err))?;
         let (record, alias_receipt) = registry
@@ -2145,8 +2142,7 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: AgentDraftParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let registry =
-            crate::agent::manifest::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let registry = self.inner.agent_registry();
         let (mut plan, source) = agent_publish_plan_from_draft(&params)?;
         verify_agent_plan_refs(&mut plan, self.agent_publish_operation_registry_root())?;
         let suggested_next_version = suggested_agent_version(&registry, &plan.name, &plan.version)
@@ -2165,8 +2161,7 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: AgentDraftParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let registry =
-            crate::agent::manifest::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let registry = self.inner.agent_registry();
         let base = validate_agent_publish_base(&registry, &params)?;
         let (plan, source) = agent_publish_plan_from_draft(&params)?;
         if plan.name != base.name || plan.namespace != base.namespace {
@@ -2382,10 +2377,11 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         provider: &verlet_metadata::provider_store::LlmProviderRecord,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let auth_context = self.inner.instance_environment.provider_auth.resolve();
         let status = verlet_metadata::provider_store::llm_provider_auth_status(
             &self.inner.user_metadata_store,
             provider,
-            &verlet_metadata::provider_store::LlmProviderAuthContext::from_process_env(),
+            &auth_context,
         )
         .await
         .map_err(|err| internal_error(crate::adapters::app_server::provider_store_error(err)))?;
@@ -2403,10 +2399,11 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         provider: &verlet_metadata::provider_store::LlmProviderRecord,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let auth_context = self.inner.instance_environment.provider_auth.resolve();
         let status = verlet_metadata::provider_store::llm_provider_auth_status(
             &self.inner.user_metadata_store,
             provider,
-            &verlet_metadata::provider_store::LlmProviderAuthContext::from_process_env(),
+            &auth_context,
         )
         .await
         .map_err(|err| internal_error(crate::adapters::app_server::provider_store_error(err)))?;
@@ -3623,11 +3620,11 @@ impl crate::adapters::app_server::VerletAppServer {
                         .to_string(),
                 )));
             }
-            let source_record = crate::agent::manifest::LocalAgentRegistry::new(
-                self.inner.agent_registry_root.clone(),
-            )
-            .load_ref(source_agent_ref)
-            .map_err(internal_error)?;
+            let source_record = self
+                .inner
+                .agent_registry()
+                .load_ref(source_agent_ref)
+                .map_err(internal_error)?;
             if source_record.manifest_hash != *source_manifest_hash {
                 return Err(internal_error(
                     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
