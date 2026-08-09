@@ -89,6 +89,9 @@ ships inside the kernel release: `verlet console`.
 
 The V1 work is focused on runtime primitives:
 
+- an embeddable multi-tenant host facade with one authenticated listener,
+  credential-to-instance selection, instance-owned authentication, and
+  independently drainable instance lifecycles;
 - agent manifest planning, publishing, listing, showing, and local running;
 - operation publication and ABI-backed invocation;
 - blob resource publication and folder-first prompt lowering;

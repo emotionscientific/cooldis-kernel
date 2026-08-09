@@ -121,6 +121,7 @@ crates/verlet-kernel/tests/fixtures/contracts/stream_schema_v1.json	Frozen golde
 crates/verlet-kernel/tests/fixtures/search_operation.wat.tpl	Frozen golden or persisted-record fixture must replay byte-for-byte.
 crates/verlet-kernel/tests/fixtures/wasm-counter-coupling-handrolled/src/lib.rs	Frozen golden or persisted-record fixture must replay byte-for-byte.
 crates/verlet-kernel/tests/fixtures/wasm_vfs_probe_operation.wat.tpl	Frozen golden or persisted-record fixture must replay byte-for-byte.
+crates/verlet-kernel/tests/host_facade.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/tests/remote_store_lease.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/tests/remote_store_queue_tail.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/tests/remote_store_sync.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.

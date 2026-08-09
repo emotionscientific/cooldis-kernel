@@ -87,7 +87,7 @@ impl InstanceTaskSet {
     /// Cancel every owned task and await them all. Idempotent; concurrent
     /// callers all observe completion.
     pub async fn shutdown(&self) {
-        self.cancellation.cancel();
+        self.cancel();
         let _drain = self.shutdown_drain.lock().await;
         loop {
             let result = std::future::poll_fn(|context| {
@@ -107,6 +107,14 @@ impl InstanceTaskSet {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
+    }
+
+    /// Signal cancellation without waiting for the owned task set to drain.
+    /// Instance shutdown uses this before closing its dispatch gate so an
+    /// active request cannot hold the gate while waiting for cancellation that
+    /// would otherwise begin only after the gate closed.
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
     }
 
     pub(crate) fn is_shutdown(&self) -> bool {
