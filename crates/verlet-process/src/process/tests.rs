@@ -23,6 +23,31 @@ fn virtual_process_retains_output_and_exit_status() {
 }
 
 #[test]
+fn deterministic_process_id_sources_produce_independent_identical_sequences() {
+    use crate::process::ProcessIdSource as _;
+
+    let first = crate::process::DeterministicProcessIds::new();
+    let second = crate::process::DeterministicProcessIds::new();
+
+    let first_ids = (0..3)
+        .map(|_| first.next_process_id().to_string())
+        .collect::<Vec<_>>();
+    let second_ids = (0..3)
+        .map(|_| second.next_process_id().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(first_ids, second_ids);
+    assert_eq!(
+        first_ids,
+        [
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000002",
+            "00000000-0000-0000-0000-000000000003",
+        ]
+    );
+}
+
+#[test]
 fn external_timeout_maps_to_terminal_process_state() {
     let request = crate::execution::ExternalCommandRequest {
         invocation: crate::execution::ExternalCommandInvocation::Script("sleep 10".to_string()),

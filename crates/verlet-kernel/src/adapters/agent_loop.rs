@@ -110,10 +110,6 @@ fn reattach_late_tool_result_entries(
     output
 }
 
-fn default_process_dispatcher_cwd() -> std::path::PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-}
-
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentLoopConfig {
     pub provider: String,
@@ -236,6 +232,8 @@ pub struct AgentLoopFactory {
     thread_spawn_agent_resolver:
         Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
     hook_pipeline: Option<std::sync::Arc<crate::agent::hooks::HookPipeline>>,
+    hook_shell: Option<String>,
+    process_dispatcher_cwd: Option<std::path::PathBuf>,
     tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
     context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
     compaction_policy: crate::kernel::compaction::CompactionPolicy,
@@ -256,6 +254,8 @@ impl AgentLoopFactory {
             bash_tool_config: None,
             thread_spawn_agent_resolver: None,
             hook_pipeline: None,
+            hook_shell: None,
+            process_dispatcher_cwd: None,
             tool_permission_gate: std::sync::Arc::new(
                 crate::agent::tool_interceptor::AllowAllToolPermissionGate,
             ),
@@ -326,6 +326,17 @@ impl AgentLoopFactory {
         self
     }
 
+    // lexicon-allow: hook - existing host debug hook configuration name retained for compatibility.
+    pub(crate) fn with_hook_shell(mut self, hook_shell: Option<String>) -> Self {
+        self.hook_shell = hook_shell;
+        self
+    }
+
+    pub(crate) fn with_process_dispatcher_cwd(mut self, cwd: Option<std::path::PathBuf>) -> Self {
+        self.process_dispatcher_cwd = cwd;
+        self
+    }
+
     pub fn with_tool_permission_gate(
         mut self,
         tool_permission_gate: std::sync::Arc<
@@ -390,7 +401,15 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for AgentLoop
             tool_router: self.tool_router.clone(),
             bash_tool_config: self.bash_tool_config.clone(),
             thread_spawn_agent_resolver: self.thread_spawn_agent_resolver.clone(),
-            hook_pipeline: self.hook_pipeline.clone(),
+            hook_pipeline: self.hook_pipeline.as_ref().map(|pipeline| {
+                std::sync::Arc::new(
+                    pipeline
+                        .as_ref()
+                        .clone()
+                        .with_shell(self.hook_shell.clone()),
+                )
+            }),
+            process_dispatcher_cwd: self.process_dispatcher_cwd.clone(),
             tool_permission_gate: std::sync::Arc::clone(&self.tool_permission_gate),
             context_compile_policy: self.context_compile_policy.clone(),
             compaction_policy: self.compaction_policy.clone(),
@@ -411,6 +430,7 @@ struct AgentLoop {
     thread_spawn_agent_resolver:
         Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
     hook_pipeline: Option<std::sync::Arc<crate::agent::hooks::HookPipeline>>,
+    process_dispatcher_cwd: Option<std::path::PathBuf>,
     tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
     context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
     compaction_policy: crate::kernel::compaction::CompactionPolicy,
@@ -633,7 +653,8 @@ impl AgentLoop {
             .bash_tool_config
             .as_ref()
             .map(|config| config.cwd.clone())
-            .unwrap_or_else(default_process_dispatcher_cwd);
+            .or_else(|| self.process_dispatcher_cwd.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let process_handle_dispatcher = services.process_handle_dispatcher().or_else(|| {
             services.process_handle_ingress().map(|ingress| {
                 crate::kernel::process_handle_dispatch::ProcessHandleDispatcher::new(

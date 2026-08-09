@@ -36,6 +36,7 @@ pub struct AsyncExecutionManager {
 
 struct AsyncExecutionManagerInner {
     config: AsyncExecutionManagerConfig,
+    process_ids: std::sync::Arc<dyn crate::process::ProcessIdSource>,
     entries: tokio::sync::Mutex<
         std::collections::HashMap<crate::process::VerletProcessId, ProcessEntry>,
     >,
@@ -262,9 +263,20 @@ pub enum ProcessSnapshotStatus {
 
 impl AsyncExecutionManager {
     pub fn new(config: AsyncExecutionManagerConfig) -> Self {
+        Self::new_with_process_id_source(
+            config,
+            std::sync::Arc::new(crate::process::RandomProcessIds),
+        )
+    }
+
+    pub fn new_with_process_id_source(
+        config: AsyncExecutionManagerConfig,
+        process_ids: std::sync::Arc<dyn crate::process::ProcessIdSource>,
+    ) -> Self {
         Self {
             inner: std::sync::Arc::new(AsyncExecutionManagerInner {
                 config,
+                process_ids,
                 entries: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             }),
         }
@@ -286,8 +298,11 @@ impl AsyncExecutionManager {
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::VerletProcessResult<AsyncProcessOutcome> {
         self.cleanup_expired().await;
+        let process_id = request
+            .process_id
+            .unwrap_or_else(|| self.inner.process_ids.next_process_id());
         let process = crate::process::VerletProcessHandle::with_process_id(
-            request.process_id.unwrap_or_default(),
+            process_id,
             backend.backend_kind(),
             request.invocation.label(),
         );

@@ -394,8 +394,7 @@ impl crate::adapters::app_server::VerletAppServer {
             }
             (None, None) => {}
         }
-        let registry =
-            crate::agent::manifest::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let registry = self.inner.agent_registry();
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         if &record.manifest_hash != expected_hash {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
@@ -526,8 +525,7 @@ impl crate::adapters::app_server::VerletAppServer {
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::agent::manifest_bind::AgentManifestBoundThread,
     > {
-        let registry =
-            crate::agent::manifest::LocalAgentRegistry::new(self.inner.agent_registry_root.clone());
+        let registry = self.inner.agent_registry();
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let provider_surface = self.agent_manifest_provider_surface().await?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
@@ -2101,6 +2099,7 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) blob_registry_root: Option<std::path::PathBuf>,
     pub(super) skill_registry_root: Option<std::path::PathBuf>,
     pub(super) cwd: Option<std::path::PathBuf>,
+    pub(super) hook_shell: Option<String>,
     pub(super) default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
     pub(super) default_workspace:
         Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
@@ -2131,7 +2130,9 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
         let mut factory = crate::adapters::agent_loop::AgentLoopFactory::new(
             config,
             std::sync::Arc::clone(&self.client),
-        );
+        )
+        .with_hook_shell(self.hook_shell.clone())
+        .with_process_dispatcher_cwd(self.cwd.clone());
         if let Some(policy) = manifest_compaction_policy(context)? {
             factory = factory.with_compaction_policy(policy);
         }
@@ -2223,8 +2224,11 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::agent::agent_process::KernelThreadSpawnAgentBinding,
     > {
-        let registry =
+        let mut registry =
             crate::agent::manifest::LocalAgentRegistry::new(self.agent_registry_root.clone());
+        if let Some(blob_registry_root) = &self.blob_registry_root {
+            registry = registry.with_blob_registry_root(blob_registry_root.clone());
+        }
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
