@@ -22,18 +22,17 @@ verlet-metadata = { path = "../verlet-metadata" }
 verlet-operations = { path = "../verlet-operations" }
 verlet-process = { path = "../verlet-process" }
 verlet-provider = { path = "../verlet-provider" }
+verlet-chat = { path = "../verlet-chat" }
 verlet-runtime-contracts = { path = "../verlet-runtime-contracts" }
 verlet-sqlite = { path = "../verlet-sqlite" }
 verlet-vfs = { path = "../verlet-vfs" }
 verlet-vbash = { path = "../verlet-vbash" }
 verlet-wasm = { path = "../verlet-wasm" }
 croner = { workspace = true }
-crossterm = { workspace = true }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
 libc = { workspace = true }
 object_store = { workspace = true }
-ratatui = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 # ADR 0005 decision 8: retained for the ingress IO-state enclave until EMO-409.

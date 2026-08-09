@@ -99,6 +99,7 @@ harness product layer are V2 direction.
 - [Local To Managed Deployment](concepts/local-to-managed.md)
 - [Permissions And Governance](concepts/permissions-and-governance.md)
 - [Runtime Primitives](developers/runtime-primitives.md)
+- [Chat Console](chat.md)
 - [Daemon And Remote Placement](daemon.md)
 - [Protocol Surfaces](developers/protocol-surfaces.md)
 - [Threat Model](threat-model.md)
