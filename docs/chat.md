@@ -15,9 +15,10 @@ verlet chat [PROMPT] --provider <provider> [--model <model>] ...
 
 The UI lives in the `verlet-chat` crate (`crates/verlet-chat`), built on
 [tuika](https://github.com/everruns/tuika) and ported from its `codex`
-example. It is presentation only: a synchronous state machine that consumes
-typed `ChatEvent`s and emits typed `Action`s, with no RPC or async code, so
-the whole surface is testable without a terminal.
+example. Its `App` core is a synchronous state machine that consumes typed
+`ChatEvent`s and emits typed `Action`s, with no RPC or async code, so the whole
+state surface is testable without a terminal. A thin async runner owns the
+terminal session and multiplexes input, host events, and animation ticks.
 
 The kernel side (`crates/verlet-kernel/src/cli/chat.rs`) hosts the async
 driver: it owns the JSON-RPC client, translates app-server notifications into
@@ -52,7 +53,7 @@ changes.
 
 Approvals are not surfaced in the TUI yet (the app-server exposes them via
 polling only). A broadcast-lag resync shows a notice rather than rebuilding
-the transcript. The console does not implement shell escape, mouse support,
-file mentions, external editor handoff, export/copy, or an orchestrator view;
-those remain separate product decisions. The goal is a credible default local
-console while preserving the app-server RPC boundary.
+the transcript. The console does not implement shell escape, mouse interaction
+beyond wheel scrolling, file mentions, external editor handoff, export/copy,
+or an orchestrator view; those remain separate product decisions. The goal is
+a credible default local console while preserving the app-server RPC boundary.

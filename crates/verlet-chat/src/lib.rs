@@ -69,7 +69,7 @@ pub enum ChatEvent {
     AnswerDelta(String),
     /// Streamed assistant thinking text.
     ThinkingDelta(String),
-    /// A tool call began. `title` is already human-shaped ("Ran cargo test",
+    /// A tool call began. `title` is already human-shaped ("cargo test",
     /// "web_search ...").
     ToolStarted { id: String, title: String },
     /// Streamed tool/command output.
@@ -87,7 +87,8 @@ pub enum ChatEvent {
     TurnCompleted { error: Option<String> },
     /// A submit landed as mid-turn steering rather than a new turn.
     TurnSteered,
-    /// Cumulative token usage for the active turn.
+    /// Token usage reported for one model request in the active turn. The UI
+    /// accumulates successive hints until the next turn starts.
     Usage { total_tokens: u64 },
     /// The UI now shows this thread (start, resume, fork all land here).
     ThreadSwitched {
@@ -113,7 +114,7 @@ pub enum ChatEvent {
     ResyncStarted,
 }
 
-/// Immutable-per-connection facts the UI shows in the banner and footer.
+/// Connection and current-thread facts the UI shows in the banner and footer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionMeta {
     /// "local/private" or "attach ws://...".

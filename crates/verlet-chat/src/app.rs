@@ -480,6 +480,9 @@ impl App {
     pub fn apply(&mut self, event: ChatEvent) {
         match event {
             ChatEvent::AnswerDelta(delta) => {
+                if delta.is_empty() {
+                    return;
+                }
                 let index = match self.active_answer {
                     Some(index) => index,
                     None => {
@@ -496,6 +499,9 @@ impl App {
                 self.follow();
             }
             ChatEvent::ThinkingDelta(delta) => {
+                if delta.is_empty() {
+                    return;
+                }
                 let index = match self.active_thinking {
                     Some(index) => index,
                     None => {
@@ -526,6 +532,9 @@ impl App {
                 self.follow();
             }
             ChatEvent::ToolOutputDelta { id, delta } => {
+                if delta.is_empty() {
+                    return;
+                }
                 if let Some(Cell::Exec { output, .. }) = self.find_exec(&id) {
                     append_output_lines(output, &delta);
                 }
@@ -558,6 +567,7 @@ impl App {
                 self.turn_active = true;
                 self.turn_started = Some(self.frame);
                 self.turn_state = format!("running {}", short_id(&turn_id));
+                self.total_tokens = 0;
                 self.active_answer = None;
                 self.active_thinking = None;
             }
@@ -571,7 +581,7 @@ impl App {
                 self.finish_turn();
             }
             ChatEvent::Usage { total_tokens } => {
-                self.total_tokens = total_tokens;
+                self.total_tokens = self.total_tokens.saturating_add(total_tokens);
             }
             ChatEvent::ThreadSwitched {
                 thread_id,
@@ -620,7 +630,6 @@ impl App {
             ChatEvent::Info { title, body } => self.notice(Tone::Info, title, body),
             ChatEvent::Error { title, body } => {
                 self.notice(Tone::Error, title, body);
-                self.finish_turn();
             }
             ChatEvent::ResyncStarted => {
                 self.notice(
@@ -669,9 +678,9 @@ impl App {
         ]
     }
 
-    /// Re-arm the stick-to-bottom follow after appending to the transcript.
+    /// Reconcile new transcript content without overriding manual scrollback.
     fn follow(&mut self) {
-        self.scroll.jump_to_bottom(self.content_h, self.viewport_h);
+        self.scroll.clamp(self.content_h, self.viewport_h);
     }
 
     /// Rebuild the transcript as one item per cell, laid out to `width`.

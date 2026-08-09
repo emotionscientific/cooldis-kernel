@@ -429,28 +429,31 @@ impl ChatDriver {
         match notification.method.as_str() {
             "item/agentMessage/delta" if active_matches => {
                 crate::cli::debug_rpc::notification_delta(notification)
+                    .filter(|delta| !delta.is_empty())
                     .map(|delta| vec![verlet_chat::ChatEvent::AnswerDelta(delta.to_string())])
                     .unwrap_or_default()
             }
             "item/agentThinking/delta" if active_matches => {
                 crate::cli::debug_rpc::notification_delta(notification)
+                    .filter(|delta| !delta.is_empty())
                     .map(|delta| vec![verlet_chat::ChatEvent::ThinkingDelta(delta.to_string())])
                     .unwrap_or_default()
             }
-            "item/started" if this_thread => notification
+            "item/started" if active_matches => notification
                 .params
                 .as_ref()
                 .and_then(|params| params.get("item"))
                 .and_then(tool_item_started)
                 .map(|event| vec![event])
                 .unwrap_or_default(),
-            "item/commandExecution/outputDelta" if this_thread => {
+            "item/commandExecution/outputDelta" if active_matches => {
                 let item_id = notification
                     .params
                     .as_ref()
                     .and_then(|params| params.get("itemId"))
                     .and_then(serde_json::Value::as_str);
-                let delta = crate::cli::debug_rpc::notification_delta(notification);
+                let delta = crate::cli::debug_rpc::notification_delta(notification)
+                    .filter(|delta| !delta.is_empty());
                 match (item_id, delta) {
                     (Some(id), Some(delta)) => vec![verlet_chat::ChatEvent::ToolOutputDelta {
                         id: id.to_string(),
@@ -459,7 +462,7 @@ impl ChatDriver {
                     _ => Vec::new(),
                 }
             }
-            "item/completed" if this_thread => notification
+            "item/completed" if active_matches => notification
                 .params
                 .as_ref()
                 .and_then(|params| params.get("item"))
@@ -486,9 +489,10 @@ impl ChatDriver {
                 }
             }
             "turn/completed"
-                if self.active_turn_id.as_deref().is_some_and(|turn_id| {
-                    crate::cli::console::notification_turn_id(notification) == Some(turn_id)
-                }) =>
+                if this_thread
+                    && self.active_turn_id.as_deref().is_some_and(|turn_id| {
+                        crate::cli::console::notification_turn_id(notification) == Some(turn_id)
+                    }) =>
             {
                 self.active_turn_id = None;
                 let message = crate::cli::debug_rpc::notification_turn_error_message(notification);
@@ -529,7 +533,27 @@ impl ChatDriver {
                 title: "stream resynced".to_string(),
                 body: vec!["earlier output may have been elided".to_string()],
             }],
-            "error" => {
+            "thread/resync/failed" if this_thread => {
+                let message = notification
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("error"))
+                    .and_then(|error| error.get("message"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown error");
+                let mut events = vec![verlet_chat::ChatEvent::Error {
+                    title: format!("stream resync failed: {message}"),
+                    body: vec![
+                        "the live subscription stopped; the transcript may be incomplete"
+                            .to_string(),
+                    ],
+                }];
+                if self.active_turn_id.take().is_some() {
+                    events.push(verlet_chat::ChatEvent::TurnCompleted { error: None });
+                }
+                events
+            }
+            "error" if active_matches => {
                 self.active_turn_id = None;
                 vec![
                     verlet_chat::ChatEvent::Error {

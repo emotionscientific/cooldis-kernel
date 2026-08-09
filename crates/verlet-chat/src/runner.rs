@@ -4,7 +4,8 @@
 //! It multiplexes three sources — terminal input, host [`ChatEvent`]s, and an
 //! animation tick — and redraws after each. The tick only runs while a turn
 //! is in flight (the spinner and elapsed timer are the only animated parts),
-//! so an idle chat draws nothing and wakes for input only.
+//! so an idle chat performs no timer-driven redraws and otherwise wakes for
+//! input or host events only.
 
 use std::io;
 

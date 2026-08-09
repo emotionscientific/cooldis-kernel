@@ -37,7 +37,7 @@ pub enum Tone {
 
 /// One item in the transcript.
 pub enum Cell {
-    /// The session header printed on startup and `/new`.
+    /// The session header printed on startup.
     Banner {
         version: String,
         rows: Vec<(String, String)>,
@@ -99,7 +99,7 @@ impl Cell {
                 output,
                 status,
                 ..
-            } => exec(title, output, *status, theme),
+            } => exec(title, output, *status, width, theme),
             Cell::Answer(state) => answer(state, width, theme, sheet),
             Cell::Notice { tone, title, body } => notice(*tone, title, body, width, theme),
             Cell::Sessions(rows) => sessions(rows, theme),
@@ -275,7 +275,13 @@ fn reasoning(body: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     out
 }
 
-fn exec(title: &str, output: &[String], status: ExecStatus, theme: &Theme) -> Vec<Line<'static>> {
+fn exec(
+    title: &str,
+    output: &[String],
+    status: ExecStatus,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let trailing = match status {
         ExecStatus::Running => None,
         ExecStatus::Ok => None,
@@ -296,27 +302,25 @@ fn exec(title: &str, output: &[String], status: ExecStatus, theme: &Theme) -> Ve
         spans
     })];
 
-    // Long output is elided in the middle, keeping a head and tail window.
+    // Wrap before eliding so a single long line remains inspectable instead of
+    // being clipped at the viewport edge.
+    let source = output
+        .iter()
+        .map(|line| Line::from(Span::styled(line.clone(), theme.muted_style())))
+        .collect::<Vec<_>>();
+    let wrapped = wrap_lines(&source, width.saturating_sub(4));
     let mut rows: Vec<Line<'static>> = Vec::new();
-    if output.len() > MAX_OUTPUT_ROWS {
+    if wrapped.len() > MAX_OUTPUT_ROWS {
         let head = MAX_OUTPUT_ROWS / 2;
-        let tail = output.len() - (MAX_OUTPUT_ROWS - head);
-        for line in &output[..head] {
-            rows.push(Line::from(Span::styled(line.clone(), theme.muted_style())));
-        }
+        let tail = wrapped.len() - (MAX_OUTPUT_ROWS - head);
+        rows.extend_from_slice(&wrapped[..head]);
         rows.push(Line::from(Span::styled(
             format!("… +{} lines", tail - head),
             Style::default().fg(theme.dim),
         )));
-        for line in &output[tail..] {
-            rows.push(Line::from(Span::styled(line.clone(), theme.muted_style())));
-        }
+        rows.extend_from_slice(&wrapped[tail..]);
     } else {
-        rows.extend(
-            output
-                .iter()
-                .map(|line| Line::from(Span::styled(line.clone(), theme.muted_style()))),
-        );
+        rows = wrapped;
     }
     out.extend(detail(rows, theme));
     out

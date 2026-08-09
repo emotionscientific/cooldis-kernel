@@ -113,6 +113,36 @@ fn deltas_stream_into_one_cell_and_close_on_turn_completion() {
 }
 
 #[test]
+fn empty_deltas_do_not_open_transcript_cells_or_output_rows() {
+    let mut app = app();
+    app.apply(ChatEvent::AnswerDelta(String::new()));
+    app.apply(ChatEvent::ThinkingDelta(String::new()));
+    app.apply(ChatEvent::ToolStarted {
+        id: "call-1".to_string(),
+        title: "build".to_string(),
+    });
+    app.apply(ChatEvent::ToolOutputDelta {
+        id: "call-1".to_string(),
+        delta: String::new(),
+    });
+
+    assert!(
+        !app.cells
+            .iter()
+            .any(|cell| matches!(cell, crate::Cell::Answer(_)))
+    );
+    assert!(
+        !app.cells
+            .iter()
+            .any(|cell| matches!(cell, crate::Cell::Reasoning { .. }))
+    );
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Exec { output, .. } if output.is_empty()
+    )));
+}
+
+#[test]
 fn tool_events_target_their_cell_by_id() {
     let mut app = app();
     app.apply(ChatEvent::TurnStarted {
@@ -228,6 +258,23 @@ fn popup_filter_narrows_with_the_typed_prefix() {
         .map(|(label, _)| label)
         .collect();
     assert_eq!(labels, vec!["/resume".to_string(), "/rename".to_string()]);
+}
+
+#[test]
+fn enter_with_no_popup_matches_submits_the_unknown_command() {
+    let mut app = app();
+    type_text(&mut app, "/wat");
+    assert!(app.popup_items().is_empty());
+
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+
+    assert!(app.popup_items().is_empty());
+    assert!(app.composer.is_empty());
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Notice { tone: crate::Tone::Error, title, .. }
+            if title.contains("unknown slash command /wat")
+    )));
 }
 
 /// Render the app at 80x24 and return the glyph grid.
@@ -365,6 +412,21 @@ fn submit_during_an_active_turn_still_queues_and_steered_updates_the_label() {
 }
 
 #[test]
+fn rpc_error_notice_does_not_finish_an_unrelated_active_turn() {
+    let mut app = app();
+    app.apply(ChatEvent::TurnStarted {
+        turn_id: "turn-1".to_string(),
+    });
+    app.apply(ChatEvent::Error {
+        title: "request `thread/list` was refused".to_string(),
+        body: Vec::new(),
+    });
+
+    assert!(app.turn_active());
+    assert!(app.turn_state.starts_with("running"));
+}
+
+#[test]
 fn thread_switched_resets_turn_state_and_token_count() {
     let mut app = app();
     app.apply(ChatEvent::TurnStarted {
@@ -382,6 +444,33 @@ fn thread_switched_resets_turn_state_and_token_count() {
     assert_eq!(app.total_tokens, 0);
     assert_eq!(app.meta.thread_id, "thread-99999999");
     assert_eq!(app.meta.thread_name.as_deref(), Some("fresh"));
+}
+
+#[test]
+fn a_new_turn_resets_previous_turn_usage() {
+    let mut app = app();
+    app.apply(ChatEvent::TurnStarted {
+        turn_id: "turn-1".to_string(),
+    });
+    app.apply(ChatEvent::Usage { total_tokens: 500 });
+    app.apply(ChatEvent::TurnCompleted { error: None });
+    app.apply(ChatEvent::TurnStarted {
+        turn_id: "turn-2".to_string(),
+    });
+
+    assert_eq!(app.total_tokens, 0);
+}
+
+#[test]
+fn usage_accumulates_across_model_requests_in_one_turn() {
+    let mut app = app();
+    app.apply(ChatEvent::TurnStarted {
+        turn_id: "turn-1".to_string(),
+    });
+    app.apply(ChatEvent::Usage { total_tokens: 120 });
+    app.apply(ChatEvent::Usage { total_tokens: 80 });
+
+    assert_eq!(app.total_tokens, 200);
 }
 
 #[test]
@@ -624,6 +713,82 @@ fn long_transcripts_follow_the_tail() {
     assert!(
         !grid.contains("notice number 0"),
         "head must have scrolled out:\n{grid}"
+    );
+}
+
+#[test]
+fn transcript_updates_preserve_manual_scrollback() {
+    let mut app = app();
+    app.content_h = 100;
+    app.viewport_h = 10;
+    app.scroll.jump_to_bottom(app.content_h, app.viewport_h);
+    let _ = app
+        .scroll
+        .handle(&key(tuika::KeyCode::PageUp), app.content_h, app.viewport_h);
+    let offset = app.scroll.offset();
+    assert!(!app.scroll.is_stuck_to_bottom());
+
+    app.apply(ChatEvent::Info {
+        title: "new output".to_string(),
+        body: Vec::new(),
+    });
+
+    assert_eq!(app.scroll.offset(), offset);
+    assert!(!app.scroll.is_stuck_to_bottom());
+}
+
+#[test]
+fn long_single_line_tool_output_wraps_instead_of_clipping_the_tail() {
+    let mut app = app();
+    app.apply(ChatEvent::ToolStarted {
+        id: "call-1".to_string(),
+        title: "emit".to_string(),
+    });
+    app.apply(ChatEvent::ToolCompleted {
+        id: "call-1".to_string(),
+        success: true,
+        output: format!("HEAD {} TAIL", "x".repeat(180)),
+    });
+
+    let grid = render(&mut app, false);
+    assert!(
+        grid.contains("TAIL"),
+        "long output tail was clipped:\n{grid}"
+    );
+}
+
+#[test]
+fn wide_character_input_submits_losslessly() {
+    let mut app = app();
+    type_text(&mut app, "你🙂é");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::Submit("你🙂é".to_string())]
+    );
+}
+
+#[test]
+fn zero_size_terminal_build_is_safe() {
+    let mut app = app();
+    app.apply(ChatEvent::ToolStarted {
+        id: "call-1".to_string(),
+        title: "emit".to_string(),
+    });
+    app.apply(ChatEvent::ToolCompleted {
+        id: "call-1".to_string(),
+        success: true,
+        output: "long output".repeat(20),
+    });
+    let theme = crate::chat_theme(false);
+    let sheet = tuika::StyleSheet::from_theme(&theme);
+    let probe = tuika::probe::RectProbe::new();
+    let _ = crate::ui::build(
+        &mut app,
+        ratatui::layout::Rect::new(0, 0, 0, 0),
+        &theme,
+        &sheet,
+        &probe,
     );
 }
 

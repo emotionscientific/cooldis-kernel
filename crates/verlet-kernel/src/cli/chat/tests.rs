@@ -62,6 +62,15 @@ fn projects_answer_and_thinking_deltas_for_the_active_turn() {
         serde_json::json!({"threadId": "thread-2", "turnId": "turn-9", "delta": "no"}),
     ));
     assert!(events.is_empty());
+
+    let events = driver.project_notification(&notification(
+        "item/agentMessage/delta",
+        serde_json::json!({"threadId": "thread-1", "turnId": "turn-1", "delta": ""}),
+    ));
+    assert!(
+        events.is_empty(),
+        "empty deltas must not open transcript cells"
+    );
 }
 
 #[test]
@@ -151,6 +160,130 @@ fn projects_command_execution_output_and_exit() {
             success: false,
             output: "boom".into(),
         }]
+    );
+}
+
+#[test]
+fn ignores_tool_and_error_events_outside_the_active_turn() {
+    let mut driver = driver();
+    for (method, params) in [
+        (
+            "item/started",
+            serde_json::json!({
+                "threadId": "thread-1",
+                "turnId": "turn-2",
+                "item": {"type": "dynamicToolCall", "id": "stale", "tool": "read"},
+            }),
+        ),
+        (
+            "item/commandExecution/outputDelta",
+            serde_json::json!({
+                "threadId": "thread-1",
+                "turnId": "turn-2",
+                "itemId": "stale",
+                "delta": "must not leak",
+            }),
+        ),
+        (
+            "item/completed",
+            serde_json::json!({
+                "threadId": "thread-1",
+                "turnId": "turn-2",
+                "item": {"type": "dynamicToolCall", "id": "stale", "success": true},
+            }),
+        ),
+        (
+            "error",
+            serde_json::json!({
+                "threadId": "thread-1",
+                "turnId": "turn-2",
+                "error": {"message": "stale failure"},
+            }),
+        ),
+    ] {
+        assert!(
+            driver
+                .project_notification(&notification(method, params))
+                .is_empty(),
+            "{method} from another turn must be ignored"
+        );
+    }
+    assert_eq!(driver.active_turn_id.as_deref(), Some("turn-1"));
+
+    let events = driver.project_notification(&notification(
+        "turn/completed",
+        serde_json::json!({
+            "threadId": "thread-2",
+            "turn": {"id": "turn-1", "status": "completed"},
+        }),
+    ));
+    assert!(
+        events.is_empty(),
+        "another thread cannot complete this turn"
+    );
+    assert_eq!(driver.active_turn_id.as_deref(), Some("turn-1"));
+}
+
+#[test]
+fn projects_error_only_for_the_active_thread_and_turn() {
+    let mut driver = driver();
+    let events = driver.project_notification(&notification(
+        "error",
+        serde_json::json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "error": {"message": "provider failed"},
+        }),
+    ));
+    assert_eq!(
+        events,
+        vec![
+            verlet_chat::ChatEvent::Error {
+                title: "app-server error: provider failed".into(),
+                body: Vec::new(),
+            },
+            verlet_chat::ChatEvent::TurnCompleted { error: None },
+        ]
+    );
+    assert!(driver.active_turn_id.is_none());
+}
+
+#[test]
+fn projects_resync_failure_for_the_current_thread_and_ends_the_turn() {
+    let mut driver = driver();
+    let events = driver.project_notification(&notification(
+        "thread/resync/failed",
+        serde_json::json!({
+            "threadId": "thread-1",
+            "reason": "broadcastLag",
+            "laggedEvents": 8,
+            "error": {"code": "resync_failed", "message": "durable history unavailable"},
+        }),
+    ));
+    assert_eq!(
+        events,
+        vec![
+            verlet_chat::ChatEvent::Error {
+                title: "stream resync failed: durable history unavailable".into(),
+                body: vec![
+                    "the live subscription stopped; the transcript may be incomplete".into()
+                ],
+            },
+            verlet_chat::ChatEvent::TurnCompleted { error: None },
+        ]
+    );
+    assert!(driver.active_turn_id.is_none());
+
+    assert!(
+        driver
+            .project_notification(&notification(
+                "thread/resync/failed",
+                serde_json::json!({
+                    "threadId": "thread-2",
+                    "error": {"message": "other thread"},
+                }),
+            ))
+            .is_empty()
     );
 }
 
