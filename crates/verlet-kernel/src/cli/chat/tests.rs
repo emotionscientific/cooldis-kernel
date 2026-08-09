@@ -1,118 +1,205 @@
 #[test]
-fn slash_parser_accepts_chat_session_commands() {
+fn parse_attach_target_accepts_unix_and_websocket() {
     assert_eq!(
-        crate::cli::chat::parse_slash_command("/help").unwrap(),
-        Some(crate::cli::chat::SlashCommand::Help)
+        super::parse_attach_target("unix:///tmp/sock").expect("unix target"),
+        super::ChatAttachTarget::Unix(std::path::PathBuf::from("/tmp/sock"))
     );
     assert_eq!(
-        crate::cli::chat::parse_slash_command("/q").unwrap(),
-        Some(crate::cli::chat::SlashCommand::Quit)
-    );
-    assert_eq!(
-        crate::cli::chat::parse_slash_command("/resume 019abc").unwrap(),
-        Some(crate::cli::chat::SlashCommand::Resume("019abc".to_string()))
-    );
-    assert_eq!(
-        crate::cli::chat::parse_slash_command("/rename customer debug").unwrap(),
-        Some(crate::cli::chat::SlashCommand::Rename(
-            "customer debug".to_string()
-        ))
-    );
-    assert_eq!(
-        crate::cli::chat::parse_slash_command("hello").unwrap(),
-        None
+        super::parse_attach_target("ws://127.0.0.1:7000/rpc").expect("ws target"),
+        super::ChatAttachTarget::WebSocket("ws://127.0.0.1:7000/rpc".to_string())
     );
 }
 
 #[test]
-fn slash_parser_repairs_unknown_or_incomplete_commands() {
-    assert!(
-        crate::cli::chat::parse_slash_command("/wat")
-            .unwrap_err()
-            .contains("/help")
-    );
-    assert!(
-        crate::cli::chat::parse_slash_command("/resume")
-            .unwrap_err()
-            .contains("thread id")
-    );
-    assert!(
-        crate::cli::chat::parse_slash_command("/rename")
-            .unwrap_err()
-            .contains("name")
-    );
+fn parse_attach_target_rejects_empty_and_unknown_schemes() {
+    assert!(super::parse_attach_target("unix://").is_err());
+    assert!(super::parse_attach_target("wss://host/rpc").is_err());
+    assert!(super::parse_attach_target("http://host").is_err());
+}
+
+fn notification(
+    method: &str,
+    params: serde_json::Value,
+) -> crate::adapters::app_server::connection::JsonRpcNotification {
+    crate::adapters::app_server::connection::JsonRpcNotification {
+        method: method.to_string(),
+        params: Some(params),
+    }
+}
+
+fn driver() -> super::ChatDriver {
+    super::ChatDriver {
+        thread_id: "thread-1".to_string(),
+        active_turn_id: Some("turn-1".to_string()),
+        models: Vec::new(),
+    }
 }
 
 #[test]
-fn attach_parser_accepts_unix_and_ws_endpoints() {
+fn projects_answer_and_thinking_deltas_for_the_active_turn() {
+    let mut driver = driver();
+    let events = driver.project_notification(&notification(
+        "item/agentMessage/delta",
+        serde_json::json!({"threadId": "thread-1", "turnId": "turn-1", "delta": "hi"}),
+    ));
     assert_eq!(
-        crate::cli::chat::parse_attach_target("unix:///tmp/verlet.sock").unwrap(),
-        crate::cli::chat::ChatAttachTarget::Unix(std::path::PathBuf::from("/tmp/verlet.sock"))
+        events,
+        vec![verlet_chat::ChatEvent::AnswerDelta("hi".into())]
     );
+
+    let events = driver.project_notification(&notification(
+        "item/agentThinking/delta",
+        serde_json::json!({"threadId": "thread-1", "turnId": "turn-1", "delta": "hm"}),
+    ));
     assert_eq!(
-        crate::cli::chat::parse_attach_target("ws://127.0.0.1:49200/rpc").unwrap(),
-        crate::cli::chat::ChatAttachTarget::WebSocket("ws://127.0.0.1:49200/rpc".to_string())
+        events,
+        vec![verlet_chat::ChatEvent::ThinkingDelta("hm".into())]
     );
-    assert!(crate::cli::chat::parse_attach_target("wss://example.com/rpc").is_err());
+
+    // Another thread's stream must not leak into this transcript.
+    let events = driver.project_notification(&notification(
+        "item/agentMessage/delta",
+        serde_json::json!({"threadId": "thread-2", "turnId": "turn-9", "delta": "no"}),
+    ));
+    assert!(events.is_empty());
 }
 
 #[test]
-fn composer_tracks_multiline_cursor_and_edits() {
-    let mut state = test_state();
-    state.insert_text("hello");
-    state.insert_newline();
-    state.insert_text("world");
-    assert_eq!(state.input, "hello\nworld");
-    assert_eq!(state.cursor_line_col(), (1, 5));
+fn projects_tool_call_lifecycle() {
+    let mut driver = driver();
+    let events = driver.project_notification(&notification(
+        "item/started",
+        serde_json::json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "item": {
+                "type": "dynamicToolCall",
+                "id": "call-1",
+                "tool": "web_search",
+                "arguments": {"query": "verlet"},
+            },
+        }),
+    ));
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::ToolStarted {
+            id: "call-1".into(),
+            title: "web_search {\"query\":\"verlet\"}".into(),
+        }]
+    );
 
-    state.move_up();
-    assert_eq!(state.cursor_line_col(), (0, 5));
-    state.backspace();
-    assert_eq!(state.input, "hell\nworld");
-    state.move_down();
-    state.move_home();
-    state.delete_forward();
-    assert_eq!(state.input, "hell\norld");
+    let events = driver.project_notification(&notification(
+        "item/completed",
+        serde_json::json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "item": {
+                "type": "dynamicToolCall",
+                "id": "call-1",
+                "success": false,
+                "contentItems": [{"type": "inputText", "text": "boom"}],
+            },
+        }),
+    ));
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::ToolCompleted {
+            id: "call-1".into(),
+            success: false,
+            output: "boom".into(),
+        }]
+    );
 }
 
 #[test]
-fn state_tracks_turn_lifecycle_rows() {
-    let mut state = test_state();
-    state.active_turn_id = Some("turn-123456".to_string());
-    state.begin_assistant();
-    state.append_assistant_delta("hi");
-    state.append_thinking_delta("plan");
-    assert!(
-        state.history.iter().any(
-            |line| line.role == crate::cli::chat::ChatLineRole::Assistant && line.text == "hi"
-        )
-    );
-    assert!(
-        state.history.iter().any(
-            |line| line.role == crate::cli::chat::ChatLineRole::Thinking && line.text == "plan"
-        )
+fn projects_command_execution_output_and_exit() {
+    let mut driver = driver();
+    let events = driver.project_notification(&notification(
+        "item/commandExecution/outputDelta",
+        serde_json::json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "exec-1",
+            "delta": "line\n",
+        }),
+    ));
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::ToolOutputDelta {
+            id: "exec-1".into(),
+            delta: "line\n".into(),
+        }]
     );
 
-    state.finish_turn();
-    assert_eq!(state.active_turn_id, None);
-    assert_eq!(state.turn_state, "idle");
+    let events = driver.project_notification(&notification(
+        "item/completed",
+        serde_json::json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "item": {
+                "type": "commandExecution",
+                "id": "exec-1",
+                "exitCode": 2,
+                "aggregatedOutput": "boom",
+            },
+        }),
+    ));
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::ToolCompleted {
+            id: "exec-1".into(),
+            success: false,
+            output: "boom".into(),
+        }]
+    );
 }
 
-fn test_state() -> crate::cli::chat::ChatTuiState {
-    crate::cli::chat::ChatTuiState::new(
-        crate::adapters::codex_tui::CodexTuiThread {
-            id: "thread-123456".to_string(),
-            raw: serde_json::json!({
-                "id": "thread-123456",
-                "cwd": "/tmp/work",
-                "name": "demo",
-            }),
-        },
-        crate::cli::chat::ChatSessionInfo {
-            connection_label: "test".to_string(),
-            cwd: "/tmp/work".to_string(),
-            model_label: "local/echo".to_string(),
-            models: vec!["local/echo (default)".to_string()],
-        },
-    )
+#[test]
+fn turn_completed_clears_the_active_turn_and_reports_errors() {
+    let mut driver = driver();
+    let events = driver.project_notification(&notification(
+        "turn/completed",
+        serde_json::json!({
+            "threadId": "thread-1",
+            "turn": {"id": "turn-1", "status": "failed", "error": {"message": "model unavailable"}},
+        }),
+    ));
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::TurnCompleted {
+            error: Some("model unavailable".into()),
+        }]
+    );
+    assert!(driver.active_turn_id.is_none());
+
+    // Once idle, an unsolicited turn/started is adopted.
+    let events = driver.project_notification(&notification(
+        "turn/started",
+        serde_json::json!({"threadId": "thread-1", "turn": {"id": "turn-2"}}),
+    ));
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::TurnStarted {
+            turn_id: "turn-2".into(),
+        }]
+    );
+    assert_eq!(driver.active_turn_id.as_deref(), Some("turn-2"));
+}
+
+#[test]
+fn session_rows_mark_the_current_thread() {
+    let rows = super::session_rows(
+        &serde_json::json!({
+            "data": [
+                {"id": "thread-1", "name": "alpha", "status": {"type": "idle"}, "preview": "  hello   world  "},
+                {"id": "thread-2", "name": "", "status": {"type": "running"}},
+            ],
+        }),
+        "thread-1",
+    );
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].current);
+    assert_eq!(rows[0].preview, "hello world");
+    assert_eq!(rows[1].name, "unnamed");
+    assert!(!rows[1].current);
 }

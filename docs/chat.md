@@ -11,26 +11,48 @@ verlet chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>
 verlet chat [PROMPT] --provider <provider> [--model <model>] ...
 ```
 
+## Architecture
+
+The UI lives in the `verlet-chat` crate (`crates/verlet-chat`), built on
+[tuika](https://github.com/everruns/tuika) and ported from its `codex`
+example. It is presentation only: a synchronous state machine that consumes
+typed `ChatEvent`s and emits typed `Action`s, with no RPC or async code, so
+the whole surface is testable without a terminal.
+
+The kernel side (`crates/verlet-kernel/src/cli/chat.rs`) hosts the async
+driver: it owns the JSON-RPC client, translates app-server notifications into
+`ChatEvent`s, and executes `Action`s as RPC calls. Chat therefore remains a
+pure client of the app-server; other frontends can replace it without touching
+the runtime.
+
+tuika is pinned to an exact version in the workspace manifest: it is pre-1.0
+and minor releases may break API, so upgrades are deliberate, reviewed
+changes.
+
 ## Included Surface
 
-- Transcript pane with compact rows for user, assistant, system/status,
-  lifecycle, thinking summary, and error output.
-- Multiline composer with paste, cursor movement, backspace/delete, Enter
-  submit, and modified Enter newline handling where the terminal reports it.
-- Status line with connection mode, cwd, model/provider, thread id/name, and
-  turn state.
-- Basic semantic colors for user, assistant, system, errors, thinking, and
-  muted metadata. `NO_COLOR=1` disables semantic color.
-- Slash commands:
+- Full-screen transcript with streaming markdown answers, thinking rows,
+  and tool/command cells that stream output live and collapse long output to
+  a middle-elided preview with the exit status.
+- Multiline composer (Enter submits, Shift+Enter or Ctrl+J inserts a
+  newline, paste is bracketed), with Up-arrow history recall on an empty
+  composer.
+- Slash-command popup with filtering and Tab completion:
   `/help`, `/quit`, `/q`, `/interrupt`, `/clear`, `/status`, `/new`,
   `/sessions`, `/resume <thread-id>`, `/rename <name>`, `/fork`, `/compact`,
   and `/models`.
+- Working indicator with elapsed time while a turn is in flight; Esc or
+  Ctrl+C interrupts, Ctrl+C on an idle session quits, Ctrl+D quits.
+- Footer with key hints, the thread short id, and the turn state; banner
+  with version, connection mode, cwd, and model.
+- PgUp/PgDn scrollback that sticks to the tail when at the bottom.
+- Dark theme by default; `NO_COLOR=1` drops to the terminal's own colors.
 
 ## Known Limits
 
-The V1 chat console deliberately does not implement shell escape or
-`command/exec`, full themes, mouse support, file mentions, autocomplete,
-external editor handoff, export/copy, OpenTUI/web frontend mode, or rich tool
-detail panels. Those remain separate product decisions. The current goal is a
-credible default local console while preserving the app-server RPC boundary so
-other frontends can replace it.
+Approvals are not surfaced in the TUI yet (the app-server exposes them via
+polling only). A broadcast-lag resync shows a notice rather than rebuilding
+the transcript. The console does not implement shell escape, mouse support,
+file mentions, external editor handoff, export/copy, or an orchestrator view;
+those remain separate product decisions. The goal is a credible default local
+console while preserving the app-server RPC boundary.

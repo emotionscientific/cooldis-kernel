@@ -1,0 +1,15 @@
+[package]
+name = "verlet-chat"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+crossterm = { workspace = true }
+futures-util = { workspace = true }
+ratatui = { workspace = true }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+tuika = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
