@@ -103,6 +103,7 @@ harness product layer are V2 direction.
 - [Daemon And Remote Placement](daemon.md)
 - [Protocol Surfaces](developers/protocol-surfaces.md)
 - [Threat Model](threat-model.md)
+- [Frozen Format IDs](format-ids.md)
 - [OpenAPI Operation Imports](openapi-adapter.md)
 - [How Verlet Is Tested](how-verlet-is-tested.md)
 - [Roadmap](roadmap.md)

@@ -403,7 +403,7 @@ The app-server opens project metadata at `state_home/metadata.sqlite3` and user
 metadata at `user_state_home/metadata.sqlite3` on startup. Project metadata owns
 provider catalog rows, MCP source records, and thread lifecycle/topology records
 for local `thread/start`, fork paths, and kernel-spawned child threads created
-through `cooldis-threads`. User metadata owns provider credentials and named
+through `verlet-threads`. User metadata owns provider credentials and named
 secret values. Plain OpenAI Compatible config can use the catalog-backed
 provider path while resolving API keys from the user auth store.
 
@@ -645,8 +645,8 @@ is absent, the method returns an empty `data` array. Registry I/O or record
 decoding failures return JSON-RPC errors.
 
 At startup, the app-server synthesizes first-party kernel operation records into
-the configured registry: `cooldis-threads`, `cooldis-schedule`,
-`cooldis-process`, and `cooldis-notify`. The default manifest binds the
+the configured registry: `verlet-threads`, `verlet-schedule`,
+`verlet-process`, and `verlet-notify`. The default manifest binds the
 thread-control package only; agents that need other first-party operations bind
 the corresponding `op://...@sha256:<record-hash>` explicitly with the required
 grants.
@@ -829,7 +829,7 @@ Params: none.
 
 Result: `{ "data": [...], "nextCursor": null, "backwardsCursor": null }`.
 Entries include root threads, app-server-created child threads, and child
-threads spawned by `cooldis-threads/thread_spawn`. Child entries populate both
+threads spawned by `verlet-threads/thread_spawn`. Child entries populate both
 `parentThreadId` and the compatibility `forkedFromId` field with the spawning
 thread id. Root threads report both fields as `null`.
 

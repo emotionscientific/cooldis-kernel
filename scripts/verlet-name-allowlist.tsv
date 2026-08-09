@@ -1,4 +1,30 @@
 # path	reason
+@source-pattern	cooldis\.events/0\.3	Frozen event-kind vocabulary version.
+@source-pattern	cooldis\.event\.	Frozen event payload schema-ID namespace.
+@source-pattern	cooldis\.stream\.	Frozen stream schema-ID namespace.
+@source-pattern	cooldis\.context\.[a-z0-9_.-]+/[0-9]+	Frozen context schema IDs.
+@source-pattern	cooldis\.debug\.[a-z0-9_.-]+/[0-9]+	Frozen debug schema IDs.
+@source-pattern	cooldis\.(spawn_subagent|submit_to_thread|wait_thread|children_of|cancel_thread|shutdown_thread|create_checkpoint|thread_(spawn|submit|wait|status|cancel)|mandate_(start|revoke|list)|process_(exec|poll|write|terminate)|notify_preview|channel_emit)	Frozen operation names recorded in receipts.
+@source-pattern	cooldis\.tool([^a-z0-9]|$)	Frozen tool-package and tool-receipt format IDs.
+@source-pattern	cooldis\.operation/0\.1	Frozen operation ABI string.
+@source-pattern	cooldis\.runtime\.kind	Frozen operation metadata key.
+@source-pattern	cooldis\.coupling\.[a-z0-9_.-]+/[0-9.]+	Frozen coupling ABI and schema IDs.
+@source-pattern	cooldis_0\.1	Frozen Wasm host import module.
+@source-pattern	cooldis\.net\.http/0\.1	Frozen Wasm HTTP ABI string.
+@source-pattern	cooldis\.agent\.	Frozen persisted agent metadata keys and source formats.
+@source-pattern	cooldis\.agent-(contract|thread-declaration|thread-handle)	Frozen legacy agent contract record kinds.
+@source-pattern	cooldis\.thread-(contract|declaration|handle|id|spawn-receipt)	Frozen thread contract and receipt format IDs.
+@source-pattern	cooldis\.thread\.[a-z0-9_.-]+(/[0-9]+)?	Frozen thread schema IDs and metadata keys.
+@source-pattern	cooldis\.app_server\.[a-z0-9_.-]+	Frozen persisted app-server metadata keys.
+@source-pattern	cooldis\.(admission|observation|orch|handle|identity|remote)[a-z0-9_.:/-]*	Frozen persisted admission, observation, placement, handle, identity, and remote IDs.
+@source-pattern	cooldis\.(blob|import-build-receipt|ingress\.v1|trace\.common/1)	Frozen blob, import, ingress, and trace format IDs.
+@source-pattern	cooldis\.(capsule_bindings\.operation_names|example\.[a-z0-9_.-]+/[0-9]+|scaffold\.[a-z0-9_.-]+/[0-9]+)	Frozen legacy config and example-fixture format IDs.
+@source-pattern	cooldis://agents/[a-z0-9_.-]+	Frozen legacy agent receipt refs.
+@source-pattern	["']cooldis\.["']	Frozen reserved schema-cohort prefix.
+@source-pattern	COOLDIS\.orch\.placement/1	Compatibility assertion for case-insensitive reserved schema cohorts.
+@source-pattern	cooldis_(app_server|coalesce|coalesced|daemon|identity|ingress|mandate|mcp|prompt|remote|route|scheduled|secret|session|stream|sync|tenant|user)[a-z0-9_]*	Frozen persisted storage names and metadata keys.
+@source-pattern	__COOLDIS_CONSOLE_CONFIG__	Shipped embedded-console bridge key.
+@source-pattern	cooldis-console-token[.a-z0-9_-]*	Shipped console token protocol compatibility key.
 .github/CODEOWNERS	Repository remote site or external workflow identity is out of scope for EMO-520.
 .github/ISSUE_TEMPLATE/config.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
 .gitignore	Legacy state directory remains ignored during the compatibility window.
@@ -9,8 +35,6 @@ apps/console/src/lib/app.svelte.ts	Stable persisted storage ABI or wire identifi
 apps/console/src/lib/schema.ts	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-abi/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-agent/src/contracts.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
-crates/verlet-agent/src/manifest_schema.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
-crates/verlet-agent/src/manifest_schema/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-guest-sdk-macros/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-guest-sdk/src/contract.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-guest-sdk/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
@@ -24,7 +48,6 @@ crates/verlet-io-pgqrs/src/lib.rs	Stable persisted storage ABI or wire identifie
 crates/verlet-kernel/Cargo.toml	Deprecated main binary target remains explicitly packaged through v0.3.0.
 crates/verlet-kernel/src/adapters/agent_loop.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/agent_loop/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
-crates/verlet-kernel/src/adapters/app_server/default_manifest.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server/connection.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/app_server/orchestrator_boundary.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
@@ -37,14 +60,12 @@ crates/verlet-kernel/src/agent/agent_process/tests.rs	Compatibility assertion fo
 crates/verlet-kernel/src/agent/agent_tool_router.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/agent/agent_tool_router/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/agent/coupling_templates.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
-crates/verlet-kernel/src/agent/manifest.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/agent/manifest/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/agent/manifest_bind.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/agent/manifest_bind/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/agent/tool_universe.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/capabilities/execution/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/capabilities/wasm_runner/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
-crates/verlet-kernel/src/cli/agent.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/cli/coupling.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/cli/daemon/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/daemon/clock_route.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
@@ -133,8 +154,7 @@ docs/adr/0006-unified-orchestration-semantics.md	Shipped ADR body is a historica
 docs/adr/0007-adapter-envelope-contract-v0.md	Shipped ADR body is a historical receipt.
 docs/adr/0008-identity-plane-v0.md	Shipped ADR body is a historical receipt.
 docs/adr/0009-orchestrator-boundary-v0.md	Shipped ADR body is a historical receipt.
-docs/agent-cli.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
-docs/agent-manifest-ontology.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
+docs/format-ids.md	Documents the frozen format-ID families.
 docs/app-server.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
 docs/daemon.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
 docs/io.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
@@ -143,16 +163,15 @@ docs/openapi-adapter.md	Current documentation names a stable wire identifier or 
 docs/public-api-coverage.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
 docs/standard-operations.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
 docs/wasm-operation-dev-kit.md	Current documentation names a stable wire identifier or out-of-scope repository URL.
-examples/agents/researcher/researcher.verlet.agent.toml.in	Example or package contract preserves a stable ABI manifest or receipt identifier.
 examples/wasm-counter-coupling/README.md	Example or package contract preserves a stable ABI manifest or receipt identifier.
 examples/wasm-counter-coupling/src/lib.rs	Example or package contract preserves a stable ABI manifest or receipt identifier.
 mkdocs.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
 proto/verlet.bridge.v1.proto	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 scripts/ci-receipts.sh	Shipped release receipt filenames remain historical.
 scripts/install.sh	Repository identity and one-release compatibility documentation remain load-bearing.
+scripts/verlet-name-allowlist.tsv	The lint's own closed list necessarily spells the frozen identifiers it permits.
 scripts/release-async.sh	Repository remote site or external workflow identity is out of scope for EMO-520.
 scripts/write-release-manifest.sh	Repository remote site or external workflow identity is out of scope for EMO-520.
-skills/verlet-agent-maker/SKILL.md	Example or package contract preserves a stable ABI manifest or receipt identifier.
 skills/verlet-tool-maker/SKILL.md	Example or package contract preserves a stable ABI manifest or receipt identifier.
 tools/file-read/verlet.tool.toml	Example or package contract preserves a stable ABI manifest or receipt identifier.
 tools/http-fetch/verlet.tool.toml	Example or package contract preserves a stable ABI manifest or receipt identifier.

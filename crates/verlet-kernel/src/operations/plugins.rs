@@ -135,7 +135,8 @@ impl LocalPluginCatalog {
         } else {
             let mut records = Vec::with_capacity(config.operation_names.len());
             for name in config.operation_names {
-                records.push(local_registry.load_record(&name)?);
+                let name = crate::operations::kernel_packages::canonical_kernel_package_name(&name);
+                records.push(local_registry.load_record(name)?);
             }
             records
         };

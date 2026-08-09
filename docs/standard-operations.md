@@ -7,11 +7,12 @@ placement, or a future remote placement.
 
 The currently implemented release-gated slice is:
 
-- thread/turn control: `cooldis-threads` as a kernel-native package;
-- process/command contract: `cooldis-process` as a kernel-native package
+- thread/turn control: `verlet-threads` as a kernel-native package;
+- mandate lifecycle: `verlet-schedule` as a kernel-native package;
+- process/command contract: `verlet-process` as a kernel-native package
   published at startup and dispatchable only when host-process authority is
   explicitly bound;
-- notify/channel intent: `cooldis-notify` as a kernel-native reference package
+- notify/channel intent: `verlet-notify` as a kernel-native reference package
   that records channel intent without delivering to external channels;
 - source/search building blocks: `http-fetch`, `file-read`, and `json-query`
   as first-party Wasm packages;
@@ -38,11 +39,11 @@ same shared schema engine used by tool packages and stream fixtures.
 
 ## Packages
 
-### `cooldis-threads`
+### `verlet-threads`
 
 Runtime kind: `kernel`
 
-`cooldis-threads` is synthesized at app-server startup when an operation
+`verlet-threads` is synthesized at app-server startup when an operation
 registry root is configured. It publishes five thread-control operations:
 
 | Operation | Required Capability | Purpose |
@@ -128,11 +129,24 @@ exists and its child-thread policy allows it. A manifest with
 `allow_child_agents = false` may bind read/control rows, but binding a
 `threads.spawn` row fails closed.
 
-### `cooldis-process`
+### `verlet-schedule`
 
 Runtime kind: `kernel`
 
-`cooldis-process` is synthesized at app-server startup when an operation
+`verlet-schedule` is synthesized at app-server startup when an operation
+registry root is configured. It publishes three mandate-lifecycle operations:
+
+| Operation | Required Capability | Purpose |
+| --- | --- | --- |
+| `mandate_start` | `schedule.manage` | Start a durable mandate from its declared schedule and payload. |
+| `mandate_revoke` | `schedule.manage` | Revoke a mandate so it cannot schedule new work. |
+| `mandate_list` | `schedule.read` | List mandates visible to the current thread scope. |
+
+### `verlet-process`
+
+Runtime kind: `kernel`
+
+`verlet-process` is synthesized at app-server startup when an operation
 registry root is configured. It publishes four process-handle operations:
 
 | Operation | Required Capability | Purpose |
@@ -158,20 +172,20 @@ same manager snapshot, whose terminal entry remains until outcome ingress is
 acknowledged. App-server streaming `command/exec` uses camelCase `dispatchId`
 and `threadId` to bind the handle settlement consumer.
 
-V1 intentionally does not add `cooldis-process` to the default manifest and
+V1 intentionally does not add `verlet-process` to the default manifest and
 `load_all_active_when_unbound` skips it. Host process authority must be declared
 explicitly by a manifest or registry binding. When a manifest binds these rows,
 the agent loop mounts a kernel dispatcher over `AsyncExecutionManager` and
 `HostBashLiveBackend`, so direct-tool aliases can start, poll, write to, and
 terminate host process handles through the stable package ABI. The app-server
 `command/exec` RPC remains a separate browser-facing projection with camelCase
-fields; `cooldis-process` emits the package receipt shape above.
+fields; `verlet-process` emits the package receipt shape above.
 
-### `cooldis-notify`
+### `verlet-notify`
 
 Runtime kind: `kernel`
 
-`cooldis-notify` is synthesized at app-server startup when an operation
+`verlet-notify` is synthesized at app-server startup when an operation
 registry root is configured. It publishes two reference operations:
 
 | Operation | Required Capability | Purpose |

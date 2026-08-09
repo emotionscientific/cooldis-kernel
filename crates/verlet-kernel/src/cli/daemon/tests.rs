@@ -612,7 +612,7 @@ fn publish_daemon_test_agent_result(
 [agent]
 name = "{name}"
 version = "0.1.0"
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]

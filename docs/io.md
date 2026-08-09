@@ -517,7 +517,7 @@ coupling fold; it emits `thread.spawn.requested` on the parent control stream
 and, when configured to block, a parent `turn.waiting` fact. The thread-spawn
 projector consumes that request, re-checks the parent thread's bound
 `threads.spawn` grant, starts the child through the same thread/turn kernel
-path as `cooldis-threads` `thread_spawn`, and witnesses `thread.spawned`.
+path as `verlet-threads` `thread_spawn`, and witnesses `thread.spawned`.
 `std::supervisor.child_completion` remains the paired fold for routed child
 completion facts back into the parent continuation.
 

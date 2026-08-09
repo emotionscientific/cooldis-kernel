@@ -177,7 +177,7 @@ The V1 parser requires identity and at least one model profile:
 name = "release-verifier"
 version = "0.1.0"
 description = "Checks a release branch."
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]

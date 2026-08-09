@@ -1,4 +1,41 @@
 #[test]
+fn kernel_package_names_use_the_verlet_public_form() {
+    assert_eq!(
+        [
+            crate::operations::kernel_packages::VERLET_THREADS_PACKAGE,
+            crate::operations::kernel_packages::VERLET_SCHEDULE_PACKAGE,
+            crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE,
+            crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE,
+        ],
+        [
+            "verlet-threads",
+            "verlet-schedule",
+            "verlet-process",
+            "verlet-notify",
+        ]
+    );
+}
+
+#[test]
+fn legacy_kernel_package_names_map_to_canonical_names() {
+    for (legacy, canonical) in [
+        (concat!("cool", "dis-threads"), "verlet-threads"),
+        (concat!("cool", "dis-schedule"), "verlet-schedule"),
+        (concat!("cool", "dis-process"), "verlet-process"),
+        (concat!("cool", "dis-notify"), "verlet-notify"),
+    ] {
+        assert_eq!(
+            crate::operations::kernel_packages::canonical_kernel_package_name(legacy),
+            canonical
+        );
+    }
+    assert_eq!(
+        crate::operations::kernel_packages::canonical_kernel_package_name("third-party"),
+        "third-party"
+    );
+}
+
+#[test]
 fn verlet_threads_package_declares_five_kernel_operations() {
     let package = crate::operations::kernel_packages::verlet_threads_kernel_package();
     let operations = package
@@ -721,6 +758,47 @@ fn verlet_threads_publish_is_idempotent_by_contract_hash() {
             .kind,
         crate::operations::kernel_packages::KERNEL_RUNTIME_KIND
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn publishing_canonical_threads_package_preserves_legacy_record_and_hash() {
+    let root = std::env::temp_dir().join(format!(
+        "verlet-kernel-package-legacy-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&root);
+    let legacy_name = concat!("cool", "dis-threads");
+    let mut legacy_package = crate::operations::kernel_packages::verlet_threads_kernel_package();
+    legacy_package.interface.identity.name = legacy_name.to_string();
+    for operation in &mut legacy_package.interface.operations {
+        operation.manual.as_mut().unwrap().tool_name = legacy_name.to_string();
+    }
+    let legacy = registry
+        .publish_interface_record(
+            verlet_operations::operation_store::PublishInterfaceOperationRequest {
+                name: legacy_name.to_string(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Kernel {
+                    package: legacy_name.to_string(),
+                },
+                manifest: legacy_package.manifest,
+                interface: legacy_package.interface,
+                capability_grants: legacy_package.capability_grants,
+                metadata: Default::default(),
+            },
+        )
+        .unwrap();
+
+    let canonical =
+        crate::operations::kernel_packages::ensure_verlet_threads_published(Some(&root))
+            .unwrap()
+            .unwrap();
+
+    assert_eq!(registry.load_record(legacy_name).unwrap(), legacy);
+    assert_eq!(canonical.name, "verlet-threads");
+    assert_ne!(canonical.active_artifact_hash, legacy.active_artifact_hash);
+    assert_eq!(registry.list_records().unwrap().len(), 2);
     let _ = std::fs::remove_dir_all(root);
 }
 

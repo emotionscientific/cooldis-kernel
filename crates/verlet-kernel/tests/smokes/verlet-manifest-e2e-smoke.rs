@@ -271,7 +271,7 @@ fn publish_manifest(
 name = "manifest-e2e"
 version = "0.1.0"
 description = "Manifest e2e local smoke."
-kind = "cooldis.agent-manifest"
+kind = "verlet.agent-manifest"
 schema_version = 1
 
 [[model_profiles]]
