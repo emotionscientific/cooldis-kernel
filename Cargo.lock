@@ -5839,6 +5839,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "libc",
+ "log",
  "object_store",
  "regex",
  "reqwest",
@@ -5872,6 +5873,7 @@ dependencies = [
  "verlet-vfs",
  "verlet-wasm",
  "wat",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

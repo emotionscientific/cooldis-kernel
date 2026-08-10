@@ -756,6 +756,7 @@ struct VerletAppServerInner {
     lease_epoch: u64,
     metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
     user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+    model_catalog: model_catalog::MergedModelCatalog,
     process_manager: verlet_process::live::AsyncExecutionManager,
     process_dispatcher:
         tokio::sync::OnceCell<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
@@ -1133,6 +1134,9 @@ impl VerletAppServer {
         )?;
         let metadata_store_path = config.metadata_store_path();
         let user_metadata_store_path = config.user_metadata_store_path();
+        let model_catalog = model_catalog::MergedModelCatalog::new(&config.user_state_home);
+        #[cfg(not(test))]
+        let model_catalog_state_home = config.user_state_home.clone();
         let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
         let mut tenant_context = crate::kernel::supervisor::TenantRuntimeContext::local(
             config.tenant_id.clone(),
@@ -1226,6 +1230,7 @@ impl VerletAppServer {
                 lease_epoch: config.lease_epoch,
                 metadata_store,
                 user_metadata_store,
+                model_catalog,
                 process_manager,
                 process_dispatcher: tokio::sync::OnceCell::new(),
                 subscriptions: tokio::sync::Mutex::new(
@@ -1325,6 +1330,11 @@ impl VerletAppServer {
                 recovery.thread_joins, recovery.process_outcomes,
             );
         }
+        // Catalog refresh is instance-owned and starts only after every
+        // fallible construction and recovery step. It never participates in
+        // constructor success or the first chat/RPC path.
+        #[cfg(not(test))]
+        model_catalog::spawn_runtime_refresh(&app.inner.tasks, model_catalog_state_home);
         Ok(app)
     }
 

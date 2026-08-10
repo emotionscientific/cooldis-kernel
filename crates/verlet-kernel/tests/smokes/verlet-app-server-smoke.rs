@@ -2,8 +2,12 @@ use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 use verlet::daemon::identity::IdentityAuthority as _;
 
+#[path = "../support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    model_catalog_test_support::disable_in_process_refresh();
     let root = std::path::PathBuf::from("/tmp")
         .join(format!("cdis-app-server-{}", uuid::Uuid::now_v7().simple()));
     let socket = root.join("app-server.sock");

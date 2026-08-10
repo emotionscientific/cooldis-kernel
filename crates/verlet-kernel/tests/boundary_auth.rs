@@ -6,6 +6,9 @@ use tokio::io::AsyncWriteExt as _;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use verlet::daemon::identity::IdentityAuthority as _;
 
+#[path = "support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 const OPERATOR_ID: &str = "operator:root";
 const ADAPTER_ID: &str = "adapter:rpc";
 const METHOD_NOT_AUTHORIZED_CODE: i64 = -32003;
@@ -947,6 +950,7 @@ fn app_config(
     root: &std::path::Path,
     listen: verlet::adapters::app_server::AppServerListenAddr,
 ) -> verlet::adapters::app_server::VerletAppServerConfig {
+    model_catalog_test_support::disable_in_process_refresh();
     let mut config =
         verlet::adapters::app_server::VerletAppServerConfig::local(listen, root.join("workspace"));
     config.runtime_home = root.join("runtime");

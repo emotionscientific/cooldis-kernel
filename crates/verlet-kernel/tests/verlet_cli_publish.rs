@@ -2,6 +2,9 @@ use sha2::Digest as _;
 use std::io::Read as _;
 use std::io::Write as _;
 
+#[path = "support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 const TEST_OPERATION_HASH: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -2820,11 +2823,14 @@ fn assert_no_command(output: &str, path: &[&str]) {
 }
 
 fn run_verlet<const N: usize>(args: [&str; N]) -> String {
-    run_verlet_command(std::process::Command::new(env!("CARGO_BIN_EXE_verlet")).args(args))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    run_verlet_command(command.args(args))
 }
 
 fn run_verlet_with_env<const N: usize>(args: [&str; N], envs: &[(&str, &str)]) -> String {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
     command.args(args);
     for (key, value) in envs {
         command.env(key, value);
@@ -2833,7 +2839,9 @@ fn run_verlet_with_env<const N: usize>(args: [&str; N], envs: &[(&str, &str)]) -
 }
 
 fn run_verlet_with_stdin<const N: usize>(args: [&str; N], stdin: &str) -> String {
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    let mut child = command
         .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2860,7 +2868,9 @@ fn run_verlet_failed_in_dir<const N: usize>(
     dir: &std::path::Path,
     args: [&str; N],
 ) -> std::process::Output {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    let output = command
         .current_dir(dir)
         .args(args)
         .output()
@@ -2886,7 +2896,9 @@ fn run_verlet_command(command: &mut std::process::Command) -> String {
 }
 
 fn run_verlet_failed<const N: usize>(args: [&str; N]) -> std::process::Output {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    let output = command
         .args(args)
         .output()
         .expect("failed to run verlet cli");

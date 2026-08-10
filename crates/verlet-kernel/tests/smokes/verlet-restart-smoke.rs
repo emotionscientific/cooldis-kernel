@@ -2,6 +2,9 @@ use std::io::Read as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 
+#[path = "../support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 const ROUTE_ID: &str = "restart-smoke";
 const WEBHOOK_PATH: &str = "/ingress";
 const WEBHOOK_SECRET: &str = "restart-smoke-secret";
@@ -165,6 +168,7 @@ impl Fixture {
         let stdout = append_file(&log_path)?;
         let stderr = append_file(&log_path)?;
         let mut command = tokio::process::Command::new(daemon_bin);
+        model_catalog_test_support::disable_for_tokio_command(&mut command);
         command
             .arg("daemon")
             .arg("run")
