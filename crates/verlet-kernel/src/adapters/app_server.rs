@@ -619,6 +619,16 @@ impl std::fmt::Debug for AppServerProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::LocalOffline => f.write_str("LocalOffline"),
+            Self::OpenAICodex {
+                model,
+                max_tokens,
+                stream,
+            } => f
+                .debug_struct("OpenAICodex")
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
             Self::BifrostOpenAIResponses {
                 base_url,
                 model,
