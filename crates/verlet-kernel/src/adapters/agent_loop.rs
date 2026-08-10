@@ -221,6 +221,32 @@ struct ModelRequestEndpoint {
     client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
 }
 
+/// Primary endpoint resolved for one turn (EMO-558).
+///
+/// `config` carries the provider coordinates stamped onto requests and turn
+/// records; `client` is the wire client for those coordinates. Both come
+/// pre-built: resolution failures belong at `model/select` time, never
+/// mid-turn.
+#[derive(Clone)]
+pub struct ResolvedTurnEndpoint {
+    pub config: AgentLoopConfig,
+    pub client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+}
+
+/// Per-turn primary-endpoint routing (EMO-558).
+///
+/// When installed on the factory, the loop calls `resolve` once per turn at
+/// turn start and uses the returned endpoint as the primary for every
+/// provider request in that turn (fallback endpoints are unaffected), so
+/// records and wire traffic agree. `None` means "use the launch-configured
+/// endpoint". A turn already running keeps the endpoint it resolved at its
+/// own start. Implementations must be cheap synchronous snapshot reads: the
+/// app-server builds the endpoint eagerly inside `model/select` and the
+/// router only loads the current snapshot.
+pub trait TurnEndpointRouter: Send + Sync {
+    fn resolve(&self) -> Option<ResolvedTurnEndpoint>;
+}
+
 #[derive(Clone)]
 pub struct AgentLoopFactory {
     config: AgentLoopConfig,
@@ -233,6 +259,7 @@ pub struct AgentLoopFactory {
         Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
     hook_pipeline: Option<std::sync::Arc<crate::agent::hooks::HookPipeline>>,
     hook_shell: Option<String>,
+    turn_endpoint_router: Option<std::sync::Arc<dyn TurnEndpointRouter>>,
     process_dispatcher_cwd: Option<std::path::PathBuf>,
     tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
     context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
@@ -255,6 +282,7 @@ impl AgentLoopFactory {
             thread_spawn_agent_resolver: None,
             hook_pipeline: None,
             hook_shell: None,
+            turn_endpoint_router: None,
             process_dispatcher_cwd: None,
             tool_permission_gate: std::sync::Arc::new(
                 crate::agent::tool_interceptor::AllowAllToolPermissionGate,
@@ -355,6 +383,16 @@ impl AgentLoopFactory {
         self
     }
 
+    /// Install per-turn primary-endpoint routing (EMO-558). Absent, the loop
+    /// keeps its launch-configured endpoint for every turn.
+    pub fn with_turn_endpoint_router(
+        mut self,
+        router: std::sync::Arc<dyn TurnEndpointRouter>,
+    ) -> Self {
+        self.turn_endpoint_router = Some(router);
+        self
+    }
+
     pub fn with_compaction_policy(
         mut self,
         policy: crate::kernel::compaction::CompactionPolicy,
@@ -409,6 +447,7 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for AgentLoop
                         .with_shell(self.hook_shell.clone()),
                 )
             }),
+            turn_endpoint_router: self.turn_endpoint_router.clone(),
             process_dispatcher_cwd: self.process_dispatcher_cwd.clone(),
             tool_permission_gate: std::sync::Arc::clone(&self.tool_permission_gate),
             context_compile_policy: self.context_compile_policy.clone(),
@@ -430,6 +469,14 @@ struct AgentLoop {
     thread_spawn_agent_resolver:
         Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
     hook_pipeline: Option<std::sync::Arc<crate::agent::hooks::HookPipeline>>,
+    /// EMO-558: when present, the loop resolves the primary endpoint from
+    /// this router once per turn at turn start (see [`TurnEndpointRouter`]);
+    /// `config`/`client` above remain the launch defaults and the fallback
+    /// when the router returns `None`. Wiring this into
+    /// `execute_provider_request` is EMO-558 implementation work; remove the
+    /// allow with it.
+    #[allow(dead_code)]
+    turn_endpoint_router: Option<std::sync::Arc<dyn TurnEndpointRouter>>,
     process_dispatcher_cwd: Option<std::path::PathBuf>,
     tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
     context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
