@@ -129,6 +129,11 @@ provider = "local_offline"
     // SAFETY: `child_pid` is the live child spawned above and SIGTERM is the
     // production shutdown signal this process smoke is proving.
     assert_eq!(unsafe { libc::kill(child_pid, libc::SIGTERM) }, 0);
+    // A repeated termination request while the first drain is in progress
+    // must remain handled rather than restoring the default fatal action or
+    // attempting a second host shutdown.
+    // SAFETY: `child_pid` still identifies the child under active drain.
+    assert_eq!(unsafe { libc::kill(child_pid, libc::SIGTERM) }, 0);
     let status = tokio::time::timeout(RPC_TIMEOUT, child.wait())
         .await
         .expect("verlet host did not exit after SIGTERM")
@@ -137,6 +142,154 @@ provider = "local_offline"
     assert!(websocket_ended(&mut first).await);
     assert!(websocket_ended(&mut second).await);
 
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A termination signal is already graceful once the liveness line is
+/// observable, even before the first client connection reaches the listener.
+#[cfg(unix)]
+#[tokio::test]
+async fn host_run_handles_sigterm_immediately_after_liveness() {
+    use tokio::io::AsyncBufReadExt as _;
+
+    let root = test_root("host-run-immediate-sigterm");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let port_reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = port_reservation.local_addr().unwrap();
+    drop(port_reservation);
+    let config_path = root.join("host.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[listen]
+addr = "{addr}"
+
+[[instance]]
+id = "first"
+root = "{}"
+cwd = "{}"
+tenant_id = "tenant-a"
+console_principal = "operator-a"
+hook_shell = "/bin/sh"
+
+[instance.provider]
+provider = "local_offline"
+"#,
+            root.join("first").display(),
+            workspace.display(),
+        ),
+    )
+    .unwrap();
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+        .args(["host", "run", "--config"])
+        .arg(&config_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let child_pid = child.id().unwrap() as libc::pid_t;
+    let mut stderr = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+    tokio::time::timeout(RPC_TIMEOUT, async {
+        loop {
+            let line = stderr
+                .next_line()
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("verlet host exited before liveness"));
+            if line.contains("verlet host listening") {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("verlet host did not print its liveness line");
+
+    // SAFETY: `child_pid` is the live child whose installed signal handler is
+    // the behavior under test.
+    assert_eq!(unsafe { libc::kill(child_pid, libc::SIGTERM) }, 0);
+    let status = tokio::time::timeout(RPC_TIMEOUT, child.wait())
+        .await
+        .expect("verlet host did not exit after immediate SIGTERM")
+        .unwrap();
+    assert!(status.success(), "host process exited with {status}");
+
+    let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
+    drop(rebound);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A constructor failure after an earlier instance has started is a failed
+/// whole-host boot: cleanup runs and the listener is never installed.
+#[tokio::test]
+async fn host_run_mid_boot_failure_exits_nonzero_without_binding() {
+    let root = test_root("host-run-mid-boot-failure");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let second_state = root.join("second").join("state");
+    std::fs::create_dir_all(second_state.join("session_history.sqlite3")).unwrap();
+    let port_reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = port_reservation.local_addr().unwrap();
+    drop(port_reservation);
+    let config_path = root.join("host.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[listen]
+addr = "{addr}"
+
+[[instance]]
+id = "first"
+root = "{}"
+cwd = "{}"
+tenant_id = "tenant-a"
+console_principal = "operator-a"
+hook_shell = "/bin/sh"
+
+[instance.provider]
+provider = "local_offline"
+
+[[instance]]
+id = "second"
+root = "{}"
+cwd = "{}"
+tenant_id = "tenant-b"
+console_principal = "operator-b"
+hook_shell = "/bin/sh"
+
+[instance.provider]
+provider = "local_offline"
+"#,
+            root.join("first").display(),
+            workspace.display(),
+            root.join("second").display(),
+            workspace.display(),
+        ),
+    )
+    .unwrap();
+
+    let output = tokio::time::timeout(
+        RPC_TIMEOUT,
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+            .args(["host", "run", "--config"])
+            .arg(&config_path)
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .expect("failing host boot did not exit")
+    .unwrap();
+
+    assert!(!output.status.success(), "host boot unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("verlet host listening"), "{stderr}");
+    let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
+    drop(rebound);
     std::fs::remove_dir_all(root).unwrap();
 }
 

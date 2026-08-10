@@ -272,12 +272,31 @@ pub enum LlmProviderCredential {
     },
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmProviderAuthContext {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub runtime_api_keys: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub environment: std::collections::BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for LlmProviderAuthContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct RedactedValues<'a>(&'a std::collections::BTreeMap<String, String>);
+
+        impl std::fmt::Debug for RedactedValues<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_map()
+                    .entries(self.0.keys().map(|name| (name, "<redacted>")))
+                    .finish()
+            }
+        }
+
+        f.debug_struct("LlmProviderAuthContext")
+            .field("runtime_api_keys", &RedactedValues(&self.runtime_api_keys))
+            .field("environment", &RedactedValues(&self.environment))
+            .finish()
+    }
 }
 
 impl LlmProviderAuthContext {

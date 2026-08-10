@@ -11,6 +11,10 @@ struct TestEnv {
 
 impl TestEnv {
     fn set(name: String, value: &str) -> Self {
+        Self::set_os(name, std::ffi::OsString::from(value))
+    }
+
+    fn set_os(name: String, value: std::ffi::OsString) -> Self {
         let prior = std::env::var_os(&name);
         // SAFETY: host config tests serialize their process-environment
         // mutations with `PROCESS_ENV_LOCK`, and this guard restores state.
@@ -56,6 +60,7 @@ impl Drop for TestConfigFile {
 }
 
 fn local_instance(id: &str, root: &std::path::Path) -> String {
+    let route_digest = crate::daemon::identity::identity_token_digest(id);
     format!(
         r#"
 [[instance]]
@@ -65,7 +70,7 @@ cwd = "{}"
 tenant_id = "tenant-{id}"
 console_principal = "operator:{id}"
 hook_shell = "/bin/sh"
-route_digests = ["sha256:{id}"]
+route_digests = ["{route_digest}"]
 
 [instance.provider]
 provider = "local_offline"
@@ -133,12 +138,14 @@ fn host_run_args_require_only_a_config_path() {
             .to_string()
             .contains("requires --config")
     );
-    assert!(
-        super::parse_host_run_args(vec!["--token".into(), "secret".into()])
-            .unwrap_err()
-            .to_string()
-            .contains("unknown host run argument")
-    );
+    let error = super::parse_host_run_args(vec![
+        "--token".into(),
+        "argument-secret-that-must-not-be-echoed".into(),
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("unknown host run argument"), "{error}");
+    assert!(!error.contains("argument-secret-that-must-not-be-echoed"));
 }
 
 #[test]
@@ -162,7 +169,9 @@ fn reject_duplicate_instance_ids() {
 fn reject_duplicate_route_digest_across_instances() {
     let root = std::env::temp_dir().join(format!("verlet-host-routes-{}", uuid::Uuid::now_v7()));
     let mut second = local_instance("second", &root);
-    second = second.replace("sha256:second", "sha256:first");
+    let first_digest = crate::daemon::identity::identity_token_digest("first");
+    let second_digest = crate::daemon::identity::identity_token_digest("second");
+    second = second.replace(&second_digest, &first_digest);
     let config = format!(
         "[listen]\naddr = \"127.0.0.1:0\"\n{}{}",
         local_instance("first", &root),
@@ -172,9 +181,69 @@ fn reject_duplicate_route_digest_across_instances() {
     let error = load_error("duplicate-route", &config);
 
     assert!(
-        error.contains("route digest \"sha256:first\" is duplicated"),
+        error.contains("route_digests[0] duplicates instance \"first\".route_digests[0]"),
         "{error}"
     );
+}
+
+#[test]
+fn reject_duplicate_route_digest_within_one_instance() {
+    let root = std::env::temp_dir().join(format!(
+        "verlet-host-routes-within-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let digest = crate::daemon::identity::identity_token_digest("first");
+    let instance = local_instance("first", &root).replace(
+        &format!("route_digests = [\"{digest}\"]"),
+        &format!("route_digests = [\"{digest}\", \"{digest}\"]"),
+    );
+    let config = format!("[listen]\naddr = \"127.0.0.1:0\"\n{instance}");
+
+    let error = load_error("duplicate-route-within", &config);
+
+    assert!(
+        error.contains("route_digests[1] duplicates instance \"first\".route_digests[0]"),
+        "{error}"
+    );
+}
+
+#[test]
+fn reject_non_digest_route_without_echoing_a_pasted_token() {
+    let root =
+        std::env::temp_dir().join(format!("verlet-host-route-token-{}", uuid::Uuid::now_v7()));
+    let raw_token = "verlet-secret-token-that-must-not-be-echoed";
+    let digest = crate::daemon::identity::identity_token_digest("first");
+    let instance = local_instance("first", &root).replace(&digest, raw_token);
+    let config = format!("[listen]\naddr = \"127.0.0.1:0\"\n{instance}");
+
+    let error = load_error("route-token", &config);
+
+    assert!(
+        error.contains("route_digests[0] must be a sha256 digest"),
+        "{error}"
+    );
+    assert!(!error.contains(raw_token), "raw token leaked in {error}");
+}
+
+#[test]
+fn reject_route_digest_shape_variants_not_emitted_by_identity_mint() {
+    let root =
+        std::env::temp_dir().join(format!("verlet-host-route-shape-{}", uuid::Uuid::now_v7()));
+    let valid = crate::daemon::identity::identity_token_digest("first");
+    for (label, invalid) in [
+        ("missing-prefix", "a".repeat(64)),
+        ("short", format!("sha256:{}", "a".repeat(63))),
+        ("uppercase", format!("sha256:{}", "A".repeat(64))),
+    ] {
+        let instance = local_instance("first", &root).replace(&valid, &invalid);
+        let config = format!("[listen]\naddr = \"127.0.0.1:0\"\n{instance}");
+        let error = load_error(label, &config);
+        assert!(
+            error.contains("route_digests[0] must be a sha256 digest"),
+            "{label}: {error}"
+        );
+        assert!(!error.contains(&invalid), "{label} leaked in {error}");
+    }
 }
 
 #[test]
@@ -301,6 +370,52 @@ model = "openai/test"
     assert!(error.contains("did not resolve"), "{error}");
 }
 
+#[cfg(unix)]
+#[test]
+fn non_unicode_key_env_error_does_not_format_secret_bytes() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let _env_lock = PROCESS_ENV_LOCK.lock().unwrap();
+    let env_name = format!("VERLET_HOST_NON_UNICODE_{}", uuid::Uuid::now_v7());
+    let secret_prefix = "provider-secret-prefix-that-must-not-appear";
+    let mut secret = secret_prefix.as_bytes().to_vec();
+    secret.push(0xff);
+    let _env = TestEnv::set_os(env_name.clone(), std::ffi::OsString::from_vec(secret));
+    let root =
+        std::env::temp_dir().join(format!("verlet-host-non-unicode-{}", uuid::Uuid::now_v7()));
+    let config = format!(
+        r#"
+[listen]
+addr = "127.0.0.1:0"
+
+[[instance]]
+id = "bifrost"
+root = "{}"
+cwd = "{}"
+tenant_id = "tenant"
+console_principal = "operator"
+hook_shell = "/bin/sh"
+
+[instance.provider]
+provider = "bifrost_openai"
+base_url = "https://bifrost.example.test"
+api_key_env = "{env_name}"
+model = "openai/test"
+"#,
+        root.join("instance").display(),
+        root.join("workspace").display(),
+    );
+
+    let error = load_error("non-unicode-key-env", &config);
+
+    assert!(error.contains(&env_name), "{error}");
+    assert!(error.contains("did not resolve"), "{error}");
+    assert!(
+        !error.contains(secret_prefix),
+        "provider key leaked in {error}"
+    );
+}
+
 #[test]
 fn bifrost_key_is_resolved_only_once_during_load() {
     let _env_lock = PROCESS_ENV_LOCK.lock().unwrap();
@@ -336,7 +451,9 @@ model = "openai/test"
     unsafe { std::env::set_var(&env_name, "changed-after-load") };
 
     let (_, hosted) = super::hosted_instance_config(&loaded.instance[0]).unwrap();
+    assert!(!format!("{hosted:?}").contains("original-key"));
     let auth = hosted.instance_environment.provider_auth.resolve();
+    assert!(!format!("{auth:?}").contains("original-key"));
     assert_eq!(
         auth.runtime_api_keys
             .get(verlet::adapters::app_server::APP_SERVER_BIFROST_PROVIDER)
@@ -346,6 +463,45 @@ model = "openai/test"
 
     drop(hosted);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn validation_failure_after_key_resolution_never_contains_key_bytes() {
+    let _env_lock = PROCESS_ENV_LOCK.lock().unwrap();
+    let env_name = format!("VERLET_HOST_KEY_REDACTION_{}", uuid::Uuid::now_v7());
+    let secret = "provider-secret-bytes-that-must-never-appear";
+    let _env = TestEnv::set(env_name.clone(), secret);
+    let root = std::env::temp_dir().join(format!(
+        "verlet-host-key-redaction-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let config = format!(
+        r#"
+[listen]
+addr = "not-a-socket-address"
+
+[[instance]]
+id = "bifrost"
+root = "{}"
+cwd = "{}"
+tenant_id = "tenant"
+console_principal = "operator"
+hook_shell = "/bin/sh"
+
+[instance.provider]
+provider = "bifrost_openai"
+base_url = "https://bifrost.example.test"
+api_key_env = "{env_name}"
+model = "openai/test"
+"#,
+        root.join("instance").display(),
+        root.join("workspace").display(),
+    );
+
+    let error = load_error("key-redaction", &config);
+
+    assert!(error.contains("listen.addr"), "{error}");
+    assert!(!error.contains(secret), "provider key leaked in {error}");
 }
 
 #[test]
@@ -389,6 +545,61 @@ fn reject_overlapping_instance_roots() {
     assert!(error.contains("instance roots overlap"), "{error}");
 }
 
+#[cfg(unix)]
+#[test]
+fn reject_overlap_through_a_symlinked_existing_parent() {
+    let root = std::env::temp_dir().join(format!(
+        "verlet-host-symlink-overlap-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let first_root = root.join("first");
+    std::fs::create_dir_all(&first_root).unwrap();
+    std::os::unix::fs::symlink(&first_root, root.join("first-alias")).unwrap();
+    let config = format!(
+        "[listen]\naddr = \"127.0.0.1:0\"\n{}{}",
+        local_instance("first", &root),
+        local_instance("second", &root.join("first-alias")),
+    );
+
+    let error = load_error("symlink-overlap", &config);
+
+    assert!(error.contains("instance roots overlap"), "{error}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn listener_accepts_literal_ipv4_and_ipv6_binds_but_rejects_hostnames() {
+    for (label, addr) in [("ipv4", "0.0.0.0:7900"), ("ipv6", "[::]:7900")] {
+        let root = std::env::temp_dir().join(format!(
+            "verlet-host-listen-{label}-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = format!(
+            "[listen]\naddr = \"{addr}\"\n{}",
+            local_instance(label, &root)
+        );
+        let file = TestConfigFile::write(label, &config);
+        assert_eq!(
+            super::load_host_run_config(&file.path).unwrap().listen.addr,
+            addr
+        );
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "verlet-host-listen-hostname-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let config = format!(
+        "[listen]\naddr = \"localhost:7900\"\n{}",
+        local_instance("hostname", &root)
+    );
+    let error = load_error("hostname-listener", &config);
+    assert!(
+        error.contains("listen.addr must be a TCP socket address"),
+        "{error}"
+    );
+}
+
 #[test]
 fn reject_empty_instance_list_and_invalid_listener() {
     let error = load_error("empty", "[listen]\naddr = \"not-an-address\"\n");
@@ -421,5 +632,45 @@ async fn mid_boot_failure_shuts_down_started_instances_and_releases_roots() {
     let (_, second_successor) = super::hosted_instance_config(&second).unwrap();
     drop(first_successor);
     drop(second_successor);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn pending_config_failure_releases_reservations_before_listener_bind() {
+    let root = std::env::temp_dir().join(format!(
+        "verlet-host-pending-cleanup-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let first = direct_local_instance("first", root.join("first"), &workspace);
+    let second = direct_local_instance(
+        "second",
+        root.join("first").join("runtime").join("nested"),
+        &workspace,
+    );
+    let port = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = port.local_addr().unwrap();
+    drop(port);
+    let config = super::VerletHostRunConfig {
+        listen: super::HostListenConfig {
+            addr: addr.to_string(),
+            allow_non_loopback: false,
+        },
+        instance: vec![first.clone(), second],
+    };
+
+    let error = super::serve_until_shutdown(config, async { Ok(()) })
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("overlaps reserved root"),
+        "{error}"
+    );
+
+    let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
+    drop(rebound);
+    let (_, successor) = super::hosted_instance_config(&first).unwrap();
+    drop(successor);
     std::fs::remove_dir_all(root).unwrap();
 }

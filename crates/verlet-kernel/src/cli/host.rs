@@ -42,7 +42,7 @@ mod tests;
 /// tenant_id = "orch"
 /// console_principal = "operator:orch"
 /// hook_shell = "/bin/sh"
-/// route_digests = ["<digest printed by identity mint>"]
+/// route_digests = ["sha256:<64 lowercase hex characters>"]
 ///
 /// [instance.provider]
 /// provider = "bifrost_openai"
@@ -201,9 +201,10 @@ fn parse_host_run_args(
 /// [`crate::adapters::host::InstanceId`] and are unique; `root`, `cwd`,
 /// `hook_shell` absolute; `tenant_id`/`console_principal` non-blank
 /// (decision 3); route digests non-blank and globally unique across
-/// instances; provider is a known name; `bifrost_openai` requires
-/// `base_url`, `api_key_env`, and `model`, and the named env var must
-/// resolve non-empty at load time; `local_offline` requires none of them.
+/// instances; each route has the exact `sha256:<64 lowercase hex>` shape
+/// printed by `identity mint`; provider is a known name; `bifrost_openai`
+/// requires `base_url`, `api_key_env`, and `model`, and the named env var
+/// must resolve non-empty at load time; `local_offline` requires none of them.
 pub(crate) fn load_host_run_config(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<VerletHostRunConfig> {
@@ -244,7 +245,7 @@ fn validate_host_run_config(config: &mut VerletHostRunConfig) -> Vec<String> {
     }
 
     let mut instance_ids = std::collections::BTreeSet::new();
-    let mut route_digests = std::collections::BTreeSet::new();
+    let mut route_digests = std::collections::BTreeMap::new();
     for instance in &mut config.instance {
         let scope = format!("instance {:?}", instance.id);
         if let Err(error) = crate::adapters::host::InstanceId::new(instance.id.clone()) {
@@ -270,17 +271,34 @@ fn validate_host_run_config(config: &mut VerletHostRunConfig) -> Vec<String> {
         if instance.console_principal.trim().is_empty() {
             errors.push(format!("{scope}.console_principal must be non-blank"));
         }
-        for digest in &instance.route_digests {
-            if digest.trim().is_empty() {
-                errors.push(format!("{scope}.route_digests must not contain blanks"));
-            } else if !route_digests.insert(digest.clone()) {
-                errors.push(format!("route digest {digest:?} is duplicated"));
+        for (index, digest) in instance.route_digests.iter().enumerate() {
+            if !is_identity_token_digest(digest) {
+                errors.push(format!(
+                    "{scope}.route_digests[{index}] must be a sha256 digest printed by `verlet identity mint`"
+                ));
+                continue;
+            }
+            if let Some((first_instance, first_index)) =
+                route_digests.insert(digest.clone(), (instance.id.clone(), index))
+            {
+                errors.push(format!(
+                    "{scope}.route_digests[{index}] duplicates instance {first_instance:?}.route_digests[{first_index}]"
+                ));
             }
         }
         validate_host_provider(&scope, &mut instance.provider, &mut errors);
     }
     validate_instance_root_overlaps(&config.instance, &mut errors);
     errors
+}
+
+fn is_identity_token_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn validate_host_provider(
@@ -328,8 +346,11 @@ fn validate_host_provider(
                     Ok(_) => errors.push(format!(
                         "{scope}.provider.api_key_env {name:?} resolved to an empty value"
                     )),
-                    Err(error) => errors.push(format!(
-                        "{scope}.provider.api_key_env {name:?} did not resolve: {error}"
+                    // `std::env::VarError::NotUnicode` owns the rejected
+                    // environment value and its formatting may expose those
+                    // secret bytes. Name the configured variable only.
+                    Err(_) => errors.push(format!(
+                        "{scope}.provider.api_key_env {name:?} did not resolve"
                     )),
                 }
             }
@@ -356,8 +377,7 @@ fn validate_instance_root_overlaps(instances: &[HostInstanceConfig], errors: &mu
         .iter()
         .filter(|instance| instance.root.is_absolute())
         .map(|instance| {
-            let normalized = std::fs::canonicalize(&instance.root)
-                .unwrap_or_else(|_| normalize_absolute_path(&instance.root));
+            let normalized = canonicalize_with_missing_tail(&instance.root);
             (instance, normalized)
         })
         .collect::<Vec<_>>();
@@ -376,6 +396,21 @@ fn validate_instance_root_overlaps(instances: &[HostInstanceConfig], errors: &mu
             }
         }
     }
+}
+
+/// Resolve every existing path prefix (including symlinks) while retaining a
+/// normalized missing tail. Host roots are commonly provisioned after config
+/// validation; canonicalizing only the complete path would silently miss an
+/// alias through an existing symlinked parent in that case.
+fn canonicalize_with_missing_tail(path: &std::path::Path) -> std::path::PathBuf {
+    for existing_prefix in path.ancestors() {
+        if let Ok(canonical_prefix) = std::fs::canonicalize(existing_prefix) {
+            if let Ok(missing_tail) = path.strip_prefix(existing_prefix) {
+                return normalize_absolute_path(&canonical_prefix.join(missing_tail));
+            }
+        }
+    }
+    normalize_absolute_path(path)
 }
 
 fn normalize_absolute_path(path: &std::path::Path) -> std::path::PathBuf {
@@ -641,8 +676,8 @@ pub(super) fn print_host_run_help() {
          The config file defines the one listener ([listen]: addr,\n\
          allow_non_loopback) and each hosted instance ([[instance]]: id,\n\
          root, cwd, tenant_id, console_principal, hook_shell,\n\
-         route_digests, [instance.provider]). Credential routes are\n\
-         configured as digests printed by `verlet identity mint`; the\n\
-         host process never holds kernel access tokens."
+         route_digests, [instance.provider]). Credential routes use the\n\
+         exact sha256 digest printed by `verlet identity mint`; host\n\
+         configuration never stores raw kernel access tokens."
     );
 }

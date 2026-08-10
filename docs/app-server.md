@@ -135,9 +135,12 @@ as `[unrecorded]`.
 Every RPC WebSocket connection resolves to a principal before any method is
 dispatched, on both transports. There is no unauthenticated fallthrough: a
 connection that fails to authenticate receives a uniform `401 Unauthorized`,
-opens no JSON-RPC session, and is witnessed as a rejection. The unauthenticated
-`/healthz` and `/readyz` HTTP probes do not expose RPC. The full design is ADR
-0008 (`docs/adr/0008-identity-plane-v0.md`, including its as-shipped addendum).
+opens no JSON-RPC session, and is witnessed as a rejection. The standalone
+app-server's unauthenticated `/healthz` and `/readyz` HTTP probes do not expose
+RPC. The multi-instance host exposes only `/healthz`; see
+[Config-driven multi-instance host](#config-driven-multi-instance-host). The
+full design is ADR 0008 (`docs/adr/0008-identity-plane-v0.md`, including its
+as-shipped addendum).
 
 ### Modes
 
@@ -168,8 +171,8 @@ managed daemon.
 one TCP listener. Each instance owns a standard `InstanceRoots::under(root)`
 layout (`runtime`, `state`, `user-state`, `agents`, `blobs`, and `skills`) and
 has its own identity authority. The host route table contains credential
-digests only; raw access tokens do not belong in the config, command line,
-environment, or logs.
+digests only; raw access tokens do not belong in the host config, host command
+line, host process environment, or logs.
 
 ```toml
 [listen]
@@ -183,7 +186,7 @@ cwd = "/data/instances/orch/workspace"
 tenant_id = "tenant-orch"
 console_principal = "operator:orch"
 hook_shell = "/bin/sh"
-route_digests = ["sha256:<digest printed by identity mint>"]
+route_digests = ["sha256:<64 lowercase hex characters>"]
 
 [instance.provider]
 provider = "bifrost_openai"
@@ -196,8 +199,10 @@ model = "openai/gpt-5"
 `false`; set it explicitly only when the authenticated listener is meant to be
 reachable over a private network. Every instance requires a unique printable
 `id`, absolute `root`, `cwd`, and `hook_shell`, non-blank `tenant_id` and
-`console_principal`, non-overlapping roots, and globally unique non-blank route
-digests. `local_offline` is the provider-free test/smoke mode. A
+`console_principal`, non-overlapping roots (including aliases through existing
+symlinked parents), and globally unique route digests in the exact
+`sha256:<64 lowercase hex>` form printed by `identity mint`. `local_offline` is
+the provider-free test/smoke mode. A
 `bifrost_openai` provider requires `base_url`, `model`, and the name of a
 non-empty environment variable in `api_key_env`; the variable value is read
 once at boot and injected only into that instance.

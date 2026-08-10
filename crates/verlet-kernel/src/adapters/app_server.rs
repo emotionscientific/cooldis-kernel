@@ -553,7 +553,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum AppServerProviderConfig {
     LocalOffline,
     BifrostOpenAIResponses {
@@ -595,6 +595,97 @@ pub enum AppServerProviderConfig {
         max_tokens: u32,
         stream: bool,
     },
+}
+
+impl std::fmt::Debug for AppServerProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LocalOffline => f.write_str("LocalOffline"),
+            Self::BifrostOpenAIResponses {
+                base_url,
+                model,
+                max_tokens,
+                stream,
+                ..
+            } => f
+                .debug_struct("BifrostOpenAIResponses")
+                .field("base_url", base_url)
+                .field("api_key", &"<redacted>")
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+            Self::OpenAIChatCompletions {
+                provider,
+                base_url,
+                model,
+                max_tokens,
+                stream,
+                headers,
+                ..
+            } => f
+                .debug_struct("OpenAIChatCompletions")
+                .field("provider", provider)
+                .field("base_url", base_url)
+                .field("api_key", &"<redacted>")
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .field(
+                    "headers",
+                    &format_args!("<redacted: {} entries>", headers.len()),
+                )
+                .finish(),
+            Self::AnthropicMessages {
+                base_url,
+                model,
+                max_tokens,
+                stream,
+                ..
+            } => f
+                .debug_struct("AnthropicMessages")
+                .field("base_url", base_url)
+                .field("api_key", &"<redacted>")
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+            Self::AnthropicBedrock {
+                region,
+                base_url,
+                model,
+                max_tokens,
+                stream,
+                session_token,
+                ..
+            } => f
+                .debug_struct("AnthropicBedrock")
+                .field("region", region)
+                .field("base_url", base_url)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field(
+                    "session_token",
+                    &session_token.as_ref().map(|_| "<redacted>"),
+                )
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+            Self::CatalogOpenAIChatCompletions {
+                provider_id,
+                model,
+                max_tokens,
+                stream,
+            } => f
+                .debug_struct("CatalogOpenAIChatCompletions")
+                .field("provider_id", provider_id)
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone)]

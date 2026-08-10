@@ -449,6 +449,17 @@ impl VerletHost {
         if request.as_ref().is_some_and(is_health_check_request) {
             return respond_health_ok(stream).await;
         }
+        // Requests that name the health path but do not exactly match its
+        // public contract never enter credential routing. This keeps HEAD,
+        // POST, and query variants on the uniform 401 surface even if they
+        // carry an otherwise routed credential.
+        if request
+            .as_ref()
+            .is_some_and(|request| request.path() == "/healthz")
+        {
+            drop(request);
+            return crate::adapters::app_server::refuse_host_tcp_stream(stream).await;
+        }
         let digest = request
             .as_ref()
             .and_then(crate::adapters::app_server::request_bearer_token)
@@ -712,10 +723,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         host.serve_websocket_listener(listener).await.unwrap();
 
-        async fn request(addr: std::net::SocketAddr, target: &str) -> String {
+        async fn request(
+            addr: std::net::SocketAddr,
+            method: &str,
+            target: &str,
+            extra_headers: &str,
+        ) -> String {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
             stream
-                .write_all(format!("GET {target} HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
+                .write_all(
+                    format!("{method} {target} HTTP/1.1\r\nHost: {addr}\r\n{extra_headers}\r\n")
+                        .as_bytes(),
+                )
                 .await
                 .unwrap();
             let mut response = String::new();
@@ -729,22 +748,72 @@ mod tests {
             response
         }
 
-        let health = request(addr, "/healthz").await;
+        let extra_headers = (0..40)
+            .map(|index| format!("X-Railway-Probe-{index}: accepted\r\n"))
+            .collect::<String>();
+        let health = request(addr, "GET", "/healthz", &extra_headers).await;
         assert!(health.starts_with("HTTP/1.1 200 OK\r\n"), "{health}");
         assert!(health.ends_with("\r\n\r\n"), "{health}");
         assert!(health.contains("Content-Length: 0\r\n"), "{health}");
 
-        let other = request(addr, "/other").await;
+        let other = request(addr, "GET", "/other", "").await;
         assert!(
             other.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
             "{other}"
         );
-        let queried = request(addr, "/healthz?detail=true").await;
+        let queried = request(addr, "GET", "/healthz?detail=true", "").await;
         assert!(
             queried.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
             "{queried}"
         );
+        for method in ["HEAD", "POST"] {
+            let response = request(addr, method, "/healthz", "").await;
+            assert!(
+                response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+                "{method} unexpectedly succeeded: {response}"
+            );
+        }
+
+        // A client that abandons a health response is connection-local. The
+        // accept task must continue serving later probes.
+        let mut abandoned = tokio::net::TcpStream::connect(addr).await.unwrap();
+        abandoned
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: abandoned\r\n\r\n")
+            .await
+            .unwrap();
+        drop(abandoned);
+        let after_abandon = request(addr, "GET", "/healthz", "").await;
+        assert!(after_abandon.starts_with("HTTP/1.1 200 OK\r\n"));
+
+        // A slow, incomplete health request occupies only its own bounded
+        // connection task and does not stall the listener's accept loop.
+        let mut slow = tokio::net::TcpStream::connect(addr).await.unwrap();
+        slow.write_all(b"GET /healthz HTTP/1.1\r\nX-Slow: ")
+            .await
+            .unwrap();
+        let while_slow = request(addr, "GET", "/healthz", "").await;
+        assert!(while_slow.starts_with("HTTP/1.1 200 OK\r\n"));
+
+        let mut malformed = tokio::net::TcpStream::connect(addr).await.unwrap();
+        malformed
+            .write_all(b"GET /healthz HTTP/1.1\r\nX-Binary: \xff\r\n\r\n")
+            .await
+            .unwrap();
+        let mut malformed_response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            malformed.read_to_string(&mut malformed_response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            malformed_response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{malformed_response}"
+        );
 
         host.shutdown().await.unwrap();
+        assert_eq!(host.inner.tasks.task_count(), 0);
+        drop(slow);
     }
 }
