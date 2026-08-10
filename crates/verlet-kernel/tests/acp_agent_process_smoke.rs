@@ -2,12 +2,14 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 use verlet_history::EventStore as _;
 
+#[path = "support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 #[test]
 fn acp_agent_binary_reports_stable_version() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verlet-acp-agent"))
-        .arg("--version")
-        .output()
-        .unwrap();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet-acp-agent"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    let output = command.arg("--version").output().unwrap();
     assert!(
         output.status.success(),
         "verlet-acp-agent --version failed: {output:?}"
@@ -25,6 +27,7 @@ fn acp_agent_binary_reports_stable_version() {
 
 #[tokio::test]
 async fn acp_agent_process_smoke_runs_binary_over_stdio() {
+    model_catalog_test_support::disable_in_process_refresh();
     let root = std::path::PathBuf::from("/tmp").join(format!(
         "cdis-acp-process-{}",
         uuid::Uuid::now_v7().simple()
@@ -259,7 +262,9 @@ struct AcpAgentChild {
 
 impl AcpAgentChild {
     async fn spawn(socket: &std::path::Path) -> Self {
-        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet-acp-agent"))
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet-acp-agent"));
+        model_catalog_test_support::disable_for_tokio_command(&mut command);
+        let mut child = command
             .arg("--socket")
             .arg(socket)
             .arg("--timeout-ms")

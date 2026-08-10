@@ -13,7 +13,7 @@ use tuika::components::MarkdownState;
 use tuika::prelude::*;
 
 use crate::cells::{Cell, ExecStatus, Tone, short_id};
-use crate::{Action, ChatEvent, SessionMeta};
+use crate::{Action, ChatEvent, ModelRow, SessionMeta};
 
 /// Whether the event loop should keep running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +34,7 @@ pub const COMMANDS: &[(&str, &str, bool)] = &[
     ("/fork", "fork the current thread", false),
     ("/rename", "name the current thread", true),
     ("/compact", "compact the current thread's context", false),
-    ("/models", "list available models", false),
+    ("/models", "pick the model for new turns", false),
     ("/interrupt", "interrupt the active turn", false),
     ("/clear", "clear the transcript", false),
     ("/quit", "exit verlet chat", false),
@@ -100,6 +100,14 @@ pub(crate) struct Popup {
     pub state: SelectState,
 }
 
+/// The `/models` picker: a modal list over the composer. Opened by
+/// [`ChatEvent::Models`], closed by Enter (emits [`Action::SelectModel`])
+/// or Esc. While open it consumes every key event.
+pub(crate) struct ModelPicker {
+    pub rows: Vec<ModelRow>,
+    pub state: SelectState,
+}
+
 /// The whole application.
 pub struct App {
     pub frame: u64,
@@ -110,6 +118,7 @@ pub struct App {
     pub composer: TextInputState,
     pub scroll: ScrollState,
     pub(crate) popup: Option<Popup>,
+    pub(crate) picker: Option<ModelPicker>,
     pub meta: SessionMeta,
     /// Turn state label for the footer: "idle", "running", "steered", ...
     pub turn_state: String,
@@ -143,6 +152,7 @@ impl App {
             composer: TextInputState::new(),
             scroll: ScrollState::new(),
             popup: None,
+            picker: None,
             meta,
             turn_state: "idle".to_string(),
             turn_active: false,
@@ -213,6 +223,13 @@ impl App {
     }
 
     fn route(&mut self, event: &Event) -> Flow {
+        // The model picker owns the whole input surface while open. Keep this
+        // ahead of transcript scrolling, paste handling, global controls, and
+        // slash completion so none of them can leak through the modal.
+        if self.picker.is_some() {
+            self.handle_picker(event);
+            return Flow::Continue;
+        }
         if self.scrolling(event) {
             let _ = self.scroll.handle(event, self.content_h, self.viewport_h);
             return Flow::Continue;
@@ -322,6 +339,45 @@ impl App {
                 true
             }
             outcome => outcome.consumed(),
+        }
+    }
+
+    /// The picker is modal: every key event lands here while it is open.
+    /// Enter selects (already-active rows just close), Esc dismisses,
+    /// arrows move; anything else is swallowed so the composer underneath
+    /// stays untouched.
+    fn handle_picker(&mut self, event: &Event) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        match picker.state.handle(event, picker.rows.len()) {
+            InputOutcome::Submitted => {
+                let row = picker
+                    .state
+                    .selected()
+                    .and_then(|index| picker.rows.get(index))
+                    .cloned();
+                self.picker = None;
+                let Some(row) = row else {
+                    return;
+                };
+                if row.active {
+                    self.notice(
+                        Tone::Info,
+                        format!("{}/{} is already active", row.provider_id, row.model),
+                        Vec::new(),
+                    );
+                    return;
+                }
+                self.actions.push(Action::SelectModel {
+                    provider_id: row.provider_id,
+                    model: row.model,
+                });
+            }
+            InputOutcome::Cancelled => {
+                self.picker = None;
+            }
+            _ => {}
         }
     }
 
@@ -610,17 +666,32 @@ impl App {
                 self.cells.push(Cell::Sessions(rows));
                 self.follow();
             }
-            ChatEvent::Models(models) => {
-                let rows = models
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, model)| (format!("{}", i + 1), model))
-                    .collect();
-                self.cells.push(Cell::Config {
-                    title: "Models".into(),
-                    rows,
-                });
-                self.follow();
+            ChatEvent::Models(rows) => {
+                // A model result supersedes completion and any older model
+                // result. Clear first so an empty refresh cannot leave stale
+                // selectable rows behind.
+                self.popup = None;
+                self.picker = None;
+                if rows.is_empty() {
+                    self.notice(Tone::Error, "no models available".to_string(), Vec::new());
+                    return;
+                }
+                let mut state = SelectState::new();
+                state.select(rows.iter().position(|row| row.active).or(Some(0)));
+                self.picker = Some(ModelPicker { rows, state });
+            }
+            ChatEvent::ModelSelected { provider_id, model } => {
+                self.meta.model_label = format!("{provider_id}/{model}");
+                let body = if self.turn_active {
+                    vec!["applies to turns after the current one".to_string()]
+                } else {
+                    Vec::new()
+                };
+                self.notice(
+                    Tone::Info,
+                    format!("model set to {provider_id}/{model}"),
+                    body,
+                );
             }
             ChatEvent::ThreadStatus(status) => {
                 if !self.turn_active {
@@ -739,7 +810,7 @@ fn banner_cell(meta: &SessionMeta) -> Cell {
             ("/help", "list the available commands"),
             ("/status", "show connection, model, and thread"),
             ("/sessions", "list threads on this server"),
-            ("/models", "list available models"),
+            ("/models", "pick the model for new turns"),
         ]
         .iter()
         .map(|(c, b)| ((*c).to_string(), (*b).to_string()))

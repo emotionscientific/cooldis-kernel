@@ -2100,6 +2100,8 @@ pub(super) struct CapsuleBindingRuntimeFactory {
     pub(super) skill_registry_root: Option<std::path::PathBuf>,
     pub(super) cwd: Option<std::path::PathBuf>,
     pub(super) hook_shell: Option<String>,
+    pub(super) turn_endpoint_router:
+        Option<std::sync::Arc<dyn crate::adapters::agent_loop::TurnEndpointRouter>>,
     pub(super) default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
     pub(super) default_workspace:
         Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
@@ -2133,6 +2135,9 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
         )
         .with_hook_shell(self.hook_shell.clone())
         .with_process_dispatcher_cwd(self.cwd.clone());
+        if let Some(router) = &self.turn_endpoint_router {
+            factory = factory.with_turn_endpoint_router(std::sync::Arc::clone(router));
+        }
         if let Some(policy) = manifest_compaction_policy(context)? {
             factory = factory.with_compaction_policy(policy);
         }

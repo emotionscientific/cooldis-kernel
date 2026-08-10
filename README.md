@@ -107,6 +107,8 @@ The V1 work is focused on runtime primitives:
   declared event folds;
 - local runtime execution through provider, virtual bash, and Wasm paths,
   including thread-VFS `/spill` receipts for oversized bash and process output;
+- OpenAI Codex backend access through browser or device OAuth against a user's
+  ChatGPT plan, with credentials isolated in the user provider store;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
 - daemon-hosted remote child placement: store-backed ingress, separate local
   child processes, and local-first stream propagation fenced by durable scoped

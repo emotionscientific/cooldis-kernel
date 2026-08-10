@@ -32,6 +32,7 @@ croner = { workspace = true }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
 libc = { workspace = true }
+log = { workspace = true }
 object_store = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
@@ -53,6 +54,9 @@ strum.workspace = true
 futures-executor = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time", "test-util"] }
 wat = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [[bin]]
 name = "verlet"

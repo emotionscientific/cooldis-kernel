@@ -1,3 +1,16 @@
+#[cfg(unix)]
+#[tokio::test]
+async fn checked_browser_open_reports_a_launcher_failure() {
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "exit 7"]);
+
+    let error = super::wait_for_browser_open_command(command)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("browser opener exited"));
+}
+
 #[test]
 fn parse_chat_args_collects_prompt_and_homes() {
     let args = vec![
@@ -301,7 +314,10 @@ fn load_chat_provider_config_reads_bifrost_json() {
             assert_eq!(max_tokens, 2048);
             assert!(!stream);
         }
-        crate::cli::console::ChatProviderConfig::Local => panic!("expected bifrost config"),
+        crate::cli::console::ChatProviderConfig::Local
+        | crate::cli::console::ChatProviderConfig::OpenAICodex { .. } => {
+            panic!("expected bifrost config")
+        }
         crate::cli::console::ChatProviderConfig::OpenAIChatCompletions { .. } => {
             panic!("expected bifrost responses config")
         }
@@ -363,6 +379,38 @@ fn load_chat_provider_config_reads_anthropic_json() {
         _ => panic!("expected Anthropic Messages config"),
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn load_chat_provider_config_selects_openai_codex_without_an_api_key() {
+    let args = crate::cli::console::parse_chat_args(
+        [
+            "--provider",
+            "openai-codex",
+            "--model",
+            "gpt-5.6-terra",
+            "--max-tokens",
+            "2048",
+            "--no-stream",
+        ]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect(),
+    )
+    .unwrap();
+
+    match crate::cli::console::load_chat_provider_config(&args).unwrap() {
+        crate::cli::console::ChatProviderConfig::OpenAICodex {
+            model,
+            max_tokens,
+            stream,
+        } => {
+            assert_eq!(model, "gpt-5.6-terra");
+            assert_eq!(max_tokens, 2048);
+            assert!(!stream);
+        }
+        _ => panic!("expected OpenAI Codex config"),
+    }
 }
 
 #[test]
@@ -483,6 +531,7 @@ fn load_chat_provider_config_reads_openai_compatible_json() {
             );
         }
         crate::cli::console::ChatProviderConfig::Local
+        | crate::cli::console::ChatProviderConfig::OpenAICodex { .. }
         | crate::cli::console::ChatProviderConfig::BifrostOpenAI { .. }
         | crate::cli::console::ChatProviderConfig::AnthropicMessages { .. }
         | crate::cli::console::ChatProviderConfig::AnthropicBedrock { .. } => {
@@ -574,6 +623,30 @@ fn load_daemon_provider_config_uses_catalog_for_plain_openai_compatible_without_
         _ => panic!("expected catalog-backed openai_compatible daemon config"),
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn load_daemon_provider_config_selects_openai_codex_without_an_api_key() {
+    let config = crate::daemon::daemon_config::VerletProviderConfig {
+        provider: Some("openai-codex".to_string()),
+        model: Some("gpt-5.6-luna".to_string()),
+        max_tokens: Some(3072),
+        stream: Some(false),
+        ..crate::daemon::daemon_config::VerletProviderConfig::default()
+    };
+
+    match crate::cli::daemon::load_daemon_provider_config(&config).unwrap() {
+        crate::cli::console::ChatProviderConfig::OpenAICodex {
+            model,
+            max_tokens,
+            stream,
+        } => {
+            assert_eq!(model, "gpt-5.6-luna");
+            assert_eq!(max_tokens, 3072);
+            assert!(!stream);
+        }
+        _ => panic!("expected OpenAI Codex daemon config"),
+    }
 }
 
 #[test]

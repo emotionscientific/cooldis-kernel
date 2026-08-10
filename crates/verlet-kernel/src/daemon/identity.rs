@@ -146,6 +146,7 @@ pub fn authority_class_for_method(method: &str) -> AuthorityClass {
         "app/list",
         "operation/list",
         "model/list",
+        "model/select",
         "modelProvider/capabilities/read",
         "experimentalFeature/list",
         "experimentalFeature/enablement/set",

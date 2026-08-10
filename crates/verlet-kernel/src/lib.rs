@@ -26,6 +26,8 @@ pub mod adapters {
     pub mod operator_client;
 }
 
+mod openai_codex;
+
 pub mod agent {
     pub mod agent_process;
     pub mod agent_tool_router;

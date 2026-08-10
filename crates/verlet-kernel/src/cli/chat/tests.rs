@@ -31,7 +31,6 @@ fn driver() -> super::ChatDriver {
     super::ChatDriver {
         thread_id: "thread-1".to_string(),
         active_turn_id: Some("turn-1".to_string()),
-        models: Vec::new(),
     }
 }
 
@@ -335,4 +334,29 @@ fn session_rows_mark_the_current_thread() {
     assert_eq!(rows[0].preview, "hello world");
     assert_eq!(rows[1].name, "unnamed");
     assert!(!rows[1].current);
+}
+
+#[test]
+fn model_rows_preserve_coordinates_auth_and_active_selection() {
+    let rows = super::model_rows(&crate::adapters::operator_client::OperatorModelList {
+        data: vec![crate::adapters::operator_client::OperatorModel {
+            provider_id: "provider-id".to_string(),
+            model: "server-model".to_string(),
+            display_name: "Server Model".to_string(),
+            auth_status: crate::adapters::operator_client::OperatorModelAuthStatus::Missing,
+            active: true,
+        }],
+        next_cursor: None,
+    });
+
+    assert_eq!(
+        rows,
+        vec![verlet_chat::ModelRow {
+            provider_id: "provider-id".to_string(),
+            model: "server-model".to_string(),
+            display_name: "Server Model".to_string(),
+            auth_status: "missing".to_string(),
+            active: true,
+        }]
+    );
 }

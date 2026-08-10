@@ -11,6 +11,7 @@ pub mod connection;
 mod default_manifest;
 pub mod instance;
 pub mod lifecycle;
+pub(crate) mod model_catalog;
 mod orchestrator_boundary;
 mod subscriptions;
 #[cfg(test)]
@@ -307,6 +308,18 @@ impl VerletAppServerConfig {
         self
     }
 
+    pub fn with_openai_codex(mut self, model: impl Into<String>) -> Self {
+        let model = model.into();
+        self.model = model.clone();
+        self.model_provider = verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID.to_string();
+        self.provider = AppServerProviderConfig::OpenAICodex {
+            model,
+            max_tokens: 4096,
+            stream: true,
+        };
+        self
+    }
+
     pub fn with_openai_chat_completions(
         mut self,
         provider: impl Into<String>,
@@ -556,6 +569,11 @@ fn is_false(value: &bool) -> bool {
 #[derive(Clone)]
 pub enum AppServerProviderConfig {
     LocalOffline,
+    OpenAICodex {
+        model: String,
+        max_tokens: u32,
+        stream: bool,
+    },
     BifrostOpenAIResponses {
         base_url: String,
         api_key: String,
@@ -693,6 +711,104 @@ pub struct VerletAppServer {
     inner: std::sync::Arc<VerletAppServerInner>,
 }
 
+/// Runtime-active provider+model selection (EMO-558).
+///
+/// Initialized from `VerletAppServerConfig` at construction and swapped by
+/// the `model/select` RPC. Never persisted: a restart returns to the
+/// configured defaults. Turn starts read this instead of the construction
+/// fields; a turn already in flight keeps the selection it started with.
+#[derive(Clone)]
+pub(crate) struct ActiveModelSelection {
+    pub(crate) model: String,
+    pub(crate) model_provider: String,
+    pub(crate) provider: AppServerProviderConfig,
+}
+
+pub(crate) struct AppServerTurnEndpointRouter {
+    state: std::sync::RwLock<AppServerTurnEndpointState>,
+}
+
+struct AppServerTurnEndpointState {
+    current: Option<crate::adapters::agent_loop::ResolvedTurnEndpoint>,
+    cache: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, crate::adapters::agent_loop::ResolvedTurnEndpoint>,
+    >,
+}
+
+impl AppServerTurnEndpointRouter {
+    fn new(initial: Option<crate::adapters::agent_loop::ResolvedTurnEndpoint>) -> Self {
+        let mut cache = std::collections::BTreeMap::new();
+        if let Some(endpoint) = &initial {
+            cache
+                .entry(endpoint.config.provider.clone())
+                .or_insert_with(std::collections::BTreeMap::new)
+                .insert(endpoint.config.model.clone(), endpoint.clone());
+        }
+        Self {
+            state: std::sync::RwLock::new(AppServerTurnEndpointState {
+                current: initial,
+                cache,
+            }),
+        }
+    }
+
+    async fn cached(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Option<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
+        self.read_state()
+            .cache
+            .get(provider_id)
+            .and_then(|models| models.get(model))
+            .cloned()
+    }
+
+    #[cfg(test)]
+    fn preload_for_test(&self, endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) {
+        self.write_state()
+            .cache
+            .entry(endpoint.config.provider.clone())
+            .or_insert_with(std::collections::BTreeMap::new)
+            .insert(endpoint.config.model.clone(), endpoint);
+    }
+
+    async fn invalidate(&self, provider_id: &str) {
+        self.write_state().cache.remove(provider_id);
+    }
+
+    fn activate(&self, endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) {
+        let mut state = self.write_state();
+        state
+            .cache
+            .entry(endpoint.config.provider.clone())
+            .or_insert_with(std::collections::BTreeMap::new)
+            .insert(endpoint.config.model.clone(), endpoint.clone());
+        state.current = Some(endpoint);
+    }
+
+    fn read_state(&self) -> std::sync::RwLockReadGuard<'_, AppServerTurnEndpointState> {
+        match self.state.read() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write_state(&self) -> std::sync::RwLockWriteGuard<'_, AppServerTurnEndpointState> {
+        match self.state.write() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+impl crate::adapters::agent_loop::TurnEndpointRouter for AppServerTurnEndpointRouter {
+    fn resolve(&self) -> Option<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
+        self.read_state().current.clone()
+    }
+}
+
 struct VerletAppServerInner {
     supervisor: crate::kernel::supervisor::VerletSupervisor,
     tasks: std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
@@ -715,6 +831,20 @@ struct VerletAppServerInner {
     model: String,
     model_provider: String,
     provider: AppServerProviderConfig,
+    /// EMO-558: the live selection. The `model`/`model_provider`/`provider`
+    /// fields above stay as the launch defaults; every read that must follow
+    /// `model/select` (turn starts, `model/list` active flag, banner state)
+    /// goes through this lock instead. Migrating those reads is EMO-558
+    active_model: tokio::sync::RwLock<ActiveModelSelection>,
+    turn_endpoint_router: std::sync::Arc<AppServerTurnEndpointRouter>,
+    /// Serializes selection with provider/auth mutations so validation,
+    /// endpoint construction, cache invalidation, and activation form one
+    /// linearizable control-plane transition.
+    model_mutation: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// False for injected runtime factories that do not carry the endpoint
+    /// router. Such constructions retain legacy runtime behavior and must not
+    /// report a model selection that their provider loop cannot honor.
+    model_selection_enabled: bool,
     capsule_bindings: CapsuleBindingsConfig,
     agent_registry_root: std::path::PathBuf,
     blob_registry_root: std::path::PathBuf,
@@ -734,6 +864,7 @@ struct VerletAppServerInner {
     lease_epoch: u64,
     metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
     user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+    model_catalog: model_catalog::MergedModelCatalog,
     process_manager: verlet_process::live::AsyncExecutionManager,
     process_dispatcher:
         tokio::sync::OnceCell<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
@@ -935,13 +1066,30 @@ impl VerletAppServer {
             open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
         sync_catalog_provider_identity(&mut config, &metadata_store).await?;
         crate::adapters::app_server::threads::normalize_registry_roots(&mut config);
-        let runtime_factory =
-            runtime_factory_from_config(&config, &metadata_store, &user_metadata_store).await?;
-        Self::with_runtime_factory_and_metadata_stores(
+        let initial_endpoint = resolved_turn_endpoint_from_provider_config(
+            &config.provider,
+            &config.model_provider,
+            &config.model,
+            &metadata_store,
+            &user_metadata_store,
+            &config.instance_environment.provider_auth.resolve(),
+        )
+        .await?;
+        let turn_endpoint_router = std::sync::Arc::new(AppServerTurnEndpointRouter::new(Some(
+            initial_endpoint.clone(),
+        )));
+        let runtime_factory = runtime_factory_from_config(
+            &config,
+            initial_endpoint,
+            std::sync::Arc::clone(&turn_endpoint_router),
+        )
+        .await?;
+        Self::with_runtime_factory_and_metadata_stores_and_router(
             config,
             runtime_factory,
             metadata_store,
             user_metadata_store,
+            turn_endpoint_router,
         )
         .await
     }
@@ -992,6 +1140,7 @@ impl VerletAppServer {
             metadata_store,
             user_metadata_store,
             Some(Box::new(decorate)),
+            std::sync::Arc::new(AppServerTurnEndpointRouter::new(None)),
         )
         .await
     }
@@ -1023,12 +1172,33 @@ impl VerletAppServer {
         metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
         user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let turn_endpoint_router = std::sync::Arc::new(AppServerTurnEndpointRouter::new(None));
+        Self::with_runtime_factory_and_metadata_stores_and_router(
+            config,
+            runtime_factory,
+            metadata_store,
+            user_metadata_store,
+            turn_endpoint_router,
+        )
+        .await
+    }
+
+    async fn with_runtime_factory_and_metadata_stores_and_router(
+        config: VerletAppServerConfig,
+        runtime_factory: std::sync::Arc<
+            dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory,
+        >,
+        metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+        user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
+        turn_endpoint_router: std::sync::Arc<AppServerTurnEndpointRouter>,
+    ) -> crate::kernel::runtime_host::VerletResult<Self> {
         Self::with_runtime_factory_and_metadata_stores_inner(
             config,
             runtime_factory,
             metadata_store,
             user_metadata_store,
             None,
+            turn_endpoint_router,
         )
         .await
     }
@@ -1048,6 +1218,7 @@ impl VerletAppServer {
                     + Send,
             >,
         >,
+        turn_endpoint_router: std::sync::Arc<AppServerTurnEndpointRouter>,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
         config.validate_root_reservation()?;
         crate::adapters::app_server::threads::normalize_registry_roots(&mut config);
@@ -1071,6 +1242,9 @@ impl VerletAppServer {
         )?;
         let metadata_store_path = config.metadata_store_path();
         let user_metadata_store_path = config.user_metadata_store_path();
+        let model_catalog = model_catalog::MergedModelCatalog::new(&config.user_state_home);
+        #[cfg(not(test))]
+        let model_catalog_state_home = config.user_state_home.clone();
         let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
         let mut tenant_context = crate::kernel::supervisor::TenantRuntimeContext::local(
             config.tenant_id.clone(),
@@ -1131,9 +1305,20 @@ impl VerletAppServer {
                 user_id: config.user_id,
                 identity_mode: config.identity_mode,
                 console_principal: config.console_principal,
-                model: config.model,
-                model_provider: config.model_provider,
-                provider: config.provider,
+                model: config.model.clone(),
+                model_provider: config.model_provider.clone(),
+                provider: config.provider.clone(),
+                active_model: tokio::sync::RwLock::new(ActiveModelSelection {
+                    model: config.model,
+                    model_provider: config.model_provider,
+                    provider: config.provider,
+                }),
+                model_selection_enabled: crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+                    turn_endpoint_router.as_ref(),
+                )
+                .is_some(),
+                turn_endpoint_router,
+                model_mutation: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 capsule_bindings: config.capsule_bindings,
                 agent_registry_root: config.agent_registry_root,
                 blob_registry_root: config.blob_registry_root,
@@ -1153,6 +1338,7 @@ impl VerletAppServer {
                 lease_epoch: config.lease_epoch,
                 metadata_store,
                 user_metadata_store,
+                model_catalog,
                 process_manager,
                 process_dispatcher: tokio::sync::OnceCell::new(),
                 subscriptions: tokio::sync::Mutex::new(
@@ -1252,6 +1438,11 @@ impl VerletAppServer {
                 recovery.thread_joins, recovery.process_outcomes,
             );
         }
+        // Catalog refresh is instance-owned and starts only after every
+        // fallible construction and recovery step. It never participates in
+        // constructor success or the first chat/RPC path.
+        #[cfg(not(test))]
+        model_catalog::spawn_runtime_refresh(&app.inner.tasks, model_catalog_state_home);
         Ok(app)
     }
 
@@ -2276,7 +2467,8 @@ async fn agent_manifest_provider_surface_from_parts(
             )
             .with_supports_streaming(false),
         ),
-        AppServerProviderConfig::BifrostOpenAIResponses { .. }
+        AppServerProviderConfig::OpenAICodex { .. }
+        | AppServerProviderConfig::BifrostOpenAIResponses { .. }
         | AppServerProviderConfig::OpenAIChatCompletions { .. }
         | AppServerProviderConfig::AnthropicMessages { .. }
         | AppServerProviderConfig::AnthropicBedrock { .. } => Ok(
@@ -2370,35 +2562,79 @@ async fn sync_catalog_provider_identity(
 
 async fn runtime_factory_from_config(
     config: &VerletAppServerConfig,
-    provider_store: &verlet_metadata::provider_store::SqliteMetadataStore,
-    auth_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+    endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint,
+    turn_endpoint_router: std::sync::Arc<AppServerTurnEndpointRouter>,
 ) -> crate::kernel::runtime_host::VerletResult<
     std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
 > {
-    match &config.provider {
+    let secret_resolver = secret_resolver_from_config(config).await?;
+    Ok(
+        runtime_factory_from_provider_parts_with_app_paths_and_router(
+            endpoint.config,
+            endpoint.client,
+            config.capsule_bindings.clone(),
+            secret_resolver,
+            config,
+            Some(turn_endpoint_router),
+        ),
+    )
+}
+
+pub(crate) async fn resolved_turn_endpoint_from_provider_config(
+    provider_config: &AppServerProviderConfig,
+    model_provider: &str,
+    selected_model: &str,
+    provider_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+    auth_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+    auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
+) -> crate::kernel::runtime_host::VerletResult<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
+    let (runtime_config, client): (
+        crate::adapters::agent_loop::AgentLoopConfig,
+        std::sync::Arc<dyn verlet_provider::ProviderClient>,
+    ) = match provider_config {
         AppServerProviderConfig::LocalOffline => {
-            let provider = config.model_provider.clone();
-            let model = config.model.clone();
             let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
-                verlet_history::ProviderApi::Other(provider.clone()),
-                provider.clone(),
+                verlet_history::ProviderApi::Other(model_provider.to_string()),
+                model_provider,
+                selected_model,
+            );
+            (
+                runtime_config,
+                std::sync::Arc::new(AppServerOfflineProviderClient::new(
+                    model_provider,
+                    selected_model,
+                )),
+            )
+        }
+        AppServerProviderConfig::OpenAICodex {
+            model,
+            max_tokens,
+            stream,
+        } => {
+            let client = std::sync::Arc::new(
+                crate::openai_codex::OpenAICodexProviderClient::new(auth_store.clone()).map_err(
+                    |err| {
+                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                            "failed to build OpenAI Codex provider client: {err}"
+                        ))
+                    },
+                )?,
+            );
+            let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::OpenAIResponses,
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
                 model.clone(),
             );
-            let secret_resolver = secret_resolver_from_config(config).await?;
-            Ok(runtime_factory_from_provider_parts_with_app_paths(
-                runtime_config,
-                std::sync::Arc::new(AppServerOfflineProviderClient::new(provider, model)),
-                config.capsule_bindings.clone(),
-                secret_resolver,
-                config,
-            ))
+            runtime_config.max_tokens = *max_tokens;
+            runtime_config.stream = *stream;
+            (runtime_config, client)
         }
         AppServerProviderConfig::BifrostOpenAIResponses {
             base_url,
             api_key,
-            model,
             max_tokens,
             stream,
+            ..
         } => {
             let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
                 std::sync::Arc::new(verlet_provider::OpenAIResponsesAdapter {
@@ -2418,28 +2654,20 @@ async fn runtime_factory_from_config(
             );
             let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
                 verlet_history::ProviderApi::OpenAIResponses,
-                APP_SERVER_BIFROST_PROVIDER,
-                model.clone(),
+                model_provider,
+                selected_model,
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config).await?;
-            Ok(runtime_factory_from_provider_parts_with_app_paths(
-                runtime_config,
-                client,
-                config.capsule_bindings.clone(),
-                secret_resolver,
-                config,
-            ))
+            (runtime_config, client)
         }
         AppServerProviderConfig::OpenAIChatCompletions {
-            provider,
             base_url,
             api_key,
-            model,
             max_tokens,
             stream,
             headers,
+            ..
         } => {
             let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
                 std::sync::Arc::new(verlet_provider::OpenAIChatCompletionsAdapter);
@@ -2457,26 +2685,19 @@ async fn runtime_factory_from_config(
             );
             let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
                 verlet_history::ProviderApi::OpenAIChatCompletions,
-                provider.clone(),
-                model.clone(),
+                model_provider,
+                selected_model,
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config).await?;
-            Ok(runtime_factory_from_provider_parts_with_app_paths(
-                runtime_config,
-                client,
-                config.capsule_bindings.clone(),
-                secret_resolver,
-                config,
-            ))
+            (runtime_config, client)
         }
         AppServerProviderConfig::AnthropicMessages {
             base_url,
             api_key,
-            model,
             max_tokens,
             stream,
+            ..
         } => {
             let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
                 std::sync::Arc::new(verlet_provider::AnthropicMessagesAdapter);
@@ -2496,19 +2717,12 @@ async fn runtime_factory_from_config(
             );
             let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
                 verlet_history::ProviderApi::AnthropicMessages,
-                APP_SERVER_ANTHROPIC_PROVIDER,
-                model.clone(),
+                model_provider,
+                selected_model,
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config).await?;
-            Ok(runtime_factory_from_provider_parts_with_app_paths(
-                runtime_config,
-                client,
-                config.capsule_bindings.clone(),
-                secret_resolver,
-                config,
-            ))
+            (runtime_config, client)
         }
         AppServerProviderConfig::AnthropicBedrock {
             region,
@@ -2516,9 +2730,9 @@ async fn runtime_factory_from_config(
             access_key_id,
             secret_access_key,
             session_token,
-            model,
             max_tokens,
             stream,
+            ..
         } => {
             let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
                 std::sync::Arc::new(verlet_provider::AnthropicBedrockMessagesAdapter);
@@ -2526,7 +2740,7 @@ async fn runtime_factory_from_config(
                 verlet_provider::ProviderEndpoint::anthropic_bedrock_with_base_url(
                     base_url,
                     region,
-                    model,
+                    selected_model,
                     access_key_id.clone(),
                     secret_access_key.clone(),
                     session_token.clone(),
@@ -2534,7 +2748,7 @@ async fn runtime_factory_from_config(
             } else {
                 verlet_provider::ProviderEndpoint::anthropic_bedrock(
                     region,
-                    model,
+                    selected_model,
                     access_key_id.clone(),
                     secret_access_key.clone(),
                     session_token.clone(),
@@ -2549,33 +2763,25 @@ async fn runtime_factory_from_config(
             );
             let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
                 verlet_history::ProviderApi::AnthropicMessages,
-                APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER,
-                model.clone(),
+                model_provider,
+                selected_model,
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config).await?;
-            Ok(runtime_factory_from_provider_parts_with_app_paths(
-                runtime_config,
-                client,
-                config.capsule_bindings.clone(),
-                secret_resolver,
-                config,
-            ))
+            (runtime_config, client)
         }
         AppServerProviderConfig::CatalogOpenAIChatCompletions {
             provider_id,
-            model,
             max_tokens,
             stream,
+            ..
         } => {
-            let auth_context = config.instance_environment.provider_auth.resolve();
             let resolved = resolve_catalog_openai_chat_completions_provider(
                 provider_store,
                 auth_store,
-                &auth_context,
+                auth_context,
                 provider_id,
-                model.as_deref(),
+                Some(selected_model),
                 *max_tokens,
                 *stream,
             )
@@ -2591,16 +2797,13 @@ async fn runtime_factory_from_config(
                     },
                 )?,
             );
-            let secret_resolver = secret_resolver_from_config(config).await?;
-            Ok(runtime_factory_from_provider_parts_with_app_paths(
-                resolved.runtime_config,
-                client,
-                config.capsule_bindings.clone(),
-                secret_resolver,
-                config,
-            ))
+            (resolved.runtime_config, client)
         }
-    }
+    };
+    Ok(crate::adapters::agent_loop::ResolvedTurnEndpoint {
+        config: runtime_config,
+        client,
+    })
 }
 
 #[cfg(test)]
@@ -2644,16 +2847,65 @@ pub(crate) fn runtime_factory_from_provider_parts_with_secret_resolver(
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         None,
+        None,
     )
 }
 
+#[cfg(test)]
+pub(crate) fn runtime_factory_from_provider_parts_with_turn_endpoint_router(
+    runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+    capsule_bindings: CapsuleBindingsConfig,
+    turn_endpoint_router: std::sync::Arc<AppServerTurnEndpointRouter>,
+) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
+    runtime_factory_from_provider_parts_with_store_paths(
+        runtime_config,
+        client,
+        capsule_bindings,
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+        None,
+        None,
+        None,
+        crate::agent::manifest_bind::AgentManifestPlacementBinding::default(),
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        None,
+        Some(turn_endpoint_router),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
+    runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
+    client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+    capsule_bindings: CapsuleBindingsConfig,
+    secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
+    config: &VerletAppServerConfig,
+) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
+    runtime_factory_from_provider_parts_with_app_paths_and_router(
+        runtime_config,
+        client,
+        // lexicon-allow: capsule - existing app-server config argument
+        capsule_bindings,
+        secret_resolver,
+        config,
+        None,
+    )
+}
+
+fn runtime_factory_from_provider_parts_with_app_paths_and_router(
     runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
     client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
     // lexicon-allow: capsule - existing app-server config type name
     capsule_bindings: CapsuleBindingsConfig,
     secret_resolver: Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
     config: &VerletAppServerConfig,
+    turn_endpoint_router: Option<std::sync::Arc<AppServerTurnEndpointRouter>>,
 ) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
     runtime_factory_from_provider_parts_with_store_paths(
         runtime_config,
@@ -2673,6 +2925,7 @@ pub(crate) fn runtime_factory_from_provider_parts_with_app_paths(
         config.default_workspace.clone(),
         std::sync::Arc::clone(&config.remote_event_store_served),
         config.instance_environment.hook_shell.clone(),
+        turn_endpoint_router,
     )
 }
 
@@ -2694,6 +2947,7 @@ fn runtime_factory_from_provider_parts_with_store_paths(
     default_workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
     remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
     hook_shell: Option<String>,
+    turn_endpoint_router: Option<std::sync::Arc<AppServerTurnEndpointRouter>>,
 ) -> std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory> {
     // lexicon-allow: capsule - existing app-server runtime factory name
     std::sync::Arc::new(threads::CapsuleBindingRuntimeFactory {
@@ -2714,6 +2968,9 @@ fn runtime_factory_from_provider_parts_with_store_paths(
         default_placement,
         default_workspace,
         remote_event_store_served,
+        turn_endpoint_router: turn_endpoint_router.map(|router| {
+            router as std::sync::Arc<dyn crate::adapters::agent_loop::TurnEndpointRouter>
+        }),
     })
 }
 

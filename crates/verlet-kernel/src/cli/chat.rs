@@ -159,7 +159,6 @@ struct ChatSessionInfo {
     connection_label: String,
     cwd: String,
     model_label: String,
-    models: Vec<String>,
 }
 
 async fn run_chat_client<S>(
@@ -193,7 +192,6 @@ where
     let mut driver = ChatDriver {
         thread_id: thread.id,
         active_turn_id: None,
-        models: session.models,
     };
 
     let run_result = {
@@ -224,9 +222,8 @@ where
 {
     client.account_read().await?;
     let config = client.config_read(false).await?;
-    let models = client.model_list().await?;
-    let model_labels = model_labels(&models);
-    if model_labels.is_empty() {
+    let models = client.model_list_typed().await?;
+    if models.data.is_empty() {
         return Err(crate::cli::usage_error("app-server returned no models"));
     }
     let cwd = config
@@ -235,21 +232,15 @@ where
         .and_then(serde_json::Value::as_str)
         .unwrap_or("?")
         .to_string();
-    let provider = config
-        .get("config")
-        .and_then(|config| config.get("model_provider"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("provider");
-    let model = config
-        .get("config")
-        .and_then(|config| config.get("model"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("model");
+    let active = models
+        .data
+        .iter()
+        .find(|model| model.active)
+        .ok_or_else(|| crate::cli::usage_error("app-server returned no active model"))?;
     Ok(ChatSessionInfo {
         connection_label,
         cwd,
-        model_label: format!("{provider}/{model}"),
-        models: model_labels,
+        model_label: format!("{}/{}", active.provider_id, active.model),
     })
 }
 
@@ -258,7 +249,6 @@ where
 struct ChatDriver {
     thread_id: String,
     active_turn_id: Option<String>,
-    models: Vec<String>,
 }
 
 impl ChatDriver {
@@ -363,7 +353,17 @@ impl ChatDriver {
                 });
             }
             verlet_chat::Action::ListModels => {
-                let _ = events.send(verlet_chat::ChatEvent::Models(self.models.clone()));
+                // Fetched fresh on every open: auth status and the active
+                // flag change underneath a long-lived session.
+                let models = client.model_list_typed().await?;
+                let _ = events.send(verlet_chat::ChatEvent::Models(model_rows(&models)));
+            }
+            verlet_chat::Action::SelectModel { provider_id, model } => {
+                let selected = client.model_select_typed(&provider_id, &model).await?;
+                let _ = events.send(verlet_chat::ChatEvent::ModelSelected {
+                    provider_id: selected.active.provider_id,
+                    model: selected.active.model,
+                });
             }
         }
         Ok(())
@@ -698,28 +698,26 @@ fn session_rows(threads: &serde_json::Value, current_id: &str) -> Vec<verlet_cha
         .collect()
 }
 
-fn model_labels(models: &serde_json::Value) -> Vec<String> {
+fn model_rows(
+    models: &crate::adapters::operator_client::OperatorModelList,
+) -> Vec<verlet_chat::ModelRow> {
     models
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|model| {
-            let provider = model
-                .get("providerId")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("provider");
-            let id = model
-                .get("model")
-                .or_else(|| model.get("id"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("model");
-            let default = model
-                .get("isDefault")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let suffix = if default { " (default)" } else { "" };
-            format!("{provider}/{id}{suffix}")
+        .data
+        .iter()
+        .map(|model| verlet_chat::ModelRow {
+            provider_id: model.provider_id.clone(),
+            model: model.model.clone(),
+            display_name: model.display_name.clone(),
+            auth_status: match model.auth_status {
+                crate::adapters::operator_client::OperatorModelAuthStatus::Configured => {
+                    "configured".to_string()
+                }
+                crate::adapters::operator_client::OperatorModelAuthStatus::Env => "env".to_string(),
+                crate::adapters::operator_client::OperatorModelAuthStatus::Missing => {
+                    "missing".to_string()
+                }
+            },
+            active: model.active,
         })
         .collect()
 }

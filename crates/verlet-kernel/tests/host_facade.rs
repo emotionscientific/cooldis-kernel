@@ -6,6 +6,8 @@ use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
+#[path = "support/model_catalog.rs"]
+mod model_catalog_test_support;
 #[path = "support/test_mount.rs"]
 mod support;
 
@@ -1168,6 +1170,7 @@ fn hosted_config(
     identity: &verlet::daemon::identity::VerletDaemonIdentityConfig,
     provider_base_url: Option<&str>,
 ) -> verlet::adapters::app_server::VerletAppServerConfig {
+    model_catalog_test_support::disable_in_process_refresh();
     let environment = verlet::adapters::app_server::instance::InstanceEnvironment {
         provider_auth: verlet::adapters::app_server::instance::ProviderAuthSource::Injected(
             verlet_metadata::provider_store::LlmProviderAuthContext::new(),
@@ -1198,6 +1201,7 @@ fn standalone_config(
     workspace: &std::path::Path,
     addr: std::net::SocketAddr,
 ) -> verlet::adapters::app_server::VerletAppServerConfig {
+    model_catalog_test_support::disable_in_process_refresh();
     let mut config = verlet::adapters::app_server::VerletAppServerConfig::local(
         verlet::adapters::app_server::AppServerListenAddr::WebSocket(addr),
         workspace,

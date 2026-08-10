@@ -1,7 +1,11 @@
 use verlet::daemon::identity::IdentityAuthority as _;
 
+#[path = "../support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    model_catalog_test_support::disable_in_process_refresh();
     let root = std::path::PathBuf::from("/tmp")
         .join(format!("cdis-workbench-{}", uuid::Uuid::now_v7().simple()));
     let result = run(&root).await;

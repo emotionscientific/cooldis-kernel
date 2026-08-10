@@ -21,6 +21,8 @@ pub const GUTTER: u16 = 1;
 const MAX_COMPOSER_ROWS: u16 = 6;
 /// Rows the completion popup shows before it windows around the selection.
 const MAX_POPUP_ROWS: usize = 8;
+/// Rows the model picker shows before it windows around the selection.
+const MAX_PICKER_ROWS: usize = 10;
 /// Blank rows between two transcript items.
 const TRANSCRIPT_GAP: u16 = 1;
 
@@ -43,13 +45,18 @@ pub fn build(
     } else {
         popup_items.len().min(MAX_POPUP_ROWS) as u16 + 1
     };
+    let picker_h = app
+        .picker
+        .as_ref()
+        .map(|picker| picker.rows.len().min(MAX_PICKER_ROWS) as u16 + 2)
+        .unwrap_or(0);
     let working_h = if app.turn_active() { 2 } else { 0 };
     let composer_rows = app
         .composer
         .visual_height(width.saturating_sub(4))
         .clamp(1, MAX_COMPOSER_ROWS);
     let body_h = composer_rows + 2;
-    let bottom_h = working_h + popup_h + body_h + 1;
+    let bottom_h = working_h + popup_h + picker_h + body_h + 1;
     let transcript_h = area.height.saturating_sub(bottom_h).max(1);
 
     // Reconcile the scroll offset with this frame's dimensions, then stash
@@ -76,6 +83,9 @@ pub fn build(
     if popup_h > 0 {
         root = root.fixed(popup_h, popup(app, &popup_items, theme));
     }
+    if picker_h > 0 {
+        root = root.fixed(picker_h, picker(app, theme, width));
+    }
     root = root.fixed(body_h, composer(app, theme, probe));
     root = root.fixed(1, footer(app, theme));
     element(root)
@@ -90,7 +100,13 @@ fn working(app: &App, theme: &Theme) -> Element {
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" ({}s • Esc to interrupt)", app.elapsed_secs()),
+            // While the picker is open it owns Esc (dismiss, not interrupt),
+            // so the interrupt hint would lie.
+            if app.picker.is_some() {
+                format!(" ({}s)", app.elapsed_secs())
+            } else {
+                format!(" ({}s • Esc to interrupt)", app.elapsed_secs())
+            },
             theme.muted_style(),
         ),
     ]);
@@ -137,6 +153,112 @@ fn popup(app: &App, items: &[(String, String)], theme: &Theme) -> Element {
     )
 }
 
+/// The `/models` picker: a titled list of selectable models. Auth problems
+/// and the active selection are annotated per row; the width columns align
+/// on the longest display name.
+fn picker(app: &App, theme: &Theme, width: u16) -> Element {
+    let Some(picker) = app.picker.as_ref() else {
+        return element(Spacer);
+    };
+    let scrollbar_w = u16::from(picker.rows.len() > MAX_PICKER_ROWS);
+    let content_w = width.saturating_sub(2).saturating_sub(scrollbar_w);
+    let max_suffix_w = picker
+        .rows
+        .iter()
+        .map(|row| tuika::width::str_cols(&model_row_suffix(row)))
+        .max()
+        .unwrap_or(0);
+    let max_name_w = picker
+        .rows
+        .iter()
+        .map(|row| tuika::width::str_cols(&row.display_name))
+        .max()
+        .unwrap_or(0);
+    // Keep both existing columns visible on a narrow terminal. Each remains a
+    // single SelectList row; overlong fields are clipped with an ellipsis.
+    let name_w = max_name_w.min(content_w.saturating_sub(max_suffix_w.saturating_add(2)) / 2);
+    let rows: Vec<Line<'static>> = picker
+        .rows
+        .iter()
+        .map(|row| {
+            let suffix = model_row_suffix(row);
+            let suffix_w = tuika::width::str_cols(&suffix);
+            let coordinate_w = content_w
+                .saturating_sub(name_w)
+                .saturating_sub(2)
+                .saturating_sub(suffix_w);
+            let name = fit_columns(&row.display_name, name_w);
+            let name_pad = name_w.saturating_sub(tuika::width::str_cols(&name));
+            let coordinate =
+                fit_columns(&format!("{}/{}", row.provider_id, row.model), coordinate_w);
+            let mut spans = vec![
+                Span::styled(
+                    format!("{name}{:width$}  ", "", width = usize::from(name_pad)),
+                    Style::default().fg(theme.text),
+                ),
+                Span::styled(coordinate, theme.muted_style()),
+            ];
+            if row.active {
+                spans.push(Span::styled(
+                    "  active",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            if row.auth_status == "missing" {
+                spans.push(Span::styled("  needs login", theme.muted_style()));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let title = Text::new(vec![Line::from(Span::styled(
+        "Select a model",
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+    ))]);
+    let list = SelectList::new(rows, &picker.state).viewport(MAX_PICKER_ROWS as u16);
+    element(
+        Flex::column()
+            .fixed(1, element(Spacer))
+            .fixed(1, element(title))
+            .grow(1, element(list)),
+    )
+}
+
+fn model_row_suffix(row: &crate::ModelRow) -> String {
+    let mut suffix = String::new();
+    if row.active {
+        suffix.push_str("  active");
+    }
+    if row.auth_status == "missing" {
+        suffix.push_str("  needs login");
+    }
+    suffix
+}
+
+/// Fit text to terminal columns without slicing UTF-8 or splitting a wide
+/// character across the right edge.
+fn fit_columns(text: &str, max_cols: u16) -> String {
+    if tuika::width::str_cols(text) <= max_cols {
+        return text.to_string();
+    }
+    if max_cols == 0 {
+        return String::new();
+    }
+
+    let body_cols = max_cols - 1;
+    let mut fitted = String::new();
+    for ch in text.chars() {
+        fitted.push(ch);
+        if tuika::width::str_cols(&fitted) > body_cols {
+            fitted.pop();
+            break;
+        }
+    }
+    fitted.push('…');
+    fitted
+}
+
 /// The rounded input box, with the caret placed by the host through `probe`.
 fn composer(app: &App, theme: &Theme, probe: &RectProbe) -> Element {
     let input = element(
@@ -165,7 +287,9 @@ fn composer(app: &App, theme: &Theme, probe: &RectProbe) -> Element {
 
 /// Key hints on the left; connection, thread, and turn state on the right.
 fn footer(app: &App, theme: &Theme) -> Element {
-    let hints = if app.popup.is_some() {
+    let hints = if app.picker.is_some() {
+        "  ↑↓ move   ⏎ select   esc dismiss"
+    } else if app.popup.is_some() {
         "  ↑↓ move   ⇥ complete   ⏎ run   esc dismiss"
     } else {
         // `PgUp` spelled out rather than `⇞⇟`: those glyphs are missing from

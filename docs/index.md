@@ -81,7 +81,8 @@ what you approve, and run it under policy.
 Verlet is experimental. The repository is focused on V1 runtime primitives:
 agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
 couplings, witnessed OpenAPI operation imports, offline coupling replay,
-local runtime execution, provider adapters,
+local runtime execution, provider adapters including OpenAI Codex access through
+a user's ChatGPT plan,
 virtual bash, VFS-backed oversized-output spill receipts,
 skill-package resources with bind-time name pinning, witnessed workspace skill
 discovery without a second mount, bind-plane local host-workspace mounts,

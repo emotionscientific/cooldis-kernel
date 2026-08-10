@@ -4,8 +4,12 @@ use verlet_history::EventStore as _;
 use verlet_history::SessionStore as _;
 use verlet_metadata::provider_store::ThreadMetadataStore as _;
 
+#[path = "../support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    model_catalog_test_support::disable_in_process_refresh();
     run_parent().await?;
     run_researcher().await?;
     if verlet_runtime_contracts::env_compat::var("VERLET_MANIFEST_E2E_LIVE")
