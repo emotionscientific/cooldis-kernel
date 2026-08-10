@@ -13,7 +13,9 @@ use tuika::prelude::*;
 use tuika::probe::RectProbe;
 
 use crate::app::App;
+use crate::app::setup::{SetupStep, credential_options, provider_connected, provider_status};
 use crate::cells::short_id;
+use crate::{LoginMethod, ProviderRow};
 
 /// Columns of blank kept down each side of the UI.
 pub const GUTTER: u16 = 1;
@@ -50,13 +52,14 @@ pub fn build(
         .as_ref()
         .map(|picker| picker.rows.len().min(MAX_PICKER_ROWS) as u16 + 2)
         .unwrap_or(0);
+    let setup_h = setup_height(app);
     let working_h = if app.turn_active() { 2 } else { 0 };
     let composer_rows = app
         .composer
         .visual_height(width.saturating_sub(4))
         .clamp(1, MAX_COMPOSER_ROWS);
     let body_h = composer_rows + 2;
-    let bottom_h = working_h + popup_h + picker_h + body_h + 1;
+    let bottom_h = working_h + popup_h + picker_h + setup_h + body_h + 1;
     let transcript_h = area.height.saturating_sub(bottom_h).max(1);
 
     // Reconcile the scroll offset with this frame's dimensions, then stash
@@ -86,6 +89,9 @@ pub fn build(
     if picker_h > 0 {
         root = root.fixed(picker_h, picker(app, theme, width));
     }
+    if setup_h > 0 {
+        root = root.fixed(setup_h, setup(app, theme, width));
+    }
     root = root.fixed(body_h, composer(app, theme, probe));
     root = root.fixed(1, footer(app, theme));
     element(root)
@@ -100,9 +106,9 @@ fn working(app: &App, theme: &Theme) -> Element {
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            // While the picker is open it owns Esc (dismiss, not interrupt),
-            // so the interrupt hint would lie.
-            if app.picker.is_some() {
+            // While the picker or the setup wizard is open it owns Esc
+            // (dismiss, not interrupt), so the interrupt hint would lie.
+            if app.picker.is_some() || app.setup_visible() {
                 format!(" ({}s)", app.elapsed_secs())
             } else {
                 format!(" ({}s • Esc to interrupt)", app.elapsed_secs())
@@ -225,6 +231,268 @@ fn picker(app: &App, theme: &Theme, width: u16) -> Element {
     )
 }
 
+/// Rows the setup wizard needs this frame, measured like the picker: list
+/// rows capped at [`MAX_PICKER_ROWS`], plus spacer, title, and (when
+/// present) a trailing error/hint line.
+fn setup_height(app: &App) -> u16 {
+    match app.setup.as_ref() {
+        None | Some(SetupStep::AwaitModels { .. }) | Some(SetupStep::AwaitProviders { .. }) => 0,
+        Some(SetupStep::Provider { rows, .. }) => rows.len().min(MAX_PICKER_ROWS) as u16 + 2,
+        Some(SetupStep::Credential {
+            provider, error, ..
+        }) => credential_options(provider).len() as u16 + 2 + u16::from(error.is_some()),
+        // Spacer, title, input row, hint/error row.
+        Some(SetupStep::KeyInput { .. }) => 4,
+        // Spacer, title, one or two content rows, hint row.
+        Some(SetupStep::LoginWait { device_code, .. }) => 4 + u16::from(device_code.is_some()),
+    }
+}
+
+/// The setup wizard panel. Same visual language as the model picker: a bold
+/// title, a selectable list (or input/wait body), muted annotations.
+fn setup(app: &App, theme: &Theme, width: u16) -> Element {
+    match app.setup.as_ref() {
+        Some(SetupStep::Provider { rows, state }) => setup_providers(rows, state, theme, width),
+        Some(SetupStep::Credential {
+            provider,
+            state,
+            error,
+            ..
+        }) => setup_credentials(provider, state, error.as_deref(), theme),
+        Some(SetupStep::KeyInput {
+            provider,
+            value,
+            busy,
+            error,
+            ..
+        }) => setup_key_input(provider, value, *busy, error.as_deref(), theme, width),
+        Some(SetupStep::LoginWait {
+            provider,
+            method,
+            device_code,
+            ..
+        }) => setup_login_wait(provider, *method, device_code.as_ref(), app, theme),
+        _ => element(Spacer),
+    }
+}
+
+fn setup_title(text: String, theme: &Theme) -> Element {
+    element(Text::new(vec![Line::from(Span::styled(
+        text,
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+    ))]))
+}
+
+fn setup_providers(
+    rows: &[ProviderRow],
+    state: &SelectState,
+    theme: &Theme,
+    width: u16,
+) -> Element {
+    let scrollbar_w = u16::from(rows.len() > MAX_PICKER_ROWS);
+    let content_w = width.saturating_sub(2).saturating_sub(scrollbar_w);
+    let max_suffix_w = u16::from(rows.iter().any(|row| row.active)) * 8;
+    let max_name_w = rows
+        .iter()
+        .map(|row| tuika::width::str_cols(&row.display_name))
+        .max()
+        .unwrap_or(0);
+    let name_w = max_name_w.min(content_w.saturating_sub(max_suffix_w.saturating_add(2)) / 2);
+    let lines: Vec<Line<'static>> = rows
+        .iter()
+        .map(|row| {
+            let suffix_w = if row.active { 8 } else { 0 };
+            let name = fit_columns(&row.display_name, name_w);
+            let name_pad = name_w.saturating_sub(tuika::width::str_cols(&name));
+            let status = fit_columns(
+                &provider_status(row),
+                content_w
+                    .saturating_sub(name_w)
+                    .saturating_sub(2)
+                    .saturating_sub(suffix_w),
+            );
+            let connected = provider_connected(row);
+            let mut spans = vec![
+                Span::styled(
+                    format!("{name}{:width$}  ", "", width = usize::from(name_pad)),
+                    Style::default().fg(theme.text),
+                ),
+                Span::styled(
+                    status,
+                    if connected {
+                        Style::default().fg(theme.accent)
+                    } else {
+                        theme.muted_style()
+                    },
+                ),
+            ];
+            if row.active {
+                spans.push(Span::styled(
+                    "  active",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let list = SelectList::new(lines, state).viewport(MAX_PICKER_ROWS as u16);
+    element(
+        Flex::column()
+            .fixed(1, element(Spacer))
+            .fixed(1, setup_title("Set up a provider".to_string(), theme))
+            .grow(1, element(list)),
+    )
+}
+
+fn setup_credentials(
+    provider: &ProviderRow,
+    state: &SelectState,
+    error: Option<&str>,
+    theme: &Theme,
+) -> Element {
+    let lines: Vec<Line<'static>> = credential_options(provider)
+        .iter()
+        .map(|option| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{}  ", option.label),
+                    Style::default().fg(theme.text),
+                ),
+                Span::styled(option.hint.to_string(), theme.muted_style()),
+            ])
+        })
+        .collect();
+    let list = SelectList::new(lines, state).viewport(MAX_PICKER_ROWS as u16);
+    let mut column = Flex::column()
+        .fixed(1, element(Spacer))
+        .fixed(
+            1,
+            setup_title(format!("Connect {}", provider.display_name), theme),
+        )
+        .grow(1, element(list));
+    if let Some(message) = error {
+        column = column.fixed(1, setup_error(message, theme));
+    }
+    element(column)
+}
+
+fn setup_error(message: &str, theme: &Theme) -> Element {
+    // Matches the notice-cell error glyph and color in `cells.rs`.
+    element(Text::new(vec![Line::from(vec![
+        Span::styled("✗ ", Style::default().fg(theme.accent)),
+        Span::styled(message.to_string(), Style::default().fg(theme.text)),
+    ])]))
+}
+
+fn setup_key_input(
+    provider: &ProviderRow,
+    value: &str,
+    busy: bool,
+    error: Option<&str>,
+    theme: &Theme,
+    width: u16,
+) -> Element {
+    // The key never renders: a masked run of bullets stands in for it, and
+    // overlong keys clip from the left so the caret edge stays visible.
+    let masked = "•".repeat(
+        value
+            .chars()
+            .count()
+            .min(usize::from(width.saturating_sub(6))),
+    );
+    let body = Line::from(vec![
+        Span::styled("› ", Style::default().fg(theme.accent_alt)),
+        Span::styled(masked, Style::default().fg(theme.text)),
+    ]);
+    let hint: Element = if let Some(message) = error {
+        setup_error(message, theme)
+    } else if busy {
+        element(Text::new(vec![Line::from(Span::styled(
+            "saving…",
+            theme.muted_style(),
+        ))]))
+    } else {
+        element(Text::new(vec![Line::from(Span::styled(
+            "⏎ save   esc back",
+            theme.muted_style(),
+        ))]))
+    };
+    element(
+        Flex::column()
+            .fixed(1, element(Spacer))
+            .fixed(
+                1,
+                setup_title(
+                    format!("Paste the {} API key", provider.display_name),
+                    theme,
+                ),
+            )
+            .fixed(1, element(Text::new(vec![body])))
+            .fixed(1, hint),
+    )
+}
+
+fn setup_login_wait(
+    provider: &ProviderRow,
+    method: LoginMethod,
+    device_code: Option<&(String, String)>,
+    app: &App,
+    theme: &Theme,
+) -> Element {
+    let title = setup_title(format!("Sign in to {}", provider.display_name), theme);
+    let mut column = Flex::column().fixed(1, element(Spacer)).fixed(1, title);
+    match (method, device_code) {
+        (LoginMethod::Device, Some((uri, code))) => {
+            column = column
+                .fixed(
+                    1,
+                    element(Text::new(vec![Line::from(vec![
+                        Span::styled("Open ".to_string(), theme.muted_style()),
+                        Span::styled(uri.clone(), Style::default().fg(theme.text)),
+                    ])])),
+                )
+                .fixed(
+                    1,
+                    element(Text::new(vec![Line::from(vec![
+                        Span::styled("Enter code ".to_string(), theme.muted_style()),
+                        Span::styled(
+                            code.clone(),
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ])])),
+                );
+        }
+        _ => {
+            let waiting = match method {
+                LoginMethod::Browser => "waiting for the browser sign-in to finish",
+                LoginMethod::Device => "requesting a device code",
+            };
+            let row = view! {
+                row(gap = 1) {
+                    fixed(1) { node(Spinner::new(app.frame).color(theme.accent)) }
+                    grow(1) { node(Text::new(vec![Line::from(Span::styled(
+                        waiting.to_string(),
+                        theme.muted_style(),
+                    ))])) }
+                }
+            };
+            column = column.fixed(1, row);
+        }
+    }
+    column = column.fixed(
+        1,
+        element(Text::new(vec![Line::from(Span::styled(
+            "esc cancel",
+            theme.muted_style(),
+        ))])),
+    );
+    element(column)
+}
+
 fn model_row_suffix(row: &crate::ModelRow) -> String {
     let mut suffix = String::new();
     if row.active {
@@ -287,7 +555,14 @@ fn composer(app: &App, theme: &Theme, probe: &RectProbe) -> Element {
 
 /// Key hints on the left; connection, thread, and turn state on the right.
 fn footer(app: &App, theme: &Theme) -> Element {
-    let hints = if app.picker.is_some() {
+    let hints = if matches!(
+        app.setup.as_ref(),
+        Some(SetupStep::KeyInput { .. } | SetupStep::LoginWait { .. })
+    ) {
+        "  ⏎ confirm   esc back"
+    } else if matches!(app.setup.as_ref(), Some(SetupStep::Provider { .. })) {
+        "  ↑↓ move   ⏎ select   c configure   esc dismiss"
+    } else if app.setup_visible() || app.picker.is_some() {
         "  ↑↓ move   ⏎ select   esc dismiss"
     } else if app.popup.is_some() {
         "  ↑↓ move   ⇥ complete   ⏎ run   esc dismiss"

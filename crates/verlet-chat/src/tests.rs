@@ -717,10 +717,18 @@ fn models_event_opens_the_picker_preselecting_the_active_row() {
     assert!(!grid.contains("Select a model"), "picker closed:\n{grid}");
 }
 
+/// `model_rows()` with the second row authenticated, for pinning the plain
+/// selection path (a `missing` row routes into the setup wizard instead).
+fn configured_model_rows() -> Vec<crate::ModelRow> {
+    let mut rows = model_rows();
+    rows[1].auth_status = "configured".to_string();
+    rows
+}
+
 #[test]
 fn picker_selection_emits_select_model_and_esc_dismisses() {
     let mut app = app();
-    app.apply(ChatEvent::Models(model_rows()));
+    app.apply(ChatEvent::Models(configured_model_rows()));
     let _ = app.handle(&key(tuika::KeyCode::Down));
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     assert_eq!(
@@ -834,12 +842,26 @@ fn models_event_replaces_popup_and_picker_and_empty_result_closes_stale_picker()
 }
 
 #[test]
-fn rejected_missing_auth_selection_keeps_model_and_active_turn_consistent() {
+fn missing_auth_selection_routes_into_the_setup_wizard() {
+    let mut app = app();
+    app.apply(ChatEvent::Models(model_rows()));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    // No doomed SelectModel: the UI fetches the provider catalog to open the
+    // credential step for `provider` instead.
+    assert_eq!(app.drain_actions(), vec![Action::ListProviders]);
+    assert!(app.picker.is_none());
+}
+
+#[test]
+fn rejected_selection_keeps_model_and_active_turn_consistent() {
     let mut app = app();
     app.apply(ChatEvent::TurnStarted {
         turn_id: "turn-1".to_string(),
     });
-    app.apply(ChatEvent::Models(model_rows()));
+    // Authenticated on the client's view, but the server still rejects the
+    // switch (stale key, unreachable endpoint).
+    app.apply(ChatEvent::Models(configured_model_rows()));
     let _ = app.handle(&key(tuika::KeyCode::Down));
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     assert!(matches!(
@@ -1087,4 +1109,663 @@ fn renders_a_turn_in_flight_snapshot() {
     assert!(grid.contains("Working ("), "working row:\n{grid}");
     assert!(grid.contains("Esc to interrupt"), "interrupt hint:\n{grid}");
     assert!(grid.contains("Looking at the snapshot…"), "answer:\n{grid}");
+}
+
+// --- setup wizard ---
+
+fn provider_rows() -> Vec<crate::ProviderRow> {
+    vec![
+        crate::ProviderRow {
+            provider_id: "anthropic".to_string(),
+            display_name: "Anthropic".to_string(),
+            auth_status: "configured".to_string(),
+            label: "stored credential".to_string(),
+            oauth: false,
+            active: true,
+        },
+        crate::ProviderRow {
+            provider_id: "openai".to_string(),
+            display_name: "OpenAI".to_string(),
+            auth_status: "missing".to_string(),
+            label: "no credential".to_string(),
+            oauth: false,
+            active: false,
+        },
+        crate::ProviderRow {
+            provider_id: "openai-codex".to_string(),
+            display_name: "OpenAI Codex".to_string(),
+            auth_status: "missing".to_string(),
+            label: "no credential".to_string(),
+            oauth: true,
+            active: false,
+        },
+    ]
+}
+
+fn open_wizard(app: &mut App) {
+    app.submit("/setup");
+    assert_eq!(app.drain_actions(), vec![Action::ListProviders]);
+    app.apply(ChatEvent::Providers(provider_rows()));
+}
+
+#[test]
+fn setup_command_opens_the_provider_step_preselecting_the_active_row() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Set up a provider"), "title:\n{grid}");
+    assert!(grid.contains("Anthropic"), "provider name:\n{grid}");
+    assert!(
+        grid.contains("✓ stored credential"),
+        "connected status:\n{grid}"
+    );
+    assert!(grid.contains("needs API key"), "key status:\n{grid}");
+    assert!(grid.contains("needs sign-in"), "oauth status:\n{grid}");
+    assert!(grid.contains("active"), "active marker:\n{grid}");
+    assert!(grid.contains("c configure"), "footer hints:\n{grid}");
+
+    // Enter on the preselected (connected) row heads to the model step.
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(app.drain_actions(), vec![Action::ListModels]);
+    let grid = render(&mut app, true);
+    assert!(
+        !grid.contains("Set up a provider"),
+        "wizard hidden:\n{grid}"
+    );
+}
+
+#[test]
+fn wizard_model_step_scopes_the_picker_to_the_chosen_provider() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::Models(vec![
+        crate::ModelRow {
+            provider_id: "anthropic".to_string(),
+            model: "model-a".to_string(),
+            display_name: "Model A".to_string(),
+            auth_status: "configured".to_string(),
+            active: true,
+        },
+        crate::ModelRow {
+            provider_id: "openai".to_string(),
+            model: "model-b".to_string(),
+            display_name: "Model B".to_string(),
+            auth_status: "missing".to_string(),
+            active: false,
+        },
+    ]));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Select a model"), "picker title:\n{grid}");
+    assert!(grid.contains("Model A"), "scoped row:\n{grid}");
+    assert!(!grid.contains("Model B"), "other provider leaked:\n{grid}");
+}
+
+#[test]
+fn unconnected_provider_routes_through_the_credential_step_to_key_entry() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Connect OpenAI"), "credential title:\n{grid}");
+    assert!(grid.contains("Paste API key"), "key option:\n{grid}");
+    assert!(grid.contains("Clear saved key"), "clear option:\n{grid}");
+    assert!(
+        !grid.contains("Sign in with browser"),
+        "oauth leaked:\n{grid}"
+    );
+
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("Paste the OpenAI API key"),
+        "input title:\n{grid}"
+    );
+
+    type_text(&mut app, "sk-secret-123");
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("sk-secret-123"), "key echoed:\n{grid}");
+    assert!(grid.contains("•••"), "mask missing:\n{grid}");
+
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::SetProviderKey {
+            provider_id: "openai".to_string(),
+            api_key: "sk-secret-123".to_string(),
+        }]
+    );
+    let grid = render(&mut app, true);
+    assert!(grid.contains("saving…"), "busy hint:\n{grid}");
+
+    // Success continues into the provider's model list.
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "openai".to_string(),
+        error: None,
+    });
+    assert_eq!(app.drain_actions(), vec![Action::ListModels]);
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Notice { title, .. } if title == "openai: credential saved"
+    )));
+}
+
+#[test]
+fn empty_and_failed_key_submissions_surface_errors_in_place() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(grid.contains("API key is empty"), "empty error:\n{grid}");
+
+    type_text(&mut app, "sk-bad");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "openai".to_string(),
+        error: Some("provider rejected the key".to_string()),
+    });
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("provider rejected the key"),
+        "failure shown in place:\n{grid}"
+    );
+}
+
+#[test]
+fn oauth_provider_offers_sign_in_and_shows_the_device_code() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Connect OpenAI Codex"), "title:\n{grid}");
+    assert!(
+        grid.contains("Sign in with browser"),
+        "browser option:\n{grid}"
+    );
+
+    // Pick the device flow (second option).
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::StartLogin {
+            provider_id: "openai-codex".to_string(),
+            method: crate::LoginMethod::Device,
+        }]
+    );
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("Sign in to OpenAI Codex"),
+        "wait title:\n{grid}"
+    );
+    assert!(
+        grid.contains("requesting a device code"),
+        "wait body:\n{grid}"
+    );
+
+    app.apply(ChatEvent::LoginDeviceCode {
+        verification_uri: "https://auth.example/device".to_string(),
+        user_code: "ABCD-1234".to_string(),
+    });
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("https://auth.example/device"),
+        "verification uri:\n{grid}"
+    );
+    assert!(grid.contains("ABCD-1234"), "user code:\n{grid}");
+
+    // Esc cancels the login and lands back on credentials with a notice.
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    assert_eq!(app.drain_actions(), vec![Action::CancelLogin]);
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("Connect OpenAI Codex"),
+        "back on credentials:\n{grid}"
+    );
+    assert!(grid.contains("sign-in canceled"), "cancel notice:\n{grid}");
+}
+
+#[test]
+fn login_success_reissues_the_selection_that_started_the_wizard() {
+    let mut app = app();
+    // Enter on a "needs login" model row routes into the wizard.
+    app.apply(ChatEvent::Models(vec![crate::ModelRow {
+        provider_id: "openai-codex".to_string(),
+        model: "gpt-5.6-sol".to_string(),
+        display_name: "GPT 5.6 sol".to_string(),
+        auth_status: "missing".to_string(),
+        active: false,
+    }]));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(app.drain_actions(), vec![Action::ListProviders]);
+
+    // The catalog answer lands directly on the provider's credential step.
+    app.apply(ChatEvent::Providers(provider_rows()));
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("Connect OpenAI Codex"),
+        "credential step:\n{grid}"
+    );
+
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::StartLogin {
+            provider_id: "openai-codex".to_string(),
+            method: crate::LoginMethod::Browser,
+        }]
+    );
+    app.apply(ChatEvent::LoginDeviceCode {
+        verification_uri: "https://stale.example/device".to_string(),
+        user_code: "STALE".to_string(),
+    });
+    assert!(matches!(
+        app.setup.as_ref(),
+        Some(crate::app::setup::SetupStep::LoginWait {
+            method: crate::LoginMethod::Browser,
+            device_code: None,
+            ..
+        })
+    ));
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "openai-codex".to_string(),
+        error: None,
+    });
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::SelectModel {
+            provider_id: "openai-codex".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+        }]
+    );
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("Sign in to"), "wizard closed:\n{grid}");
+}
+
+#[test]
+fn wizard_swallows_composer_input_and_esc_dismisses_from_the_provider_step() {
+    let mut app = app();
+    open_wizard(&mut app);
+    app.apply(ChatEvent::TurnStarted {
+        turn_id: "turn-1".to_string(),
+    });
+    type_text(&mut app, "hello");
+    let _ = app.handle(&tuika::Event::Paste("pasted".to_string()));
+    let _ = app.handle(&tuika::Event::Key(tuika::Key {
+        code: tuika::KeyCode::Char('c'),
+        ctrl: true,
+        alt: false,
+        shift: false,
+    }));
+    assert!(app.composer.is_empty(), "composer must stay untouched");
+    assert_eq!(app.drain_actions(), Vec::new());
+
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(
+        !grid.contains("Set up a provider"),
+        "wizard closed:\n{grid}"
+    );
+    type_text(&mut app, "hi");
+    assert!(!app.composer.is_empty(), "composer usable again");
+}
+
+#[test]
+fn stale_credential_results_report_out_of_band_without_reopening_the_wizard() {
+    let mut app = app();
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "openai".to_string(),
+        error: Some("boom".to_string()),
+    });
+    let grid = render(&mut app, true);
+    assert!(
+        !grid.contains("Set up a provider"),
+        "wizard stayed shut:\n{grid}"
+    );
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Notice { tone: crate::Tone::Error, title, .. }
+            if title == "openai: credential failed"
+    )));
+}
+
+#[test]
+fn setup_request_errors_release_invisible_wait_states() {
+    let mut app = app();
+    app.apply(ChatEvent::Models(vec![crate::ModelRow {
+        provider_id: "missing-provider".to_string(),
+        model: "model-a".to_string(),
+        display_name: "Model A".to_string(),
+        auth_status: "missing".to_string(),
+        active: false,
+    }]));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::Error {
+        title: "provider catalog failed".to_string(),
+        body: Vec::new(),
+    });
+    assert!(app.setup.is_none());
+    assert!(app.pending_selection.is_none());
+
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::Error {
+        title: "model catalog failed".to_string(),
+        body: Vec::new(),
+    });
+    assert!(app.setup.is_none());
+    app.apply(ChatEvent::Models(vec![
+        crate::ModelRow {
+            provider_id: "anthropic".to_string(),
+            model: "model-a".to_string(),
+            display_name: "Model A".to_string(),
+            auth_status: "configured".to_string(),
+            active: true,
+        },
+        crate::ModelRow {
+            provider_id: "openai".to_string(),
+            model: "model-b".to_string(),
+            display_name: "Model B".to_string(),
+            auth_status: "missing".to_string(),
+            active: false,
+        },
+    ]));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Model A"), "first model missing:\n{grid}");
+    assert!(grid.contains("Model B"), "result stayed scoped:\n{grid}");
+}
+
+#[test]
+fn setup_action_errors_return_busy_steps_to_interactive_state() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    type_text(&mut app, "sk-secret");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::Error {
+        title: "saving sk-secret failed".to_string(),
+        body: vec!["sk-secret was rejected".to_string()],
+    });
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("sk-secret"), "secret leaked:\n{grid}");
+    assert!(!grid.contains("saving…"), "key input stayed busy:\n{grid}");
+    type_text(&mut app, "sk-retry");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::SetProviderKey {
+            provider_id: "openai".to_string(),
+            api_key: "sk-retry".to_string(),
+        }]
+    );
+
+    let mut oauth_app = App::new(meta());
+    open_wizard(&mut oauth_app);
+    let _ = oauth_app.handle(&key(tuika::KeyCode::Down));
+    let _ = oauth_app.handle(&key(tuika::KeyCode::Down));
+    let _ = oauth_app.handle(&key(tuika::KeyCode::Enter));
+    let _ = oauth_app.handle(&key(tuika::KeyCode::Enter));
+    let _ = oauth_app.drain_actions();
+    oauth_app.apply(ChatEvent::Error {
+        title: "login failed".to_string(),
+        body: Vec::new(),
+    });
+    let grid = render(&mut oauth_app, true);
+    assert!(
+        grid.contains("Connect OpenAI Codex"),
+        "login stayed busy:\n{grid}"
+    );
+    assert!(
+        !grid.contains("Sign in to OpenAI Codex"),
+        "login wait stayed open:\n{grid}"
+    );
+}
+
+#[test]
+fn credential_failure_never_renders_the_submitted_secret() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    type_text(&mut app, "sk-do-not-render");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "openai".to_string(),
+        error: Some("provider echoed sk-do-not-render".to_string()),
+    });
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("sk-do-not-render"), "secret leaked:\n{grid}");
+    assert!(
+        grid.contains("provider echoed [redacted]"),
+        "redacted error missing:\n{grid}"
+    );
+
+    let mut late_app = App::new(meta());
+    open_wizard(&mut late_app);
+    let _ = late_app.handle(&key(tuika::KeyCode::Down));
+    let _ = late_app.handle(&key(tuika::KeyCode::Enter));
+    let _ = late_app.handle(&key(tuika::KeyCode::Enter));
+    type_text(&mut late_app, "sk-late-error");
+    let _ = late_app.handle(&key(tuika::KeyCode::Enter));
+    let _ = late_app.drain_actions();
+    let _ = late_app.handle(&key(tuika::KeyCode::Esc));
+    late_app.apply(ChatEvent::Error {
+        title: "saving sk-late-error failed".to_string(),
+        body: vec!["rejected sk-late-error".to_string()],
+    });
+    let grid = render(&mut late_app, true);
+    assert!(
+        !grid.contains("sk-late-error"),
+        "late error leaked:\n{grid}"
+    );
+}
+
+#[test]
+fn catalog_events_do_not_clobber_open_credential_input() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    type_text(&mut app, "sk-kept");
+
+    app.apply(ChatEvent::Providers(provider_rows()));
+    app.apply(ChatEvent::Models(vec![crate::ModelRow {
+        provider_id: "anthropic".to_string(),
+        model: "model-a".to_string(),
+        display_name: "Must Not Open".to_string(),
+        auth_status: "configured".to_string(),
+        active: true,
+    }]));
+    app.apply(ChatEvent::CredentialCleared {
+        provider_id: "anthropic".to_string(),
+    });
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "anthropic".to_string(),
+        error: None,
+    });
+
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("Paste the OpenAI API key"),
+        "input was replaced:\n{grid}"
+    );
+    assert!(
+        !grid.contains("Must Not Open"),
+        "picker opened behind setup:\n{grid}"
+    );
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::SetProviderKey {
+            provider_id: "openai".to_string(),
+            api_key: "sk-kept".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn manual_models_command_supersedes_the_wizard_model_scope() {
+    let mut app = app();
+    open_wizard(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+
+    app.submit("/models");
+    assert_eq!(app.drain_actions(), vec![Action::ListModels]);
+    app.apply(ChatEvent::Models(vec![
+        crate::ModelRow {
+            provider_id: "anthropic".to_string(),
+            model: "model-a".to_string(),
+            display_name: "Model A".to_string(),
+            auth_status: "configured".to_string(),
+            active: true,
+        },
+        crate::ModelRow {
+            provider_id: "openai".to_string(),
+            model: "model-b".to_string(),
+            display_name: "Model B".to_string(),
+            auth_status: "missing".to_string(),
+            active: false,
+        },
+    ]));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Model A"), "first model missing:\n{grid}");
+    assert!(
+        grid.contains("Model B"),
+        "manual result was scoped:\n{grid}"
+    );
+}
+
+#[test]
+fn missing_awaited_provider_and_canceled_login_clear_pending_selection() {
+    let mut app = app();
+    app.apply(ChatEvent::Models(vec![crate::ModelRow {
+        provider_id: "gone".to_string(),
+        model: "model-a".to_string(),
+        display_name: "Model A".to_string(),
+        auth_status: "missing".to_string(),
+        active: false,
+    }]));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::Providers(provider_rows()));
+    assert!(app.pending_selection.is_none());
+
+    let mut cancel_app = App::new(meta());
+    cancel_app.apply(ChatEvent::Models(vec![crate::ModelRow {
+        provider_id: "openai-codex".to_string(),
+        model: "gpt-5.6-sol".to_string(),
+        display_name: "GPT 5.6 sol".to_string(),
+        auth_status: "missing".to_string(),
+        active: false,
+    }]));
+    let _ = cancel_app.handle(&key(tuika::KeyCode::Enter));
+    let _ = cancel_app.drain_actions();
+    cancel_app.apply(ChatEvent::Providers(provider_rows()));
+    let _ = cancel_app.handle(&key(tuika::KeyCode::Enter));
+    let _ = cancel_app.drain_actions();
+    let _ = cancel_app.handle(&key(tuika::KeyCode::Esc));
+    let _ = cancel_app.drain_actions();
+    assert!(cancel_app.pending_selection.is_none());
+    cancel_app.apply(ChatEvent::CredentialResult {
+        provider_id: "openai-codex".to_string(),
+        error: None,
+    });
+    assert_eq!(cancel_app.drain_actions(), Vec::new());
+
+    let mut key_app = App::new(meta());
+    key_app.apply(ChatEvent::Models(vec![crate::ModelRow {
+        provider_id: "openai".to_string(),
+        model: "gpt-key".to_string(),
+        display_name: "GPT key".to_string(),
+        auth_status: "missing".to_string(),
+        active: false,
+    }]));
+    let _ = key_app.handle(&key(tuika::KeyCode::Enter));
+    let _ = key_app.drain_actions();
+    key_app.apply(ChatEvent::Providers(provider_rows()));
+    let _ = key_app.handle(&key(tuika::KeyCode::Enter));
+    type_text(&mut key_app, "sk-key");
+    let _ = key_app.handle(&key(tuika::KeyCode::Enter));
+    let _ = key_app.drain_actions();
+    let _ = key_app.handle(&key(tuika::KeyCode::Esc));
+    assert!(key_app.pending_selection.is_none());
+}
+
+#[test]
+fn long_and_wide_provider_rows_preserve_the_active_marker() {
+    let mut app = app();
+    app.apply(ChatEvent::Providers(vec![crate::ProviderRow {
+        provider_id: "provider".to_string(),
+        display_name: "模型🙂 provider with a very long display name".repeat(2),
+        auth_status: "configured".to_string(),
+        label: "a very long stored credential status".repeat(2),
+        oauth: false,
+        active: true,
+    }]));
+    let grid = render_at(&mut app, true, 40, 12);
+    assert!(grid.contains("active"), "active marker clipped:\n{grid}");
+}
+
+#[test]
+fn clearing_a_credential_refreshes_the_open_wizard() {
+    let mut app = app();
+    open_wizard(&mut app);
+    // `c` opens the credential step even on a connected provider.
+    let _ = app.handle(&key(tuika::KeyCode::Char('c')));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Connect Anthropic"), "config step:\n{grid}");
+
+    // Pick "Clear saved key" (second option for a key provider).
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::ClearCredential {
+            provider_id: "anthropic".to_string(),
+        }]
+    );
+    app.apply(ChatEvent::CredentialCleared {
+        provider_id: "anthropic".to_string(),
+    });
+    assert_eq!(app.drain_actions(), vec![Action::ListProviders]);
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Notice { title, .. } if title == "anthropic: credential cleared"
+    )));
+}
+
+#[test]
+fn setup_wizard_build_is_safe_at_zero_and_tiny_terminal_sizes() {
+    for (width, height) in [(0u16, 0u16), (1, 1), (20, 4)] {
+        let mut app = app();
+        open_wizard(&mut app);
+        let _ = render_at(&mut app, true, width, height);
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+        let _ = app.handle(&key(tuika::KeyCode::Enter));
+        let _ = render_at(&mut app, true, width, height);
+        let _ = app.handle(&key(tuika::KeyCode::Enter));
+        let _ = render_at(&mut app, true, width, height);
+    }
 }
