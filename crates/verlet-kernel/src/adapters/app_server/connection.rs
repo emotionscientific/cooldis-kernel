@@ -1,3 +1,4 @@
+use crate::adapters::app_server::model_catalog::ModelCatalogSource as _;
 use crate::agent::agent_tool_router::AgentKernelToolProvider as _;
 use base64::Engine as _;
 use futures_util::SinkExt as _;
@@ -2268,6 +2269,10 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(|err| {
                 internal_error(crate::adapters::app_server::provider_store_error(err))
             })?;
+        self.inner
+            .turn_endpoint_router
+            .invalidate(&provider.provider_id)
+            .await;
         let provider = self.model_provider_record(&provider.provider_id).await?;
         Ok(serde_json::json!({ "provider": self.model_provider_json(&provider).await? }))
     }
@@ -2319,6 +2324,10 @@ impl crate::adapters::app_server::VerletAppServer {
                 format!("model provider deletion task failed: {error}"),
             ))
         })??;
+        self.inner
+            .turn_endpoint_router
+            .invalidate(&provider_id)
+            .await;
         Ok(serde_json::json!({ "deleted": true, "providerId": provider_id }))
     }
 
@@ -2376,6 +2385,10 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(|err| {
                 internal_error(crate::adapters::app_server::provider_store_error(err))
             })?;
+        self.inner
+            .turn_endpoint_router
+            .invalidate(&provider.provider_id)
+            .await;
         Ok(serde_json::json!({ "auth": self.model_provider_auth_json(&provider).await? }))
     }
 
@@ -2391,6 +2404,10 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(|err| {
                 internal_error(crate::adapters::app_server::provider_store_error(err))
             })?;
+        self.inner
+            .turn_endpoint_router
+            .invalidate(&provider.provider_id)
+            .await;
         Ok(serde_json::json!({ "auth": self.model_provider_auth_json(&provider).await? }))
     }
 
@@ -2445,6 +2462,7 @@ impl crate::adapters::app_server::VerletAppServer {
         )
         .await
         .map_err(|err| internal_error(crate::adapters::app_server::provider_store_error(err)))?;
+        let active = self.inner.active_model.read().await.clone();
         Ok(serde_json::json!({
             "providerId": provider.provider_id,
             "api": provider_api_rpc_json(&provider.api),
@@ -2454,7 +2472,11 @@ impl crate::adapters::app_server::VerletAppServer {
             "authHeader": provider.auth_header,
             "headers": redacted_model_provider_config_values(&provider.headers),
             "models": provider.models.iter().map(|model| {
-                model_provider_model_json(provider, model, model.model_id == self.inner.model)
+                model_provider_model_json(
+                    provider,
+                    model,
+                    provider.provider_id == active.model_provider && model.model_id == active.model,
+                )
             }).collect::<Vec<_>>(),
             "metadata": provider.metadata,
             "createdAtMs": provider.created_at_ms,
@@ -2464,7 +2486,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 "source": status.source,
                 "label": status.label,
             },
-            "isActiveProvider": provider.provider_id == self.inner.model_provider,
+            "isActiveProvider": provider.provider_id == active.model_provider,
         }))
     }
 
@@ -3155,10 +3177,11 @@ impl crate::adapters::app_server::VerletAppServer {
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::agent::manifest_bind::AgentManifestProviderSurface,
     > {
+        let active = self.inner.active_model.read().await.clone();
         crate::adapters::app_server::agent_manifest_provider_surface_from_parts(
-            &self.inner.provider,
-            &self.inner.model_provider,
-            &self.inner.model,
+            &active.provider,
+            &active.model_provider,
+            &active.model,
             &self.inner.metadata_store,
         )
         .await
@@ -3388,10 +3411,8 @@ impl crate::adapters::app_server::VerletAppServer {
         let cwd_override = params.cwd.as_deref().map(|cwd| {
             crate::adapters::app_server::threads::resolve_cwd(&self.inner.cwd, Some(cwd))
         });
-        let model = params
-            .model
-            .clone()
-            .unwrap_or_else(|| self.inner.model.clone());
+        let active = self.inner.active_model.read().await.clone();
+        let model = params.model.clone().unwrap_or_else(|| active.model.clone());
         let model_provider = {
             let state = self.inner.state.read().await;
             params.model_provider.clone().unwrap_or_else(|| {
@@ -3399,7 +3420,7 @@ impl crate::adapters::app_server::VerletAppServer {
                     .threads
                     .get(&params.thread_id)
                     .map(|thread| thread.model_provider.clone())
-                    .unwrap_or_else(|| self.inner.model_provider.clone())
+                    .unwrap_or_else(|| active.model_provider.clone())
             })
         };
 
@@ -3474,10 +3495,8 @@ impl crate::adapters::app_server::VerletAppServer {
                 crate::adapters::app_server::threads::resolve_cwd(&self.inner.cwd, Some(cwd))
             })
             .unwrap_or_else(|| source.cwd.clone());
-        let model = params
-            .model
-            .clone()
-            .unwrap_or_else(|| self.inner.model.clone());
+        let active = self.inner.active_model.read().await.clone();
+        let model = params.model.clone().unwrap_or_else(|| active.model.clone());
         let model_provider = params
             .model_provider
             .clone()
@@ -4368,9 +4387,10 @@ impl crate::adapters::app_server::VerletAppServer {
         let coordinates = handle.context().coordinates.clone();
         connection.subscribe_thread(handle.clone()).await;
         let turn_id = format!("turn-{}", uuid::Uuid::now_v7());
+        let active = self.inner.active_model.read().await.clone();
         let input = crate::adapters::app_server::threads::turn_input_from_values(&params.input)
-            .with_provider(self.inner.model_provider.clone())
-            .with_model(params.model.unwrap_or_else(|| self.inner.model.clone()));
+            .with_provider(active.model_provider)
+            .with_model(params.model.unwrap_or(active.model));
         let cwd = params.cwd.as_deref().map(|cwd| {
             crate::adapters::app_server::threads::resolve_cwd(&self.inner.cwd, Some(cwd))
         });
@@ -5110,76 +5130,246 @@ impl crate::adapters::app_server::VerletAppServer {
         params: ModelSelectParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let ModelSelectParams { provider_id, model } = params;
-        let _ = (provider_id, model);
-        Err(internal_error(
-            crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                "model/select is not implemented yet (EMO-558)".to_string(),
-            ),
-        ))
+        let entries = self.model_list_json().await?;
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.get("providerId").and_then(serde_json::Value::as_str)
+                    == Some(provider_id.as_str())
+                    && entry.get("model").and_then(serde_json::Value::as_str)
+                        == Some(model.as_str())
+            })
+            .ok_or_else(|| {
+                jsonrpc_error(
+                    -32602,
+                    format!("model {provider_id}/{model} was not found in model/list"),
+                )
+            })?;
+        if entry.get("authStatus").and_then(serde_json::Value::as_str) == Some("missing") {
+            let provider = self
+                .inner
+                .metadata_store
+                .get_provider(&provider_id)
+                .await
+                .map_err(|err| {
+                    internal_error(crate::adapters::app_server::provider_store_error(err))
+                })?;
+            return Err(jsonrpc_error(
+                -32602,
+                missing_model_provider_auth_message(&provider_id, provider.as_ref()),
+            ));
+        }
+
+        let launch_selection =
+            provider_id == self.inner.model_provider && model == self.inner.model;
+        let provider_config = if launch_selection {
+            self.inner.provider.clone()
+        } else {
+            let provider = self.model_provider_record(&provider_id).await?;
+            let max_tokens = provider
+                .models
+                .iter()
+                .find(|candidate| candidate.model_id == model)
+                .and_then(|model| model.max_output_tokens)
+                .unwrap_or(4096);
+            crate::adapters::app_server::AppServerProviderConfig::CatalogOpenAIChatCompletions {
+                provider_id: provider_id.clone(),
+                model: Some(model.clone()),
+                max_tokens,
+                stream: true,
+            }
+        };
+        let endpoint = match self
+            .inner
+            .turn_endpoint_router
+            .cached(&provider_id, &model)
+            .await
+        {
+            Some(endpoint) => endpoint,
+            None => {
+                let auth_context = self.inner.instance_environment.provider_auth.resolve();
+                let endpoint =
+                    crate::adapters::app_server::resolved_turn_endpoint_from_provider_config(
+                        &provider_config,
+                        &provider_id,
+                        &model,
+                        &self.inner.metadata_store,
+                        &self.inner.user_metadata_store,
+                        &auth_context,
+                    )
+                    .await
+                    .map_err(|err| jsonrpc_error(-32602, err.to_string()))?;
+                self.inner
+                    .turn_endpoint_router
+                    .insert(endpoint.clone())
+                    .await;
+                endpoint
+            }
+        };
+
+        let mut active_model = self.inner.active_model.write().await;
+        self.inner.turn_endpoint_router.swap(endpoint);
+        *active_model = crate::adapters::app_server::ActiveModelSelection {
+            model: model.clone(),
+            model_provider: provider_id.clone(),
+            provider: provider_config,
+        };
+        drop(active_model);
+        Ok(serde_json::json!({
+            "active": {
+                "providerId": provider_id,
+                "model": model,
+            }
+        }))
     }
 
     pub(super) async fn model_list_json(
         &self,
     ) -> Result<Vec<serde_json::Value>, JsonRpcErrorError> {
-        match &self.inner.provider {
-            crate::adapters::app_server::AppServerProviderConfig::CatalogOpenAIChatCompletions { provider_id, .. } => {
-                let provider = self
-                    .inner
-                    .metadata_store
-                    .get_provider(provider_id)
-                    .await
-                    .map_err(|err| internal_error(crate::adapters::app_server::provider_store_error(err)))?
-                    .ok_or_else(|| {
-                        internal_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                            "catalog provider {provider_id:?} is not in the provider metadata store"
-                        )))
-                    })?;
-                let mut default_seen = false;
-                let mut models = provider
-                    .models
-                    .iter()
-                    .map(|model| {
-                        let is_default = !default_seen && model.model_id == self.inner.model;
-                        if is_default {
-                            default_seen = true;
-                        }
-                        catalog_model_json(&provider, model, is_default)
-                    })
-                    .collect::<Vec<_>>();
-                if !default_seen {
-                    models.push(configured_model_json(
-                        &self.inner.model_provider,
-                        &self.inner.model,
-                        catalog_provider_display_name(&provider),
-                        "Configured catalog provider model",
-                    ));
-                }
-                Ok(models)
+        let mut providers = self
+            .inner
+            .metadata_store
+            .list_providers()
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
+        providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+        let provider_records = providers
+            .iter()
+            .map(|provider| (provider.provider_id.clone(), provider.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut catalog_entries = Vec::new();
+        for provider in &providers {
+            for model in &provider.models {
+                catalog_entries.push(
+                    crate::adapters::app_server::model_catalog::ModelCatalogEntry {
+                        provider_id: provider.provider_id.clone(),
+                        model_id: model.model_id.clone(),
+                        display_name: model
+                            .display_name
+                            .clone()
+                            .unwrap_or_else(|| model.model_id.clone()),
+                        context_window: model.context_window_tokens,
+                        max_output_tokens: model.max_output_tokens.map(u64::from),
+                    },
+                );
             }
-            crate::adapters::app_server::AppServerProviderConfig::LocalOffline => Ok(vec![configured_model_json(
-                &self.inner.model_provider,
-                &self.inner.model,
-                "Verlet Local Offline".to_string(),
-                "Deterministic local Verlet model",
-            )]),
-            crate::adapters::app_server::AppServerProviderConfig::BifrostOpenAIResponses { .. }
-            | crate::adapters::app_server::AppServerProviderConfig::OpenAIChatCompletions { .. }
-            | crate::adapters::app_server::AppServerProviderConfig::AnthropicMessages { .. }
-            | crate::adapters::app_server::AppServerProviderConfig::AnthropicBedrock { .. } => Ok(vec![configured_model_json(
-                &self.inner.model_provider,
-                &self.inner.model,
-                format!("{} {}", self.inner.model_provider, self.inner.model),
-                "Configured Verlet app-server model",
-            )]),
         }
+        let active = self.inner.active_model.read().await.clone();
+        if !catalog_entries.iter().any(|entry| {
+            entry.provider_id == self.inner.model_provider && entry.model_id == self.inner.model
+        }) {
+            let display_name = provider_records
+                .get(&self.inner.model_provider)
+                .map(catalog_provider_display_name)
+                .unwrap_or_else(|| match &self.inner.provider {
+                    crate::adapters::app_server::AppServerProviderConfig::LocalOffline => {
+                        "Verlet Local Offline".to_string()
+                    }
+                    _ => format!("{} {}", self.inner.model_provider, self.inner.model),
+                });
+            catalog_entries.push(
+                crate::adapters::app_server::model_catalog::ModelCatalogEntry {
+                    provider_id: self.inner.model_provider.clone(),
+                    model_id: self.inner.model.clone(),
+                    display_name,
+                    context_window: None,
+                    max_output_tokens: None,
+                },
+            );
+        }
+        let catalog =
+            crate::adapters::app_server::model_catalog::StaticModelCatalog::new(catalog_entries);
+        let auth_context = self.inner.instance_environment.provider_auth.resolve();
+        let mut auth_statuses = std::collections::BTreeMap::new();
+        for provider in &providers {
+            let status = verlet_metadata::provider_store::llm_provider_auth_status(
+                &self.inner.user_metadata_store,
+                provider,
+                &auth_context,
+            )
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
+            let label = match status.source {
+                Some(verlet_metadata::provider_store::LlmProviderAuthSourceKind::Environment) => {
+                    "env"
+                }
+                Some(_) => "configured",
+                None => "missing",
+            };
+            auth_statuses.insert(provider.provider_id.clone(), label);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        Ok(catalog
+            .entries()
+            .into_iter()
+            .filter(|entry| seen.insert((entry.provider_id.clone(), entry.model_id.clone())))
+            .map(|entry| {
+                let is_active =
+                    entry.provider_id == active.model_provider && entry.model_id == active.model;
+                let auth_status = auth_statuses
+                    .get(&entry.provider_id)
+                    .copied()
+                    .unwrap_or("configured");
+                let mut value = configured_model_json(
+                    &entry.provider_id,
+                    &entry.model_id,
+                    entry.display_name,
+                    "Selectable Verlet app-server model",
+                );
+                let Some(object) = value.as_object_mut() else {
+                    return value;
+                };
+                object.insert("active".to_string(), serde_json::json!(is_active));
+                object.insert("isDefault".to_string(), serde_json::json!(is_active));
+                object.insert("authStatus".to_string(), serde_json::json!(auth_status));
+                object.insert(
+                    "contextWindowTokens".to_string(),
+                    serde_json::json!(entry.context_window),
+                );
+                object.insert(
+                    "maxOutputTokens".to_string(),
+                    serde_json::json!(entry.max_output_tokens),
+                );
+                if let Some(provider) = provider_records.get(&entry.provider_id)
+                    && let Some(model) = provider
+                        .models
+                        .iter()
+                        .find(|model| model.model_id == entry.model_id)
+                {
+                    object.insert(
+                        "api".to_string(),
+                        provider_api_rpc_json(model.api.as_ref().unwrap_or(&provider.api)),
+                    );
+                    object.insert(
+                        "baseUrl".to_string(),
+                        serde_json::json!(model.base_url.as_ref().unwrap_or(&provider.base_url)),
+                    );
+                    object.insert(
+                        "description".to_string(),
+                        serde_json::json!(catalog_provider_display_name(provider)),
+                    );
+                    object.insert(
+                        "inputModalities".to_string(),
+                        serde_json::json!(model.input_modalities),
+                    );
+                    object.insert("metadata".to_string(), serde_json::json!(model.metadata));
+                }
+                value
+            })
+            .collect())
     }
 
     pub(super) async fn model_provider_capabilities_json(&self) -> serde_json::Value {
+        let active = self.inner.active_model.read().await.clone();
         let supports_streaming =
             crate::adapters::app_server::agent_manifest_provider_surface_from_parts(
-                &self.inner.provider,
-                &self.inner.model_provider,
-                &self.inner.model,
+                &active.provider,
+                &active.model_provider,
+                &active.model,
                 &self.inner.metadata_store,
             )
             .await
@@ -6138,44 +6328,6 @@ pub(super) fn configured_model_json(
     })
 }
 
-pub(super) fn catalog_model_json(
-    provider: &verlet_metadata::provider_store::LlmProviderRecord,
-    model: &verlet_metadata::provider_store::LlmProviderModelRecord,
-    is_default: bool,
-) -> serde_json::Value {
-    let display_name = model
-        .display_name
-        .clone()
-        .unwrap_or_else(|| model.model_id.clone());
-    serde_json::json!({
-        "id": model.model_id,
-        "model": model.model_id,
-        "providerId": provider.provider_id,
-        "providerRef": format!("provider://{}", provider.provider_id),
-        "modelRef": format!("model://{}/{}", provider.provider_id, model.model_id),
-        "api": model.api.as_ref().unwrap_or(&provider.api),
-        "baseUrl": model.base_url.as_ref().unwrap_or(&provider.base_url),
-        "upgrade": null,
-        "upgradeInfo": null,
-        "availabilityNux": null,
-        "displayName": display_name,
-        "description": catalog_provider_display_name(provider),
-        "hidden": false,
-        "supportedReasoningEfforts": [
-            { "reasoningEffort": "none", "description": "No reasoning" }
-        ],
-        "defaultReasoningEffort": "none",
-        "inputModalities": model.input_modalities,
-        "supportsPersonality": false,
-        "additionalSpeedTiers": [],
-        "serviceTiers": [],
-        "contextWindowTokens": model.context_window_tokens,
-        "maxOutputTokens": model.max_output_tokens,
-        "metadata": model.metadata,
-        "isDefault": is_default,
-    })
-}
-
 pub(super) fn catalog_provider_display_name(
     provider: &verlet_metadata::provider_store::LlmProviderRecord,
 ) -> String {
@@ -6183,6 +6335,37 @@ pub(super) fn catalog_provider_display_name(
         .display_name
         .clone()
         .unwrap_or_else(|| provider.provider_id.clone())
+}
+
+fn missing_model_provider_auth_message(
+    provider_id: &str,
+    provider: Option<&verlet_metadata::provider_store::LlmProviderRecord>,
+) -> String {
+    let env_name = provider.and_then(|provider| {
+        if let verlet_metadata::provider_store::LlmProviderAuthConfig::Env { name } = &provider.auth
+        {
+            return Some(name.clone());
+        }
+        provider
+            .metadata
+            .get("auth_env")
+            .filter(|names| !names.trim().is_empty())
+            .map(|names| {
+                names
+                    .split(',')
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            })
+    });
+    match env_name {
+        Some(env_name) => format!(
+            "model provider {provider_id:?} is missing authentication; set {env_name} or run `verlet auth set {provider_id} --api-key-stdin`"
+        ),
+        None => format!(
+            "model provider {provider_id:?} is missing authentication; set a provider API-key environment variable or run `verlet auth set {provider_id} --api-key-stdin`"
+        ),
+    }
 }
 
 pub(super) fn model_provider_record_from_rpc(

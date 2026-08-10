@@ -224,7 +224,7 @@ where
 {
     client.account_read().await?;
     let config = client.config_read(false).await?;
-    let models = client.model_list().await?;
+    let models = client.model_list_typed().await?;
     let model_labels = model_labels(&models);
     if model_labels.is_empty() {
         return Err(crate::cli::usage_error("app-server returned no models"));
@@ -235,20 +235,15 @@ where
         .and_then(serde_json::Value::as_str)
         .unwrap_or("?")
         .to_string();
-    let provider = config
-        .get("config")
-        .and_then(|config| config.get("model_provider"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("provider");
-    let model = config
-        .get("config")
-        .and_then(|config| config.get("model"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("model");
+    let active = models
+        .data
+        .iter()
+        .find(|model| model.active)
+        .ok_or_else(|| crate::cli::usage_error("app-server returned no active model"))?;
     Ok(ChatSessionInfo {
         connection_label,
         cwd,
-        model_label: format!("{provider}/{model}"),
+        model_label: format!("{}/{}", active.provider_id, active.model),
         models: model_labels,
     })
 }
@@ -698,28 +693,13 @@ fn session_rows(threads: &serde_json::Value, current_id: &str) -> Vec<verlet_cha
         .collect()
 }
 
-fn model_labels(models: &serde_json::Value) -> Vec<String> {
+fn model_labels(models: &crate::adapters::operator_client::OperatorModelList) -> Vec<String> {
     models
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+        .data
+        .iter()
         .map(|model| {
-            let provider = model
-                .get("providerId")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("provider");
-            let id = model
-                .get("model")
-                .or_else(|| model.get("id"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("model");
-            let default = model
-                .get("isDefault")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let suffix = if default { " (default)" } else { "" };
-            format!("{provider}/{id}{suffix}")
+            let suffix = if model.active { " (active)" } else { "" };
+            format!("{}/{}{}", model.provider_id, model.model, suffix)
         })
         .collect()
 }

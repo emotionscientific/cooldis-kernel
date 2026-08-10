@@ -4,10 +4,6 @@
 //! and models.dev refresh (EMO-561) can plug in behind it without touching
 //! the RPC layer again.
 
-// Seam is unwired until EMO-558 implements `model/list` over it; EMO-558
-// removes this allow.
-#![allow(dead_code)]
-
 /// One selectable model as surfaced by `model/list`.
 ///
 /// Auth status and the active flag are not part of the entry: the RPC layer

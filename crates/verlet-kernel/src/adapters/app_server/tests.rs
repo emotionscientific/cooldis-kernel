@@ -110,6 +110,10 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
             crate::daemon::identity::AuthorityClass::Interactive,
         ),
         (
+            "model/select",
+            crate::daemon::identity::AuthorityClass::Interactive,
+        ),
+        (
             "modelProvider/capabilities/read",
             crate::daemon::identity::AuthorityClass::Interactive,
         ),
@@ -2551,6 +2555,508 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
         .unwrap();
     assert_eq!(default["id"].as_str(), Some("fixture-default"));
     assert_eq!(default["providerId"].as_str(), Some("fixture"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_list_enriches_store_models_with_auth_and_active_status() {
+    const ENV_NAME: &str = "VERLET_MODEL_LIST_ENV_FIXTURE";
+    let root = unique_test_root("app-server-model-list-enriched");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("model-list-enriched.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    config.instance_environment.provider_auth =
+        crate::adapters::app_server::instance::ProviderAuthSource::Injected(
+            verlet_metadata::provider_store::LlmProviderAuthContext::new()
+                .with_env(ENV_NAME, "env-secret"),
+        );
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    for provider in [
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "stored-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://stored.example.invalid/v1",
+        )
+        .with_display_name("Stored Fixture")
+        .with_auth_header(true)
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("stored-model")
+                .with_display_name("Stored Model"),
+        ),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "env-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://env.example.invalid/v1",
+        )
+        .with_auth(
+            verlet_metadata::provider_store::LlmProviderAuthConfig::Env {
+                name: ENV_NAME.to_string(),
+            },
+        )
+        .with_auth_header(true)
+        .with_model(verlet_metadata::provider_store::LlmProviderModelRecord::new("env-model")),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "missing-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://missing.example.invalid/v1",
+        )
+        .with_auth_header(true)
+        .with_model(verlet_metadata::provider_store::LlmProviderModelRecord::new("missing-model")),
+    ] {
+        project_store.upsert_provider(provider).await.unwrap();
+    }
+    user_store
+        .set_credential(
+            "stored-fixture",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "stored-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let data = models["data"].as_array().unwrap();
+    let find = |provider_id: &str, model: &str| {
+        data.iter()
+            .find(|entry| entry["providerId"] == provider_id && entry["model"] == model)
+            .unwrap()
+    };
+    assert_eq!(
+        find("stored-fixture", "stored-model")["authStatus"],
+        "configured"
+    );
+    assert_eq!(find("env-fixture", "env-model")["authStatus"], "env");
+    assert_eq!(
+        find("missing-fixture", "missing-model")["authStatus"],
+        "missing"
+    );
+    let active = find(
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
+    );
+    assert_eq!(active["active"], true);
+    assert_eq!(active["isDefault"], true);
+    assert_eq!(active["authStatus"], "configured");
+    assert_eq!(active["displayName"], "Verlet Local Offline");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_select_switches_active_model_and_restart_restores_launch_default() {
+    let root = unique_test_root("app-server-model-select");
+    let make_config = || {
+        let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+            root.join(format!("model-select-{}.sock", uuid::Uuid::now_v7())),
+        );
+        let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+            listen,
+            std::env::current_dir().unwrap(),
+        );
+        config.runtime_home = root.join("runtime");
+        config.state_home = root.join("state");
+        config.user_state_home = root.join("user-state");
+        config.agent_registry_root = root.join("agents");
+        config
+    };
+    let config = make_config();
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "select-fixture",
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                "https://select.example.invalid/v1",
+            )
+            .with_auth_header(true)
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("select-model")
+                    .with_max_output_tokens(777),
+            ),
+        )
+        .await
+        .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            "select-fixture",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "select-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let selected = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": "select-fixture",
+                "model": "select-model",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected["active"]["providerId"], "select-fixture");
+    assert_eq!(selected["active"]["model"], "select-model");
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(
+                |entry| entry["providerId"] == "select-fixture" && entry["model"] == "select-model"
+            )
+            .unwrap()["active"],
+        true
+    );
+    drop(connection);
+    drop(outbound_rx);
+    app.shutdown().await.unwrap();
+    drop(app);
+
+    let restarted = crate::adapters::app_server::VerletAppServer::new_local(make_config())
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
+    initialize_for_test(&connection).await;
+    let models = restarted
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let active = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["active"] == true)
+        .unwrap();
+    assert_eq!(
+        active["providerId"],
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+    );
+    assert_eq!(
+        active["model"],
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_select_rejects_missing_auth_without_changing_active_model() {
+    let root = unique_test_root("app-server-model-select-missing-auth");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("model-select-missing-auth.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "missing-select-fixture",
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                "https://missing-select.example.invalid/v1",
+            )
+            .with_auth(
+                verlet_metadata::provider_store::LlmProviderAuthConfig::Env {
+                    name: "MISSING_SELECT_API_KEY".to_string(),
+                },
+            )
+            .with_auth_header(true)
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new(
+                    "missing-select-model",
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let error = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": "missing-select-fixture",
+                "model": "missing-select-model",
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(error.message.contains("missing-select-fixture"));
+    assert!(error.message.contains("MISSING_SELECT_API_KEY"));
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let active = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["active"] == true)
+        .unwrap();
+    assert_eq!(
+        active["providerId"],
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
+    let root = unique_test_root("app-server-model-select-mid-turn");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("model-select-mid-turn.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let project_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
+        .await
+        .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "mid-turn-fixture",
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                "https://mid-turn.example.invalid/v1",
+            )
+            .with_auth_header(true)
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("mid-turn-model"),
+            ),
+        )
+        .await
+        .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
+        .await
+        .unwrap();
+    user_store
+        .set_credential(
+            "mid-turn-fixture",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "mid-turn-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    let client = std::sync::Arc::new(ModelSelectionGatedClient::default());
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::Other(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER.to_string(),
+        ),
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
+    );
+    let initial_endpoint = crate::adapters::agent_loop::ResolvedTurnEndpoint {
+        config: runtime_config.clone(),
+        client: client.clone(),
+    };
+    let router = std::sync::Arc::new(
+        crate::adapters::app_server::AppServerTurnEndpointRouter::new(Some(initial_endpoint)),
+    );
+    router
+        .insert(crate::adapters::agent_loop::ResolvedTurnEndpoint {
+            config: crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                "mid-turn-fixture",
+                "mid-turn-model",
+            ),
+            client: client.clone(),
+        })
+        .await;
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_turn_endpoint_router(
+            runtime_config,
+            client.clone(),
+            crate::adapters::app_server::CapsuleBindingsConfig::default(),
+            router.clone(),
+        );
+    let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_stores_and_router(
+        config,
+        runtime_factory,
+        project_store,
+        user_store,
+        router,
+    )
+    .await
+    .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let turn_id = start_text_turn(&app, &connection, &thread_id, "hold old endpoint").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.request_started.notified(),
+    )
+    .await
+    .expect("old endpoint request did not start");
+
+    app.dispatch_request(
+        &connection,
+        "model/select",
+        Some(serde_json::json!({
+            "providerId": "mid-turn-fixture",
+            "model": "mid-turn-model",
+        })),
+    )
+    .await
+    .unwrap();
+    client.release_request.notify_one();
+    wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &turn_id).await;
+
+    let requests = client.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].provider,
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+    );
+    assert_eq!(
+        requests[0].model,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL
+    );
+    let session = app
+        .handle_for_thread(&thread_id)
+        .await
+        .unwrap()
+        .session_context()
+        .await
+        .unwrap();
+    let assistant = session
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            verlet_history::CanonicalMessage::Assistant {
+                provider, model, ..
+            } => Some((provider, model)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        assistant.0,
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+    );
+    assert_eq!(
+        assistant.1,
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL
+    );
+
+    let next_turn_id =
+        start_text_turn(&app, &connection, &thread_id, "use selected endpoint").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.request_started.notified(),
+    )
+    .await
+    .expect("selected endpoint request did not start");
+    client.release_request.notify_one();
+    wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &next_turn_id).await;
+    let requests = client.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].provider, "mid-turn-fixture");
+    assert_eq!(requests[1].model, "mid-turn-model");
+    let session = app
+        .handle_for_thread(&thread_id)
+        .await
+        .unwrap()
+        .session_context()
+        .await
+        .unwrap();
+    let assistant = session
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            verlet_history::CanonicalMessage::Assistant {
+                provider, model, ..
+            } => Some((provider, model)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(assistant.0, "mid-turn-fixture");
+    assert_eq!(assistant.1, "mid-turn-model");
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["providerId"] == "mid-turn-fixture")
+            .unwrap()["active"],
+        true
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -10655,6 +11161,7 @@ async fn fast_stream_completion_reads_saved_assistant_when_projection_is_empty()
         &root,
         &workspace,
         provider_client,
+        // lexicon-allow: capsule - existing app-server config type name
         crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
@@ -15333,6 +15840,7 @@ where
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         None,
+        None,
     );
     crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, factory)
         .await
@@ -15866,6 +16374,36 @@ impl verlet_provider::ProviderClient for InspectingCapsuleClient {
         self.requests.lock().unwrap().push(request.clone());
         Ok(verlet_provider::ProviderResponse {
             content: vec![verlet_history::CanonicalContent::text("inspected")],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
+        })
+    }
+}
+
+#[derive(Default)]
+struct ModelSelectionGatedClient {
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
+    request_started: tokio::sync::Notify,
+    release_request: tokio::sync::Notify,
+}
+
+impl ModelSelectionGatedClient {
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl verlet_provider::ProviderClient for ModelSelectionGatedClient {
+    async fn complete(
+        &self,
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        self.request_started.notify_one();
+        self.release_request.notified().await;
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text("old endpoint reply")],
             usage: verlet_history::CanonicalUsage::default(),
             stop_reason: verlet_history::CanonicalStopReason::EndTurn,
         })

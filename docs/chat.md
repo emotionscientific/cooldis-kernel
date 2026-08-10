@@ -45,7 +45,7 @@ changes.
 - Working indicator with elapsed time while a turn is in flight; Esc or
   Ctrl+C interrupts, Ctrl+C on an idle session quits, Ctrl+D quits.
 - Footer with key hints, the thread short id, and the turn state; banner
-  with version, connection mode, cwd, and model.
+  with version, connection mode, cwd, and the app-server's runtime-active model.
 - PgUp/PgDn scrollback that sticks to the tail when at the bottom.
 - Dark theme by default; `NO_COLOR=1` drops to the terminal's own colors.
 
@@ -55,5 +55,9 @@ Approvals are not surfaced in the TUI yet (the app-server exposes them via
 polling only). A broadcast-lag resync shows a notice rather than rebuilding
 the transcript. The console does not implement shell escape, mouse interaction
 beyond wheel scrolling, file mentions, external editor handoff, export/copy,
-or an orchestrator view; those remain separate product decisions. The goal is
-a credible default local console while preserving the app-server RPC boundary.
+an orchestrator view, or an interactive model picker. Runtime model switching
+is available to RPC clients through `model/select`; the banner and `/models`
+status reflect the active entry returned by `model/list`. A switch affects the
+next turn and is reset when the app-server restarts. Those remaining UI surfaces
+are separate product decisions. The goal is a credible default local console
+while preserving the app-server RPC boundary.

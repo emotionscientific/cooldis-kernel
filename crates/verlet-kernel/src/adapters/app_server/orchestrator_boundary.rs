@@ -361,9 +361,10 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(crate::adapters::app_server::connection::internal_error)?;
 
         let turn_id = format!("turn-{}", uuid::Uuid::now_v7());
+        let active = self.inner.active_model.read().await.clone();
         let input = crate::adapters::app_server::threads::turn_input_from_values(&input_values)
-            .with_provider(self.inner.model_provider.clone())
-            .with_model(self.inner.model.clone());
+            .with_provider(active.model_provider)
+            .with_model(active.model);
         let turn = {
             let mut state = self.inner.state.write().await;
             let thread = state.threads.get_mut(&params.thread_id).ok_or_else(|| {

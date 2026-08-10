@@ -9,6 +9,50 @@ struct RecordingClient {
     capabilities: Option<verlet_provider::ProviderCapabilityRecord>,
 }
 
+struct MutableTurnEndpointRouter {
+    endpoint: std::sync::Mutex<Option<crate::adapters::agent_loop::ResolvedTurnEndpoint>>,
+}
+
+impl MutableTurnEndpointRouter {
+    fn new(endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) -> Self {
+        Self {
+            endpoint: std::sync::Mutex::new(Some(endpoint)),
+        }
+    }
+
+    fn set(&self, endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) {
+        *self.endpoint.lock().unwrap() = Some(endpoint);
+    }
+}
+
+impl crate::adapters::agent_loop::TurnEndpointRouter for MutableTurnEndpointRouter {
+    fn resolve(&self) -> Option<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
+        self.endpoint.lock().unwrap().clone()
+    }
+}
+
+struct GatedRecordingClient {
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
+    responses: std::sync::Mutex<std::collections::VecDeque<verlet_provider::ProviderResponse>>,
+    first_request_started: tokio::sync::Notify,
+    release_first_request: tokio::sync::Notify,
+}
+
+impl GatedRecordingClient {
+    fn new(responses: Vec<verlet_provider::ProviderResponse>) -> Self {
+        Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+            responses: std::sync::Mutex::new(responses.into()),
+            first_request_started: tokio::sync::Notify::new(),
+            release_first_request: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
 impl RecordingClient {
     fn with_responses(responses: Vec<verlet_provider::ProviderResponse>) -> Self {
         Self {
@@ -1510,6 +1554,27 @@ impl verlet_provider::ProviderClient for RecordingClient {
 }
 
 #[async_trait::async_trait]
+impl verlet_provider::ProviderClient for GatedRecordingClient {
+    async fn complete(
+        &self,
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        let request_index = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.clone());
+            requests.len() - 1
+        };
+        if request_index == 0 {
+            self.first_request_started.notify_one();
+            self.release_first_request.notified().await;
+        }
+        self.responses.lock().unwrap().pop_front().ok_or_else(|| {
+            verlet_provider::ProviderError::Decode("no test response queued".to_string())
+        })
+    }
+}
+
+#[async_trait::async_trait]
 impl verlet_provider::ProviderClient for BashMandateListClient {
     async fn complete(
         &self,
@@ -2110,6 +2175,138 @@ async fn runtime_builds_each_turn_from_canonical_session_history() {
         vec!["hello", "first reply", "again", "second reply"]
     );
     assert!(session.entries.iter().all(is_canonical_message_entry));
+}
+
+#[tokio::test]
+async fn turn_endpoint_router_snapshots_wire_and_record_coordinates_per_turn() {
+    let launch_client = std::sync::Arc::new(RecordingClient::default());
+    let first_client = std::sync::Arc::new(GatedRecordingClient::new(vec![
+        response_tool_call_named("echo_search", serde_json::json!({"input":"routed"})),
+        response_text("first routed reply"),
+    ]));
+    let second_client = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
+        "second routed reply",
+    )]));
+    let first_endpoint = crate::adapters::agent_loop::ResolvedTurnEndpoint {
+        config: crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::OpenAIResponses,
+            "provider-a",
+            "model-a",
+        ),
+        client: first_client.clone(),
+    };
+    let second_endpoint = crate::adapters::agent_loop::ResolvedTurnEndpoint {
+        config: crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::AnthropicMessages,
+            "provider-b",
+            "model-b",
+        ),
+        client: second_client.clone(),
+    };
+    let router = std::sync::Arc::new(MutableTurnEndpointRouter::new(first_endpoint));
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    verlet_history::ProviderApi::OpenAIResponses,
+                    "launch-provider",
+                    "launch-model",
+                ),
+                launch_client.clone(),
+            )
+            .with_operation_registry(echo_registry("echo").await)
+            .with_turn_endpoint_router(router.clone()),
+        ),
+        std::sync::Arc::new(verlet_history::InMemorySessionStore::new()),
+    );
+    let thread = host
+        .start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new(
+                "tenant_a",
+                "user_1",
+                "session_routed",
+            ),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit_turn(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        crate::kernel::runtime_host::turn::TurnInput::text("first")
+            .with_provider("ignored-turn-provider")
+            .with_model("ignored-turn-model"),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        first_client.first_request_started.notified(),
+    )
+    .await
+    .expect("first routed request did not start");
+    router.set(second_endpoint);
+    first_client.release_first_request.notify_one();
+    assert_output(&mut events, "first routed reply").await;
+
+    host.submit(thread.context().coordinates.thread_id, "turn-2", "second")
+        .await
+        .unwrap();
+    assert_output(&mut events, "second routed reply").await;
+
+    let first_requests = first_client.requests();
+    assert_eq!(first_requests.len(), 2);
+    assert!(first_requests.iter().all(|request| {
+        request.provider == "provider-a"
+            && request.model == "model-a"
+            && request.api == verlet_history::ProviderApi::OpenAIResponses
+    }));
+    let second_requests = second_client.requests();
+    assert_eq!(second_requests.len(), 1);
+    assert_eq!(second_requests[0].provider, "provider-b");
+    assert_eq!(second_requests[0].model, "model-b");
+    assert_eq!(
+        second_requests[0].api,
+        verlet_history::ProviderApi::AnthropicMessages
+    );
+    assert!(launch_client.requests().is_empty());
+
+    let session = thread.session_context().await.unwrap();
+    let assistant_coordinates = session
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            verlet_history::CanonicalMessage::Assistant {
+                api,
+                provider,
+                model,
+                ..
+            } => Some((api.clone(), provider.clone(), model.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_coordinates,
+        vec![
+            (
+                verlet_history::ProviderApi::OpenAIResponses,
+                "provider-a".to_string(),
+                "model-a".to_string(),
+            ),
+            (
+                verlet_history::ProviderApi::OpenAIResponses,
+                "provider-a".to_string(),
+                "model-a".to_string(),
+            ),
+            (
+                verlet_history::ProviderApi::AnthropicMessages,
+                "provider-b".to_string(),
+                "model-b".to_string(),
+            ),
+        ]
+    );
 }
 
 #[tokio::test]
