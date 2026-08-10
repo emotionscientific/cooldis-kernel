@@ -279,17 +279,21 @@ fn enter_with_no_popup_matches_submits_the_unknown_command() {
 
 /// Render the app at 80x24 and return the glyph grid.
 fn render(app: &mut App, no_color: bool) -> String {
+    render_at(app, no_color, 80, 24)
+}
+
+fn render_at(app: &mut App, no_color: bool, width: u16, height: u16) -> String {
     let theme = crate::chat_theme(no_color);
     let sheet = tuika::StyleSheet::from_theme(&theme);
     let probe = tuika::probe::RectProbe::new();
     let root = crate::ui::build(
         app,
-        ratatui::layout::Rect::new(0, 0, 80, 24),
+        ratatui::layout::Rect::new(0, 0, width, height),
         &theme,
         &sheet,
         &probe,
     );
-    let buffer = tuika::testing::render(root.as_ref(), 80, 24, &theme);
+    let buffer = tuika::testing::render(root.as_ref(), width, height, &theme);
     tuika::testing::grid(&buffer)
 }
 
@@ -756,6 +760,162 @@ fn picker_swallows_typing_and_model_selected_updates_the_footer_label() {
         grid.contains("model set to provider/model-b"),
         "confirmation notice:\n{grid}"
     );
+}
+
+#[test]
+fn picker_is_modal_over_paste_scrolling_and_global_control_keys() {
+    let mut app = app();
+    type_text(&mut app, "/");
+    assert!(!app.popup_items().is_empty());
+    app.content_h = 100;
+    app.viewport_h = 10;
+    app.scroll.jump_to_bottom(app.content_h, app.viewport_h);
+    let scroll_offset = app.scroll.offset();
+    app.apply(ChatEvent::TurnStarted {
+        turn_id: "turn-1".to_string(),
+    });
+    app.apply(ChatEvent::Models(model_rows()));
+
+    let _ = app.handle(&tuika::Event::Paste("must not leak".to_string()));
+    let _ = app.handle(&key(tuika::KeyCode::PageUp));
+    for code in [tuika::KeyCode::Char('c'), tuika::KeyCode::Char('d')] {
+        assert_eq!(
+            app.handle(&tuika::Event::Key(tuika::Key {
+                code,
+                ctrl: true,
+                alt: false,
+                shift: false,
+            })),
+            Flow::Continue
+        );
+    }
+
+    assert_eq!(app.composer.text(), "/");
+    assert_eq!(app.scroll.offset(), scroll_offset);
+    assert_eq!(app.drain_actions(), Vec::new());
+    assert!(render(&mut app, true).contains("Select a model"));
+
+    // Esc belongs to the picker even while a turn is active.
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    assert_eq!(app.drain_actions(), Vec::new());
+    assert!(!render(&mut app, true).contains("Select a model"));
+}
+
+#[test]
+fn models_event_replaces_popup_and_picker_and_empty_result_closes_stale_picker() {
+    let mut app = app();
+    type_text(&mut app, "/");
+    assert!(!app.popup_items().is_empty());
+
+    let mut replacement = model_rows();
+    replacement[0].active = false;
+    replacement[1].active = false;
+    app.apply(ChatEvent::Models(replacement.clone()));
+    assert!(
+        app.popup_items().is_empty(),
+        "picker must win focus over popup"
+    );
+    assert_eq!(app.picker.as_ref().unwrap().state.selected(), Some(0));
+
+    replacement[0].display_name = "Replacement".to_string();
+    app.apply(ChatEvent::Models(replacement));
+    assert_eq!(
+        app.picker.as_ref().unwrap().rows[0].display_name,
+        "Replacement"
+    );
+
+    app.apply(ChatEvent::Models(Vec::new()));
+    assert!(app.picker.is_none());
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Notice { tone: crate::Tone::Error, title, .. }
+            if title == "no models available"
+    )));
+}
+
+#[test]
+fn rejected_missing_auth_selection_keeps_model_and_active_turn_consistent() {
+    let mut app = app();
+    app.apply(ChatEvent::TurnStarted {
+        turn_id: "turn-1".to_string(),
+    });
+    app.apply(ChatEvent::Models(model_rows()));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert!(matches!(
+        app.drain_actions().as_slice(),
+        [Action::SelectModel { provider_id, model }]
+            if provider_id == "provider" && model == "model-b"
+    ));
+
+    app.apply(ChatEvent::Error {
+        title: "model/select rejected: authentication required".to_string(),
+        body: Vec::new(),
+    });
+
+    assert_eq!(app.meta.model_label, "provider/model");
+    assert!(app.turn_active());
+    assert!(app.picker.is_none());
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Notice { tone: crate::Tone::Error, title, .. }
+            if title.contains("authentication required")
+    )));
+}
+
+#[test]
+fn selection_during_active_turn_uses_server_echo_and_explains_deferred_effect() {
+    let mut app = app();
+    app.apply(ChatEvent::TurnStarted {
+        turn_id: "turn-1".to_string(),
+    });
+    app.apply(ChatEvent::ModelSelected {
+        provider_id: "echoed-provider".to_string(),
+        model: "echoed-model".to_string(),
+    });
+
+    assert_eq!(app.meta.model_label, "echoed-provider/echoed-model");
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Notice { title, body, .. }
+            if title == "model set to echoed-provider/echoed-model"
+                && body == &["applies to turns after the current one".to_string()]
+    )));
+}
+
+#[test]
+fn long_and_wide_model_rows_fit_one_line_at_eighty_columns() {
+    let mut app = app();
+    app.apply(ChatEvent::Models(vec![crate::ModelRow {
+        provider_id: "provider-with-a-very-long-identifier".repeat(2),
+        model: "model-with-a-very-long-identifier".repeat(2),
+        display_name: "模型🙂 with an extremely long display name ".repeat(3),
+        auth_status: "missing".to_string(),
+        active: false,
+    }]));
+
+    let grid = render_at(&mut app, true, 80, 24);
+    assert_eq!(
+        grid.lines()
+            .filter(|line| line.contains('模') && line.contains('型'))
+            .count(),
+        1,
+        "wide display name missing or wrapped:\n{grid}"
+    );
+    assert!(
+        grid.contains("provider-with"),
+        "provider coordinate clipped: {grid}"
+    );
+    assert!(grid.contains("needs login"), "auth status clipped: {grid}");
+}
+
+#[test]
+fn model_picker_build_is_safe_at_zero_and_tiny_terminal_sizes() {
+    for (width, height) in [(0, 0), (1, 1), (20, 4)] {
+        let mut app = app();
+        app.apply(ChatEvent::Models(model_rows()));
+        let _ = render_at(&mut app, true, width, height);
+    }
 }
 
 #[test]

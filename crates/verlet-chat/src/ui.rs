@@ -84,7 +84,7 @@ pub fn build(
         root = root.fixed(popup_h, popup(app, &popup_items, theme));
     }
     if picker_h > 0 {
-        root = root.fixed(picker_h, picker(app, theme));
+        root = root.fixed(picker_h, picker(app, theme, width));
     }
     root = root.fixed(body_h, composer(app, theme, probe));
     root = root.fixed(1, footer(app, theme));
@@ -150,34 +150,47 @@ fn popup(app: &App, items: &[(String, String)], theme: &Theme) -> Element {
 /// The `/models` picker: a titled list of selectable models. Auth problems
 /// and the active selection are annotated per row; the width columns align
 /// on the longest display name.
-fn picker(app: &App, theme: &Theme) -> Element {
+fn picker(app: &App, theme: &Theme, width: u16) -> Element {
     let Some(picker) = app.picker.as_ref() else {
         return element(Spacer);
     };
-    let pad = picker
+    let scrollbar_w = u16::from(picker.rows.len() > MAX_PICKER_ROWS);
+    let content_w = width.saturating_sub(2).saturating_sub(scrollbar_w);
+    let max_suffix_w = picker
         .rows
         .iter()
-        .map(|row| row.display_name.chars().count())
+        .map(|row| tuika::width::str_cols(&model_row_suffix(row)))
         .max()
         .unwrap_or(0);
+    let max_name_w = picker
+        .rows
+        .iter()
+        .map(|row| tuika::width::str_cols(&row.display_name))
+        .max()
+        .unwrap_or(0);
+    // Keep both existing columns visible on a narrow terminal. Each remains a
+    // single SelectList row; overlong fields are clipped with an ellipsis.
+    let name_w = max_name_w.min(content_w.saturating_sub(max_suffix_w.saturating_add(2)) / 2);
     let rows: Vec<Line<'static>> = picker
         .rows
         .iter()
         .map(|row| {
+            let suffix = model_row_suffix(row);
+            let suffix_w = tuika::width::str_cols(&suffix);
+            let coordinate_w = content_w
+                .saturating_sub(name_w)
+                .saturating_sub(2)
+                .saturating_sub(suffix_w);
+            let name = fit_columns(&row.display_name, name_w);
+            let name_pad = name_w.saturating_sub(tuika::width::str_cols(&name));
+            let coordinate =
+                fit_columns(&format!("{}/{}", row.provider_id, row.model), coordinate_w);
             let mut spans = vec![
                 Span::styled(
-                    format!(
-                        "{}{:width$}  ",
-                        row.display_name,
-                        "",
-                        width = pad - row.display_name.chars().count()
-                    ),
+                    format!("{name}{:width$}  ", "", width = usize::from(name_pad)),
                     Style::default().fg(theme.text),
                 ),
-                Span::styled(
-                    format!("{}/{}", row.provider_id, row.model),
-                    theme.muted_style(),
-                ),
+                Span::styled(coordinate, theme.muted_style()),
             ];
             if row.active {
                 spans.push(Span::styled(
@@ -204,6 +217,40 @@ fn picker(app: &App, theme: &Theme) -> Element {
             .fixed(1, element(title))
             .grow(1, element(list)),
     )
+}
+
+fn model_row_suffix(row: &crate::ModelRow) -> String {
+    let mut suffix = String::new();
+    if row.active {
+        suffix.push_str("  active");
+    }
+    if row.auth_status == "missing" {
+        suffix.push_str("  needs login");
+    }
+    suffix
+}
+
+/// Fit text to terminal columns without slicing UTF-8 or splitting a wide
+/// character across the right edge.
+fn fit_columns(text: &str, max_cols: u16) -> String {
+    if tuika::width::str_cols(text) <= max_cols {
+        return text.to_string();
+    }
+    if max_cols == 0 {
+        return String::new();
+    }
+
+    let body_cols = max_cols - 1;
+    let mut fitted = String::new();
+    for ch in text.chars() {
+        fitted.push(ch);
+        if tuika::width::str_cols(&fitted) > body_cols {
+            fitted.pop();
+            break;
+        }
+    }
+    fitted.push('…');
+    fitted
 }
 
 /// The rounded input box, with the caret placed by the host through `probe`.

@@ -223,6 +223,13 @@ impl App {
     }
 
     fn route(&mut self, event: &Event) -> Flow {
+        // The model picker owns the whole input surface while open. Keep this
+        // ahead of transcript scrolling, paste handling, global controls, and
+        // slash completion so none of them can leak through the modal.
+        if self.picker.is_some() {
+            self.handle_picker(event);
+            return Flow::Continue;
+        }
         if self.scrolling(event) {
             let _ = self.scroll.handle(event, self.content_h, self.viewport_h);
             return Flow::Continue;
@@ -243,10 +250,6 @@ impl App {
             return Flow::Quit;
         }
         if self.popup.is_some() && self.handle_popup(event, *key) {
-            return Flow::Continue;
-        }
-        if self.picker.is_some() {
-            self.handle_picker(event);
             return Flow::Continue;
         }
         if key.plain() && key.code == KeyCode::Esc {
@@ -664,6 +667,11 @@ impl App {
                 self.follow();
             }
             ChatEvent::Models(rows) => {
+                // A model result supersedes completion and any older model
+                // result. Clear first so an empty refresh cannot leave stale
+                // selectable rows behind.
+                self.popup = None;
+                self.picker = None;
                 if rows.is_empty() {
                     self.notice(Tone::Error, "no models available".to_string(), Vec::new());
                     return;

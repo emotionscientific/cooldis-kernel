@@ -87,6 +87,10 @@ are not the authority for cloud metering.
   `/help`, `/quit`, `/q`, `/interrupt`, `/clear`, `/status`, `/new`,
   `/sessions`, `/resume <thread-id>`, `/rename <name>`, `/fork`, `/compact`,
   and `/models`.
+- `/models` opens a modal picker backed by a fresh `model/list` request.
+  Selecting a row calls `model/select`; missing credentials are reported by
+  the app-server without changing the active model. While the picker is open,
+  it owns keyboard input and Esc dismisses it.
 - Working indicator with elapsed time while a turn is in flight; Esc or
   Ctrl+C interrupts, Ctrl+C on an idle session quits, Ctrl+D quits.
 - Footer with key hints, the thread short id, and the turn state; banner
@@ -100,9 +104,9 @@ Approvals are not surfaced in the TUI yet (the app-server exposes them via
 polling only). A broadcast-lag resync shows a notice rather than rebuilding
 the transcript. The console does not implement shell escape, mouse interaction
 beyond wheel scrolling, file mentions, external editor handoff, export/copy,
-an orchestrator view, or an interactive model picker. Runtime model switching
-is available to RPC clients through `model/select`; the banner and `/models`
-status reflect the active entry returned by `model/list`. A switch affects the
-next turn and is reset when the app-server restarts. Those remaining UI surfaces
-are separate product decisions. The goal is a credible default local console
-while preserving the app-server RPC boundary.
+or an orchestrator view. Runtime model switching is also available to other RPC
+clients through `model/select`; the banner and `/models` picker reflect the
+active entry returned by `model/list`. A switch affects the next turn and is
+reset when the app-server restarts. Those remaining UI surfaces are separate
+product decisions. The goal is a credible default local console while
+preserving the app-server RPC boundary.
