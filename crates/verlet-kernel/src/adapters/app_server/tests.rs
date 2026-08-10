@@ -3669,7 +3669,7 @@ async fn model_select_routes_store_backed_codex_through_oauth_client() {
         body["model"],
         verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL
     );
-    assert_eq!(body["max_output_tokens"], 733);
+    assert!(body.get("max_output_tokens").is_none());
     assert_eq!(body["stream"], true);
     assert_latest_assistant_coordinates(
         &app,
