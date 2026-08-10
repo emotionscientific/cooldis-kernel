@@ -2164,24 +2164,15 @@ async fn retire_console_credential(
     Ok(())
 }
 
-struct ResolvedCatalogOpenAIChatCompletionsProvider {
-    runtime_config: crate::adapters::agent_loop::AgentLoopConfig,
-    endpoint: verlet_provider::ProviderEndpoint,
-}
-
-async fn resolve_catalog_openai_chat_completions_provider<C, A>(
-    provider_store: &C,
-    auth_store: &A,
+async fn resolve_catalog_provider(
+    provider_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+    auth_store: &verlet_metadata::provider_store::SqliteMetadataStore,
     auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
     provider_id: &str,
     model: Option<&str>,
     max_tokens: u32,
     stream: bool,
-) -> crate::kernel::runtime_host::VerletResult<ResolvedCatalogOpenAIChatCompletionsProvider>
-where
-    C: verlet_metadata::provider_store::LlmProviderCatalogStore,
-    A: verlet_metadata::provider_store::LlmProviderAuthStore,
-{
+) -> crate::kernel::runtime_host::VerletResult<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
     let provider = provider_store
         .get_provider(provider_id)
         .await
@@ -2199,16 +2190,56 @@ where
     let api = model_record
         .and_then(|model| model.api.clone())
         .unwrap_or_else(|| provider.api.clone());
-    if api != verlet_history::ProviderApi::OpenAIChatCompletions {
-        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-            format!(
-                "catalog provider {provider_id:?} uses api {api:?}; only OpenAI Chat Completions catalog providers are supported here"
-            ),
-        ));
-    }
     let base_url = model_record
         .and_then(|model| model.base_url.clone())
         .unwrap_or_else(|| provider.base_url.clone());
+
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        if provider_id == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
+            verlet_history::ProviderApi::OpenAIResponses
+        } else {
+            api.clone()
+        },
+        provider.provider_id.clone(),
+        model_id,
+    );
+    runtime_config.max_tokens = max_tokens;
+    runtime_config.stream = stream;
+
+    if provider_id == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
+        let credential = verlet_metadata::provider_store::LlmProviderAuthStore::get_credential(
+            auth_store,
+            provider_id,
+        )
+        .await
+        .map_err(provider_store_error)?;
+        if !matches!(
+            credential,
+            Some(verlet_metadata::provider_store::LlmProviderCredential::OAuth { .. })
+        ) {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "catalog provider {provider_id:?} requires a stored OAuth login; run `verlet auth login openai-codex`"
+                ),
+            ));
+        }
+        let client = std::sync::Arc::new(
+            crate::openai_codex::OpenAICodexProviderClient::with_responses_url(
+                auth_store.clone(),
+                base_url,
+            )
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "failed to build catalog OpenAI Codex provider client: {err}"
+                ))
+            })?,
+        );
+        return Ok(crate::adapters::agent_loop::ResolvedTurnEndpoint {
+            config: runtime_config,
+            client,
+        });
+    }
+
     let resolved_auth = verlet_metadata::provider_store::resolve_llm_provider_auth(
         auth_store,
         &provider,
@@ -2221,13 +2252,37 @@ where
             format!("catalog provider {provider_id:?} requires an API key but none was configured"),
         ));
     }
-    let mut endpoint = verlet_provider::ProviderEndpoint::openai_chat_completions(
-        &base_url,
-        resolved_auth
-            .as_ref()
-            .map(|auth| auth.api_key.clone())
-            .unwrap_or_default(),
-    );
+    let api_key = resolved_auth
+        .as_ref()
+        .map(|auth| auth.api_key.clone())
+        .unwrap_or_default();
+    let (mut endpoint, adapter): (
+        verlet_provider::ProviderEndpoint,
+        std::sync::Arc<dyn verlet_provider::ProviderWireAdapter>,
+    ) = match api {
+        verlet_history::ProviderApi::OpenAIChatCompletions => (
+            verlet_provider::ProviderEndpoint::openai_chat_completions(&base_url, api_key),
+            std::sync::Arc::new(verlet_provider::OpenAIChatCompletionsAdapter),
+        ),
+        verlet_history::ProviderApi::OpenAIResponses => (
+            verlet_provider::ProviderEndpoint::openai_responses(&base_url, api_key),
+            std::sync::Arc::new(verlet_provider::OpenAIResponsesAdapter {
+                include_encrypted_reasoning: false,
+                reasoning_summary: verlet_provider::OpenAIReasoningSummary::Auto,
+            }),
+        ),
+        verlet_history::ProviderApi::AnthropicMessages => (
+            verlet_provider::ProviderEndpoint::anthropic_messages(&base_url, api_key),
+            std::sync::Arc::new(verlet_provider::AnthropicMessagesAdapter),
+        ),
+        verlet_history::ProviderApi::Other(_) => {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "catalog provider {provider_id:?} uses unsupported api {api:?}; supported store-backed provider APIs are OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages"
+                ),
+            ));
+        }
+    };
     if !provider.auth_header {
         endpoint.auth = verlet_provider::ProviderAuth::None;
     }
@@ -2236,18 +2291,20 @@ where
     if let Some(model_record) = model_record {
         headers.extend(model_record.headers.clone());
     }
-    endpoint.headers = resolve_catalog_headers(&headers, auth_context)?;
+    endpoint
+        .headers
+        .extend(resolve_catalog_headers(&headers, auth_context)?);
 
-    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
-        api,
-        provider.provider_id.clone(),
-        model_id,
+    let client = std::sync::Arc::new(
+        verlet_provider::ProviderHttpClient::new(endpoint, adapter).map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "failed to build catalog {api:?} provider client: {err}"
+            ))
+        })?,
     );
-    runtime_config.max_tokens = max_tokens;
-    runtime_config.stream = stream;
-    Ok(ResolvedCatalogOpenAIChatCompletionsProvider {
-        runtime_config,
-        endpoint,
+    Ok(crate::adapters::agent_loop::ResolvedTurnEndpoint {
+        config: runtime_config,
+        client,
     })
 }
 
@@ -2685,7 +2742,7 @@ pub(crate) async fn resolved_turn_endpoint_from_provider_config(
             stream,
             ..
         } => {
-            let resolved = resolve_catalog_openai_chat_completions_provider(
+            return resolve_catalog_provider(
                 provider_store,
                 auth_store,
                 auth_context,
@@ -2694,19 +2751,7 @@ pub(crate) async fn resolved_turn_endpoint_from_provider_config(
                 *max_tokens,
                 *stream,
             )
-            .await?;
-            let adapter: std::sync::Arc<dyn verlet_provider::ProviderWireAdapter> =
-                std::sync::Arc::new(verlet_provider::OpenAIChatCompletionsAdapter);
-            let client = std::sync::Arc::new(
-                verlet_provider::ProviderHttpClient::new(resolved.endpoint, adapter).map_err(
-                    |err| {
-                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                            "failed to build catalog OpenAI Chat Completions provider client: {err}"
-                        ))
-                    },
-                )?,
-            );
-            (resolved.runtime_config, client)
+            .await;
         }
     };
     Ok(crate::adapters::agent_loop::ResolvedTurnEndpoint {

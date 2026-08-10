@@ -6539,6 +6539,11 @@ fn missing_model_provider_auth_message(
     provider_id: &str,
     provider: Option<&verlet_metadata::provider_store::LlmProviderRecord>,
 ) -> String {
+    if provider_id == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
+        return format!(
+            "model provider {provider_id:?} is missing authentication; run `verlet auth login openai-codex`"
+        );
+    }
     let env_name = provider.and_then(|provider| {
         if let verlet_metadata::provider_store::LlmProviderAuthConfig::Env { name } = &provider.auth
         {
