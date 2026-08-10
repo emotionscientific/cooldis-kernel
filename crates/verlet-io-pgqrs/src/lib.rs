@@ -63,6 +63,42 @@ pub struct PgqrsIngressQueue {
     consumer: pgqrs::Consumer,
     config: PgqrsQueueConfig,
     sqlite_dedupe_path: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    pause_after_dedupe_claim: Option<std::sync::Arc<tokio::sync::Barrier>>,
+}
+
+struct PendingDedupeClaim<'a> {
+    queue: &'a PgqrsIngressQueue,
+    dedupe_key: Option<verlet_io_core::IoDedupeKey>,
+    armed: bool,
+}
+
+impl<'a> PendingDedupeClaim<'a> {
+    fn new(queue: &'a PgqrsIngressQueue, dedupe_key: Option<verlet_io_core::IoDedupeKey>) -> Self {
+        Self {
+            queue,
+            dedupe_key,
+            armed: true,
+        }
+    }
+
+    fn commit(mut self) {
+        self.armed = false;
+    }
+
+    fn release(mut self) -> verlet_io_core::IoResult<()> {
+        self.queue.release_dedupe_key(&self.dedupe_key)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for PendingDedupeClaim<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.queue.release_dedupe_key(&self.dedupe_key);
+        }
+    }
 }
 
 impl PgqrsIngressQueue {
@@ -98,11 +134,22 @@ impl PgqrsIngressQueue {
             consumer,
             config,
             sqlite_dedupe_path,
+            #[cfg(test)]
+            pause_after_dedupe_claim: None,
         })
     }
 
     pub fn config(&self) -> &PgqrsQueueConfig {
         &self.config
+    }
+
+    #[cfg(test)]
+    fn with_pause_after_dedupe_claim(
+        mut self,
+        barrier: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        self.pause_after_dedupe_claim = Some(barrier);
+        self
     }
 
     pub async fn lease_default(
@@ -140,16 +187,23 @@ impl verlet_io_core::IngressSink for PgqrsIngressQueue {
                 "duplicate dedupe key",
             ));
         }
-
         let ack = verlet_io_core::IngressAck::accepted(&envelope);
+        let claim = PendingDedupeClaim::new(self, ack.dedupe_key.clone());
+        #[cfg(test)]
+        if let Some(barrier) = &self.pause_after_dedupe_claim {
+            barrier.wait().await;
+            std::future::pending::<()>().await;
+        }
+
         let payload = serde_json::to_value(IngressQueuePayload::new(envelope)).map_err(|err| {
             verlet_io_core::IoError::Queue(format!("encode ingress envelope: {err}"))
         })?;
 
         if let Err(err) = self.producer.enqueue(&payload).await.map_err(queue_error) {
-            self.release_dedupe_key(&ack.dedupe_key)?;
+            claim.release()?;
             return Err(err);
         }
+        claim.commit();
         Ok(ack)
     }
 }
@@ -205,6 +259,11 @@ impl PgqrsIngressQueue {
         let connection = rusqlite::Connection::open(path).map_err(|err| {
             verlet_io_core::IoError::Queue(format!("open sqlite dedupe store: {err}"))
         })?;
+        connection
+            .busy_timeout(SQLITE_BUSY_TIMEOUT)
+            .map_err(|err| {
+                verlet_io_core::IoError::Queue(format!("configure sqlite dedupe store: {err}"))
+            })?;
         connection
             .execute(
                 "DELETE FROM cooldis_ingress_dedupe
@@ -530,6 +589,41 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_submit_releases_claim_before_queue_insert() {
+        let path = test_db_path("cancelled-submit");
+        let config = crate::PgqrsQueueConfig::local_sqlite(&path, "verlet-ingress");
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let queue = std::sync::Arc::new(
+            crate::PgqrsIngressQueue::connect(config.clone())
+                .await
+                .unwrap()
+                .with_pause_after_dedupe_claim(std::sync::Arc::clone(&barrier)),
+        );
+        let submitting_queue = std::sync::Arc::clone(&queue);
+        let submit = tokio::spawn(async move {
+            submitting_queue
+                .submit(envelope("cancel before enqueue"))
+                .await
+        });
+        barrier.wait().await;
+        submit.abort();
+        assert!(submit.await.unwrap_err().is_cancelled());
+        drop(queue);
+
+        let reopened = crate::PgqrsIngressQueue::connect(config).await.unwrap();
+        let ack = reopened
+            .submit(envelope("cancel before enqueue"))
+            .await
+            .unwrap();
+        assert!(ack.accepted, "cancelled submit stranded its dedupe claim");
+        assert_eq!(
+            reopened.lease_default("worker-1", 10).await.unwrap().len(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

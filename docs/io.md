@@ -130,6 +130,8 @@ into durable ingress envelopes. The queue worker admits those envelopes as
 witnessed `timer.fired` control-stream events with a payload that names the
 source `mandate_event_id`, `scheduled_for`, deterministic `occurrence_index`,
 and whether the fire was a recovery `catch_up`.
+Hosted instances run the same route per instance by default, with its ingress
+queue and route state resolved under that instance's root.
 `std::schedule.cron` renders the mandate `input_template` as a plain string for
 the continuation turn input; the only supported substitution is
 `{scheduled_for}`.

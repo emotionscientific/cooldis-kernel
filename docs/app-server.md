@@ -186,6 +186,7 @@ cwd = "/data/instances/orch/workspace"
 tenant_id = "tenant-orch"
 console_principal = "operator:orch"
 hook_shell = "/bin/sh"
+clock = true
 route_digests = ["sha256:<64 lowercase hex characters>"]
 
 [instance.provider]
@@ -201,8 +202,9 @@ reachable over a private network. Every instance requires a unique printable
 `id`, absolute `root`, `cwd`, and `hook_shell`, non-blank `tenant_id` and
 `console_principal`, non-overlapping roots (including aliases through existing
 symlinked parents), and globally unique route digests in the exact
-`sha256:<64 lowercase hex>` form printed by `identity mint`. `local_offline` is
-the provider-free test/smoke mode. A
+`sha256:<64 lowercase hex>` form printed by `identity mint`. Each instance runs
+its own `clock.tick` route by default; set `clock = false` in that instance's
+table to opt out. `local_offline` is the provider-free test/smoke mode. A
 `bifrost_openai` provider requires `base_url`, `model`, and the name of a
 non-empty environment variable in `api_key_env`; the variable value is read
 once at boot and injected only into that instance.
@@ -236,8 +238,9 @@ The host validates every entry and resolves every provider environment variable
 before starting any instance. After boot it prints one liveness line containing
 only the instance count and bound address. `GET /healthz` on the same listener
 returns an unauthenticated empty `200 OK` for deployment probes; no other host
-path bypasses authentication. SIGTERM and SIGINT drain listener and connection
-tasks, shut down all instances, and exit successfully unless shutdown fails.
+path bypasses authentication. SIGTERM and SIGINT drain listener, connection,
+and instance clock tasks, shut down all instances, and exit successfully unless
+shutdown fails.
 
 ### Bootstrap and credentials
 

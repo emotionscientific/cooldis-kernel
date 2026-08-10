@@ -96,8 +96,9 @@ harness product layer are V2 direction.
 The runtime also exposes a multi-tenant host facade and `verlet host run`: one
 listener selects an instance from an explicit credential-digest route, while
 the selected instance remains responsible for authentication, witnessing, and
-its own shutdown boundary. Non-loopback private-network binds require an
-explicit config opt-in; see [RPC Control Plane](app-server.md#config-driven-multi-instance-host).
+its own default mandate clock and shutdown boundary. Non-loopback
+private-network binds require an explicit config opt-in; see
+[RPC Control Plane](app-server.md#config-driven-multi-instance-host).
 
 ## Read Next
 

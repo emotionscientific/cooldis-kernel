@@ -327,7 +327,7 @@ impl VerletIoConfig {
         }
     }
 
-    fn resolve_paths(&mut self, base: &std::path::Path) {
+    pub(crate) fn resolve_paths(&mut self, base: &std::path::Path) {
         self.ingress.resolve_paths(base);
         for route in &mut self.routes {
             route.resolve_paths(base);

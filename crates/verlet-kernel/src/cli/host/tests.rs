@@ -99,6 +99,7 @@ fn direct_local_instance(
         tenant_id: format!("tenant-{id}"),
         console_principal: format!("operator:{id}"),
         hook_shell: "/bin/sh".to_string(),
+        clock: None,
         route_digests: Vec::new(),
         provider: super::HostInstanceProviderConfig {
             provider: "local_offline".to_string(),
@@ -125,6 +126,61 @@ fn parse_minimal_config_with_defaults() {
     assert!(!loaded.listen.allow_non_loopback);
     assert_eq!(loaded.instance.len(), 1);
     assert_eq!(loaded.instance[0].id, "first");
+    assert!(loaded.instance[0].clock_enabled());
+    assert_eq!(loaded.instance[0].clock, None);
+}
+
+#[test]
+fn clock_can_be_disabled_but_must_be_a_boolean() {
+    let root = std::env::temp_dir().join(format!("verlet-host-clock-{}", uuid::Uuid::now_v7()));
+    let disabled = local_instance("first", &root).replace(
+        "hook_shell = \"/bin/sh\"",
+        "hook_shell = \"/bin/sh\"\nclock = false",
+    );
+    let config = format!("[listen]\naddr = \"127.0.0.1:0\"\n{disabled}");
+    let file = TestConfigFile::write("clock-disabled", &config);
+    let loaded = super::load_host_run_config(&file.path).unwrap();
+    assert!(!loaded.instance[0].clock_enabled());
+    assert_eq!(loaded.instance[0].clock, Some(false));
+
+    let invalid = local_instance("first", &root).replace(
+        "hook_shell = \"/bin/sh\"",
+        "hook_shell = \"/bin/sh\"\nclock = \"sometimes\"",
+    );
+    let error = load_error(
+        "clock-invalid",
+        &format!("[listen]\naddr = \"127.0.0.1:0\"\n{invalid}"),
+    );
+    assert!(error.contains("clock"), "{error}");
+    assert!(error.contains("boolean"), "{error}");
+}
+
+#[test]
+fn hosted_clock_queue_paths_are_isolated_under_instance_roots() {
+    let root =
+        std::env::temp_dir().join(format!("verlet-host-clock-paths-{}", uuid::Uuid::now_v7()));
+    let first_id = crate::adapters::host::InstanceId::new("first").unwrap();
+    let second_id = crate::adapters::host::InstanceId::new("second").unwrap();
+    let (first_io, first_route) = super::hosted_clock_io(&first_id, &root.join("first"));
+    let (second_io, second_route) = super::hosted_clock_io(&second_id, &root.join("second"));
+
+    assert_eq!(first_route.id, "clock-first");
+    assert_eq!(second_route.id, "clock-second");
+    assert_eq!(first_route.kind, "clock.tick");
+    assert_eq!(second_route.kind, "clock.tick");
+    assert!(first_route.enabled && second_route.enabled);
+    assert_eq!(
+        first_io.ingress.queue.sqlite_path.as_deref(),
+        Some(root.join("first/.verlet/queue/ingress.sqlite").as_path())
+    );
+    assert_eq!(
+        second_io.ingress.queue.sqlite_path.as_deref(),
+        Some(root.join("second/.verlet/queue/ingress.sqlite").as_path())
+    );
+    assert_ne!(
+        first_io.ingress.effective_queue_dsn(),
+        second_io.ingress.effective_queue_dsn()
+    );
 }
 
 #[test]

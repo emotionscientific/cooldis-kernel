@@ -42,6 +42,7 @@ mod tests;
 /// tenant_id = "orch"
 /// console_principal = "operator:orch"
 /// hook_shell = "/bin/sh"
+/// clock = true
 /// route_digests = ["sha256:<64 lowercase hex characters>"]
 ///
 /// [instance.provider]
@@ -89,12 +90,22 @@ pub(crate) struct HostInstanceConfig {
     /// instances never read `SHELL`/`COMSPEC`).
     // lexicon-allow: hook - architect-fixed host config field from EMO-564.
     pub(crate) hook_shell: String,
+    /// Run the instance-owned `clock.tick` route. Defaults to true when
+    /// absent; set false only when mandates must remain externally driven.
+    #[serde(default)]
+    pub(crate) clock: Option<bool>,
     /// Credential digests routed to this instance (decision 1). May be
     /// empty (an instance reachable only in-process), but a digest listed
     /// under two instances is a config error.
     #[serde(default)]
     pub(crate) route_digests: Vec<String>,
     pub(crate) provider: HostInstanceProviderConfig,
+}
+
+impl HostInstanceConfig {
+    fn clock_enabled(&self) -> bool {
+        self.clock.unwrap_or(true)
+    }
 }
 
 /// `[instance.provider]`: the injected provider auth for one instance
@@ -510,6 +521,46 @@ pub(crate) fn hosted_instance_config(
     Ok((id, config))
 }
 
+fn hosted_clock_io(
+    id: &crate::adapters::host::InstanceId,
+    root: &std::path::Path,
+) -> (
+    crate::daemon::daemon_config::VerletIoConfig,
+    crate::daemon::daemon_config::VerletIoRouteConfig,
+) {
+    let mut io = crate::daemon::daemon_config::VerletIoConfig::default();
+    io.resolve_paths(root);
+    let route = crate::daemon::daemon_config::VerletIoRouteConfig {
+        id: format!("clock-{id}"),
+        kind: crate::daemon::clock_route::CLOCK_TICK_ROUTE_KIND.to_string(),
+        enabled: true,
+        policy: None,
+        content_policies: None,
+        threading: None,
+        agent_ref: None,
+        coalesce_bursts: None,
+        ingress: None,
+        egress_projection: Vec::new(),
+        typing_simulation: None,
+        egress_retry: crate::daemon::daemon_config::VerletEgressRetryConfig::default(),
+        telegram: None,
+        metadata: std::collections::BTreeMap::new(),
+    };
+    (io, route)
+}
+
+async fn start_hosted_clock(
+    io: &crate::daemon::daemon_config::VerletIoConfig,
+    route: &crate::daemon::daemon_config::VerletIoRouteConfig,
+    server: &crate::adapters::app_server::VerletAppServer,
+    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let bridge = crate::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(server);
+    let sink =
+        crate::cli::daemon::route_sink_for_ingress(route, &io.ingress, &bridge, tasks).await?;
+    crate::cli::daemon::start_clock_route(route, sink, server, tasks).await
+}
+
 /// Boot sequence + signal wait: construct [`crate::adapters::host::VerletHost`],
 /// `start_instance` each (any failure shuts down what already started and
 /// returns the error), register every route digest, bind the TCP
@@ -573,13 +624,32 @@ where
     let mut pending = Vec::with_capacity(config.instance.len());
     for instance in &config.instance {
         let (id, hosted) = hosted_instance_config(instance)?;
-        pending.push((id, hosted, instance.route_digests.clone()));
+        pending.push((
+            id,
+            hosted,
+            instance.route_digests.clone(),
+            instance.clock_enabled(),
+            instance.root.clone(),
+        ));
     }
 
     let host = crate::adapters::host::VerletHost::new();
-    for (id, hosted, route_digests) in pending.drain(..) {
+    let mut io_tasks = Vec::new();
+    for (id, hosted, route_digests, clock_enabled, root) in pending.drain(..) {
         if let Err(error) = host.start_instance(id.clone(), hosted).await {
-            return shutdown_after_boot_error(&host, error).await;
+            return shutdown_after_boot_error(&host, &mut io_tasks, error).await;
+        }
+        if clock_enabled {
+            let Some(server) = host.instance(&id).await else {
+                let error = crate::cli::usage_error(format!(
+                    "Verlet host instance {id} disappeared during boot"
+                ));
+                return shutdown_after_boot_error(&host, &mut io_tasks, error).await;
+            };
+            let (io, route) = hosted_clock_io(&id, &root);
+            if let Err(error) = start_hosted_clock(&io, &route, &server, &mut io_tasks).await {
+                return shutdown_after_boot_error(&host, &mut io_tasks, error).await;
+            }
         }
         for digest in route_digests {
             host.register_credential_route_digest(digest, id.clone());
@@ -591,6 +661,7 @@ where
         Err(error) => {
             return shutdown_after_boot_error(
                 &host,
+                &mut io_tasks,
                 crate::cli::usage_error(format!(
                     "failed to bind Verlet host listener {}: {error}",
                     config.listen.addr
@@ -604,6 +675,7 @@ where
         Err(error) => {
             return shutdown_after_boot_error(
                 &host,
+                &mut io_tasks,
                 crate::cli::usage_error(format!(
                     "failed to inspect Verlet host listener {}: {error}",
                     config.listen.addr
@@ -621,7 +693,7 @@ where
         )
         .await
     {
-        return shutdown_after_boot_error(&host, error).await;
+        return shutdown_after_boot_error(&host, &mut io_tasks, error).await;
     }
     eprintln!(
         "verlet host listening on {listen_addr} with {} instances",
@@ -629,6 +701,7 @@ where
     );
 
     let signal_result = shutdown_signal.await;
+    shutdown_io_tasks(&mut io_tasks).await;
     let shutdown_result = host.shutdown().await;
     signal_result?;
     shutdown_result
@@ -636,13 +709,24 @@ where
 
 async fn shutdown_after_boot_error(
     host: &crate::adapters::host::VerletHost,
+    io_tasks: &mut Vec<tokio::task::JoinHandle<()>>,
     boot_error: crate::kernel::runtime_host::VerletError,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
+    shutdown_io_tasks(io_tasks).await;
     match host.shutdown().await {
         Ok(()) => Err(boot_error),
         Err(shutdown_error) => Err(crate::cli::usage_error(format!(
             "{boot_error}; host cleanup also failed: {shutdown_error}"
         ))),
+    }
+}
+
+async fn shutdown_io_tasks(tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
+    for task in tasks.iter() {
+        task.abort();
+    }
+    while let Some(task) = tasks.pop() {
+        let _ = task.await;
     }
 }
 
@@ -675,9 +759,10 @@ pub(super) fn print_host_run_help() {
          \n\
          The config file defines the one listener ([listen]: addr,\n\
          allow_non_loopback) and each hosted instance ([[instance]]: id,\n\
-         root, cwd, tenant_id, console_principal, hook_shell,\n\
-         route_digests, [instance.provider]). Credential routes use the\n\
-         exact sha256 digest printed by `verlet identity mint`; host\n\
+         root, cwd, tenant_id, console_principal, hook_shell, clock,\n\
+         route_digests, [instance.provider]). Clock defaults to true.\n\
+         Credential routes use the exact sha256 digest printed by\n\
+         `verlet identity mint`; host\n\
          configuration never stores raw kernel access tokens."
     );
 }
