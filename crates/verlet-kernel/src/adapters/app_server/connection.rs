@@ -329,6 +329,19 @@ pub(super) struct ModelProviderAuthSetParams {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct ModelProviderAuthSetOAuthParams {
+    pub(super) provider_id: String,
+    pub(super) access: String,
+    pub(super) refresh: String,
+    pub(super) expires_at_ms: i64,
+    #[serde(default)]
+    pub(super) account_id: Option<String>,
+    #[serde(default)]
+    pub(super) email: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct ModelProviderAuthDeleteParams {
     pub(super) provider_id: String,
 }
@@ -871,6 +884,10 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
         crate::daemon::identity::AuthorityClass::Host,
     ),
     (
+        "modelProvider/auth/setOAuth",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
         "modelProvider/auth/delete",
         crate::daemon::identity::AuthorityClass::Host,
     ),
@@ -1109,6 +1126,7 @@ pub(super) const HOST_EFFECT_METHODS: &[&str] = &[
     "modelProvider/delete",
     "modelProvider/auth/status",
     "modelProvider/auth/set",
+    "modelProvider/auth/setOAuth",
     "modelProvider/auth/delete",
     // Runtime construction, reconstruction, and standing-grant changes.
     "thread/start",
@@ -1575,6 +1593,10 @@ impl crate::adapters::app_server::VerletAppServer {
             "modelProvider/auth/set" => {
                 let params: ModelProviderAuthSetParams = parse_params(params)?;
                 self.model_provider_auth_set(params).await
+            }
+            "modelProvider/auth/setOAuth" => {
+                let params: ModelProviderAuthSetOAuthParams = parse_params(params)?;
+                self.model_provider_auth_set_oauth(params).await
             }
             "modelProvider/auth/delete" => {
                 let params: ModelProviderAuthDeleteParams = parse_params(params)?;
@@ -2399,6 +2421,79 @@ impl crate::adapters::app_server::VerletAppServer {
                 &provider.provider_id,
                 verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
                     key: api_key.to_string(),
+                },
+            )
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
+        match self
+            .rebuild_active_catalog_provider_endpoint(&provider.provider_id)
+            .await
+        {
+            Ok(Some(endpoint)) => self.inner.turn_endpoint_router.activate(endpoint),
+            Ok(None) => {
+                self.inner
+                    .turn_endpoint_router
+                    .invalidate(&provider.provider_id)
+                    .await;
+            }
+            Err(error) => {
+                self.restore_model_provider_credential(&provider.provider_id, previous)
+                    .await?;
+                return Err(error);
+            }
+        }
+        Ok(serde_json::json!({ "auth": self.model_provider_auth_json(&provider).await? }))
+    }
+
+    pub(super) async fn model_provider_auth_set_oauth(
+        &self,
+        params: ModelProviderAuthSetOAuthParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let access = params.access.trim().to_string();
+        if access.is_empty() {
+            return Err(jsonrpc_error(
+                -32602,
+                "modelProvider/auth/setOAuth requires a non-empty access token",
+            ));
+        }
+        let refresh = params.refresh.trim().to_string();
+        if refresh.is_empty() {
+            return Err(jsonrpc_error(
+                -32602,
+                "modelProvider/auth/setOAuth requires a non-empty refresh token",
+            ));
+        }
+        let _mutation = self.inner.model_mutation.lock().await;
+        let provider = self.model_provider_record(&params.provider_id).await?;
+        if provider.provider_id != verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
+            return Err(jsonrpc_error(
+                -32602,
+                format!(
+                    "model provider {:?} does not use OAuth; use modelProvider/auth/set",
+                    provider.provider_id
+                ),
+            ));
+        }
+        let previous = self
+            .inner
+            .user_metadata_store
+            .get_credential(&provider.provider_id)
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
+        self.inner
+            .user_metadata_store
+            .set_credential(
+                &provider.provider_id,
+                verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                    access,
+                    refresh,
+                    expires_at_ms: params.expires_at_ms,
+                    account_id: params.account_id,
+                    email: params.email,
                 },
             )
             .await
