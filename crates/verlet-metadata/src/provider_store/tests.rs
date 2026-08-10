@@ -810,6 +810,20 @@ async fn auth_status_redacts_values() {
     assert!(!json.contains("secret"));
 }
 
+#[test]
+fn provider_auth_context_debug_redacts_all_secret_values() {
+    let context = crate::provider_store::LlmProviderAuthContext::new()
+        .with_runtime_api_key("provider", "runtime-secret")
+        .with_env("PROVIDER_API_KEY", "environment-secret");
+
+    let debug = format!("{context:?}");
+
+    assert!(debug.contains("provider"), "{debug}");
+    assert!(debug.contains("PROVIDER_API_KEY"), "{debug}");
+    assert!(!debug.contains("runtime-secret"), "{debug}");
+    assert!(!debug.contains("environment-secret"), "{debug}");
+}
+
 #[tokio::test]
 async fn command_auth_is_visible_but_not_executed_by_default() {
     let store = crate::provider_store::SqliteLlmProviderStore::in_memory()

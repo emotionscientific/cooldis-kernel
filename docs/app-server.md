@@ -135,9 +135,12 @@ as `[unrecorded]`.
 Every RPC WebSocket connection resolves to a principal before any method is
 dispatched, on both transports. There is no unauthenticated fallthrough: a
 connection that fails to authenticate receives a uniform `401 Unauthorized`,
-opens no JSON-RPC session, and is witnessed as a rejection. The unauthenticated
-`/healthz` and `/readyz` HTTP probes do not expose RPC. The full design is ADR
-0008 (`docs/adr/0008-identity-plane-v0.md`, including its as-shipped addendum).
+opens no JSON-RPC session, and is witnessed as a rejection. The standalone
+app-server's unauthenticated `/healthz` and `/readyz` HTTP probes do not expose
+RPC. The multi-instance host exposes only `/healthz`; see
+[Config-driven multi-instance host](#config-driven-multi-instance-host). The
+full design is ADR 0008 (`docs/adr/0008-identity-plane-v0.md`, including its
+as-shipped addendum).
 
 ### Modes
 
@@ -155,11 +158,86 @@ the mode (see `daemon/daemon_config.rs`):
   principal in the daemon's state home before starting it. Peer mapping is
   disabled; every connection presents a credential.
 
-The TCP WebSocket listener remains loopback-only in both modes. A hosted
-deployment that needs remote access must provide a separate trusted transport
-or proxy. Standalone `verlet rpc` and `verlet console` construct local-mode
+The standalone TCP WebSocket listener remains loopback-only in both modes.
+`verlet host run` separately permits an explicit `allow_non_loopback = true`
+opt-in for a credential-authenticated private-network listener; loopback stays
+the default. Standalone `verlet rpc` and `verlet console` construct local-mode
 app servers; the console is a private local surface, not a client for a running
 managed daemon.
+
+### Config-driven multi-instance host
+
+`verlet host run --config <host.toml>` boots multiple managed instances behind
+one TCP listener. Each instance owns a standard `InstanceRoots::under(root)`
+layout (`runtime`, `state`, `user-state`, `agents`, `blobs`, and `skills`) and
+has its own identity authority. The host route table contains credential
+digests only; raw access tokens do not belong in the host config, host command
+line, host process environment, or logs.
+
+```toml
+[listen]
+addr = "[::]:7900"
+allow_non_loopback = true
+
+[[instance]]
+id = "orch"
+root = "/data/instances/orch"
+cwd = "/data/instances/orch/workspace"
+tenant_id = "tenant-orch"
+console_principal = "operator:orch"
+hook_shell = "/bin/sh"
+route_digests = ["sha256:<64 lowercase hex characters>"]
+
+[instance.provider]
+provider = "bifrost_openai"
+base_url = "http://bifrost.railway.internal:8080"
+api_key_env = "VERLET_HOST_ORCH_PROVIDER_KEY"
+model = "openai/gpt-5"
+```
+
+`listen.addr` must be a TCP socket address. `allow_non_loopback` defaults to
+`false`; set it explicitly only when the authenticated listener is meant to be
+reachable over a private network. Every instance requires a unique printable
+`id`, absolute `root`, `cwd`, and `hook_shell`, non-blank `tenant_id` and
+`console_principal`, non-overlapping roots (including aliases through existing
+symlinked parents), and globally unique route digests in the exact
+`sha256:<64 lowercase hex>` form printed by `identity mint`. `local_offline` is
+the provider-free test/smoke mode. A
+`bifrost_openai` provider requires `base_url`, `model`, and the name of a
+non-empty environment variable in `api_key_env`; the variable value is read
+once at boot and injected only into that instance.
+
+Provision each instance before starting the host. Use the state home under its
+configured root, capture tokens in the client/orchestrator secret store, and
+copy only the printed digest into `host.toml`:
+
+```sh
+verlet identity bootstrap operator:orch \
+  --display "Orch operator" \
+  --state-home /data/instances/orch/state
+
+verlet identity declare adapter:gateway \
+  --kind adapter \
+  --display "Gateway adapter" \
+  --declared-by operator:orch \
+  --state-home /data/instances/orch/state
+
+verlet identity mint adapter:gateway \
+  --minted-by operator:orch \
+  --state-home /data/instances/orch/state
+# stdout includes both:
+# token <store-this-client-side>
+# token_digest=sha256:<put-this-in-route_digests>
+
+verlet host run --config /etc/verlet/host.toml
+```
+
+The host validates every entry and resolves every provider environment variable
+before starting any instance. After boot it prints one liveness line containing
+only the instance count and bound address. `GET /healthz` on the same listener
+returns an unauthenticated empty `200 OK` for deployment probes; no other host
+path bypasses authentication. SIGTERM and SIGINT drain listener and connection
+tasks, shut down all instances, and exit successfully unless shutdown fails.
 
 ### Bootstrap and credentials
 
@@ -199,8 +277,9 @@ verlet daemon run --config verlet.toml
 ```
 
 `bootstrap` declares the first operator and mints its credential atomically.
-`mint` prints the new token exactly once; only its digest is stored. Capture the
-operator and adapter tokens in the deployment's secret store. `identity list`
+`mint` prints the new token exactly once followed by
+`token_digest=sha256:<hex>`; only the digest is stored. Capture the operator and
+adapter tokens in the deployment's secret store. `identity list`
 shows redacted records, and `revoke-credential` / `revoke-principal` retire
 them. Revocation takes effect at the next connection; live sessions are not
 torn down.

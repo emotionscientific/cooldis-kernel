@@ -732,7 +732,7 @@ pub struct ProviderHttpClient {
     adapter: std::sync::Arc<dyn ProviderWireAdapter>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderEndpoint {
     pub url: String,
     pub auth: ProviderAuth,
@@ -740,7 +740,20 @@ pub struct ProviderEndpoint {
     pub headers: Vec<(String, String)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for ProviderEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderEndpoint")
+            .field("url", &self.url)
+            .field("auth", &self.auth)
+            .field(
+                "headers",
+                &format_args!("<redacted: {} entries>", self.headers.len()),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderAuth {
     Bearer {
@@ -758,6 +771,38 @@ pub enum ProviderAuth {
         service: String,
     },
     None,
+}
+
+impl std::fmt::Debug for ProviderAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer { .. } => f
+                .debug_struct("Bearer")
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::AnthropicApiKey { .. } => f
+                .debug_struct("AnthropicApiKey")
+                .field("key", &"<redacted>")
+                .finish(),
+            Self::AwsSigV4 {
+                region,
+                service,
+                session_token,
+                ..
+            } => f
+                .debug_struct("AwsSigV4")
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field(
+                    "session_token",
+                    &session_token.as_ref().map(|_| "<redacted>"),
+                )
+                .field("region", region)
+                .field("service", service)
+                .finish(),
+            Self::None => f.write_str("None"),
+        }
+    }
 }
 
 impl ProviderEndpoint {

@@ -1474,3 +1474,22 @@ fn thinking_effort_and_reasoning_summary_wire_spellings_are_pinned() {
         .collect();
     assert_eq!(summaries, vec!["auto", "concise", "detailed", "verbose"]);
 }
+#[test]
+fn provider_endpoint_debug_redacts_auth_and_header_values() {
+    let mut endpoint = crate::ProviderEndpoint::openai_responses(
+        "https://provider.example.test/v1",
+        "provider-secret",
+    );
+    endpoint
+        .headers
+        .push(("X-Provider-Secret".to_string(), "header-secret".to_string()));
+
+    let debug = format!("{endpoint:?}");
+
+    assert!(
+        debug.contains("https://provider.example.test/v1"),
+        "{debug}"
+    );
+    assert!(!debug.contains("provider-secret"), "{debug}");
+    assert!(!debug.contains("header-secret"), "{debug}");
+}

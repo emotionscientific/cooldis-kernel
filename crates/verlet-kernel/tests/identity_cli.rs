@@ -130,6 +130,14 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         .lines()
         .find_map(|line| line.strip_prefix("token "))
         .unwrap();
+    let token_digest = mint_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("token_digest="))
+        .unwrap();
+    assert_eq!(
+        token_digest,
+        verlet::daemon::identity::identity_token_digest(token)
+    );
 
     let list = run_identity(["identity", "list", "--state-home", &state_home_arg]);
     assert!(list.status.success(), "{}", stderr(&list));

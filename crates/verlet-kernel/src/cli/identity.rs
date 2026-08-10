@@ -139,6 +139,10 @@ pub(super) async fn identity_mint(
     println!("credential_id {}", credential.credential_id);
     eprintln!("WARNING: identity credential token is shown once; store it securely now.");
     println!("token {token}");
+    println!(
+        "token_digest={}",
+        crate::daemon::identity::identity_token_digest(&token)
+    );
     Ok(())
 }
 

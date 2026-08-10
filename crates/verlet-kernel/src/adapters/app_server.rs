@@ -566,7 +566,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum AppServerProviderConfig {
     LocalOffline,
     OpenAICodex {
@@ -613,6 +613,107 @@ pub enum AppServerProviderConfig {
         max_tokens: u32,
         stream: bool,
     },
+}
+
+impl std::fmt::Debug for AppServerProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LocalOffline => f.write_str("LocalOffline"),
+            Self::OpenAICodex {
+                model,
+                max_tokens,
+                stream,
+            } => f
+                .debug_struct("OpenAICodex")
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+            Self::BifrostOpenAIResponses {
+                base_url,
+                model,
+                max_tokens,
+                stream,
+                ..
+            } => f
+                .debug_struct("BifrostOpenAIResponses")
+                .field("base_url", base_url)
+                .field("api_key", &"<redacted>")
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+            Self::OpenAIChatCompletions {
+                provider,
+                base_url,
+                model,
+                max_tokens,
+                stream,
+                headers,
+                ..
+            } => f
+                .debug_struct("OpenAIChatCompletions")
+                .field("provider", provider)
+                .field("base_url", base_url)
+                .field("api_key", &"<redacted>")
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .field(
+                    "headers",
+                    &format_args!("<redacted: {} entries>", headers.len()),
+                )
+                .finish(),
+            Self::AnthropicMessages {
+                base_url,
+                model,
+                max_tokens,
+                stream,
+                ..
+            } => f
+                .debug_struct("AnthropicMessages")
+                .field("base_url", base_url)
+                .field("api_key", &"<redacted>")
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+            Self::AnthropicBedrock {
+                region,
+                base_url,
+                model,
+                max_tokens,
+                stream,
+                session_token,
+                ..
+            } => f
+                .debug_struct("AnthropicBedrock")
+                .field("region", region)
+                .field("base_url", base_url)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field(
+                    "session_token",
+                    &session_token.as_ref().map(|_| "<redacted>"),
+                )
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+            Self::CatalogOpenAIChatCompletions {
+                provider_id,
+                model,
+                max_tokens,
+                stream,
+            } => f
+                .debug_struct("CatalogOpenAIChatCompletions")
+                .field("provider_id", provider_id)
+                .field("model", model)
+                .field("max_tokens", max_tokens)
+                .field("stream", stream)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3098,7 +3199,22 @@ async fn bind_websocket_listener(
 pub(crate) struct HttpRequestHead {
     method: String,
     path: String,
+    has_query: bool,
     headers: Vec<(String, String)>,
+}
+
+impl HttpRequestHead {
+    pub(crate) fn method(&self) -> &str {
+        &self.method
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn has_query(&self) -> bool {
+        self.has_query
+    }
 }
 
 pub(crate) async fn peek_http_request(
@@ -3190,11 +3306,10 @@ fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next()?.to_string();
     let target = parts.next()?;
-    let path = target
+    let (path, has_query) = target
         .split_once('?')
-        .map(|(path, _)| path)
-        .unwrap_or(target)
-        .to_string();
+        .map(|(path, _)| (path, true))
+        .unwrap_or((target, false));
     let headers = lines
         .filter_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -3203,7 +3318,8 @@ fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
         .collect();
     Some(HttpRequestHead {
         method,
-        path,
+        path: path.to_string(),
+        has_query,
         headers,
     })
 }
@@ -3327,7 +3443,7 @@ where
     Ok(())
 }
 
-async fn consume_http_request_headers<S>(
+pub(crate) async fn consume_http_request_headers<S>(
     stream: &mut S,
 ) -> crate::kernel::runtime_host::VerletResult<()>
 where
