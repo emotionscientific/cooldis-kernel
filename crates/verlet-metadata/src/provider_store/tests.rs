@@ -493,6 +493,104 @@ fn default_openai_compatible_provider_record_matches_runtime_connection_shape() 
     );
 }
 
+#[test]
+fn default_openai_codex_provider_record_is_a_minimal_responses_catalog() {
+    let provider = crate::provider_store::default_openai_codex_llm_provider_record();
+
+    assert_eq!(
+        provider.provider_id,
+        crate::provider_store::OPENAI_CODEX_PROVIDER_ID
+    );
+    assert_eq!(provider.api, verlet_history::ProviderApi::OpenAIResponses);
+    assert_eq!(
+        provider.base_url,
+        crate::provider_store::OPENAI_CODEX_RESPONSES_URL
+    );
+    assert!(provider.auth_header);
+    assert_eq!(provider.models.len(), 3);
+    assert_eq!(
+        provider.models[0].model_id,
+        crate::provider_store::OPENAI_CODEX_DEFAULT_MODEL
+    );
+    assert_eq!(
+        provider.models[0]
+            .metadata
+            .get("default")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert!(provider.models.iter().all(|model| {
+        model.input_modalities == vec![crate::provider_store::LlmProviderInputModality::Text]
+    }));
+}
+
+#[tokio::test]
+async fn oauth_credential_round_trips_account_metadata_without_debugging_tokens() {
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    let credential = crate::provider_store::LlmProviderCredential::OAuth {
+        access: "secret-access".to_string(),
+        refresh: "secret-refresh".to_string(),
+        expires_at_ms: 1_900_000_000_000,
+        account_id: Some("acct-123".to_string()),
+        email: Some("user@example.com".to_string()),
+    };
+
+    store
+        .set_credential(
+            crate::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            credential.clone(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get_credential(crate::provider_store::OPENAI_CODEX_PROVIDER_ID)
+            .await
+            .unwrap(),
+        Some(credential.clone())
+    );
+    let debug = format!("{credential:?}");
+    assert!(!debug.contains("secret-access"));
+    assert!(!debug.contains("secret-refresh"));
+    assert!(!debug.contains("acct-123"));
+    assert!(!debug.contains("user@example.com"));
+    assert!(debug.contains("[REDACTED]"));
+
+    store
+        .delete_credential(crate::provider_store::OPENAI_CODEX_PROVIDER_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_credential(crate::provider_store::OPENAI_CODEX_PROVIDER_ID)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn oauth_credential_without_account_fields_remains_deserializable() {
+    let credential: crate::provider_store::LlmProviderCredential = serde_json::from_str(
+        r#"{"type":"o_auth","access":"access","refresh":"refresh","expires_at_ms":42}"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        credential,
+        crate::provider_store::LlmProviderCredential::OAuth {
+            access: "access".to_string(),
+            refresh: "refresh".to_string(),
+            expires_at_ms: 42,
+            account_id: None,
+            email: None,
+        }
+    );
+}
+
 #[tokio::test]
 async fn seeding_openai_compatible_prepopulates_catalog_and_resolves_environment_auth() {
     let store = crate::provider_store::SqliteLlmProviderStore::in_memory()

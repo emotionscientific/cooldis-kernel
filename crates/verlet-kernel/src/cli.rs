@@ -172,6 +172,9 @@ fn print_command_help(path: &[String]) -> crate::kernel::runtime_host::VerletRes
             }
         }
         [command] if command == "auth" => crate::cli::auth::print_auth_help(),
+        [command, subcommand] if command == "auth" && subcommand == "login" => {
+            crate::cli::auth::print_auth_login_help()
+        }
         [command, subcommand] if command == "auth" && subcommand == "status" => {
             crate::cli::auth::print_auth_status_help()
         }

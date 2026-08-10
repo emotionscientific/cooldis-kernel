@@ -319,6 +319,35 @@ pub(super) fn open_browser_url(url: &str) -> crate::kernel::runtime_host::Verlet
         .map_err(|err| crate::cli::usage_error(format!("failed to open browser: {err}")))
 }
 
+pub(super) async fn open_browser_url_checked(
+    url: &str,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let command = browser_open_command(url)?;
+    wait_for_browser_open_command(command).await
+}
+
+async fn wait_for_browser_open_command(
+    command: std::process::Command,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let mut command = tokio::process::Command::from(command);
+    command
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let status = command
+        .status()
+        .await
+        .map_err(|err| crate::cli::usage_error(format!("failed to open browser: {err}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(crate::cli::usage_error(format!(
+            "browser opener exited with {status}"
+        )))
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn browser_open_command(
     url: &str,
@@ -424,6 +453,11 @@ pub(super) struct ChatConfigSection {
 #[derive(Clone, Debug)]
 pub(super) enum ChatProviderConfig {
     Local,
+    OpenAICodex {
+        model: String,
+        max_tokens: u32,
+        stream: bool,
+    },
     BifrostOpenAI {
         base_url: String,
         api_key: String,
@@ -471,6 +505,20 @@ pub(super) fn apply_chat_provider_config(
 ) {
     match provider {
         ChatProviderConfig::Local => {}
+        ChatProviderConfig::OpenAICodex {
+            model,
+            max_tokens,
+            stream,
+        } => {
+            config.model = model.clone();
+            config.model_provider =
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID.to_string();
+            config.provider = crate::adapters::app_server::AppServerProviderConfig::OpenAICodex {
+                model,
+                max_tokens,
+                stream,
+            };
+        }
         ChatProviderConfig::BifrostOpenAI {
             base_url,
             api_key,
@@ -800,6 +848,13 @@ pub(super) fn load_chat_provider_config(
 
     match provider {
         "local" | "local_offline" | "offline" => Ok(ChatProviderConfig::Local),
+        "openai-codex" | "openai_codex" => Ok(ChatProviderConfig::OpenAICodex {
+            model: config.model.clone().unwrap_or_else(|| {
+                verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL.to_string()
+            }),
+            max_tokens: config.max_tokens.unwrap_or(4096),
+            stream: config.stream.unwrap_or(true),
+        }),
         "bifrost" | "bifrost_openai" | "openai" | "openai_responses" => {
             let env_file = config
                 .env_file
@@ -1160,7 +1215,7 @@ pub(super) fn load_chat_provider_config(
             })
         }
         other => Err(crate::cli::usage_error(format!(
-            "unknown chat provider {other:?}; expected local, bifrost_openai, openai_chat_completions, anthropic, anthropic_bedrock, or openai_compatible"
+            "unknown chat provider {other:?}; expected local, openai-codex, bifrost_openai, openai_chat_completions, anthropic, anthropic_bedrock, or openai_compatible"
         ))),
     }
 }
@@ -1312,6 +1367,7 @@ impl PrivateAppServer {
             .state_home
             .clone()
             .unwrap_or_else(|| root.join("state"));
+        config.user_state_home = crate::cli::secret::default_user_state_home()?;
         // lexicon-allow: capsule - existing app-server operation binding API name
         config.capsule_bindings = capsule_bindings;
         apply_chat_provider_config(&mut config, provider);
@@ -1535,6 +1591,7 @@ pub(super) fn print_chat_help() {
 Usage:\n\
   verlet chat [PROMPT] [--config <file>] [--cwd <path>]\n\
   verlet chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>\n\
+  verlet chat [PROMPT] --provider openai-codex [--model <model>]\n\
   verlet chat [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
 \n\
 Starts the bundled local terminal console over the app-server RPC boundary. By\n\

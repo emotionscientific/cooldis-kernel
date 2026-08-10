@@ -3,6 +3,11 @@ pub const OPENAI_COMPATIBLE_BASE_URL: &str = "https://api.example.invalid/v1";
 pub const OPENAI_COMPATIBLE_DEFAULT_MODEL: &str = "example-chat-model";
 pub const OPENAI_COMPATIBLE_ALT_MODEL: &str = "example-chat-model-large";
 pub const OPENAI_COMPATIBLE_EXAMPLE_HEADER: &str = "X-Example-Provider";
+pub const OPENAI_CODEX_PROVIDER_ID: &str = "openai-codex";
+pub const OPENAI_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+pub const OPENAI_CODEX_DEFAULT_MODEL: &str = "gpt-5.6-sol";
+pub const OPENAI_CODEX_MODELS: &[&str] =
+    &[OPENAI_CODEX_DEFAULT_MODEL, "gpt-5.6-terra", "gpt-5.6-luna"];
 
 pub type LlmProviderStoreResult<T> = Result<T, LlmProviderStoreError>;
 
@@ -259,7 +264,7 @@ pub enum LlmProviderAuthConfig {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmProviderCredential {
     ApiKey {
@@ -269,7 +274,30 @@ pub enum LlmProviderCredential {
         access: String,
         refresh: String,
         expires_at_ms: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
     },
+}
+
+impl std::fmt::Debug for LlmProviderCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey { .. } => formatter
+                .debug_struct("ApiKey")
+                .field("key", &"[REDACTED]")
+                .finish(),
+            Self::OAuth { expires_at_ms, .. } => formatter
+                .debug_struct("OAuth")
+                .field("access", &"[REDACTED]")
+                .field("refresh", &"[REDACTED]")
+                .field("expires_at_ms", expires_at_ms)
+                .field("account_id", &"[REDACTED]")
+                .field("email", &"[REDACTED]")
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -426,6 +454,29 @@ pub fn default_openai_compatible_llm_provider_record() -> LlmProviderRecord {
     )
 }
 
+pub fn default_openai_codex_llm_provider_record() -> LlmProviderRecord {
+    let mut provider = LlmProviderRecord::new(
+        OPENAI_CODEX_PROVIDER_ID,
+        verlet_history::ProviderApi::OpenAIResponses,
+        OPENAI_CODEX_RESPONSES_URL,
+    )
+    .with_display_name("OpenAI Codex (ChatGPT plan)")
+    .with_auth_header(true)
+    .with_metadata("api_family", "openai_responses")
+    .with_metadata("billing", "chatgpt_plan")
+    .with_metadata("catalog", "static_emo_560");
+    for model_id in OPENAI_CODEX_MODELS {
+        let mut model = LlmProviderModelRecord::new(*model_id)
+            .with_display_name(*model_id)
+            .with_input_modality(LlmProviderInputModality::Text);
+        if *model_id == OPENAI_CODEX_DEFAULT_MODEL {
+            model = model.with_metadata("default", "true");
+        }
+        provider = provider.with_model(model);
+    }
+    provider
+}
+
 pub async fn seed_openai_compatible_llm_provider(
     store: &dyn LlmProviderCatalogStore,
 ) -> LlmProviderStoreResult<()> {
@@ -434,10 +485,19 @@ pub async fn seed_openai_compatible_llm_provider(
         .await
 }
 
+pub async fn seed_openai_codex_llm_provider(
+    store: &dyn LlmProviderCatalogStore,
+) -> LlmProviderStoreResult<()> {
+    store
+        .upsert_provider(default_openai_codex_llm_provider_record())
+        .await
+}
+
 pub async fn seed_default_llm_providers(
     store: &dyn LlmProviderCatalogStore,
 ) -> LlmProviderStoreResult<()> {
-    seed_openai_compatible_llm_provider(store).await
+    seed_openai_compatible_llm_provider(store).await?;
+    seed_openai_codex_llm_provider(store).await
 }
 
 #[derive(Clone)]

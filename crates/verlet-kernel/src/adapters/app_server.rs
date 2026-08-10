@@ -308,6 +308,18 @@ impl VerletAppServerConfig {
         self
     }
 
+    pub fn with_openai_codex(mut self, model: impl Into<String>) -> Self {
+        let model = model.into();
+        self.model = model.clone();
+        self.model_provider = verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID.to_string();
+        self.provider = AppServerProviderConfig::OpenAICodex {
+            model,
+            max_tokens: 4096,
+            stream: true,
+        };
+        self
+    }
+
     pub fn with_openai_chat_completions(
         mut self,
         provider: impl Into<String>,
@@ -557,6 +569,11 @@ fn is_false(value: &bool) -> bool {
 #[derive(Clone, Debug)]
 pub enum AppServerProviderConfig {
     LocalOffline,
+    OpenAICodex {
+        model: String,
+        max_tokens: u32,
+        stream: bool,
+    },
     BifrostOpenAIResponses {
         base_url: String,
         api_key: String,
@@ -2359,7 +2376,8 @@ async fn agent_manifest_provider_surface_from_parts(
             )
             .with_supports_streaming(false),
         ),
-        AppServerProviderConfig::BifrostOpenAIResponses { .. }
+        AppServerProviderConfig::OpenAICodex { .. }
+        | AppServerProviderConfig::BifrostOpenAIResponses { .. }
         | AppServerProviderConfig::OpenAIChatCompletions { .. }
         | AppServerProviderConfig::AnthropicMessages { .. }
         | AppServerProviderConfig::AnthropicBedrock { .. } => Ok(
@@ -2471,18 +2489,14 @@ async fn runtime_factory_from_config(
     )
 }
 
-pub(crate) async fn resolved_turn_endpoint_from_provider_config<C, A>(
+pub(crate) async fn resolved_turn_endpoint_from_provider_config(
     provider_config: &AppServerProviderConfig,
     model_provider: &str,
     selected_model: &str,
-    provider_store: &C,
-    auth_store: &A,
+    provider_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+    auth_store: &verlet_metadata::provider_store::SqliteMetadataStore,
     auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
-) -> crate::kernel::runtime_host::VerletResult<crate::adapters::agent_loop::ResolvedTurnEndpoint>
-where
-    C: verlet_metadata::provider_store::LlmProviderCatalogStore,
-    A: verlet_metadata::provider_store::LlmProviderAuthStore,
-{
+) -> crate::kernel::runtime_host::VerletResult<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
     let (runtime_config, client): (
         crate::adapters::agent_loop::AgentLoopConfig,
         std::sync::Arc<dyn verlet_provider::ProviderClient>,
@@ -2500,6 +2514,29 @@ where
                     selected_model,
                 )),
             )
+        }
+        AppServerProviderConfig::OpenAICodex {
+            model,
+            max_tokens,
+            stream,
+        } => {
+            let client = std::sync::Arc::new(
+                crate::openai_codex::OpenAICodexProviderClient::new(auth_store.clone()).map_err(
+                    |err| {
+                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                            "failed to build OpenAI Codex provider client: {err}"
+                        ))
+                    },
+                )?,
+            );
+            let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::OpenAIResponses,
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                model.clone(),
+            );
+            runtime_config.max_tokens = *max_tokens;
+            runtime_config.stream = *stream;
+            (runtime_config, client)
         }
         AppServerProviderConfig::BifrostOpenAIResponses {
             base_url,

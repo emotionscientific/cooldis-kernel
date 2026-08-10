@@ -1150,6 +1150,120 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
 }
 
 #[tokio::test]
+async fn openai_codex_oauth_status_is_redacted_and_api_key_set_cannot_replace_it() {
+    let root = unique_test_root("app-server-openai-codex-auth");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(root.join("openai-codex-auth.sock"));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let provider_id = verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID;
+
+    let missing = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": provider_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing["auth"]["configured"], false);
+
+    let credential = verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+        access: "codex-access-secret".to_string(),
+        refresh: "codex-refresh-secret".to_string(),
+        expires_at_ms: verlet_history::now_ms() + 3_600_000,
+        account_id: Some("acct-secret".to_string()),
+        email: Some("user@example.com".to_string()),
+    };
+    app.inner
+        .user_metadata_store
+        .set_credential(provider_id, credential.clone())
+        .await
+        .unwrap();
+
+    let configured = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": provider_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(configured["auth"]["configured"], true);
+    assert_eq!(configured["auth"]["source"], "stored");
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let codex_rows: Vec<&serde_json::Value> = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["providerId"] == provider_id)
+        .collect();
+    assert!(codex_rows.len() >= 3);
+    assert!(
+        codex_rows
+            .iter()
+            .all(|entry| entry["authStatus"] == "configured")
+    );
+    let encoded = serde_json::to_string(&(configured, models)).unwrap();
+    for secret in [
+        "codex-access-secret",
+        "codex-refresh-secret",
+        "acct-secret",
+        "user@example.com",
+    ] {
+        assert!(!encoded.contains(secret));
+    }
+
+    let rejected = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/set",
+            Some(serde_json::json!({
+                "providerId": provider_id,
+                "apiKey": "must-not-replace-oauth",
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code, -32602);
+    assert!(rejected.message.contains("verlet auth login openai-codex"));
+    assert_eq!(
+        app.inner
+            .user_metadata_store
+            .get_credential(provider_id)
+            .await
+            .unwrap(),
+        Some(credential)
+    );
+
+    let deleted = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/delete",
+            Some(serde_json::json!({ "providerId": provider_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted["auth"]["configured"], false);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn model_provider_list_and_read_return_redacted_endpoint_records() {
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
         format!("verlet-provider-list-{}.sock", uuid::Uuid::now_v7()),
@@ -2488,7 +2602,9 @@ async fn model_list_projects_catalog_provider_models() {
     );
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
+        // lexicon-allow: capsule - existing provider test client name
         std::sync::Arc::new(InspectingCapsuleClient::default()),
+        // lexicon-allow: capsule - existing app-server config type name
         crate::adapters::app_server::CapsuleBindingsConfig::default(),
     );
     let app =
@@ -3012,6 +3128,87 @@ async fn model_select_rejects_missing_auth_without_changing_active_model() {
 }
 
 #[tokio::test]
+async fn model_select_rejects_store_backed_codex_without_changing_active_model() {
+    let root = unique_test_root("app-server-model-select-codex");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("model-select-codex.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                access: "select-access".to_string(),
+                refresh: "select-refresh".to_string(),
+                expires_at_ms: verlet_history::now_ms() + 3_600_000,
+                account_id: Some("select-account".to_string()),
+                email: None,
+            },
+        )
+        .await
+        .unwrap();
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let before = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    let error = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                "model": verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL,
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(error.message.contains("only OpenAI Chat Completions"));
+
+    let after = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    assert!(std::sync::Arc::ptr_eq(&before.client, &after.client));
+    assert_eq!(before.config.provider, after.config.provider);
+    assert_eq!(before.config.model, after.config.model);
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let active = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["active"] == true)
+        .unwrap();
+    assert_eq!(
+        active["providerId"],
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn model_select_rejects_injected_runtime_factories_without_endpoint_routing() {
     let app = test_app_with_provider_and_capsule_bindings(
         std::sync::Arc::new(InspectingCapsuleClient::default()),
@@ -3229,6 +3426,79 @@ async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
             .find(|entry| entry["providerId"] == "mid-turn-fixture")
             .unwrap()["active"],
         true
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_list_projects_the_curated_openai_codex_models() {
+    let root = unique_test_root("app-server-openai-codex-model-list");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-openai-codex-model-list-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen, root.clone())
+            .with_openai_codex("gpt-5.6-terra");
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    verlet_metadata::provider_store::seed_default_llm_providers(&metadata_store)
+        .await
+        .unwrap();
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+        "gpt-5.6-terra",
+    );
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        std::sync::Arc::new(InspectingCapsuleClient::default()),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let data = models["data"].as_array().unwrap();
+    // The merged listing also carries catalog and other store providers, so
+    // assert on the codex rows rather than the whole list.
+    let codex_ids: std::collections::BTreeSet<&str> = data
+        .iter()
+        .filter(|entry| entry["providerId"] == "openai-codex")
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    for curated in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        assert!(
+            codex_ids.contains(curated),
+            "model/list omitted curated OpenAI Codex model {curated}"
+        );
+    }
+    let terra = data
+        .iter()
+        .find(|entry| entry["providerId"] == "openai-codex" && entry["id"] == "gpt-5.6-terra")
+        .unwrap();
+    assert_eq!(terra["isDefault"].as_bool(), Some(true));
+    assert!(
+        data.iter()
+            .filter(|entry| entry["providerId"] == "openai-codex")
+            .all(|entry| entry["authStatus"] == "missing")
     );
     let _ = std::fs::remove_dir_all(root);
 }
