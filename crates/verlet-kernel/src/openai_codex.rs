@@ -404,7 +404,7 @@ async fn wait_for_browser_callback(
                     .query_pairs()
                     .into_owned()
                     .collect::<std::collections::HashMap<_, _>>();
-                if let Some(code) = params.get("code") {
+                if let Some(code) = params.get("code").filter(|code| !code.is_empty()) {
                     (
                         "200 OK",
                         "OpenAI login complete. You can close this window and return to Verlet.",
@@ -492,6 +492,10 @@ fn refresh_gate() -> &'static tokio::sync::Mutex<()> {
     REFRESH_GATE.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+fn credential_needs_refresh(expires_at_ms: i64, now_ms: i64) -> bool {
+    expires_at_ms <= now_ms.saturating_add(60_000)
+}
+
 #[derive(Clone)]
 pub(crate) struct OpenAICodexProviderClient {
     store: verlet_metadata::provider_store::SqliteMetadataStore,
@@ -543,6 +547,7 @@ impl OpenAICodexProviderClient {
             .await
             .map_err(|err| error(format!("could not read the provider store: {err}")))?
             .ok_or_else(relogin_error)?;
+        let observed_credential = credential.clone();
         let verlet_metadata::provider_store::LlmProviderCredential::OAuth {
             access,
             refresh,
@@ -553,7 +558,7 @@ impl OpenAICodexProviderClient {
         else {
             return Err(relogin_error());
         };
-        if expires_at_ms > verlet_history::now_ms().saturating_add(60_000) {
+        if !credential_needs_refresh(expires_at_ms, verlet_history::now_ms()) {
             return Ok(
                 verlet_metadata::provider_store::LlmProviderCredential::OAuth {
                     access,
@@ -581,16 +586,20 @@ impl OpenAICodexProviderClient {
             .await
             .map_err(|err| error(format!("could not read the OAuth refresh response: {err}")))?;
         let response_code = oauth_error_code(&text);
+        let current_credential = self
+            .store
+            .get_credential(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
+            .await
+            .map_err(|err| error(format!("could not re-read the provider store: {err}")))?;
+        if current_credential.as_ref() != Some(&observed_credential) {
+            return adopt_credential_changed_during_refresh(current_credential);
+        }
         if !status.is_success() {
-            if response_code.as_deref() == Some("refresh_token_reused") {
-                self.store
-                    .delete_credential(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
-                    .await
-                    .map_err(|err| {
-                        error(format!(
-                            "could not clear the invalid OAuth credential: {err}"
-                        ))
-                    })?;
+            if matches!(
+                response_code.as_deref(),
+                Some("refresh_token_reused" | "refresh_token_expired" | "invalid_grant")
+            ) {
+                self.clear_invalid_credential().await?;
                 return Err(relogin_error());
             }
             return Err(error(format!(
@@ -600,14 +609,23 @@ impl OpenAICodexProviderClient {
                     .unwrap_or_default()
             )));
         }
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|err| error(format!("OAuth refresh returned invalid JSON: {err}")))?;
-        let refreshed = credential_from_token_value_with_identity(
-            &value,
-            verlet_history::now_ms(),
-            account_id,
-            email,
-        )?;
+        let refreshed = serde_json::from_str(&text)
+            .map_err(|err| error(format!("OAuth refresh returned invalid JSON: {err}")))
+            .and_then(|value| {
+                credential_from_token_value_with_identity(
+                    &value,
+                    verlet_history::now_ms(),
+                    account_id,
+                    email,
+                )
+            });
+        let refreshed = match refreshed {
+            Ok(refreshed) => refreshed,
+            Err(_) => {
+                self.clear_invalid_credential().await?;
+                return Err(relogin_error());
+            }
+        };
         self.store
             .set_credential(
                 verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
@@ -620,6 +638,19 @@ impl OpenAICodexProviderClient {
                 ))
             })?;
         Ok(refreshed)
+    }
+
+    async fn clear_invalid_credential(&self) -> Result<()> {
+        use verlet_metadata::provider_store::LlmProviderAuthStore as _;
+
+        self.store
+            .delete_credential(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
+            .await
+            .map_err(|err| {
+                error(format!(
+                    "could not clear the invalid OAuth credential: {err}; after correcting the provider store, run `verlet auth login openai-codex` again"
+                ))
+            })
     }
 
     fn endpoint_from_credential(
@@ -664,6 +695,27 @@ fn relogin_error() -> OpenAICodexError {
     )
 }
 
+fn adopt_credential_changed_during_refresh(
+    credential: Option<verlet_metadata::provider_store::LlmProviderCredential>,
+) -> Result<verlet_metadata::provider_store::LlmProviderCredential> {
+    let Some(credential) = credential else {
+        return Err(relogin_error());
+    };
+    match &credential {
+        verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+            expires_at_ms,
+            account_id: Some(_),
+            ..
+        } if !credential_needs_refresh(*expires_at_ms, verlet_history::now_ms()) => Ok(credential),
+        verlet_metadata::provider_store::LlmProviderCredential::OAuth { .. } => Err(error(
+            "the saved OAuth credential changed while refresh was in flight; retry the request",
+        )),
+        verlet_metadata::provider_store::LlmProviderCredential::ApiKey { .. } => {
+            Err(relogin_error())
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl verlet_provider::ProviderClient for OpenAICodexProviderClient {
     fn capabilities(&self) -> Option<verlet_provider::ProviderCapabilityRecord> {
@@ -703,6 +755,8 @@ mod tests {
     use verlet_metadata::provider_store::LlmProviderAuthStore as _;
     use verlet_provider::ProviderClient as _;
 
+    static CALLBACK_TEST_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn jwt(payload: serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -713,6 +767,14 @@ mod tests {
     struct FakeHttpServer {
         base_url: String,
         requests: Arc<Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    struct GatedFakeHttpServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        request_seen: Arc<tokio::sync::Notify>,
+        release_response: Arc<tokio::sync::Notify>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -739,6 +801,38 @@ mod tests {
         FakeHttpServer {
             base_url: format!("http://{address}"),
             requests,
+            task,
+        }
+    }
+
+    async fn gated_fake_http_server(status: u16, body: serde_json::Value) -> GatedFakeHttpServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let request_seen = Arc::new(tokio::sync::Notify::new());
+        let seen = Arc::clone(&request_seen);
+        let release_response = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::clone(&release_response);
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            captured.lock().unwrap().push(request);
+            seen.notify_one();
+            release.notified().await;
+            let body = serde_json::to_string(&body).unwrap();
+            let reason = if status < 300 { "OK" } else { "Bad Request" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        GatedFakeHttpServer {
+            base_url: format!("http://{address}"),
+            requests,
+            request_seen,
+            release_response,
             task,
         }
     }
@@ -838,6 +932,7 @@ mod tests {
 
     #[tokio::test]
     async fn browser_login_validates_state_and_exchanges_pkce_code() {
+        let _callback_guard = CALLBACK_TEST_GATE.lock().await;
         let token = token_response("acct-browser", "", "refresh-browser");
         let server = fake_http_server(vec![(200, token)]).await;
         let mut endpoints = OAuthEndpoints::default();
@@ -859,17 +954,30 @@ mod tests {
         let state = query["state"].clone();
 
         let callback = tokio::spawn(async move {
-            for candidate in ["wrong-state", state.as_str()] {
+            for (path, expected_status) in [
+                (
+                    format!("/not-the-callback?code=browser-code&state={state}"),
+                    "404 Not Found",
+                ),
+                (
+                    format!("{CALLBACK_PATH}?code=browser-code&state=wrong-state"),
+                    "400 Bad Request",
+                ),
+                (
+                    format!("{CALLBACK_PATH}?code=&state={state}"),
+                    "400 Bad Request",
+                ),
+                (
+                    format!("{CALLBACK_PATH}?code=browser-code&state={state}"),
+                    "200 OK",
+                ),
+            ] {
                 let mut socket = tokio::net::TcpStream::connect(CALLBACK_ADDR).await.unwrap();
-                let request = format!(
-                    "GET {CALLBACK_PATH}?code=browser-code&state={candidate} HTTP/1.1\r\nHost: localhost\r\n\r\n"
-                );
+                let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
                 socket.write_all(request.as_bytes()).await.unwrap();
                 let mut response = Vec::new();
                 socket.read_to_end(&mut response).await.unwrap();
-                if candidate == "wrong-state" {
-                    assert!(String::from_utf8_lossy(&response).contains("400 Bad Request"));
-                }
+                assert!(String::from_utf8_lossy(&response).contains(expected_status));
             }
         });
         let credential = client.complete_browser_login(login).await.unwrap();
@@ -883,14 +991,34 @@ mod tests {
                 ..
             } if account_id == "acct-browser"
         ));
-        let requests = server.requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].starts_with("POST /token "));
-        assert!(requests[0].contains("code=browser-code"));
-        assert!(requests[0].contains("code_verifier="));
-        assert!(
-            requests[0].contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback")
-        );
+        {
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("POST /token "));
+            assert!(requests[0].contains("code=browser-code"));
+            assert!(requests[0].contains("code_verifier="));
+            assert!(
+                requests[0]
+                    .contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback")
+            );
+        }
+        assert!(tokio::net::TcpStream::connect(CALLBACK_ADDR).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn browser_login_bind_failure_recommends_the_device_flow() {
+        let _callback_guard = CALLBACK_TEST_GATE.lock().await;
+        let _occupied = tokio::net::TcpListener::bind(CALLBACK_ADDR).await.unwrap();
+        let client = OpenAICodexOAuthClient::new().unwrap();
+
+        let error = match client.begin_browser_login().await {
+            Ok(_) => panic!("browser login unexpectedly bound an occupied callback port"),
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        assert!(message.contains(CALLBACK_ADDR));
+        assert!(message.contains("verlet auth login openai-codex --device"));
     }
 
     #[tokio::test]
@@ -991,6 +1119,193 @@ mod tests {
         }
         server.task.await.unwrap();
         assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn refresh_window_includes_expired_and_exactly_sixty_seconds_remaining() {
+        let now_ms = 1_700_000_000_000;
+        assert!(credential_needs_refresh(now_ms - 1, now_ms));
+        assert!(credential_needs_refresh(now_ms + 60_000, now_ms));
+        assert!(!credential_needs_refresh(now_ms + 60_001, now_ms));
+        assert!(credential_needs_refresh(i64::MIN, i64::MAX));
+    }
+
+    #[tokio::test]
+    async fn credential_deleted_during_refresh_is_not_resurrected() {
+        let server =
+            gated_fake_http_server(200, token_response("acct-123", "", "rotated-refresh")).await;
+        let store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
+            .await
+            .unwrap();
+        store
+            .set_credential(
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                oauth_credential("expired-access", "single-use-refresh", 1),
+            )
+            .await
+            .unwrap();
+        let client = OpenAICodexProviderClient::with_urls(
+            store.clone(),
+            format!("{}/oauth/token", server.base_url),
+            "http://unused.invalid/responses",
+        )
+        .unwrap();
+        let refresh = tokio::spawn(async move { client.fresh_credential().await });
+        // tight-timeout: the loopback fixture must observe the in-memory request promptly
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.request_seen.notified(),
+        )
+        .await
+        .expect("refresh request did not reach the fake token endpoint");
+        store
+            .delete_credential(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
+            .await
+            .unwrap();
+        server.release_response.notify_one();
+
+        let message = refresh.await.unwrap().unwrap_err().to_string();
+        server.task.await.unwrap();
+        assert!(message.contains("verlet auth login openai-codex"));
+        assert!(
+            store
+                .get_credential(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_token_reused_preserves_a_newer_store_winner() {
+        let server = gated_fake_http_server(
+            400,
+            serde_json::json!({ "error": { "code": "refresh_token_reused" } }),
+        )
+        .await;
+        let store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
+            .await
+            .unwrap();
+        store
+            .set_credential(
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                oauth_credential("expired-access", "spent-refresh", 1),
+            )
+            .await
+            .unwrap();
+        let client = OpenAICodexProviderClient::with_urls(
+            store.clone(),
+            format!("{}/oauth/token", server.base_url),
+            "http://unused.invalid/responses",
+        )
+        .unwrap();
+        let refresh = tokio::spawn(async move { client.fresh_credential().await });
+        // tight-timeout: the loopback fixture must observe the in-memory request promptly
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.request_seen.notified(),
+        )
+        .await
+        .expect("refresh request did not reach the fake token endpoint");
+        let winner = oauth_credential(
+            "winner-access",
+            "winner-refresh",
+            verlet_history::now_ms() + 3_600_000,
+        );
+        store
+            .set_credential(
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                winner.clone(),
+            )
+            .await
+            .unwrap();
+        server.release_response.notify_one();
+
+        assert_eq!(refresh.await.unwrap().unwrap(), winner);
+        server.task.await.unwrap();
+        assert_eq!(
+            store
+                .get_credential(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
+                .await
+                .unwrap(),
+            Some(winner)
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_refresh_token_is_cleared_and_instructs_relogin() {
+        let server = fake_http_server(vec![(
+            400,
+            serde_json::json!({ "error": { "code": "invalid_grant" } }),
+        )])
+        .await;
+        let store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
+            .await
+            .unwrap();
+        store
+            .set_credential(
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                oauth_credential("expired-access", "expired-refresh", 1),
+            )
+            .await
+            .unwrap();
+        let client = OpenAICodexProviderClient::with_urls(
+            store.clone(),
+            format!("{}/oauth/token", server.base_url),
+            "http://unused.invalid/responses",
+        )
+        .unwrap();
+
+        let message = client.fresh_credential().await.unwrap_err().to_string();
+        server.task.await.unwrap();
+        assert!(message.contains("verlet auth login openai-codex"));
+        assert!(
+            store
+                .get_credential(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn unusable_successful_refresh_response_clears_the_spent_credential() {
+        let server = fake_http_server(vec![(
+            200,
+            serde_json::json!({
+                "access_token": "rotated-access",
+                "expires_in": 3600
+            }),
+        )])
+        .await;
+        let store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
+            .await
+            .unwrap();
+        store
+            .set_credential(
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                oauth_credential("expired-access", "single-use-refresh", 1),
+            )
+            .await
+            .unwrap();
+        let client = OpenAICodexProviderClient::with_urls(
+            store.clone(),
+            format!("{}/oauth/token", server.base_url),
+            "http://unused.invalid/responses",
+        )
+        .unwrap();
+
+        let message = client.fresh_credential().await.unwrap_err().to_string();
+        server.task.await.unwrap();
+        assert!(message.contains("verlet auth login openai-codex"));
+        assert!(
+            store
+                .get_credential(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

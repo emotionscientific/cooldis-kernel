@@ -288,18 +288,13 @@ impl std::fmt::Debug for LlmProviderCredential {
                 .debug_struct("ApiKey")
                 .field("key", &"[REDACTED]")
                 .finish(),
-            Self::OAuth {
-                expires_at_ms,
-                account_id,
-                email,
-                ..
-            } => formatter
+            Self::OAuth { expires_at_ms, .. } => formatter
                 .debug_struct("OAuth")
                 .field("access", &"[REDACTED]")
                 .field("refresh", &"[REDACTED]")
                 .field("expires_at_ms", expires_at_ms)
-                .field("account_id", account_id)
-                .field("email", email)
+                .field("account_id", &"[REDACTED]")
+                .field("email", &"[REDACTED]")
                 .finish(),
         }
     }

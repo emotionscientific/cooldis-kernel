@@ -319,6 +319,35 @@ pub(super) fn open_browser_url(url: &str) -> crate::kernel::runtime_host::Verlet
         .map_err(|err| crate::cli::usage_error(format!("failed to open browser: {err}")))
 }
 
+pub(super) async fn open_browser_url_checked(
+    url: &str,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let command = browser_open_command(url)?;
+    wait_for_browser_open_command(command).await
+}
+
+async fn wait_for_browser_open_command(
+    command: std::process::Command,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let mut command = tokio::process::Command::from(command);
+    command
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let status = command
+        .status()
+        .await
+        .map_err(|err| crate::cli::usage_error(format!("failed to open browser: {err}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(crate::cli::usage_error(format!(
+            "browser opener exited with {status}"
+        )))
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn browser_open_command(
     url: &str,

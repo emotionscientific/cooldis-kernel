@@ -35,9 +35,9 @@ openai-codex` shows the account without exposing tokens, and `verlet auth delete
 openai-codex` signs the local Verlet installation out. Verlet refreshes expiring
 tokens automatically.
 
-The initial static catalog exposes `gpt-5.6-sol`, `gpt-5.6-terra`, and
-`gpt-5.6-luna`; `gpt-5.6-sol` is the default. A future catalog integration will
-replace this temporary curated list.
+The built-in seed guarantees `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6-luna`; `gpt-5.6-sol` is the default. The merged model catalog can add
+other current Codex-plan models without replacing those baseline rows.
 
 ## Architecture
 

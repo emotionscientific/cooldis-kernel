@@ -55,7 +55,7 @@ pub(super) async fn auth_login(
             .map_err(openai_codex_auth_error)?;
         let authorization_url = login.authorization_url().to_string();
         println!("OpenAI login URL: {authorization_url}");
-        match crate::cli::console::open_browser_url(&authorization_url) {
+        match crate::cli::console::open_browser_url_checked(&authorization_url).await {
             Ok(()) => client
                 .complete_browser_login(login)
                 .await
@@ -208,6 +208,11 @@ pub(super) async fn auth_set(
     let provider_id = options
         .provider_id
         .ok_or_else(|| crate::cli::usage_error("auth set requires <provider-id>"))?;
+    if provider_id == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
+        return Err(crate::cli::usage_error(
+            "openai-codex uses OAuth; run `verlet auth login openai-codex` instead of `verlet auth set`",
+        ));
+    }
     if !options.api_key_stdin {
         return Err(crate::cli::usage_error("auth set requires --api-key-stdin"));
     }
@@ -470,6 +475,20 @@ Deletes a stored model-provider credential.\n"
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn api_key_set_rejects_openai_codex_before_reading_stdin() {
+        let error = super::auth_set(
+            ["openai-codex", "--api-key-stdin"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("verlet auth login openai-codex"));
+    }
+
     #[test]
     fn login_args_accept_device_and_state_home() {
         let parsed = super::parse_auth_login_args(

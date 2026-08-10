@@ -2489,18 +2489,14 @@ async fn runtime_factory_from_config(
     )
 }
 
-pub(crate) async fn resolved_turn_endpoint_from_provider_config<C, A>(
+pub(crate) async fn resolved_turn_endpoint_from_provider_config(
     provider_config: &AppServerProviderConfig,
     model_provider: &str,
     selected_model: &str,
-    provider_store: &C,
-    auth_store: &A,
+    provider_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+    auth_store: &verlet_metadata::provider_store::SqliteMetadataStore,
     auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
-) -> crate::kernel::runtime_host::VerletResult<crate::adapters::agent_loop::ResolvedTurnEndpoint>
-where
-    C: verlet_metadata::provider_store::LlmProviderCatalogStore,
-    A: verlet_metadata::provider_store::LlmProviderAuthStore,
-{
+) -> crate::kernel::runtime_host::VerletResult<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
     let (runtime_config, client): (
         crate::adapters::agent_loop::AgentLoopConfig,
         std::sync::Arc<dyn verlet_provider::ProviderClient>,
@@ -2540,15 +2536,7 @@ where
             );
             runtime_config.max_tokens = *max_tokens;
             runtime_config.stream = *stream;
-            let secret_resolver = secret_resolver_from_config(config).await?;
-            Ok(runtime_factory_from_provider_parts_with_app_paths(
-                runtime_config,
-                client,
-                // lexicon-allow: capsule - existing app-server config field name
-                config.capsule_bindings.clone(),
-                secret_resolver,
-                config,
-            ))
+            (runtime_config, client)
         }
         AppServerProviderConfig::BifrostOpenAIResponses {
             base_url,

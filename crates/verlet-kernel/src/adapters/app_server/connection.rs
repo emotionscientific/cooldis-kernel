@@ -2379,6 +2379,12 @@ impl crate::adapters::app_server::VerletAppServer {
         }
         let _mutation = self.inner.model_mutation.lock().await;
         let provider = self.model_provider_record(&params.provider_id).await?;
+        if provider.provider_id == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
+            return Err(jsonrpc_error(
+                -32602,
+                "openai-codex uses OAuth; run `verlet auth login openai-codex` instead of modelProvider/auth/set",
+            ));
+        }
         let previous = self
             .inner
             .user_metadata_store

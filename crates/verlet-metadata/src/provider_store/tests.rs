@@ -555,6 +555,8 @@ async fn oauth_credential_round_trips_account_metadata_without_debugging_tokens(
     let debug = format!("{credential:?}");
     assert!(!debug.contains("secret-access"));
     assert!(!debug.contains("secret-refresh"));
+    assert!(!debug.contains("acct-123"));
+    assert!(!debug.contains("user@example.com"));
     assert!(debug.contains("[REDACTED]"));
 
     store
