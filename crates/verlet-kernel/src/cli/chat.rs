@@ -365,6 +365,18 @@ impl ChatDriver {
                     model: selected.active.model,
                 });
             }
+            // Setup-wizard wiring lands with EMO-572; until then the wizard
+            // actions answer with an honest notice instead of dead air.
+            verlet_chat::Action::ListProviders
+            | verlet_chat::Action::SetProviderKey { .. }
+            | verlet_chat::Action::StartLogin { .. }
+            | verlet_chat::Action::CancelLogin
+            | verlet_chat::Action::ClearCredential { .. } => {
+                let _ = events.send(verlet_chat::ChatEvent::Error {
+                    title: "provider setup is not wired to this server yet".to_string(),
+                    body: vec!["use `verlet auth` from a shell for now".to_string()],
+                });
+            }
         }
         Ok(())
     }

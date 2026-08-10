@@ -53,6 +53,54 @@ pub enum Action {
     ListModels,
     /// A picker row was chosen: switch the app-server's active model.
     SelectModel { provider_id: String, model: String },
+    /// `/setup` — fetch the provider auth catalog; the host answers with
+    /// [`ChatEvent::Providers`], which opens the setup wizard.
+    ListProviders,
+    /// A pasted API key to store for the provider; the host answers with
+    /// [`ChatEvent::CredentialResult`].
+    SetProviderKey {
+        provider_id: String,
+        api_key: String,
+    },
+    /// Start an OAuth login for the provider. The host runs the flow in the
+    /// background and reports [`ChatEvent::LoginDeviceCode`] (device method)
+    /// and [`ChatEvent::CredentialResult`].
+    StartLogin {
+        provider_id: String,
+        method: LoginMethod,
+    },
+    /// Abort the in-flight OAuth login, if any.
+    CancelLogin,
+    /// Delete the provider's stored credential; the host answers with
+    /// [`ChatEvent::CredentialCleared`] (or an error notice).
+    ClearCredential { provider_id: String },
+}
+
+/// How an OAuth-capable provider signs in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginMethod {
+    /// PKCE flow through the local browser.
+    Browser,
+    /// Device-code flow: the UI shows a URL and code to enter elsewhere.
+    Device,
+}
+
+/// One row of the setup wizard's provider step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderRow {
+    pub provider_id: String,
+    pub display_name: String,
+    /// `configured` | `env` | `missing`, as reported by
+    /// `modelProvider/auth/status`.
+    pub auth_status: String,
+    /// The server's human status label ("stored credential",
+    /// "OPENAI_API_KEY detected", ...). Shown as the row hint.
+    pub label: String,
+    /// OAuth-shaped provider (openai-codex): sign-in options instead of a
+    /// pasted API key.
+    pub oauth: bool,
+    /// Whether this provider owns the active model selection.
+    pub active: bool,
 }
 
 /// One row of the `/models` picker.
@@ -120,6 +168,21 @@ pub enum ChatEvent {
     Models(Vec<ModelRow>),
     /// `model/select` succeeded; the active model changed for later turns.
     ModelSelected { provider_id: String, model: String },
+    /// Provider auth catalog: opens (or refreshes) the setup wizard. Sent
+    /// unsolicited at bootstrap when the active model has no credentials.
+    Providers(Vec<ProviderRow>),
+    /// A device-code login started: show the URL and code to the user.
+    LoginDeviceCode {
+        verification_uri: String,
+        user_code: String,
+    },
+    /// A credential attempt (pasted key or OAuth login) finished.
+    CredentialResult {
+        provider_id: String,
+        error: Option<String>,
+    },
+    /// The provider's stored credential was deleted.
+    CredentialCleared { provider_id: String },
     /// The thread's runtime status changed ("idle", "running", ...).
     ThreadStatus(String),
     /// An informational notice for the transcript.

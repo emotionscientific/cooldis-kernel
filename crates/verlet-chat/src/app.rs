@@ -12,8 +12,11 @@ use ratatui::style::{Modifier, Style};
 use tuika::components::MarkdownState;
 use tuika::prelude::*;
 
+pub(crate) mod setup;
+
 use crate::cells::{Cell, ExecStatus, Tone, short_id};
 use crate::{Action, ChatEvent, ModelRow, SessionMeta};
+use setup::SetupStep;
 
 /// Whether the event loop should keep running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +38,7 @@ pub const COMMANDS: &[(&str, &str, bool)] = &[
     ("/rename", "name the current thread", true),
     ("/compact", "compact the current thread's context", false),
     ("/models", "pick the model for new turns", false),
+    ("/setup", "connect a provider and pick a model", false),
     ("/interrupt", "interrupt the active turn", false),
     ("/clear", "clear the transcript", false),
     ("/quit", "exit verlet chat", false),
@@ -56,6 +60,7 @@ pub enum SlashCommand {
     Fork,
     Compact,
     Models,
+    Setup,
 }
 
 /// Parse `input` as a slash command. `Ok(None)` means ordinary prompt text.
@@ -84,6 +89,7 @@ pub fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, String> 
         "fork" => Ok(Some(SlashCommand::Fork)),
         "compact" => Ok(Some(SlashCommand::Compact)),
         "models" => Ok(Some(SlashCommand::Models)),
+        "setup" => Ok(Some(SlashCommand::Setup)),
         "" => Err("slash command is empty; type /help".to_string()),
         other => Err(format!("unknown slash command /{other}; type /help")),
     }
@@ -119,6 +125,10 @@ pub struct App {
     pub scroll: ScrollState,
     pub(crate) popup: Option<Popup>,
     pub(crate) picker: Option<ModelPicker>,
+    pub(crate) setup: Option<SetupStep>,
+    /// A model choice waiting on credentials: re-issued as
+    /// [`Action::SelectModel`] once the provider's credential lands.
+    pub(crate) pending_selection: Option<(String, String)>,
     pub meta: SessionMeta,
     /// Turn state label for the footer: "idle", "running", "steered", ...
     pub turn_state: String,
@@ -153,6 +163,8 @@ impl App {
             scroll: ScrollState::new(),
             popup: None,
             picker: None,
+            setup: None,
+            pending_selection: None,
             meta,
             turn_state: "idle".to_string(),
             turn_active: false,
@@ -223,9 +235,14 @@ impl App {
     }
 
     fn route(&mut self, event: &Event) -> Flow {
-        // The model picker owns the whole input surface while open. Keep this
-        // ahead of transcript scrolling, paste handling, global controls, and
-        // slash completion so none of them can leak through the modal.
+        // The setup wizard and the model picker own the whole input surface
+        // while open. Keep them ahead of transcript scrolling, paste
+        // handling, global controls, and slash completion so none of those
+        // can leak through the modal.
+        if self.setup_visible() {
+            self.handle_setup(event);
+            return Flow::Continue;
+        }
         if self.picker.is_some() {
             self.handle_picker(event);
             return Flow::Continue;
@@ -367,6 +384,13 @@ impl App {
                         format!("{}/{} is already active", row.provider_id, row.model),
                         Vec::new(),
                     );
+                    return;
+                }
+                if row.auth_status == "missing" {
+                    // Selecting the row would only earn a server rejection;
+                    // route through the wizard's credential step instead and
+                    // re-issue this choice once a credential lands.
+                    self.setup_for_model(row.provider_id, row.model);
                     return;
                 }
                 self.actions.push(Action::SelectModel {
@@ -517,6 +541,7 @@ impl App {
                 }
             }
             SlashCommand::Models => self.actions.push(Action::ListModels),
+            SlashCommand::Setup => self.actions.push(Action::ListProviders),
         }
     }
 
@@ -672,6 +697,29 @@ impl App {
                 // selectable rows behind.
                 self.popup = None;
                 self.picker = None;
+                // The wizard's model step: the same picker, scoped to the
+                // provider that was just connected or chosen.
+                let rows = match self.setup.take() {
+                    Some(SetupStep::AwaitModels { provider_id }) => {
+                        let scoped: Vec<ModelRow> = rows
+                            .into_iter()
+                            .filter(|row| row.provider_id == provider_id)
+                            .collect();
+                        if scoped.is_empty() {
+                            self.notice(
+                                Tone::Error,
+                                format!("no models available for {provider_id}"),
+                                Vec::new(),
+                            );
+                            return;
+                        }
+                        scoped
+                    }
+                    step => {
+                        self.setup = step;
+                        rows
+                    }
+                };
                 if rows.is_empty() {
                     self.notice(Tone::Error, "no models available".to_string(), Vec::new());
                     return;
@@ -681,6 +729,7 @@ impl App {
                 self.picker = Some(ModelPicker { rows, state });
             }
             ChatEvent::ModelSelected { provider_id, model } => {
+                self.pending_selection = None;
                 self.meta.model_label = format!("{provider_id}/{model}");
                 let body = if self.turn_active {
                     vec!["applies to turns after the current one".to_string()]
@@ -692,6 +741,17 @@ impl App {
                     format!("model set to {provider_id}/{model}"),
                     body,
                 );
+            }
+            ChatEvent::Providers(rows) => self.open_setup(rows),
+            ChatEvent::LoginDeviceCode {
+                verification_uri,
+                user_code,
+            } => self.apply_device_code(verification_uri, user_code),
+            ChatEvent::CredentialResult { provider_id, error } => {
+                self.apply_credential_result(provider_id, error);
+            }
+            ChatEvent::CredentialCleared { provider_id } => {
+                self.apply_credential_cleared(provider_id);
             }
             ChatEvent::ThreadStatus(status) => {
                 if !self.turn_active {
