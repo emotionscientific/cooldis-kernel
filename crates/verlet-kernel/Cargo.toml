@@ -55,6 +55,9 @@ futures-executor = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time", "test-util"] }
 wat = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [[bin]]
 name = "verlet"
 path = "src/bin/verlet.rs"

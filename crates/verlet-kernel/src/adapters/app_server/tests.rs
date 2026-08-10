@@ -2405,6 +2405,44 @@ async fn registry_roots_resolve_against_configured_cwd() {
 }
 
 #[tokio::test]
+async fn model_list_includes_the_checked_in_offline_catalog() {
+    let root = unique_test_root("app-server-model-catalog-offline");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("model-catalog-offline.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let offline = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["providerId"] == "anthropic" && entry["model"] == "claude-sonnet-4-6")
+        .expect("model/list omitted the built-in offline catalog");
+    assert_eq!(offline["displayName"], "Claude Sonnet 4.6");
+    assert_eq!(offline["contextWindowTokens"], 1_000_000);
+    assert_eq!(offline["maxOutputTokens"], 128_000);
+    assert_eq!(offline["authStatus"], "missing");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn model_list_projects_catalog_provider_models() {
     let root = unique_test_root("app-server-model-query");
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
@@ -2470,14 +2508,17 @@ async fn model_list_projects_catalog_provider_models() {
         .unwrap();
     assert_eq!(models["nextCursor"], serde_json::Value::Null);
     let data = models["data"].as_array().unwrap();
-    assert_eq!(data.len(), 2);
-    assert_eq!(data[0]["providerId"].as_str(), Some("fixture"));
-    assert_eq!(data[0]["id"].as_str(), Some("fixture-small"));
-    assert_eq!(data[0]["isDefault"].as_bool(), Some(false));
-    assert_eq!(data[1]["id"].as_str(), Some("fixture-large"));
-    assert_eq!(data[1]["displayName"].as_str(), Some("Fixture Large"));
-    assert_eq!(data[1]["maxOutputTokens"].as_u64(), Some(2048));
-    assert_eq!(data[1]["isDefault"].as_bool(), Some(true));
+    let fixture = data
+        .iter()
+        .filter(|entry| entry["providerId"] == "fixture")
+        .collect::<Vec<_>>();
+    assert_eq!(fixture.len(), 2);
+    assert_eq!(fixture[0]["id"].as_str(), Some("fixture-small"));
+    assert_eq!(fixture[0]["isDefault"].as_bool(), Some(false));
+    assert_eq!(fixture[1]["id"].as_str(), Some("fixture-large"));
+    assert_eq!(fixture[1]["displayName"].as_str(), Some("Fixture Large"));
+    assert_eq!(fixture[1]["maxOutputTokens"].as_u64(), Some(2048));
+    assert_eq!(fixture[1]["isDefault"].as_bool(), Some(true));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -2542,7 +2583,12 @@ async fn model_list_appends_configured_default_when_catalog_omits_it() {
         .await
         .unwrap();
     let data = models["data"].as_array().unwrap();
-    assert_eq!(data.len(), 3);
+    assert_eq!(
+        data.iter()
+            .filter(|entry| entry["providerId"] == "fixture")
+            .count(),
+        3
+    );
     assert_eq!(
         data.iter()
             .filter(|model| model["isDefault"].as_bool() == Some(true))

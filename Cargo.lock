@@ -5873,6 +5873,7 @@ dependencies = [
  "verlet-vfs",
  "verlet-wasm",
  "wat",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

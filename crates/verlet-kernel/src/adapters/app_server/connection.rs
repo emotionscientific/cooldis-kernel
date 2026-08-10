@@ -5368,6 +5368,8 @@ impl crate::adapters::app_server::VerletAppServer {
             .iter()
             .map(|provider| (provider.provider_id.clone(), provider.clone()))
             .collect::<std::collections::BTreeMap<_, _>>();
+        // Project-provider rows lead so their operator-configured display and
+        // limits win deduplication over models.dev metadata for the same pair.
         let mut catalog_entries = Vec::new();
         for provider in &providers {
             for model in &provider.models {
@@ -5385,6 +5387,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 );
             }
         }
+        catalog_entries.extend(self.inner.model_catalog.entries());
         let launch_pair_in_catalog = catalog_entries.iter().any(|entry| {
             entry.provider_id == self.inner.model_provider && entry.model_id == self.inner.model
         });
@@ -5441,9 +5444,10 @@ impl crate::adapters::app_server::VerletAppServer {
             .map(|entry| {
                 let is_active =
                     entry.provider_id == active.model_provider && entry.model_id == active.model;
-                let launch_only = !launch_pair_in_catalog
-                    && entry.provider_id == self.inner.model_provider
-                    && entry.model_id == self.inner.model;
+                let launch_only = entry.provider_id == self.inner.model_provider
+                    && entry.model_id == self.inner.model
+                    && (!launch_pair_in_catalog
+                        || !provider_records.contains_key(&entry.provider_id));
                 let auth_status = if launch_only {
                     "configured"
                 } else if let Some(provider) = provider_records.get(&entry.provider_id) {
@@ -5465,7 +5469,7 @@ impl crate::adapters::app_server::VerletAppServer {
                         "configured"
                     }
                 } else {
-                    "configured"
+                    "missing"
                 };
                 let mut value = configured_model_json(
                     &entry.provider_id,

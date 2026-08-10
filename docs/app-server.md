@@ -656,12 +656,16 @@ grants.
 
 Params: none.
 
-Result: `{ "data": [...], "nextCursor": null }`. The list contains every model
-from every provider in the project metadata store, plus the launch-configured
-provider/model when that pair is absent. Each entry includes `providerId`,
-`model`, `displayName`, `authStatus` (`configured`, `env`, or `missing`), and
-`active`. Compatibility fields such as `id` and `isDefault` remain present;
-`isDefault` follows the session's active selection.
+Result: `{ "data": [...], "nextCursor": null }`. The list composes the
+checked-in models.dev catalog with its last valid background refresh and every
+model from every provider in the project metadata store; project metadata wins
+when the same provider/model pair appears in both sources.
+The launch-configured provider/model is appended when that pair is absent.
+Each entry includes `providerId`, `model`, `displayName`, `authStatus`
+(`configured`, `env`, or `missing`), and `active`. Catalog providers that have
+not been configured in the project report `missing`. Compatibility fields such
+as `id` and `isDefault` remain present; `isDefault` follows the session's active
+selection.
 
 Auth status uses the same user credential store and environment resolution as
 `verlet auth status`. The active selection is process-local runtime state.

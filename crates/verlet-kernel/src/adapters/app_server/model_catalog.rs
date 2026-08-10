@@ -124,8 +124,11 @@ impl CatalogRefreshOptions {
     ) -> Option<Self> {
         let url = match read_env(MODEL_CATALOG_URL_ENV) {
             Ok(value) if value.trim().is_empty() => return None,
-            Ok(value) => value,
-            Err(_) => DEFAULT_MODEL_CATALOG_URL.to_string(),
+            Ok(value) => value.trim().to_string(),
+            Err(std::env::VarError::NotPresent) => DEFAULT_MODEL_CATALOG_URL.to_string(),
+            // A configured but non-Unicode value must not unexpectedly fall
+            // back to ambient network access.
+            Err(std::env::VarError::NotUnicode(_)) => return None,
         };
         let now_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -283,12 +286,31 @@ fn sanitize_snapshot(snapshot: ModelCatalogSnapshot) -> ModelCatalogSnapshot {
     let mut models = snapshot
         .models
         .into_iter()
-        .filter(|model| {
+        .filter_map(|mut model| {
+            model.provider_id = model.provider_id.trim().to_string();
+            model.model_id = model.model_id.trim().to_string();
+            model.display_name = model.display_name.trim().to_string();
+            if model.display_name.is_empty() {
+                model.display_name.clone_from(&model.model_id);
+            }
+            model.context_window = model.context_window.filter(|value| *value > 0);
+            model.max_output_tokens = model.max_output_tokens.filter(|value| *value > 0);
+            model.input_price = model
+                .input_price
+                .filter(|value| value.is_finite() && *value >= 0.0);
+            model.output_price = model
+                .output_price
+                .filter(|value| value.is_finite() && *value >= 0.0);
             matches!(
                 model.provider_id.as_str(),
                 "anthropic" | "openai" | "openai-codex"
-            ) && !model.model_id.trim().is_empty()
-                && !model.display_name.trim().is_empty()
+            )
+            .then_some(model)
+            .filter(|model| {
+                !model.model_id.is_empty()
+                    && (model.provider_id != "openai-codex"
+                        || is_openai_codex_model(&model.model_id))
+            })
         })
         .collect::<Vec<_>>();
     models.sort_by(|left, right| {
@@ -336,7 +358,10 @@ impl MergedModelCatalog {
                 log::debug!("model catalog cache could not be read; using built-in data: {error}");
             }
         }
-        merged.into_values().collect()
+        merged
+            .into_values()
+            .filter(|model| !model.deprecated)
+            .collect()
     }
 }
 
@@ -358,13 +383,19 @@ impl ModelCatalogSource for MergedModelCatalog {
 async fn refresh_catalog(
     options: &CatalogRefreshOptions,
 ) -> Result<CatalogRefreshOutcome, CatalogRefreshError> {
-    let previous = match read_refresh_state(&options.state_home) {
+    let mut previous = match read_refresh_state(&options.state_home) {
         Ok(state) => state.unwrap_or_default(),
         Err(error) => {
             log::debug!("model catalog refresh state was invalid; refreshing anyway: {error}");
             CatalogRefreshState::default()
         }
     };
+    // Validators only describe a usable cached representation. Sending them
+    // after cache loss can produce a 304 that cannot restore that cache.
+    if !matches!(read_catalog_cache(&options.state_home), Ok(Some(_))) {
+        previous.etag = None;
+        previous.last_modified = None;
+    }
     if previous.checked_at_unix_secs > 0
         && (options.now_unix_secs < previous.checked_at_unix_secs
             || options
@@ -594,11 +625,7 @@ fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         let mut file = options.open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        #[cfg(windows)]
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-        std::fs::rename(&temporary, path)?;
+        replace_file(&temporary, path)?;
         #[cfg(unix)]
         std::fs::File::open(parent)?.sync_all()?;
         Ok(())
@@ -607,6 +634,43 @@ fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(temporary, path)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let temporary = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let flags = windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+        | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers that stay
+    // alive for the duration of the call.
+    let replaced = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            temporary.as_ptr(),
+            path.as_ptr(),
+            flags,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// One selectable model as surfaced by `model/list`.
@@ -689,8 +753,22 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         let offline_entries = super::MergedModelCatalog::new(offline_home).entries();
-        assert_eq!(offline_entries.len(), snapshot.models.len());
+        assert_eq!(
+            offline_entries.len(),
+            snapshot
+                .models
+                .iter()
+                .filter(|model| !model.deprecated)
+                .count()
+        );
         assert!(!offline_entries.is_empty());
+        assert!(offline_entries.iter().all(|entry| {
+            snapshot.models.iter().any(|model| {
+                model.provider_id == entry.provider_id
+                    && model.model_id == entry.model_id
+                    && !model.deprecated
+            })
+        }));
     }
 
     #[test]
@@ -714,6 +792,59 @@ mod tests {
         assert!(first.get("description").is_none());
         assert!(first.get("tool_call").is_none());
         assert!(first.get("unknown_upstream_field").is_none());
+    }
+
+    #[test]
+    fn sanitization_normalizes_strings_limits_and_prices() {
+        let snapshot = super::sanitize_snapshot(super::ModelCatalogSnapshot {
+            comment: None,
+            models: vec![
+                super::ModelCatalogModel {
+                    provider_id: " openai ".to_string(),
+                    model_id: " gpt-test ".to_string(),
+                    display_name: "   ".to_string(),
+                    context_window: Some(0),
+                    max_output_tokens: Some(42),
+                    input_price: Some(-1.0),
+                    output_price: Some(2.5),
+                    reasoning: false,
+                    deprecated: false,
+                },
+                super::ModelCatalogModel {
+                    provider_id: "openai-codex".to_string(),
+                    model_id: "gpt-uncurated".to_string(),
+                    display_name: "Must be dropped".to_string(),
+                    context_window: None,
+                    max_output_tokens: None,
+                    input_price: None,
+                    output_price: None,
+                    reasoning: false,
+                    deprecated: false,
+                },
+            ],
+        });
+
+        assert_eq!(snapshot.models.len(), 1);
+        let model = &snapshot.models[0];
+        assert_eq!(model.provider_id, "openai");
+        assert_eq!(model.model_id, "gpt-test");
+        assert_eq!(model.display_name, "gpt-test");
+        assert_eq!(model.context_window, None);
+        assert_eq!(model.max_output_tokens, Some(42));
+        assert_eq!(model.input_price, None);
+        assert_eq!(model.output_price, Some(2.5));
+    }
+
+    #[test]
+    fn empty_and_garbage_upstream_payloads_are_rejected() {
+        assert!(matches!(
+            super::normalize_models_dev_json(b"{}"),
+            Err(super::CatalogRefreshError::EmptyCatalog)
+        ));
+        assert!(matches!(
+            super::normalize_models_dev_json(b"not json"),
+            Err(super::CatalogRefreshError::Json(_))
+        ));
     }
 
     #[test]
@@ -849,6 +980,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_does_not_send_validators_without_a_usable_cache() {
+        let state_home = test_state_home("validator-without-cache");
+        super::write_refresh_state(
+            &state_home,
+            &super::CatalogRefreshState {
+                checked_at_unix_secs: FIRST_CHECK_SECS - super::REFRESH_INTERVAL_SECS,
+                etag: Some("\"orphaned-etag\"".to_string()),
+                last_modified: Some("Sun, 09 Aug 2026 20:00:00 GMT".to_string()),
+            },
+        )
+        .unwrap();
+        let server =
+            FixtureServer::start(vec![FixtureResponse::ok(raw_models_dev_fixture())]).await;
+        let options = super::CatalogRefreshOptions::for_test(
+            state_home.clone(),
+            server.url.clone(),
+            FIRST_CHECK_SECS,
+        );
+
+        assert_eq!(
+            super::refresh_catalog(&options).await.unwrap(),
+            super::CatalogRefreshOutcome::Updated
+        );
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].contains("if-none-match:"));
+        assert!(!requests[0].contains("if-modified-since:"));
+        assert!(super::catalog_cache_path(&state_home).is_file());
+
+        remove_test_state_home(&state_home);
+    }
+
+    #[tokio::test]
     async fn refresh_retries_server_failures_but_remains_bounded() {
         let state_home = test_state_home("retry");
         let server = FixtureServer::start(vec![
@@ -871,6 +1035,74 @@ mod tests {
         assert_eq!(server.finish().await.len(), 3);
         assert!(super::catalog_cache_path(&state_home).is_file());
 
+        remove_test_state_home(&state_home);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_oversized_responses_before_reading_the_body() {
+        let state_home = test_state_home("oversized");
+        let server = FixtureServer::start(vec![
+            FixtureResponse::ok(String::new()).with_declared_length(super::MAX_REMOTE_BYTES + 1),
+        ])
+        .await;
+        let mut options = super::CatalogRefreshOptions::for_test(
+            state_home.clone(),
+            server.url.clone(),
+            FIRST_CHECK_SECS,
+        );
+        options.retry_delays.clear();
+
+        assert!(matches!(
+            super::fetch_catalog(&options, &super::CatalogRefreshState::default()).await,
+            Err(super::CatalogRefreshError::ResponseTooLarge)
+        ));
+        assert_eq!(server.finish().await.len(), 1);
+
+        remove_test_state_home(&state_home);
+    }
+
+    #[tokio::test]
+    async fn fetch_does_not_retry_non_retryable_http_statuses() {
+        let state_home = test_state_home("http-status");
+        let server = FixtureServer::start(vec![FixtureResponse::status("400 Bad Request")]).await;
+        let options = super::CatalogRefreshOptions::for_test(
+            state_home.clone(),
+            server.url.clone(),
+            FIRST_CHECK_SECS,
+        );
+
+        assert!(matches!(
+            super::fetch_catalog(&options, &super::CatalogRefreshState::default()).await,
+            Err(super::CatalogRefreshError::HttpStatus(
+                reqwest::StatusCode::BAD_REQUEST
+            ))
+        ));
+        assert_eq!(server.finish().await.len(), 1);
+
+        remove_test_state_home(&state_home);
+    }
+
+    #[tokio::test]
+    async fn fetch_request_timeout_is_bounded() {
+        let state_home = test_state_home("request-timeout");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api.json", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut options =
+            super::CatalogRefreshOptions::for_test(state_home.clone(), url, FIRST_CHECK_SECS);
+        options.request_timeout = std::time::Duration::from_millis(50);
+        options.retry_delays.clear();
+
+        assert!(matches!(
+            super::fetch_catalog(&options, &super::CatalogRefreshState::default()).await,
+            Err(super::CatalogRefreshError::Request)
+        ));
+
+        server.abort();
+        let _ = server.await;
         remove_test_state_home(&state_home);
     }
 
@@ -951,6 +1183,22 @@ mod tests {
         remove_test_state_home(&state_home);
     }
 
+    #[test]
+    fn non_unicode_runtime_url_disables_refresh_scheduling() {
+        let state_home = test_state_home("non-unicode-url");
+        let tasks = std::sync::Arc::new(super::super::lifecycle::InstanceTaskSet::new());
+
+        let scheduled = super::spawn_runtime_refresh_with_env(&tasks, state_home.clone(), |_| {
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                "configured-but-invalid",
+            )))
+        });
+
+        assert!(!scheduled);
+        assert_eq!(tasks.task_count(), 0);
+        remove_test_state_home(&state_home);
+    }
+
     #[tokio::test]
     async fn runtime_refresh_is_abandoned_at_instance_shutdown() {
         let state_home = test_state_home("cancellable");
@@ -977,6 +1225,28 @@ mod tests {
         server.abort();
         let _ = server.await;
         assert!(!state_home.join(super::CATALOG_CACHE_DIR).exists());
+        remove_test_state_home(&state_home);
+    }
+
+    #[test]
+    fn atomic_write_replaces_whole_files_and_cleans_failed_temporaries() {
+        let state_home = test_state_home("atomic-write");
+        let target = state_home.join("target.json");
+        std::fs::write(&target, b"old contents").unwrap();
+
+        super::atomic_write(&target, b"new contents").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
+
+        let directory_target = state_home.join("directory-target");
+        std::fs::create_dir(&directory_target).unwrap();
+        assert!(super::atomic_write(&directory_target, b"cannot replace a directory").is_err());
+        let leftovers = std::fs::read_dir(&state_home)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "failed write left temporary files");
+
         remove_test_state_home(&state_home);
     }
 
@@ -1101,6 +1371,7 @@ mod tests {
         status: &'static str,
         headers: Vec<(&'static str, &'static str)>,
         body: String,
+        declared_content_length: Option<usize>,
     }
 
     impl FixtureResponse {
@@ -1109,6 +1380,7 @@ mod tests {
                 status: "200 OK",
                 headers: Vec::new(),
                 body,
+                declared_content_length: None,
             }
         }
 
@@ -1121,6 +1393,7 @@ mod tests {
                 status,
                 headers: Vec::new(),
                 body: String::new(),
+                declared_content_length: None,
             }
         }
 
@@ -1129,11 +1402,16 @@ mod tests {
             self
         }
 
+        fn with_declared_length(mut self, length: usize) -> Self {
+            self.declared_content_length = Some(length);
+            self
+        }
+
         fn render(&self) -> String {
             let mut response = format!(
                 "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
                 self.status,
-                self.body.len()
+                self.declared_content_length.unwrap_or(self.body.len())
             );
             for (name, value) in &self.headers {
                 response.push_str(&format!("{name}: {value}\r\n"));
