@@ -48,8 +48,23 @@ pub enum Action {
     Fork,
     /// `/compact` — request compaction of the current thread.
     Compact,
-    /// `/models` — fetch the model list for display.
+    /// `/models` — fetch the model list; the host answers with
+    /// [`ChatEvent::Models`], which opens the picker.
     ListModels,
+    /// A picker row was chosen: switch the app-server's active model.
+    SelectModel { provider_id: String, model: String },
+}
+
+/// One row of the `/models` picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelRow {
+    pub provider_id: String,
+    pub model: String,
+    pub display_name: String,
+    /// `configured` | `env` | `missing`, as reported by `model/list`.
+    pub auth_status: String,
+    /// Whether this is the app-server's active selection.
+    pub active: bool,
 }
 
 /// One row of `/sessions` output.
@@ -101,8 +116,10 @@ pub enum ChatEvent {
     ThreadRenamed { name: String },
     /// `/sessions` result.
     Sessions(Vec<SessionRow>),
-    /// `/models` result.
-    Models(Vec<String>),
+    /// `/models` result: opens the model picker over these rows.
+    Models(Vec<ModelRow>),
+    /// `model/select` succeeded; the active model changed for later turns.
+    ModelSelected { provider_id: String, model: String },
     /// The thread's runtime status changed ("idle", "running", ...).
     ThreadStatus(String),
     /// An informational notice for the transcript.
