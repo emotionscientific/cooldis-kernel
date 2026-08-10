@@ -1133,6 +1133,8 @@ impl VerletAppServer {
         )?;
         let metadata_store_path = config.metadata_store_path();
         let user_metadata_store_path = config.user_metadata_store_path();
+        #[cfg(not(test))]
+        let model_catalog_state_home = config.user_state_home.clone();
         let supervisor = crate::kernel::supervisor::VerletSupervisor::new();
         let mut tenant_context = crate::kernel::supervisor::TenantRuntimeContext::local(
             config.tenant_id.clone(),
@@ -1236,6 +1238,11 @@ impl VerletAppServer {
                 ),
             }),
         };
+        // Catalog refresh is instance-owned and deliberately starts only after
+        // every fallible construction step above. It never participates in
+        // constructor success or the first chat/RPC path.
+        #[cfg(not(test))]
+        model_catalog::spawn_runtime_refresh(&app.inner.tasks, model_catalog_state_home);
         let initialization = async {
             let process_ingress: std::sync::Arc<
                 dyn crate::kernel::runtime_host::runtime_api::ProcessHandleIngressSink,

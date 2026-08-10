@@ -30,6 +30,22 @@ tuika is pinned to an exact version in the workspace manifest: it is pre-1.0
 and minor releases may break API, so upgrades are deliberate, reviewed
 changes.
 
+## Model Catalog
+
+Model metadata comes from a small models.dev snapshot checked into the kernel
+for the `anthropic`, `openai`, and `openai-codex` providers. The app-server can
+therefore list models with no network access. On startup it also schedules a
+background models.dev refresh, capped at once per 24 hours, and stores the last
+valid normalized response under the same user state home as the provider
+metadata store. A valid cached response overlays the built-in snapshot; a
+refresh or cache failure silently falls back to the built-in data and never
+blocks chat.
+
+The refresh endpoint defaults to `https://models.dev/api.json`. Set
+`VERLET_MODEL_CATALOG_URL` before starting the app-server to use a compatible
+endpoint instead. Catalog prices are informational model metadata only; they
+are not the authority for cloud metering.
+
 ## Included Surface
 
 - Full-screen transcript with streaming markdown answers, thinking rows,

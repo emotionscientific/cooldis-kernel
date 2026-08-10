@@ -32,6 +32,7 @@ croner = { workspace = true }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
 libc = { workspace = true }
+log = { workspace = true }
 object_store = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
