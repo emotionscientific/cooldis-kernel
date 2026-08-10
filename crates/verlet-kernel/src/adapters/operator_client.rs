@@ -67,6 +67,43 @@ pub struct OperatorTurn {
     pub raw: serde_json::Value,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OperatorModelAuthStatus {
+    Configured,
+    Env,
+    Missing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorModel {
+    pub provider_id: String,
+    pub model: String,
+    pub display_name: String,
+    pub auth_status: OperatorModelAuthStatus,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorModelList {
+    pub data: Vec<OperatorModel>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorActiveModel {
+    pub provider_id: String,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+pub struct OperatorModelSelectResult {
+    pub active: OperatorActiveModel,
+}
+
 #[derive(Clone, Debug)]
 pub struct OperatorCompletedTurn {
     pub thread_id: String,
@@ -209,6 +246,41 @@ where
         &mut self,
     ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
         self.request("model/list", serde_json::json!({})).await
+    }
+
+    pub async fn model_list_typed(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorModelList> {
+        let value = self.model_list().await?;
+        serde_json::from_value(value)
+            .map_err(|err| tui_error(format!("invalid model/list response: {err}")))
+    }
+
+    /// `model/select` (EMO-558): switch the app-server's active
+    /// provider+model for turns started after the call.
+    pub async fn model_select(
+        &mut self,
+        provider_id: &str,
+        model: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "model/select",
+            serde_json::json!({
+                "providerId": provider_id,
+                "model": model,
+            }),
+        )
+        .await
+    }
+
+    pub async fn model_select_typed(
+        &mut self,
+        provider_id: &str,
+        model: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorModelSelectResult> {
+        let value = self.model_select(provider_id, model).await?;
+        serde_json::from_value(value)
+            .map_err(|err| tui_error(format!("invalid model/select response: {err}")))
     }
 
     pub async fn config_read(

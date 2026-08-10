@@ -249,7 +249,8 @@ dispatcher against the principal's kind:
   `mcpSource/*`, `thread/start`, `thread/resume`, `approval/resolve`, ...).
   Operator-only.
 - `Interactive`: reads and conversational control on existing threads
-  (`thread/read`, `thread/list`, `stream/read`, `turn/steer`, `mandate/*`, ...).
+  (`thread/read`, `thread/list`, `stream/read`, `turn/steer`, `model/select`,
+  `mandate/*`, ...).
 - `Ingress`: input delivery. `turn/start` and `ingress/submit` are the only
   dispatched methods an adapter credential can call. They may
   lazily reconstruct a thread from its committed metadata (replaying the
@@ -655,14 +656,30 @@ grants.
 
 Params: none.
 
-Result: the existing `{ "data": [...], "nextCursor": null }` envelope. Local
-and direct provider configs return the configured provider/model identity.
-Catalog-backed configs return the configured provider's model records and append
-the configured default when the catalog omits it. Exactly one entry has
-`isDefault: true`.
+Result: `{ "data": [...], "nextCursor": null }`. The list contains every model
+from every provider in the project metadata store, plus the launch-configured
+provider/model when that pair is absent. Each entry includes `providerId`,
+`model`, `displayName`, `authStatus` (`configured`, `env`, or `missing`), and
+`active`. Compatibility fields such as `id` and `isDefault` remain present;
+`isDefault` follows the session's active selection.
 
-A missing catalog provider or invalid provider metadata returns a JSON-RPC
-error during app-server setup or method handling.
+Auth status uses the same user credential store and environment resolution as
+`verlet auth status`. The active selection is process-local runtime state.
+
+### `model/select`
+
+Params: `{ "providerId": "wafer", "model": "wafer-model" }`.
+
+Result: `{ "active": { "providerId": "wafer", "model": "wafer-model" } }`.
+The pair must exist in `model/list`, and its provider must have a stored
+credential or satisfied environment credential. Validation and provider-client
+construction complete before the selection changes, so a failed call changes
+nothing and returns JSON-RPC `-32602` with the provider or credential problem.
+
+Selection applies to turns started after the call. A turn already running keeps
+the endpoint it resolved at its own start, including subsequent tool rounds.
+Selection is not persisted: restarting the app-server restores the provider and
+model from launch configuration.
 
 ### `modelProvider/list`
 
@@ -674,7 +691,7 @@ provider endpoint record: `providerId`, `api`, `baseUrl`, optional
 `metadata`, timestamps, `configuredAuth` from the user auth store, and
 `isActiveProvider`. Model rows include `modelId`, optional model-level
 `api`/`baseUrl`, token limits, input modalities, redacted headers, metadata,
-and `isDefault` when it matches the runtime default model.
+and `isDefault` when it matches the runtime-active model.
 
 ### `modelProvider/read`
 
@@ -693,7 +710,9 @@ Params: `{ "provider": { "providerId": "...", "api": "open_ai_chat_completions",
 Result: `{ "provider": { ... } }` with the redacted stored record. This method
 creates or replaces provider metadata only. It rejects inline API keys and
 command-backed auth or header values; use `modelProvider/auth/set` for stored
-credentials.
+credentials. A catalog provider backing the active model cannot be replaced;
+select another provider first so the active endpoint and stored metadata cannot
+diverge.
 
 ### `modelProvider/delete`
 
@@ -701,7 +720,8 @@ Params: `{ "providerId": "wafer" }`.
 
 Result: `{ "deleted": true, "providerId": "wafer" }`. Deleting a provider also
 removes any user-stored credential for the same provider id and clears stale
-project-store credential rows if present.
+project-store credential rows if present. A catalog provider backing the active
+model cannot be deleted until another provider is selected.
 
 ### `modelProvider/auth/status`
 
@@ -711,6 +731,12 @@ Result: `{ "auth": { ... } | null, "data": [...], "nextCursor": null }`.
 Entries report `providerId`, optional `displayName`, whether a credential is
 configured, its non-secret source/label, and whether the provider uses an auth
 header. Credential values are never returned.
+
+`modelProvider/auth/set` and `modelProvider/auth/delete` serialize with
+`model/select`. When they target the active catalog provider, the app-server
+eagerly rebuilds and atomically replaces the future-turn endpoint. If deleting
+the credential would leave that provider unauthenticated, deletion fails and
+the credential is restored; an in-flight turn keeps its existing snapshot.
 
 ### `mcpSource/list`
 

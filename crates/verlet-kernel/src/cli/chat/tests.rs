@@ -31,7 +31,6 @@ fn driver() -> super::ChatDriver {
     super::ChatDriver {
         thread_id: "thread-1".to_string(),
         active_turn_id: Some("turn-1".to_string()),
-        models: Vec::new(),
     }
 }
 

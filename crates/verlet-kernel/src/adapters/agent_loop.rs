@@ -221,6 +221,32 @@ struct ModelRequestEndpoint {
     client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
 }
 
+/// Primary endpoint resolved for one turn (EMO-558).
+///
+/// `config` carries the provider coordinates stamped onto requests and turn
+/// records; `client` is the wire client for those coordinates. Both come
+/// pre-built: resolution failures belong at `model/select` time, never
+/// mid-turn.
+#[derive(Clone)]
+pub struct ResolvedTurnEndpoint {
+    pub config: AgentLoopConfig,
+    pub client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+}
+
+/// Per-turn primary-endpoint routing (EMO-558).
+///
+/// When installed on the factory, the loop calls `resolve` once per turn at
+/// turn start and uses the returned endpoint as the primary for every
+/// provider request in that turn (fallback endpoints are unaffected), so
+/// records and wire traffic agree. `None` means "use the launch-configured
+/// endpoint". A turn already running keeps the endpoint it resolved at its
+/// own start. Implementations must be cheap synchronous snapshot reads: the
+/// app-server builds the endpoint eagerly inside `model/select` and the
+/// router only loads the current snapshot.
+pub trait TurnEndpointRouter: Send + Sync {
+    fn resolve(&self) -> Option<ResolvedTurnEndpoint>;
+}
+
 #[derive(Clone)]
 pub struct AgentLoopFactory {
     config: AgentLoopConfig,
@@ -233,6 +259,7 @@ pub struct AgentLoopFactory {
         Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
     hook_pipeline: Option<std::sync::Arc<crate::agent::hooks::HookPipeline>>,
     hook_shell: Option<String>,
+    turn_endpoint_router: Option<std::sync::Arc<dyn TurnEndpointRouter>>,
     process_dispatcher_cwd: Option<std::path::PathBuf>,
     tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
     context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
@@ -255,6 +282,7 @@ impl AgentLoopFactory {
             thread_spawn_agent_resolver: None,
             hook_pipeline: None,
             hook_shell: None,
+            turn_endpoint_router: None,
             process_dispatcher_cwd: None,
             tool_permission_gate: std::sync::Arc::new(
                 crate::agent::tool_interceptor::AllowAllToolPermissionGate,
@@ -355,6 +383,16 @@ impl AgentLoopFactory {
         self
     }
 
+    /// Install per-turn primary-endpoint routing (EMO-558). Absent, the loop
+    /// keeps its launch-configured endpoint for every turn.
+    pub fn with_turn_endpoint_router(
+        mut self,
+        router: std::sync::Arc<dyn TurnEndpointRouter>,
+    ) -> Self {
+        self.turn_endpoint_router = Some(router);
+        self
+    }
+
     pub fn with_compaction_policy(
         mut self,
         policy: crate::kernel::compaction::CompactionPolicy,
@@ -409,6 +447,8 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for AgentLoop
                         .with_shell(self.hook_shell.clone()),
                 )
             }),
+            turn_endpoint_router: self.turn_endpoint_router.clone(),
+            turn_endpoints: std::sync::Mutex::new(std::collections::HashMap::new()),
             process_dispatcher_cwd: self.process_dispatcher_cwd.clone(),
             tool_permission_gate: std::sync::Arc::clone(&self.tool_permission_gate),
             context_compile_policy: self.context_compile_policy.clone(),
@@ -430,6 +470,17 @@ struct AgentLoop {
     thread_spawn_agent_resolver:
         Option<std::sync::Arc<dyn crate::agent::agent_process::KernelThreadSpawnAgentResolver>>,
     hook_pipeline: Option<std::sync::Arc<crate::agent::hooks::HookPipeline>>,
+    /// EMO-558: when present, the loop resolves the primary endpoint from
+    /// this router once per turn at turn start (see [`TurnEndpointRouter`]);
+    /// `config`/`client` above remain the launch defaults and the fallback
+    /// when the router returns `None`.
+    turn_endpoint_router: Option<std::sync::Arc<dyn TurnEndpointRouter>>,
+    /// Endpoints retained for turns suspended on tool approval. A resumed
+    /// tool call is still part of its original turn, so a later model
+    /// selection must not reroute its continuation request.
+    turn_endpoints: std::sync::Mutex<
+        std::collections::HashMap<String, crate::adapters::agent_loop::ResolvedTurnEndpoint>,
+    >,
     process_dispatcher_cwd: Option<std::path::PathBuf>,
     tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
     context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
@@ -747,6 +798,7 @@ impl AgentLoop {
         turn_id: String,
         input: &crate::kernel::runtime_host::turn::TurnInput,
         cancellation: tokio_util::sync::CancellationToken,
+        endpoint: &ResolvedTurnEndpoint,
     ) -> crate::kernel::runtime_host::turn::TurnContext {
         crate::kernel::runtime_host::turn::TurnContext::new(
             thread_context.clone(),
@@ -754,20 +806,63 @@ impl AgentLoop {
             input,
             cancellation,
         )
-        .with_effective_model_provider(self.config.provider.clone(), self.config.model.clone())
+        .with_effective_model_provider(
+            endpoint.config.provider.clone(),
+            endpoint.config.model.clone(),
+        )
         .with_budget(verlet_runtime_contracts::TurnBudget {
             max_tool_rounds: self.max_tool_rounds,
-            max_output_tokens: Some(self.config.max_tokens),
-            max_context_text_bytes: self
+            max_output_tokens: Some(endpoint.config.max_tokens),
+            max_context_text_bytes: endpoint
                 .client
                 .capabilities()
                 .and_then(|capabilities| capabilities.context_policy.max_text_bytes),
         })
     }
 
+    fn resolve_turn_endpoint(&self) -> (ResolvedTurnEndpoint, bool) {
+        if let Some(endpoint) = self
+            .turn_endpoint_router
+            .as_ref()
+            .and_then(|router| router.resolve())
+        {
+            return (endpoint, true);
+        }
+        (
+            ResolvedTurnEndpoint {
+                config: self.config.clone(),
+                client: std::sync::Arc::clone(&self.client),
+            },
+            false,
+        )
+    }
+
+    fn retained_turn_endpoint(&self, turn_id: &str) -> Option<ResolvedTurnEndpoint> {
+        self.locked_turn_endpoints().get(turn_id).cloned()
+    }
+
+    fn retain_turn_endpoint(&self, turn_id: &str, endpoint: &ResolvedTurnEndpoint) {
+        self.locked_turn_endpoints()
+            .insert(turn_id.to_string(), endpoint.clone());
+    }
+
+    fn forget_turn_endpoint(&self, turn_id: &str) {
+        self.locked_turn_endpoints().remove(turn_id);
+    }
+
+    fn locked_turn_endpoints(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, ResolvedTurnEndpoint>> {
+        match self.turn_endpoints.lock() {
+            Ok(endpoints) => endpoints,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     async fn run_turn(
         &self,
         turn_context: &crate::kernel::runtime_host::turn::TurnContext,
+        endpoint: &ResolvedTurnEndpoint,
         turn_delivery_start_sequence: verlet_history::EventSequence,
         turn_anchor_timestamp_ms: i64,
         services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
@@ -834,9 +929,10 @@ impl AgentLoop {
                 policy: self.context_compile_policy.clone(),
             },
         );
-        let mut request = self
+        let request = self
             .config
             .request_from_messages(compiled_context.messages.clone());
+        let mut request = request_for_endpoint(&request, &endpoint.config);
         request.system = compiled_context.system.clone();
         request.tools = compiled_context.tools.clone();
         if let Some(thinking) = &turn_context.thinking {
@@ -853,12 +949,12 @@ impl AgentLoop {
         let mut provider_dropped_messages = 0;
         let mut provider_truncated_text_bytes = 0;
         let mut provider_retained_text_bytes = agent_diagnostics.retained_text_bytes;
-        let mode = if self.config.stream {
+        let mode = if endpoint.config.stream {
             verlet_provider::ProviderRequestMode::Stream
         } else {
             verlet_provider::ProviderRequestMode::Complete
         };
-        if let Some(capabilities) = self.client.capabilities() {
+        if let Some(capabilities) = endpoint.client.capabilities() {
             let (compiled, provider_compilation) =
                 verlet_provider::compile_provider_request_context(
                     request,
@@ -907,6 +1003,7 @@ impl AgentLoop {
         );
         let executed = execute_provider_request(
             self,
+            endpoint,
             turn_context,
             coordinates,
             &request,
@@ -1018,6 +1115,7 @@ async fn sweep_cancelled_turn_tool_calls(
     if cancelled_turns.is_empty() {
         return Ok(());
     }
+    let (recovery_endpoint, _) = runtime.resolve_turn_endpoint();
 
     let mut completed = std::collections::BTreeMap::<
         crate::kernel::control_decision::ToolCallSubject,
@@ -1127,6 +1225,7 @@ async fn sweep_cancelled_turn_tool_calls(
             request.subject.turn_id.clone(),
             &crate::kernel::runtime_host::turn::TurnInput::text(""),
             tokio_util::sync::CancellationToken::new(),
+            &recovery_endpoint,
         );
         let current_finish_order = *finish_order;
         let outcome = cancelled_tool_call_outcome(
@@ -1201,7 +1300,7 @@ async fn run_idle_provider_command(
     match command {
         crate::kernel::runtime_host::runtime_api::ThreadCommand::Submit {
             turn_id,
-            input,
+            mut input,
             mode,
         } => {
             if mode == verlet_runtime_contracts::TurnSubmissionMode::Steer {
@@ -1235,8 +1334,14 @@ async fn run_idle_provider_command(
                 return false;
             }
             let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
+            let (turn_endpoint, routed) = runtime.resolve_turn_endpoint();
+            if routed {
+                input.provider = Some(turn_endpoint.config.provider.clone());
+                input.model = Some(turn_endpoint.config.model.clone());
+            }
             if let Err(err) = run_auto_compaction_if_needed(
                 runtime,
+                &turn_endpoint,
                 thread_context,
                 format!("{turn_id}:auto_compact"),
                 coordinates,
@@ -1299,6 +1404,7 @@ async fn run_idle_provider_command(
                 };
             run_provider_turn(
                 runtime,
+                &turn_endpoint,
                 thread_context,
                 turn_id,
                 input,
@@ -1322,8 +1428,10 @@ async fn run_idle_provider_command(
             summary,
         } => {
             let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
+            let (turn_endpoint, _) = runtime.resolve_turn_endpoint();
             match run_compaction(
                 runtime,
+                &turn_endpoint,
                 thread_context,
                 turn_id,
                 trigger,
@@ -1356,8 +1464,12 @@ async fn run_idle_provider_command(
             call_id,
         } => {
             let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
+            let turn_endpoint = runtime
+                .retained_turn_endpoint(&turn_id)
+                .unwrap_or_else(|| runtime.resolve_turn_endpoint().0);
             match resume_pending_tool_call(
                 runtime,
+                &turn_endpoint,
                 thread_context,
                 &turn_id,
                 &call_id,
@@ -1374,6 +1486,7 @@ async fn run_idle_provider_command(
                 }) => {
                     run_provider_turn(
                         runtime,
+                        &turn_endpoint,
                         thread_context,
                         turn_id,
                         crate::kernel::runtime_host::turn::TurnInput::text(""),
@@ -1391,7 +1504,12 @@ async fn run_idle_provider_command(
                     )
                     .await
                 }
-                Ok(ToolResumeOutcome::StillWaiting | ToolResumeOutcome::AlreadyCompleted) => {
+                Ok(ToolResumeOutcome::StillWaiting) => {
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
+                    false
+                }
+                Ok(ToolResumeOutcome::AlreadyCompleted) => {
+                    runtime.forget_turn_endpoint(&turn_id);
                     let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     false
                 }
@@ -1453,6 +1571,7 @@ async fn run_idle_provider_command(
 
 async fn run_auto_compaction_if_needed(
     runtime: &AgentLoop,
+    endpoint: &ResolvedTurnEndpoint,
     thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: String,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
@@ -1497,6 +1616,7 @@ async fn run_auto_compaction_if_needed(
                     turn_id.clone(),
                     &crate::kernel::runtime_host::turn::TurnInput::text(""),
                     tokio_util::sync::CancellationToken::new(),
+                    endpoint,
                 )
                 .snapshot(),
             hook_contexts: Vec::new(),
@@ -1511,6 +1631,7 @@ async fn run_auto_compaction_if_needed(
     }
     run_compaction(
         runtime,
+        endpoint,
         thread_context,
         turn_id,
         crate::kernel::compaction::CompactionTrigger::Auto,
@@ -1547,6 +1668,7 @@ async fn persisted_thread_anchor_timestamp_ms(
 
 async fn run_compaction(
     runtime: &AgentLoop,
+    endpoint: &ResolvedTurnEndpoint,
     thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: String,
     trigger: crate::kernel::compaction::CompactionTrigger,
@@ -1561,6 +1683,7 @@ async fn run_compaction(
         turn_id,
         &input,
         tokio_util::sync::CancellationToken::new(),
+        endpoint,
     );
     if let Some(hook_pipeline) = &runtime.hook_pipeline {
         let outcome = hook_pipeline
@@ -1597,7 +1720,9 @@ async fn run_compaction(
 
     let summary = match requested_summary {
         Some(summary) if !summary.trim().is_empty() => summary,
-        _ => generate_compaction_summary(runtime, &turn_context, services, events).await?,
+        _ => {
+            generate_compaction_summary(runtime, endpoint, &turn_context, services, events).await?
+        }
     };
     let source_context = services
         .build_session_context(turn_context.coordinates())
@@ -1676,6 +1801,7 @@ async fn run_compaction(
 
 async fn generate_compaction_summary(
     runtime: &AgentLoop,
+    endpoint: &ResolvedTurnEndpoint,
     turn_context: &crate::kernel::runtime_host::turn::TurnContext,
     services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
     events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
@@ -1694,18 +1820,20 @@ async fn generate_compaction_summary(
     }
     let normalized = verlet_provider::provider_transform::normalize_history_for_target(
         messages,
-        &runtime.config.api,
-        &runtime.config.provider,
+        &endpoint.config.api,
+        &endpoint.config.provider,
     );
-    let mut request = runtime.config.request_from_messages(normalized.messages);
+    let request = runtime.config.request_from_messages(normalized.messages);
+    let mut request = request_for_endpoint(&request, &endpoint.config);
     request.system.push(verlet_provider::SystemBlock::text(
         "Summarize the conversation so far for continuation. Preserve decisions, open tasks, tool results, and constraints. Return only the summary.",
     ));
     request.tools = Vec::new();
-    request.max_tokens = runtime.config.max_tokens.min(1024);
+    request.max_tokens = endpoint.config.max_tokens.min(1024);
     request.thinking = None;
     let executed = execute_provider_request(
         runtime,
+        endpoint,
         turn_context,
         turn_context.coordinates(),
         &request,
@@ -1755,6 +1883,7 @@ impl ModelRequestAttemptError {
 
 async fn execute_provider_request(
     runtime: &AgentLoop,
+    primary_endpoint: &ResolvedTurnEndpoint,
     turn_context: &crate::kernel::runtime_host::turn::TurnContext,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     request: &verlet_provider::ProviderRequest,
@@ -1766,8 +1895,8 @@ async fn execute_provider_request(
     let mode = runtime_request_mode(mode);
     let mut endpoints = Vec::with_capacity(runtime.model_request_fallbacks.len() + 1);
     endpoints.push(ModelRequestEndpoint {
-        config: runtime.config.clone(),
-        client: std::sync::Arc::clone(&runtime.client),
+        config: primary_endpoint.config.clone(),
+        client: std::sync::Arc::clone(&primary_endpoint.client),
     });
     endpoints.extend(runtime.model_request_fallbacks.iter().cloned());
     let retry_policy = runtime.model_request_retry_policy;
@@ -1980,6 +2109,7 @@ fn request_for_endpoint(
     request.api = config.api.clone();
     request.provider = config.provider.clone();
     request.model = config.model.clone();
+    request.max_tokens = config.max_tokens;
     request
 }
 
@@ -2094,8 +2224,37 @@ fn response_content_text(content: &[verlet_history::CanonicalContent]) -> String
         .join("")
 }
 
+struct TurnEndpointRetention<'a> {
+    runtime: &'a AgentLoop,
+    turn_id: &'a str,
+    preserve: bool,
+}
+
+impl<'a> TurnEndpointRetention<'a> {
+    fn new(runtime: &'a AgentLoop, turn_id: &'a str) -> Self {
+        Self {
+            runtime,
+            turn_id,
+            preserve: false,
+        }
+    }
+
+    fn preserve(&mut self) {
+        self.preserve = true;
+    }
+}
+
+impl Drop for TurnEndpointRetention<'_> {
+    fn drop(&mut self) {
+        if !self.preserve {
+            self.runtime.forget_turn_endpoint(self.turn_id);
+        }
+    }
+}
+
 async fn run_provider_turn(
     runtime: &AgentLoop,
+    endpoint: &ResolvedTurnEndpoint,
     thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: String,
     turn_input: crate::kernel::runtime_host::turn::TurnInput,
@@ -2115,6 +2274,8 @@ async fn run_provider_turn(
         crate::kernel::runtime_host::runtime_api::ThreadCommand,
     >,
 ) -> bool {
+    runtime.retain_turn_endpoint(&turn_id, endpoint);
+    let mut endpoint_retention = TurnEndpointRetention::new(runtime, &turn_id);
     let mut tool_rounds = match persisted_tool_rounds_for_turn(
         services,
         coordinates,
@@ -2167,6 +2328,7 @@ async fn run_provider_turn(
         turn_id.clone(),
         &turn_input,
         turn_cancellation.clone(),
+        endpoint,
     );
     if let Some(hook_pipeline) = &runtime.hook_pipeline {
         let outcome = hook_pipeline
@@ -2250,6 +2412,7 @@ async fn run_provider_turn(
             .iter()
             .any(|pending| pending.subject.turn_id == turn_id)
         {
+            endpoint_retention.preserve();
             let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
             return false;
         }
@@ -2289,6 +2452,7 @@ async fn run_provider_turn(
             .await
             {
                 ToolBatchAwaitOutcome::Completed(Ok(ToolAppendOutcome::Suspended)) => {
+                    endpoint_retention.preserve();
                     let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     return false;
                 }
@@ -2445,6 +2609,7 @@ async fn run_provider_turn(
         }
         let turn = runtime.run_turn(
             &turn_context,
+            endpoint,
             turn_delivery_start_sequence,
             turn_anchor_timestamp_ms,
             services,
@@ -2546,7 +2711,7 @@ async fn run_provider_turn(
                     let text = text_from_message(&message);
                     last_assistant_text = Some(text.clone());
                     let tool_calls = tool_calls_from_message(&message);
-                    if !runtime.config.stream
+                    if !endpoint.config.stream
                         && let Some(usage) = usage_from_message(&message)
                     {
                         crate::kernel::runtime_host::runtime_events::emit_runtime_event(
@@ -2557,7 +2722,7 @@ async fn run_provider_turn(
                             },
                         );
                     }
-                    if !runtime.config.stream {
+                    if !endpoint.config.stream {
                         for tool_call in &tool_calls {
                             crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                                 events,
@@ -2585,7 +2750,7 @@ async fn run_provider_turn(
                             let assistant_entry_id = entry.entry_id;
                             let _ = events
                                 .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror { thread_id, entry });
-                            if !runtime.config.stream {
+                            if !endpoint.config.stream {
                                 emit_non_stream_content_events(events, coordinates, &message);
                             }
                             if !text.is_empty() {
@@ -2762,6 +2927,7 @@ async fn run_provider_turn(
             return true;
         }
         if suspended_after_tools {
+            endpoint_retention.preserve();
             let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
             return false;
         }
@@ -3789,6 +3955,7 @@ fn context_compile_receipt_payload(
 
 async fn resume_pending_tool_call(
     runtime: &AgentLoop,
+    endpoint: &ResolvedTurnEndpoint,
     thread_context: &verlet_runtime_contracts::ThreadContext,
     turn_id: &str,
     call_id: &str,
@@ -3880,6 +4047,7 @@ async fn resume_pending_tool_call(
         turn_id.to_string(),
         &crate::kernel::runtime_host::turn::TurnInput::text(""),
         tokio_util::sync::CancellationToken::new(),
+        endpoint,
     );
     match action {
         ResumedToolCallAction::Execute(arguments) => {
