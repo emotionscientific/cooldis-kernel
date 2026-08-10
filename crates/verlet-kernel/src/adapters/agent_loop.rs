@@ -448,6 +448,7 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory for AgentLoop
                 )
             }),
             turn_endpoint_router: self.turn_endpoint_router.clone(),
+            turn_endpoints: std::sync::Mutex::new(std::collections::HashMap::new()),
             process_dispatcher_cwd: self.process_dispatcher_cwd.clone(),
             tool_permission_gate: std::sync::Arc::clone(&self.tool_permission_gate),
             context_compile_policy: self.context_compile_policy.clone(),
@@ -474,6 +475,12 @@ struct AgentLoop {
     /// `config`/`client` above remain the launch defaults and the fallback
     /// when the router returns `None`.
     turn_endpoint_router: Option<std::sync::Arc<dyn TurnEndpointRouter>>,
+    /// Endpoints retained for turns suspended on tool approval. A resumed
+    /// tool call is still part of its original turn, so a later model
+    /// selection must not reroute its continuation request.
+    turn_endpoints: std::sync::Mutex<
+        std::collections::HashMap<String, crate::adapters::agent_loop::ResolvedTurnEndpoint>,
+    >,
     process_dispatcher_cwd: Option<std::path::PathBuf>,
     tool_permission_gate: std::sync::Arc<dyn crate::agent::tool_interceptor::ToolPermissionGate>,
     context_compile_policy: crate::kernel::context_compiler::AgentContextCompilePolicy,
@@ -805,7 +812,7 @@ impl AgentLoop {
         )
         .with_budget(verlet_runtime_contracts::TurnBudget {
             max_tool_rounds: self.max_tool_rounds,
-            max_output_tokens: Some(self.config.max_tokens),
+            max_output_tokens: Some(endpoint.config.max_tokens),
             max_context_text_bytes: endpoint
                 .client
                 .capabilities()
@@ -828,6 +835,28 @@ impl AgentLoop {
             },
             false,
         )
+    }
+
+    fn retained_turn_endpoint(&self, turn_id: &str) -> Option<ResolvedTurnEndpoint> {
+        self.locked_turn_endpoints().get(turn_id).cloned()
+    }
+
+    fn retain_turn_endpoint(&self, turn_id: &str, endpoint: &ResolvedTurnEndpoint) {
+        self.locked_turn_endpoints()
+            .insert(turn_id.to_string(), endpoint.clone());
+    }
+
+    fn forget_turn_endpoint(&self, turn_id: &str) {
+        self.locked_turn_endpoints().remove(turn_id);
+    }
+
+    fn locked_turn_endpoints(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, ResolvedTurnEndpoint>> {
+        match self.turn_endpoints.lock() {
+            Ok(endpoints) => endpoints,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     async fn run_turn(
@@ -920,7 +949,7 @@ impl AgentLoop {
         let mut provider_dropped_messages = 0;
         let mut provider_truncated_text_bytes = 0;
         let mut provider_retained_text_bytes = agent_diagnostics.retained_text_bytes;
-        let mode = if self.config.stream {
+        let mode = if endpoint.config.stream {
             verlet_provider::ProviderRequestMode::Stream
         } else {
             verlet_provider::ProviderRequestMode::Complete
@@ -1435,7 +1464,9 @@ async fn run_idle_provider_command(
             call_id,
         } => {
             let _ = status.send(verlet_runtime_contracts::ThreadStatus::Running);
-            let (turn_endpoint, _) = runtime.resolve_turn_endpoint();
+            let turn_endpoint = runtime
+                .retained_turn_endpoint(&turn_id)
+                .unwrap_or_else(|| runtime.resolve_turn_endpoint().0);
             match resume_pending_tool_call(
                 runtime,
                 &turn_endpoint,
@@ -1473,7 +1504,12 @@ async fn run_idle_provider_command(
                     )
                     .await
                 }
-                Ok(ToolResumeOutcome::StillWaiting | ToolResumeOutcome::AlreadyCompleted) => {
+                Ok(ToolResumeOutcome::StillWaiting) => {
+                    let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
+                    false
+                }
+                Ok(ToolResumeOutcome::AlreadyCompleted) => {
+                    runtime.forget_turn_endpoint(&turn_id);
                     let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     false
                 }
@@ -1793,7 +1829,7 @@ async fn generate_compaction_summary(
         "Summarize the conversation so far for continuation. Preserve decisions, open tasks, tool results, and constraints. Return only the summary.",
     ));
     request.tools = Vec::new();
-    request.max_tokens = runtime.config.max_tokens.min(1024);
+    request.max_tokens = endpoint.config.max_tokens.min(1024);
     request.thinking = None;
     let executed = execute_provider_request(
         runtime,
@@ -2073,6 +2109,7 @@ fn request_for_endpoint(
     request.api = config.api.clone();
     request.provider = config.provider.clone();
     request.model = config.model.clone();
+    request.max_tokens = config.max_tokens;
     request
 }
 
@@ -2187,6 +2224,34 @@ fn response_content_text(content: &[verlet_history::CanonicalContent]) -> String
         .join("")
 }
 
+struct TurnEndpointRetention<'a> {
+    runtime: &'a AgentLoop,
+    turn_id: &'a str,
+    preserve: bool,
+}
+
+impl<'a> TurnEndpointRetention<'a> {
+    fn new(runtime: &'a AgentLoop, turn_id: &'a str) -> Self {
+        Self {
+            runtime,
+            turn_id,
+            preserve: false,
+        }
+    }
+
+    fn preserve(&mut self) {
+        self.preserve = true;
+    }
+}
+
+impl Drop for TurnEndpointRetention<'_> {
+    fn drop(&mut self) {
+        if !self.preserve {
+            self.runtime.forget_turn_endpoint(self.turn_id);
+        }
+    }
+}
+
 async fn run_provider_turn(
     runtime: &AgentLoop,
     endpoint: &ResolvedTurnEndpoint,
@@ -2209,6 +2274,8 @@ async fn run_provider_turn(
         crate::kernel::runtime_host::runtime_api::ThreadCommand,
     >,
 ) -> bool {
+    runtime.retain_turn_endpoint(&turn_id, endpoint);
+    let mut endpoint_retention = TurnEndpointRetention::new(runtime, &turn_id);
     let mut tool_rounds = match persisted_tool_rounds_for_turn(
         services,
         coordinates,
@@ -2345,6 +2412,7 @@ async fn run_provider_turn(
             .iter()
             .any(|pending| pending.subject.turn_id == turn_id)
         {
+            endpoint_retention.preserve();
             let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
             return false;
         }
@@ -2384,6 +2452,7 @@ async fn run_provider_turn(
             .await
             {
                 ToolBatchAwaitOutcome::Completed(Ok(ToolAppendOutcome::Suspended)) => {
+                    endpoint_retention.preserve();
                     let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     return false;
                 }
@@ -2642,7 +2711,7 @@ async fn run_provider_turn(
                     let text = text_from_message(&message);
                     last_assistant_text = Some(text.clone());
                     let tool_calls = tool_calls_from_message(&message);
-                    if !runtime.config.stream
+                    if !endpoint.config.stream
                         && let Some(usage) = usage_from_message(&message)
                     {
                         crate::kernel::runtime_host::runtime_events::emit_runtime_event(
@@ -2653,7 +2722,7 @@ async fn run_provider_turn(
                             },
                         );
                     }
-                    if !runtime.config.stream {
+                    if !endpoint.config.stream {
                         for tool_call in &tool_calls {
                             crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                                 events,
@@ -2681,7 +2750,7 @@ async fn run_provider_turn(
                             let assistant_entry_id = entry.entry_id;
                             let _ = events
                                 .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::CanonicalMirror { thread_id, entry });
-                            if !runtime.config.stream {
+                            if !endpoint.config.stream {
                                 emit_non_stream_content_events(events, coordinates, &message);
                             }
                             if !text.is_empty() {
@@ -2858,6 +2927,7 @@ async fn run_provider_turn(
             return true;
         }
         if suspended_after_tools {
+            endpoint_retention.preserve();
             let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
             return false;
         }

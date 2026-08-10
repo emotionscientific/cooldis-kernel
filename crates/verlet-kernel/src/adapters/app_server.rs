@@ -617,12 +617,14 @@ pub(crate) struct ActiveModelSelection {
 }
 
 pub(crate) struct AppServerTurnEndpointRouter {
-    current: std::sync::RwLock<Option<crate::adapters::agent_loop::ResolvedTurnEndpoint>>,
-    cache: tokio::sync::Mutex<
-        std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, crate::adapters::agent_loop::ResolvedTurnEndpoint>,
-        >,
+    state: std::sync::RwLock<AppServerTurnEndpointState>,
+}
+
+struct AppServerTurnEndpointState {
+    current: Option<crate::adapters::agent_loop::ResolvedTurnEndpoint>,
+    cache: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, crate::adapters::agent_loop::ResolvedTurnEndpoint>,
     >,
 }
 
@@ -636,8 +638,10 @@ impl AppServerTurnEndpointRouter {
                 .insert(endpoint.config.model.clone(), endpoint.clone());
         }
         Self {
-            current: std::sync::RwLock::new(initial),
-            cache: tokio::sync::Mutex::new(cache),
+            state: std::sync::RwLock::new(AppServerTurnEndpointState {
+                current: initial,
+                cache,
+            }),
         }
     }
 
@@ -646,35 +650,54 @@ impl AppServerTurnEndpointRouter {
         provider_id: &str,
         model: &str,
     ) -> Option<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
-        self.cache
-            .lock()
-            .await
+        self.read_state()
+            .cache
             .get(provider_id)
             .and_then(|models| models.get(model))
             .cloned()
     }
 
-    async fn insert(&self, endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) {
-        self.cache
-            .lock()
-            .await
+    #[cfg(test)]
+    fn preload_for_test(&self, endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) {
+        self.write_state()
+            .cache
             .entry(endpoint.config.provider.clone())
             .or_insert_with(std::collections::BTreeMap::new)
             .insert(endpoint.config.model.clone(), endpoint);
     }
 
     async fn invalidate(&self, provider_id: &str) {
-        self.cache.lock().await.remove(provider_id);
+        self.write_state().cache.remove(provider_id);
     }
 
-    fn swap(&self, endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) {
-        *self.current.write().unwrap() = Some(endpoint);
+    fn activate(&self, endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) {
+        let mut state = self.write_state();
+        state
+            .cache
+            .entry(endpoint.config.provider.clone())
+            .or_insert_with(std::collections::BTreeMap::new)
+            .insert(endpoint.config.model.clone(), endpoint.clone());
+        state.current = Some(endpoint);
+    }
+
+    fn read_state(&self) -> std::sync::RwLockReadGuard<'_, AppServerTurnEndpointState> {
+        match self.state.read() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write_state(&self) -> std::sync::RwLockWriteGuard<'_, AppServerTurnEndpointState> {
+        match self.state.write() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
 impl crate::adapters::agent_loop::TurnEndpointRouter for AppServerTurnEndpointRouter {
     fn resolve(&self) -> Option<crate::adapters::agent_loop::ResolvedTurnEndpoint> {
-        self.current.read().unwrap().clone()
+        self.read_state().current.clone()
     }
 }
 
@@ -706,6 +729,14 @@ struct VerletAppServerInner {
     /// goes through this lock instead. Migrating those reads is EMO-558
     active_model: tokio::sync::RwLock<ActiveModelSelection>,
     turn_endpoint_router: std::sync::Arc<AppServerTurnEndpointRouter>,
+    /// Serializes selection with provider/auth mutations so validation,
+    /// endpoint construction, cache invalidation, and activation form one
+    /// linearizable control-plane transition.
+    model_mutation: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// False for injected runtime factories that do not carry the endpoint
+    /// router. Such constructions retain legacy runtime behavior and must not
+    /// report a model selection that their provider loop cannot honor.
+    model_selection_enabled: bool,
     capsule_bindings: CapsuleBindingsConfig,
     agent_registry_root: std::path::PathBuf,
     blob_registry_root: std::path::PathBuf,
@@ -1170,7 +1201,12 @@ impl VerletAppServer {
                     model_provider: config.model_provider,
                     provider: config.provider,
                 }),
+                model_selection_enabled: crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+                    turn_endpoint_router.as_ref(),
+                )
+                .is_some(),
                 turn_endpoint_router,
+                model_mutation: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 capsule_bindings: config.capsule_bindings,
                 agent_registry_root: config.agent_registry_root,
                 blob_registry_root: config.blob_registry_root,

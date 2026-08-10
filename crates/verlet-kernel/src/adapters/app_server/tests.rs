@@ -2618,6 +2618,22 @@ async fn model_list_enriches_store_models_with_auth_and_active_status() {
         )
         .with_auth_header(true)
         .with_model(verlet_metadata::provider_store::LlmProviderModelRecord::new("missing-model")),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "no-auth-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://no-auth.example.invalid/v1",
+        )
+        .with_auth_header(false)
+        .with_model(verlet_metadata::provider_store::LlmProviderModelRecord::new("no-auth-model")),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://collision.example.invalid/v1",
+        )
+        .with_auth_header(true)
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("store-only-model"),
+        ),
     ] {
         project_store.upsert_provider(provider).await.unwrap();
     }
@@ -2657,6 +2673,10 @@ async fn model_list_enriches_store_models_with_auth_and_active_status() {
         find("missing-fixture", "missing-model")["authStatus"],
         "missing"
     );
+    assert_eq!(
+        find("no-auth-fixture", "no-auth-model")["authStatus"],
+        "configured"
+    );
     let active = find(
         crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
         crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
@@ -2665,6 +2685,9 @@ async fn model_list_enriches_store_models_with_auth_and_active_status() {
     assert_eq!(active["isDefault"], true);
     assert_eq!(active["authStatus"], "configured");
     assert_eq!(active["displayName"], "Verlet Local Offline");
+    let encoded = serde_json::to_string(&models).unwrap();
+    assert!(!encoded.contains("stored-secret"));
+    assert!(!encoded.contains("env-secret"));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -2754,6 +2777,86 @@ async fn model_select_switches_active_model_and_restart_restores_launch_default(
             )
             .unwrap()["active"],
         true
+    );
+    let endpoint_before_rotation = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    app.dispatch_request(
+        &connection,
+        "modelProvider/auth/set",
+        Some(serde_json::json!({
+            "providerId": "select-fixture",
+            "apiKey": "rotated-select-secret",
+        })),
+    )
+    .await
+    .unwrap();
+    let endpoint_after_rotation = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            &endpoint_before_rotation.client,
+            &endpoint_after_rotation.client,
+        ),
+        "rotating active auth must replace the future-turn endpoint snapshot"
+    );
+    let auth_delete_error = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/delete",
+            Some(serde_json::json!({ "providerId": "select-fixture" })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(auth_delete_error.code, -32602);
+    assert!(auth_delete_error.message.contains("requires an API key"));
+    assert!(
+        app.inner
+            .user_metadata_store
+            .get_credential("select-fixture")
+            .await
+            .unwrap()
+            .is_some(),
+        "failed active auth deletion must roll the credential back"
+    );
+    let provider_update_error = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/upsert",
+            Some(serde_json::json!({
+                "provider": {
+                    "providerId": "select-fixture",
+                    "api": "open_ai_chat_completions",
+                    "baseUrl": "https://replacement.example.invalid/v1",
+                    "authHeader": true,
+                    "models": [{ "modelId": "select-model" }],
+                }
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(provider_update_error.code, -32602);
+    assert!(
+        provider_update_error
+            .message
+            .contains("select a different provider")
+    );
+    let provider_delete_error = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/delete",
+            Some(serde_json::json!({ "providerId": "select-fixture" })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(provider_delete_error.code, -32602);
+    assert!(
+        provider_delete_error
+            .message
+            .contains("select a different provider")
     );
     drop(connection);
     drop(outbound_rx);
@@ -2863,6 +2966,32 @@ async fn model_select_rejects_missing_auth_without_changing_active_model() {
 }
 
 #[tokio::test]
+async fn model_select_rejects_injected_runtime_factories_without_endpoint_routing() {
+    let app = test_app_with_provider_and_capsule_bindings(
+        std::sync::Arc::new(InspectingCapsuleClient::default()),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    )
+    .await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+                "model": crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
+            })),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, -32602);
+    assert!(error.message.contains("no turn endpoint router"));
+}
+
+#[tokio::test]
 async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
     let root = unique_test_root("app-server-model-select-mid-turn");
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
@@ -2920,16 +3049,14 @@ async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
     let router = std::sync::Arc::new(
         crate::adapters::app_server::AppServerTurnEndpointRouter::new(Some(initial_endpoint)),
     );
-    router
-        .insert(crate::adapters::agent_loop::ResolvedTurnEndpoint {
-            config: crate::adapters::agent_loop::AgentLoopConfig::new(
-                verlet_history::ProviderApi::OpenAIChatCompletions,
-                "mid-turn-fixture",
-                "mid-turn-model",
-            ),
-            client: client.clone(),
-        })
-        .await;
+    router.preload_for_test(crate::adapters::agent_loop::ResolvedTurnEndpoint {
+        config: crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "mid-turn-fixture",
+            "mid-turn-model",
+        ),
+        client: client.clone(),
+    });
     let runtime_factory =
         crate::adapters::app_server::runtime_factory_from_provider_parts_with_turn_endpoint_router(
             runtime_config,
@@ -11816,6 +11943,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
             &root,
             &workspace,
             provider_client,
+            // lexicon-allow: capsule - existing app-server test config type
             crate::adapters::app_server::CapsuleBindingsConfig::default(),
             true,
         )
@@ -11850,6 +11978,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
         thread_id
     };
 
+    // lexicon-allow: capsule - existing app-server test fixture type
     let second_client = std::sync::Arc::new(SequencedStreamCapsuleClient::new([
         "restored completion one",
         "restored completion two",
@@ -11860,6 +11989,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
         &root,
         &workspace,
         provider_client,
+        // lexicon-allow: capsule - existing app-server test config type
         crate::adapters::app_server::CapsuleBindingsConfig::default(),
         true,
     )
@@ -12291,11 +12421,16 @@ async fn app_server_websocket_query_methods_are_callable() {
         operation_record_by_name(operations["data"].as_array().unwrap(), "lookup")["name"].as_str(),
         Some("lookup")
     );
-    assert!(
-        client.model_list().await.unwrap()["data"]
-            .as_array()
-            .is_some_and(|models| !models.is_empty())
-    );
+    let models = client.model_list_typed().await.unwrap();
+    assert!(!models.data.is_empty());
+    assert_eq!(models.data.iter().filter(|model| model.active).count(), 1);
+    let active = models.data.iter().find(|model| model.active).unwrap();
+    let selected = client
+        .model_select_typed(&active.provider_id, &active.model)
+        .await
+        .unwrap();
+    assert_eq!(selected.active.provider_id, active.provider_id);
+    assert_eq!(selected.active.model, active.model);
 
     let thread = client
         .thread_start(serde_json::json!({ "agentRef": "agent://wire-runner@latest" }))

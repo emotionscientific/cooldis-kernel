@@ -710,7 +710,9 @@ Params: `{ "provider": { "providerId": "...", "api": "open_ai_chat_completions",
 Result: `{ "provider": { ... } }` with the redacted stored record. This method
 creates or replaces provider metadata only. It rejects inline API keys and
 command-backed auth or header values; use `modelProvider/auth/set` for stored
-credentials.
+credentials. A catalog provider backing the active model cannot be replaced;
+select another provider first so the active endpoint and stored metadata cannot
+diverge.
 
 ### `modelProvider/delete`
 
@@ -718,7 +720,8 @@ Params: `{ "providerId": "wafer" }`.
 
 Result: `{ "deleted": true, "providerId": "wafer" }`. Deleting a provider also
 removes any user-stored credential for the same provider id and clears stale
-project-store credential rows if present.
+project-store credential rows if present. A catalog provider backing the active
+model cannot be deleted until another provider is selected.
 
 ### `modelProvider/auth/status`
 
@@ -728,6 +731,12 @@ Result: `{ "auth": { ... } | null, "data": [...], "nextCursor": null }`.
 Entries report `providerId`, optional `displayName`, whether a credential is
 configured, its non-secret source/label, and whether the provider uses an auth
 header. Credential values are never returned.
+
+`modelProvider/auth/set` and `modelProvider/auth/delete` serialize with
+`model/select`. When they target the active catalog provider, the app-server
+eagerly rebuilds and atomically replaces the future-turn endpoint. If deleting
+the credential would leave that provider unauthenticated, deletion fails and
+the credential is restored; an in-flight turn keeps its existing snapshot.
 
 ### `mcpSource/list`
 

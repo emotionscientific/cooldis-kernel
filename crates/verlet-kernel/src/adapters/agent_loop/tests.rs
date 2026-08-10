@@ -2310,6 +2310,69 @@ async fn turn_endpoint_router_snapshots_wire_and_record_coordinates_per_turn() {
 }
 
 #[tokio::test]
+async fn turn_endpoint_router_uses_selected_stream_mode_and_token_limit() {
+    let launch_client = std::sync::Arc::new(RecordingClient::default());
+    let selected_client = std::sync::Arc::new(StreamingClient::new(vec![vec![
+        verlet_provider::ProviderStreamEvent::TextDelta {
+            text: "selected stream reply".to_string(),
+        },
+        verlet_provider::ProviderStreamEvent::Done {
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
+        },
+    ]]));
+    let mut selected_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        "selected-provider",
+        "selected-model",
+    );
+    selected_config.max_tokens = 321;
+    selected_config.stream = true;
+    let router = std::sync::Arc::new(MutableTurnEndpointRouter::new(
+        crate::adapters::agent_loop::ResolvedTurnEndpoint {
+            config: selected_config,
+            client: selected_client.clone(),
+        },
+    ));
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(
+            crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::OpenAIResponses,
+                "launch-provider",
+                "launch-model",
+            ),
+            launch_client.clone(),
+        )
+        .with_turn_endpoint_router(router),
+    ));
+    let thread = host
+        .start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new(
+                "tenant_a",
+                "user_1",
+                "session_routed_stream",
+            ),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "use selected stream",
+    )
+    .await
+    .unwrap();
+    assert_output(&mut events, "selected stream reply").await;
+
+    let requests = selected_client.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_tokens, 321);
+    assert!(launch_client.requests().is_empty());
+}
+
+#[tokio::test]
 async fn runtime_applies_provider_context_policy_before_request() {
     let mut capabilities = verlet_provider::ProviderCapabilityRecord::for_api(
         verlet_history::ProviderApi::OpenAIResponses,
@@ -3235,6 +3298,70 @@ async fn manual_compaction_runs_hooks_and_replaces_context_with_model_summary() 
         read_plan_event.provenance.source_event_ids.first().copied(),
         Some(summary_event.id)
     );
+}
+
+#[tokio::test]
+async fn routed_compaction_uses_the_resolved_endpoints_token_limit() {
+    let launch_client = std::sync::Arc::new(RecordingClient::default());
+    let selected_client = std::sync::Arc::new(RecordingClient::with_responses(vec![
+        response_text("selected reply"),
+        response_text("selected summary"),
+    ]));
+    let mut selected_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        "selected-provider",
+        "selected-model",
+    );
+    selected_config.max_tokens = 333;
+    let router = std::sync::Arc::new(MutableTurnEndpointRouter::new(
+        crate::adapters::agent_loop::ResolvedTurnEndpoint {
+            config: selected_config,
+            client: selected_client.clone(),
+        },
+    ));
+    let host = crate::kernel::runtime_host::RuntimeHost::new(std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(
+            crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::OpenAIResponses,
+                "launch-provider",
+                "launch-model",
+            ),
+            launch_client.clone(),
+        )
+        .with_turn_endpoint_router(router),
+    ));
+    let thread = host
+        .start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new(
+                "tenant_a",
+                "user_1",
+                "session_routed_compaction",
+            ),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "hello")
+        .await
+        .unwrap();
+    assert_output(&mut events, "selected reply").await;
+    host.compact_thread(thread.context().coordinates.thread_id, "compact-1", None)
+        .await
+        .unwrap();
+    assert_compaction(
+        &mut events,
+        crate::kernel::compaction::CompactionTrigger::Manual,
+        "selected summary",
+    )
+    .await;
+
+    let requests = selected_client.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].max_tokens, 333);
+    assert_eq!(requests[1].max_tokens, 333);
+    assert!(launch_client.requests().is_empty());
 }
 
 #[tokio::test]
@@ -6587,6 +6714,111 @@ async fn resume_tool_call_consumes_decision_and_invokes_once() {
         2,
         "duplicate resume must not invoke or continue the tool twice"
     );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn resumed_tool_call_keeps_the_endpoint_snapshotted_by_the_original_turn() {
+    let registry = echo_registry("echo").await;
+    let launch_client = std::sync::Arc::new(RecordingClient::default());
+    let original_client = std::sync::Arc::new(RecordingClient::with_responses(vec![
+        response_tool_call_named("echo_search", serde_json::json!({"input": "verlet"})),
+        response_text("original endpoint resumed"),
+    ]));
+    let replacement_client =
+        std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
+            "replacement endpoint leaked",
+        )]));
+    let original_endpoint = crate::adapters::agent_loop::ResolvedTurnEndpoint {
+        config: crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::OpenAIResponses,
+            "original-provider",
+            "original-model",
+        ),
+        client: original_client.clone(),
+    };
+    let replacement_endpoint = crate::adapters::agent_loop::ResolvedTurnEndpoint {
+        config: crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "replacement-provider",
+            "replacement-model",
+        ),
+        client: replacement_client.clone(),
+    };
+    let router = std::sync::Arc::new(MutableTurnEndpointRouter::new(original_endpoint));
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(
+            crate::adapters::agent_loop::AgentLoopFactory::new(
+                crate::adapters::agent_loop::AgentLoopConfig::new(
+                    verlet_history::ProviderApi::OpenAIResponses,
+                    "launch-provider",
+                    "launch-model",
+                ),
+                launch_client.clone(),
+            )
+            .with_operation_registry(registry)
+            .with_turn_endpoint_router(router.clone()),
+        ),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new(
+                "tenant_a",
+                "user_1",
+                "session_sticky_resume",
+            ),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    append_tool_controller_bind_receipt(&store, &thread.context().coordinates, "echo_search").await;
+    append_witnessed_tool_suspension(
+        &store,
+        &thread.context().coordinates,
+        "snapshot-controller",
+        "turn-1",
+        "call_1|fc_1",
+        "approval-1",
+    )
+    .await;
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "use echo")
+        .await
+        .unwrap();
+    wait_for_thread_event(
+        &store,
+        &thread.context().coordinates,
+        verlet_history::EventKind::TurnWaiting,
+    )
+    .await;
+    router.set(replacement_endpoint);
+    append_witnessed_tool_decision(
+        &store,
+        &thread.context().coordinates,
+        "snapshot-controller",
+        "turn-1",
+        "call_1|fc_1",
+        crate::kernel::control_decision::ToolCallDecisionOutcomePayload::Allow,
+    )
+    .await;
+    host.resume_tool_call(
+        thread.context().coordinates.thread_id,
+        "turn-1",
+        "call_1|fc_1",
+    )
+    .await
+    .unwrap();
+    assert_output(&mut events, "original endpoint resumed").await;
+
+    let requests = original_client.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request.provider == "original-provider" && request.model == "original-model"
+    }));
+    assert!(replacement_client.requests().is_empty());
+    assert!(launch_client.requests().is_empty());
 }
 
 #[tokio::test]

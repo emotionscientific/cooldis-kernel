@@ -159,7 +159,6 @@ struct ChatSessionInfo {
     connection_label: String,
     cwd: String,
     model_label: String,
-    models: Vec<String>,
 }
 
 async fn run_chat_client<S>(
@@ -193,7 +192,6 @@ where
     let mut driver = ChatDriver {
         thread_id: thread.id,
         active_turn_id: None,
-        models: session.models,
     };
 
     let run_result = {
@@ -244,7 +242,6 @@ where
         connection_label,
         cwd,
         model_label: format!("{}/{}", active.provider_id, active.model),
-        models: model_labels,
     })
 }
 
@@ -253,7 +250,6 @@ where
 struct ChatDriver {
     thread_id: String,
     active_turn_id: Option<String>,
-    models: Vec<String>,
 }
 
 impl ChatDriver {
@@ -358,7 +354,8 @@ impl ChatDriver {
                 });
             }
             verlet_chat::Action::ListModels => {
-                let _ = events.send(verlet_chat::ChatEvent::Models(self.models.clone()));
+                let models = client.model_list_typed().await?;
+                let _ = events.send(verlet_chat::ChatEvent::Models(model_labels(&models)));
             }
         }
         Ok(())

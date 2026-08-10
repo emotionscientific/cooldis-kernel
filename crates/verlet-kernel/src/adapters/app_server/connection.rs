@@ -2262,6 +2262,9 @@ impl crate::adapters::app_server::VerletAppServer {
         params: ModelProviderUpsertParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let provider = model_provider_record_from_rpc(params.provider)?;
+        let _mutation = self.inner.model_mutation.lock().await;
+        self.reject_active_catalog_provider_mutation(&provider.provider_id, "update")
+            .await?;
         self.inner
             .metadata_store
             .upsert_provider(provider.clone())
@@ -2282,12 +2285,17 @@ impl crate::adapters::app_server::VerletAppServer {
         params: ModelProviderDeleteParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let provider_id = params.provider_id;
+        let mutation = self.inner.model_mutation.clone().lock_owned().await;
+        self.reject_active_catalog_provider_mutation(&provider_id, "delete")
+            .await?;
         self.model_provider_record(&provider_id).await?;
         let metadata_store = self.inner.metadata_store.clone();
         let user_metadata_store = self.inner.user_metadata_store.clone();
+        let turn_endpoint_router = self.inner.turn_endpoint_router.clone();
         let delete_provider_id = provider_id.clone();
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         if !self.inner.tasks.spawn(async move {
+            let _mutation = mutation;
             let result = async {
                 metadata_store
                     .delete_provider(&delete_provider_id)
@@ -2307,6 +2315,7 @@ impl crate::adapters::app_server::VerletAppServer {
                     .map_err(|err| {
                         internal_error(crate::adapters::app_server::provider_store_error(err))
                     })?;
+                turn_endpoint_router.invalidate(&delete_provider_id).await;
                 Ok::<(), JsonRpcErrorError>(())
             }
             .await;
@@ -2324,10 +2333,6 @@ impl crate::adapters::app_server::VerletAppServer {
                 format!("model provider deletion task failed: {error}"),
             ))
         })??;
-        self.inner
-            .turn_endpoint_router
-            .invalidate(&provider_id)
-            .await;
         Ok(serde_json::json!({ "deleted": true, "providerId": provider_id }))
     }
 
@@ -2372,7 +2377,16 @@ impl crate::adapters::app_server::VerletAppServer {
                 "modelProvider/auth/set requires a non-empty apiKey",
             ));
         }
+        let _mutation = self.inner.model_mutation.lock().await;
         let provider = self.model_provider_record(&params.provider_id).await?;
+        let previous = self
+            .inner
+            .user_metadata_store
+            .get_credential(&provider.provider_id)
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
         self.inner
             .user_metadata_store
             .set_credential(
@@ -2385,10 +2399,23 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(|err| {
                 internal_error(crate::adapters::app_server::provider_store_error(err))
             })?;
-        self.inner
-            .turn_endpoint_router
-            .invalidate(&provider.provider_id)
-            .await;
+        match self
+            .rebuild_active_catalog_provider_endpoint(&provider.provider_id)
+            .await
+        {
+            Ok(Some(endpoint)) => self.inner.turn_endpoint_router.activate(endpoint),
+            Ok(None) => {
+                self.inner
+                    .turn_endpoint_router
+                    .invalidate(&provider.provider_id)
+                    .await;
+            }
+            Err(error) => {
+                self.restore_model_provider_credential(&provider.provider_id, previous)
+                    .await?;
+                return Err(error);
+            }
+        }
         Ok(serde_json::json!({ "auth": self.model_provider_auth_json(&provider).await? }))
     }
 
@@ -2396,7 +2423,16 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: ModelProviderAuthDeleteParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let _mutation = self.inner.model_mutation.lock().await;
         let provider = self.model_provider_record(&params.provider_id).await?;
+        let previous = self
+            .inner
+            .user_metadata_store
+            .get_credential(&provider.provider_id)
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
         self.inner
             .user_metadata_store
             .delete_credential(&provider.provider_id)
@@ -2404,11 +2440,101 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(|err| {
                 internal_error(crate::adapters::app_server::provider_store_error(err))
             })?;
-        self.inner
-            .turn_endpoint_router
-            .invalidate(&provider.provider_id)
-            .await;
+        match self
+            .rebuild_active_catalog_provider_endpoint(&provider.provider_id)
+            .await
+        {
+            Ok(Some(endpoint)) => self.inner.turn_endpoint_router.activate(endpoint),
+            Ok(None) => {
+                self.inner
+                    .turn_endpoint_router
+                    .invalidate(&provider.provider_id)
+                    .await;
+            }
+            Err(error) => {
+                self.restore_model_provider_credential(&provider.provider_id, previous)
+                    .await?;
+                return Err(error);
+            }
+        }
         Ok(serde_json::json!({ "auth": self.model_provider_auth_json(&provider).await? }))
+    }
+
+    async fn reject_active_catalog_provider_mutation(
+        &self,
+        provider_id: &str,
+        operation: &str,
+    ) -> Result<(), JsonRpcErrorError> {
+        let active = self.inner.active_model.read().await;
+        if active.model_provider == provider_id
+            && matches!(
+                &active.provider,
+                crate::adapters::app_server::AppServerProviderConfig::CatalogOpenAIChatCompletions { .. }
+            )
+        {
+            return Err(jsonrpc_error(
+                -32602,
+                format!(
+                    "cannot {operation} active model provider {provider_id:?}; select a different provider first"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn rebuild_active_catalog_provider_endpoint(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<crate::adapters::agent_loop::ResolvedTurnEndpoint>, JsonRpcErrorError> {
+        let active = self.inner.active_model.read().await.clone();
+        if active.model_provider != provider_id
+            || !matches!(
+                &active.provider,
+                crate::adapters::app_server::AppServerProviderConfig::CatalogOpenAIChatCompletions { .. }
+            )
+        {
+            return Ok(None);
+        }
+        let auth_context = self.inner.instance_environment.provider_auth.resolve();
+        crate::adapters::app_server::resolved_turn_endpoint_from_provider_config(
+            &active.provider,
+            &active.model_provider,
+            &active.model,
+            &self.inner.metadata_store,
+            &self.inner.user_metadata_store,
+            &auth_context,
+        )
+        .await
+        .map(Some)
+        .map_err(|err| jsonrpc_error(-32602, err.to_string()))
+    }
+
+    async fn restore_model_provider_credential(
+        &self,
+        provider_id: &str,
+        credential: Option<verlet_metadata::provider_store::LlmProviderCredential>,
+    ) -> Result<(), JsonRpcErrorError> {
+        let result = match credential {
+            Some(credential) => {
+                self.inner
+                    .user_metadata_store
+                    .set_credential(provider_id, credential)
+                    .await
+            }
+            None => {
+                self.inner
+                    .user_metadata_store
+                    .delete_credential(provider_id)
+                    .await
+            }
+        };
+        result.map_err(|err| {
+            internal_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "failed to roll back model provider credential after endpoint rebuild failed: {err}"
+                ),
+            ))
+        })
     }
 
     async fn model_provider_record(
@@ -5129,6 +5255,13 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: ModelSelectParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        if !self.inner.model_selection_enabled {
+            return Err(jsonrpc_error(
+                -32602,
+                "model/select is unavailable because this app-server runtime factory has no turn endpoint router",
+            ));
+        }
+        let _mutation = self.inner.model_mutation.lock().await;
         let ModelSelectParams { provider_id, model } = params;
         let entries = self.model_list_json().await?;
         let entry = entries
@@ -5199,16 +5332,12 @@ impl crate::adapters::app_server::VerletAppServer {
                     )
                     .await
                     .map_err(|err| jsonrpc_error(-32602, err.to_string()))?;
-                self.inner
-                    .turn_endpoint_router
-                    .insert(endpoint.clone())
-                    .await;
                 endpoint
             }
         };
 
         let mut active_model = self.inner.active_model.write().await;
-        self.inner.turn_endpoint_router.swap(endpoint);
+        self.inner.turn_endpoint_router.activate(endpoint);
         *active_model = crate::adapters::app_server::ActiveModelSelection {
             model: model.clone(),
             model_provider: provider_id.clone(),
@@ -5256,19 +5385,21 @@ impl crate::adapters::app_server::VerletAppServer {
                 );
             }
         }
-        let active = self.inner.active_model.read().await.clone();
-        if !catalog_entries.iter().any(|entry| {
+        let launch_pair_in_catalog = catalog_entries.iter().any(|entry| {
             entry.provider_id == self.inner.model_provider && entry.model_id == self.inner.model
-        }) {
-            let display_name = provider_records
-                .get(&self.inner.model_provider)
-                .map(catalog_provider_display_name)
-                .unwrap_or_else(|| match &self.inner.provider {
-                    crate::adapters::app_server::AppServerProviderConfig::LocalOffline => {
-                        "Verlet Local Offline".to_string()
-                    }
-                    _ => format!("{} {}", self.inner.model_provider, self.inner.model),
-                });
+        });
+        let active = self.inner.active_model.read().await.clone();
+        if !launch_pair_in_catalog {
+            let display_name = match &self.inner.provider {
+                crate::adapters::app_server::AppServerProviderConfig::LocalOffline => {
+                    "Verlet Local Offline".to_string()
+                }
+                crate::adapters::app_server::AppServerProviderConfig::CatalogOpenAIChatCompletions { .. } => provider_records
+                    .get(&self.inner.model_provider)
+                    .map(catalog_provider_display_name)
+                    .unwrap_or_else(|| format!("{} {}", self.inner.model_provider, self.inner.model)),
+                _ => format!("{} {}", self.inner.model_provider, self.inner.model),
+            };
             catalog_entries.push(
                 crate::adapters::app_server::model_catalog::ModelCatalogEntry {
                     provider_id: self.inner.model_provider.clone(),
@@ -5310,10 +5441,32 @@ impl crate::adapters::app_server::VerletAppServer {
             .map(|entry| {
                 let is_active =
                     entry.provider_id == active.model_provider && entry.model_id == active.model;
-                let auth_status = auth_statuses
-                    .get(&entry.provider_id)
-                    .copied()
-                    .unwrap_or("configured");
+                let launch_only = !launch_pair_in_catalog
+                    && entry.provider_id == self.inner.model_provider
+                    && entry.model_id == self.inner.model;
+                let auth_status = if launch_only {
+                    "configured"
+                } else if let Some(provider) = provider_records.get(&entry.provider_id) {
+                    let base_status = if provider.auth_header {
+                        auth_statuses
+                            .get(&entry.provider_id)
+                            .copied()
+                            .unwrap_or("missing")
+                    } else {
+                        "configured"
+                    };
+                    let header_status =
+                        model_header_auth_status(provider, &entry.model_id, &auth_context);
+                    if base_status == "missing" || header_status == "missing" {
+                        "missing"
+                    } else if base_status == "env" || header_status == "env" {
+                        "env"
+                    } else {
+                        "configured"
+                    }
+                } else {
+                    "configured"
+                };
                 let mut value = configured_model_json(
                     &entry.provider_id,
                     &entry.model_id,
@@ -6335,6 +6488,41 @@ pub(super) fn catalog_provider_display_name(
         .display_name
         .clone()
         .unwrap_or_else(|| provider.provider_id.clone())
+}
+
+fn model_header_auth_status(
+    provider: &verlet_metadata::provider_store::LlmProviderRecord,
+    model_id: &str,
+    auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
+) -> &'static str {
+    let mut saw_environment = false;
+    let values = provider.headers.values().chain(
+        provider
+            .models
+            .iter()
+            .find(|model| model.model_id == model_id)
+            .into_iter()
+            .flat_map(|model| model.headers.values()),
+    );
+    for value in values {
+        match value {
+            verlet_metadata::provider_store::LlmProviderConfigValue::Literal { .. } => {}
+            verlet_metadata::provider_store::LlmProviderConfigValue::Env { name } => {
+                if !auth_context
+                    .environment
+                    .get(name)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return "missing";
+                }
+                saw_environment = true;
+            }
+            verlet_metadata::provider_store::LlmProviderConfigValue::Command { .. } => {
+                return "missing";
+            }
+        }
+    }
+    if saw_environment { "env" } else { "configured" }
 }
 
 fn missing_model_provider_auth_message(
