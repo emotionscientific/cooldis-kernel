@@ -75,6 +75,16 @@ impl std::fmt::Display for InstanceId {
     }
 }
 
+/// Bind policy for the host listener (EMO-564). The default keeps the
+/// loopback guard; a deployment that serves the host over a private
+/// network (Railway project networking) opts in explicitly through its
+/// host config. There is no "public bind" tier: nothing here terminates
+/// TLS, and the opt-in name says exactly what is being waived.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostListenerOptions {
+    pub allow_non_loopback: bool,
+}
+
 /// The host facade: owns the instances, the credential route table, and
 /// the listener + connection tasks. Cloning shares the one host.
 #[derive(Clone)]
@@ -241,7 +251,23 @@ impl VerletHost {
     /// credential. Registration after host shutdown is a no-op because a
     /// drained host cannot serve again.
     pub fn register_credential_route(&self, token: &str, instance: InstanceId) {
-        let digest = crate::daemon::identity::identity_token_digest(token);
+        self.register_credential_route_digest(
+            crate::daemon::identity::identity_token_digest(token),
+            instance,
+        );
+    }
+
+    /// Register the route for one credential by its digest (EMO-564): the
+    /// host deployment's config carries digests only, so the host process
+    /// never holds kernel access tokens. Same semantics as
+    /// [`VerletHost::register_credential_route`] minus the digest step; the
+    /// digest format is whatever `identity mint` printed
+    /// (`identity_token_digest` of the token).
+    pub fn register_credential_route_digest(
+        &self,
+        digest: impl Into<String>,
+        instance: InstanceId,
+    ) {
         let mut routes = self
             .inner
             .credential_routes
@@ -254,7 +280,7 @@ impl VerletHost {
         if self.inner.tasks.is_shutdown() {
             return;
         }
-        routes.insert(digest, instance);
+        routes.insert(digest.into(), instance);
     }
 
     /// Drop the route for one credential; presented again, it refuses per
@@ -284,6 +310,21 @@ impl VerletHost {
         &self,
         listener: tokio::net::TcpListener,
     ) -> VerletResult<()> {
+        self.serve_websocket_listener_with_options(listener, HostListenerOptions::default())
+            .await
+    }
+
+    /// [`VerletHost::serve_websocket_listener`] with an explicit bind
+    /// policy (EMO-564). `allow_non_loopback: true` is the deployment
+    /// opt-in for serving on a private network address (Railway project
+    /// networking): the credential-per-instance authentication carries the
+    /// boundary there; the loopback guard remains the unconfigured
+    /// default and its error message is unchanged.
+    pub async fn serve_websocket_listener_with_options(
+        &self,
+        listener: tokio::net::TcpListener,
+        options: HostListenerOptions,
+    ) -> VerletResult<()> {
         let shutdown = self.inner.shutdown.read().await;
         if *shutdown {
             return Err(host_error("Verlet host is shut down"));
@@ -293,7 +334,7 @@ impl VerletHost {
                 "failed to inspect Verlet host websocket listener: {error}"
             ))
         })?;
-        if !addr.ip().is_loopback() {
+        if !options.allow_non_loopback && !addr.ip().is_loopback() {
             return Err(host_error(format!(
                 "Verlet host websocket listen address {addr} is not loopback"
             )));
@@ -405,6 +446,9 @@ impl VerletHost {
 
     async fn route_tcp_stream(&self, stream: tokio::net::TcpStream) -> VerletResult<()> {
         let request = crate::adapters::app_server::peek_http_request(&stream).await?;
+        if request.as_ref().is_some_and(is_health_check_request) {
+            return respond_health_ok(stream).await;
+        }
         let digest = request
             .as_ref()
             .and_then(crate::adapters::app_server::request_bearer_token)
@@ -438,6 +482,28 @@ impl VerletHost {
 
 fn host_error(message: impl Into<String>) -> crate::kernel::runtime_host::VerletError {
     crate::kernel::runtime_host::VerletError::RuntimeFactory(message.into())
+}
+
+/// `GET /healthz` on the host listener (EMO-564): the deployment health
+/// probe. Matched before any credential handling; everything else
+/// unauthenticated keeps the 401 refusal shape.
+fn is_health_check_request(request: &crate::adapters::app_server::HttpRequestHead) -> bool {
+    // EMO-564 stub: match method GET and path exactly "/healthz" from the
+    // peeked request head; no other paths, no query strings. Until
+    // implemented, no request matches, so health probes fall through to
+    // the ordinary 401 refusal.
+    let _ = request;
+    false
+}
+
+/// Answer a health probe with a minimal `200 OK` (no body detail — the
+/// health endpoint discloses liveness only, never instance names or
+/// counts) and close the stream.
+async fn respond_health_ok(stream: tokio::net::TcpStream) -> VerletResult<()> {
+    // EMO-564: write a fixed HTTP/1.1 200 response with Connection: close,
+    // mirroring the refusal writer's I/O and error handling shape.
+    let _ = stream;
+    unimplemented!("EMO-564: write the fixed 200 health response")
 }
 
 #[cfg(test)]

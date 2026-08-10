@@ -7,6 +7,7 @@ mod coupling;
 mod daemon;
 mod debug_bind;
 mod debug_rpc;
+mod host;
 mod identity;
 mod import;
 mod rpc;
@@ -61,6 +62,7 @@ pub async fn run() -> crate::kernel::runtime_host::VerletResult<()> {
         "chat" => run_chat(args).await,
         "debug" => crate::cli::debug_rpc::run_debug(args).await,
         "daemon" => crate::cli::daemon::run_daemon(args).await,
+        "host" => crate::cli::host::run_host(args).await,
         "rpc" => crate::cli::rpc::run_rpc(args).await,
         other => Err(usage_error(format!(
             "unknown command {other:?}; use `verlet --help`"
@@ -231,6 +233,10 @@ fn print_command_help(path: &[String]) -> crate::kernel::runtime_host::VerletRes
         [command, subcommand, _action] if command == "daemon" && subcommand == "service" => {
             crate::cli::daemon::print_daemon_help()
         }
+        [command] if command == "host" => crate::cli::host::print_host_help(),
+        [command, subcommand] if command == "host" && subcommand == "run" => {
+            crate::cli::host::print_host_run_help()
+        }
         _ => {
             return Err(usage_error(format!(
                 "unknown help command {:?}; use `verlet commands`",
@@ -331,6 +337,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "verlet daemon service print [--target launchd|systemd] --config verlet.toml [--label com.verlet.daemon]",
     "verlet daemon service install [--target launchd|systemd] --config verlet.toml [--label com.verlet.daemon]",
     "verlet daemon service uninstall [--target launchd|systemd] [--label com.verlet.daemon]",
+    "verlet host run --config <host.toml>",
 ];
 
 fn print_help() {
