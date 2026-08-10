@@ -21,6 +21,8 @@ pub const GUTTER: u16 = 1;
 const MAX_COMPOSER_ROWS: u16 = 6;
 /// Rows the completion popup shows before it windows around the selection.
 const MAX_POPUP_ROWS: usize = 8;
+/// Rows the model picker shows before it windows around the selection.
+const MAX_PICKER_ROWS: usize = 10;
 /// Blank rows between two transcript items.
 const TRANSCRIPT_GAP: u16 = 1;
 
@@ -43,13 +45,18 @@ pub fn build(
     } else {
         popup_items.len().min(MAX_POPUP_ROWS) as u16 + 1
     };
+    let picker_h = app
+        .picker
+        .as_ref()
+        .map(|picker| picker.rows.len().min(MAX_PICKER_ROWS) as u16 + 2)
+        .unwrap_or(0);
     let working_h = if app.turn_active() { 2 } else { 0 };
     let composer_rows = app
         .composer
         .visual_height(width.saturating_sub(4))
         .clamp(1, MAX_COMPOSER_ROWS);
     let body_h = composer_rows + 2;
-    let bottom_h = working_h + popup_h + body_h + 1;
+    let bottom_h = working_h + popup_h + picker_h + body_h + 1;
     let transcript_h = area.height.saturating_sub(bottom_h).max(1);
 
     // Reconcile the scroll offset with this frame's dimensions, then stash
@@ -75,6 +82,9 @@ pub fn build(
     }
     if popup_h > 0 {
         root = root.fixed(popup_h, popup(app, &popup_items, theme));
+    }
+    if picker_h > 0 {
+        root = root.fixed(picker_h, picker(app, theme));
     }
     root = root.fixed(body_h, composer(app, theme, probe));
     root = root.fixed(1, footer(app, theme));
@@ -137,6 +147,65 @@ fn popup(app: &App, items: &[(String, String)], theme: &Theme) -> Element {
     )
 }
 
+/// The `/models` picker: a titled list of selectable models. Auth problems
+/// and the active selection are annotated per row; the width columns align
+/// on the longest display name.
+fn picker(app: &App, theme: &Theme) -> Element {
+    let Some(picker) = app.picker.as_ref() else {
+        return element(Spacer);
+    };
+    let pad = picker
+        .rows
+        .iter()
+        .map(|row| row.display_name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let rows: Vec<Line<'static>> = picker
+        .rows
+        .iter()
+        .map(|row| {
+            let mut spans = vec![
+                Span::styled(
+                    format!(
+                        "{}{:width$}  ",
+                        row.display_name,
+                        "",
+                        width = pad - row.display_name.chars().count()
+                    ),
+                    Style::default().fg(theme.text),
+                ),
+                Span::styled(
+                    format!("{}/{}", row.provider_id, row.model),
+                    theme.muted_style(),
+                ),
+            ];
+            if row.active {
+                spans.push(Span::styled(
+                    "  active",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            if row.auth_status == "missing" {
+                spans.push(Span::styled("  needs login", theme.muted_style()));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let title = Text::new(vec![Line::from(Span::styled(
+        "Select a model",
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+    ))]);
+    let list = SelectList::new(rows, &picker.state).viewport(MAX_PICKER_ROWS as u16);
+    element(
+        Flex::column()
+            .fixed(1, element(Spacer))
+            .fixed(1, element(title))
+            .grow(1, element(list)),
+    )
+}
+
 /// The rounded input box, with the caret placed by the host through `probe`.
 fn composer(app: &App, theme: &Theme, probe: &RectProbe) -> Element {
     let input = element(
@@ -165,7 +234,9 @@ fn composer(app: &App, theme: &Theme, probe: &RectProbe) -> Element {
 
 /// Key hints on the left; connection, thread, and turn state on the right.
 fn footer(app: &App, theme: &Theme) -> Element {
-    let hints = if app.popup.is_some() {
+    let hints = if app.picker.is_some() {
+        "  ↑↓ move   ⏎ select   esc dismiss"
+    } else if app.popup.is_some() {
         "  ↑↓ move   ⇥ complete   ⏎ run   esc dismiss"
     } else {
         // `PgUp` spelled out rather than `⇞⇟`: those glyphs are missing from

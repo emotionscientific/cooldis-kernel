@@ -673,20 +673,89 @@ fn renders_markdown_answers_with_code() {
     assert!(grid.contains("Done."), "trailing prose:\n{grid}");
 }
 
+fn model_rows() -> Vec<crate::ModelRow> {
+    vec![
+        crate::ModelRow {
+            provider_id: "provider".to_string(),
+            model: "model-a".to_string(),
+            display_name: "Model A".to_string(),
+            auth_status: "configured".to_string(),
+            active: true,
+        },
+        crate::ModelRow {
+            provider_id: "provider".to_string(),
+            model: "model-b".to_string(),
+            display_name: "Model B".to_string(),
+            auth_status: "missing".to_string(),
+            active: false,
+        },
+    ]
+}
+
 #[test]
-fn renders_models_panel_and_no_color_mode() {
+fn models_event_opens_the_picker_preselecting_the_active_row() {
     let mut app = app();
-    app.apply(ChatEvent::Models(vec![
-        "provider/model-a (default)".to_string(),
-        "provider/model-b".to_string(),
-    ]));
+    app.apply(ChatEvent::Models(model_rows()));
     let grid = render(&mut app, true);
-    assert!(grid.contains("Models"), "panel title:\n{grid}");
+    assert!(grid.contains("Select a model"), "picker title:\n{grid}");
+    assert!(grid.contains("Model A"), "display name row:\n{grid}");
     assert!(
-        grid.contains("provider/model-a (default)"),
-        "model row:\n{grid}"
+        grid.contains("provider/model-b"),
+        "coordinates row:\n{grid}"
     );
-    assert!(grid.contains("provider/model-b"), "model row:\n{grid}");
+    assert!(grid.contains("active"), "active marker:\n{grid}");
+    assert!(grid.contains("needs login"), "auth marker:\n{grid}");
+
+    // Enter on the preselected (active) row is a no-op notice, no action.
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("Select a model"), "picker closed:\n{grid}");
+}
+
+#[test]
+fn picker_selection_emits_select_model_and_esc_dismisses() {
+    let mut app = app();
+    app.apply(ChatEvent::Models(model_rows()));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::SelectModel {
+            provider_id: "provider".to_string(),
+            model: "model-b".to_string(),
+        }]
+    );
+
+    // Reopen, then Esc closes without selecting and without interrupting.
+    app.apply(ChatEvent::Models(model_rows()));
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("Select a model"), "picker closed:\n{grid}");
+}
+
+#[test]
+fn picker_swallows_typing_and_model_selected_updates_the_footer_label() {
+    let mut app = app();
+    app.apply(ChatEvent::Models(model_rows()));
+    type_text(&mut app, "stray keys");
+    assert!(
+        app.composer.is_empty(),
+        "composer must stay untouched while the picker is open"
+    );
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+
+    app.apply(ChatEvent::ModelSelected {
+        provider_id: "provider".to_string(),
+        model: "model-b".to_string(),
+    });
+    assert_eq!(app.meta.model_label, "provider/model-b");
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("model set to provider/model-b"),
+        "confirmation notice:\n{grid}"
+    );
 }
 
 #[test]

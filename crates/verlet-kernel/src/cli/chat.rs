@@ -223,8 +223,7 @@ where
     client.account_read().await?;
     let config = client.config_read(false).await?;
     let models = client.model_list_typed().await?;
-    let model_labels = model_labels(&models);
-    if model_labels.is_empty() {
+    if models.data.is_empty() {
         return Err(crate::cli::usage_error("app-server returned no models"));
     }
     let cwd = config
@@ -354,8 +353,17 @@ impl ChatDriver {
                 });
             }
             verlet_chat::Action::ListModels => {
+                // Fetched fresh on every open: auth status and the active
+                // flag change underneath a long-lived session.
                 let models = client.model_list_typed().await?;
-                let _ = events.send(verlet_chat::ChatEvent::Models(model_labels(&models)));
+                let _ = events.send(verlet_chat::ChatEvent::Models(model_rows(&models)));
+            }
+            verlet_chat::Action::SelectModel { provider_id, model } => {
+                let selected = client.model_select_typed(&provider_id, &model).await?;
+                let _ = events.send(verlet_chat::ChatEvent::ModelSelected {
+                    provider_id: selected.active.provider_id,
+                    model: selected.active.model,
+                });
             }
         }
         Ok(())
@@ -690,13 +698,26 @@ fn session_rows(threads: &serde_json::Value, current_id: &str) -> Vec<verlet_cha
         .collect()
 }
 
-fn model_labels(models: &crate::adapters::operator_client::OperatorModelList) -> Vec<String> {
+fn model_rows(
+    models: &crate::adapters::operator_client::OperatorModelList,
+) -> Vec<verlet_chat::ModelRow> {
     models
         .data
         .iter()
-        .map(|model| {
-            let suffix = if model.active { " (active)" } else { "" };
-            format!("{}/{}{}", model.provider_id, model.model, suffix)
+        .map(|model| verlet_chat::ModelRow {
+            provider_id: model.provider_id.clone(),
+            model: model.model.clone(),
+            display_name: model.display_name.clone(),
+            auth_status: match model.auth_status {
+                crate::adapters::operator_client::OperatorModelAuthStatus::Configured => {
+                    "configured".to_string()
+                }
+                crate::adapters::operator_client::OperatorModelAuthStatus::Env => "env".to_string(),
+                crate::adapters::operator_client::OperatorModelAuthStatus::Missing => {
+                    "missing".to_string()
+                }
+            },
+            active: model.active,
         })
         .collect()
 }
