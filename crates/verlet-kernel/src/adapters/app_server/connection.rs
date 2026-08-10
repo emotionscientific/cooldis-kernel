@@ -5281,30 +5281,35 @@ impl crate::adapters::app_server::VerletAppServer {
             .ok_or_else(|| {
                 jsonrpc_error(
                     -32602,
-                    format!("model {provider_id}/{model} was not found in model/list"),
+                    format!(
+                        "model {provider_id}/{model} was not found in model/list; choose a provider/model pair returned by model/list"
+                    ),
                 )
             })?;
+        let auth_context = self.inner.instance_environment.provider_auth.resolve();
+        let provider = self
+            .inner
+            .metadata_store
+            .get_provider(&provider_id)
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
         if entry.get("authStatus").and_then(serde_json::Value::as_str) == Some("missing") {
-            let provider = self
-                .inner
-                .metadata_store
-                .get_provider(&provider_id)
-                .await
-                .map_err(|err| {
-                    internal_error(crate::adapters::app_server::provider_store_error(err))
-                })?;
             return Err(jsonrpc_error(
                 -32602,
-                missing_model_provider_auth_message(&provider_id, provider.as_ref()),
+                missing_model_provider_auth_message(
+                    &provider_id,
+                    &model,
+                    provider.as_ref(),
+                    &auth_context,
+                ),
             ));
         }
 
         let launch_selection =
             provider_id == self.inner.model_provider && model == self.inner.model;
-        let provider_config = if launch_selection {
-            self.inner.provider.clone()
-        } else {
-            let provider = self.model_provider_record(&provider_id).await?;
+        let provider_config = if let Some(provider) = provider.as_ref() {
             let max_tokens = provider
                 .models
                 .iter()
@@ -5317,30 +5322,53 @@ impl crate::adapters::app_server::VerletAppServer {
                 max_tokens,
                 stream: true,
             }
+        } else if launch_selection {
+            self.inner.provider.clone()
+        } else {
+            return Err(jsonrpc_error(
+                -32602,
+                format!(
+                    "model provider {provider_id:?} is not configured; add it with modelProvider/upsert"
+                ),
+            ));
         };
-        let endpoint = match self
-            .inner
-            .turn_endpoint_router
-            .cached(&provider_id, &model)
-            .await
-        {
+        let discard_launch_endpoint = {
+            let active = self.inner.active_model.read().await;
+            active.model_provider == self.inner.model_provider
+                && active.model == self.inner.model
+                && !matches!(
+                    &active.provider,
+                    crate::adapters::app_server::AppServerProviderConfig::CatalogOpenAIChatCompletions { .. }
+                )
+                && (!launch_selection || provider.is_some())
+        };
+        let cached = if discard_launch_endpoint && launch_selection {
+            None
+        } else {
+            self.inner
+                .turn_endpoint_router
+                .cached(&provider_id, &model)
+                .await
+        };
+        let endpoint = match cached {
             Some(endpoint) => endpoint,
-            None => {
-                let auth_context = self.inner.instance_environment.provider_auth.resolve();
-                let endpoint =
-                    crate::adapters::app_server::resolved_turn_endpoint_from_provider_config(
-                        &provider_config,
-                        &provider_id,
-                        &model,
-                        &self.inner.metadata_store,
-                        &self.inner.user_metadata_store,
-                        &auth_context,
-                    )
-                    .await
-                    .map_err(|err| jsonrpc_error(-32602, err.to_string()))?;
-                endpoint
-            }
+            None => crate::adapters::app_server::resolved_turn_endpoint_from_provider_config(
+                &provider_config,
+                &provider_id,
+                &model,
+                &self.inner.metadata_store,
+                &self.inner.user_metadata_store,
+                &auth_context,
+            )
+            .await
+            .map_err(|err| jsonrpc_error(-32602, err.to_string()))?,
         };
+        if discard_launch_endpoint {
+            self.inner
+                .turn_endpoint_router
+                .invalidate_model(&self.inner.model_provider, &self.inner.model)
+                .await;
+        }
 
         let mut active_model = self.inner.active_model.write().await;
         self.inner.turn_endpoint_router.activate(endpoint);
@@ -6506,15 +6534,12 @@ fn model_header_auth_status(
     auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
 ) -> &'static str {
     let mut saw_environment = false;
-    let values = provider.headers.values().chain(
-        provider
-            .models
-            .iter()
-            .find(|model| model.model_id == model_id)
-            .into_iter()
-            .flat_map(|model| model.headers.values()),
-    );
-    for value in values {
+    let model = provider
+        .models
+        .iter()
+        .find(|model| model.model_id == model_id);
+    let headers = crate::adapters::app_server::merged_catalog_headers(provider, model);
+    for value in headers.values() {
         match value {
             verlet_metadata::provider_store::LlmProviderConfigValue::Literal { .. } => {}
             verlet_metadata::provider_store::LlmProviderConfigValue::Env { name } => {
@@ -6537,8 +6562,43 @@ fn model_header_auth_status(
 
 fn missing_model_provider_auth_message(
     provider_id: &str,
+    model_id: &str,
     provider: Option<&verlet_metadata::provider_store::LlmProviderRecord>,
+    auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
 ) -> String {
+    if provider_id == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
+        return format!(
+            "model provider {provider_id:?} is missing authentication; run `verlet auth login openai-codex`"
+        );
+    }
+    if let Some(provider) = provider {
+        let model = provider
+            .models
+            .iter()
+            .find(|model| model.model_id == model_id);
+        let headers = crate::adapters::app_server::merged_catalog_headers(provider, model);
+        for (header_name, value) in headers {
+            match value {
+                verlet_metadata::provider_store::LlmProviderConfigValue::Env { name }
+                    if !auth_context
+                        .environment
+                        .get(&name)
+                        .is_some_and(|value| !value.is_empty()) =>
+                {
+                    return format!(
+                        "model provider {provider_id:?} header {header_name:?} requires environment variable {name}; set {name} or update/remove the header with modelProvider/upsert"
+                    );
+                }
+                verlet_metadata::provider_store::LlmProviderConfigValue::Command { .. } => {
+                    return format!(
+                        "model provider {provider_id:?} header {header_name:?} uses unsupported command-backed resolution; update or remove the header with modelProvider/upsert"
+                    );
+                }
+                verlet_metadata::provider_store::LlmProviderConfigValue::Literal { .. }
+                | verlet_metadata::provider_store::LlmProviderConfigValue::Env { .. } => {}
+            }
+        }
+    }
     let env_name = provider.and_then(|provider| {
         if let verlet_metadata::provider_store::LlmProviderAuthConfig::Env { name } = &provider.auth
         {

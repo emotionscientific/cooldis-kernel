@@ -514,6 +514,13 @@ impl OpenAICodexProviderClient {
         )
     }
 
+    pub(crate) fn with_responses_url(
+        store: verlet_metadata::provider_store::SqliteMetadataStore,
+        responses_url: impl Into<String>,
+    ) -> Result<Self> {
+        Self::with_urls(store, TOKEN_URL, responses_url)
+    }
+
     fn with_urls(
         store: verlet_metadata::provider_store::SqliteMetadataStore,
         token_url: impl Into<String>,
