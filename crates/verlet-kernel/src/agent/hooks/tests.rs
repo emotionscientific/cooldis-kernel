@@ -55,6 +55,24 @@ async fn command_hook_handler_prefers_injected_shell() {
     .unwrap();
     std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
 
+    // A freshly written script can fail exec with ETXTBSY on Linux when a
+    // concurrent test's child briefly inherits the writing descriptor across
+    // its fork/exec window. Spin a discarded invocation until the file is
+    // executable so the pipeline run below cannot hit the race.
+    for attempt in 0..500u32 {
+        match std::process::Command::new(&shell)
+            .stdout(std::process::Stdio::null())
+            .status()
+        {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                assert!(attempt < 499, "injected shell stayed busy: {error}");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(error) => panic!("injected shell failed to exec: {error}"),
+        }
+    }
+
     let hook = crate::agent::hooks::CommandHookHandler::new(
         "injected-shell",
         crate::agent::hooks::HookEventName::SessionStart,
@@ -76,7 +94,12 @@ async fn command_hook_handler_prefers_injected_shell() {
         .run_session_start(request, |_| {})
         .await;
 
-    assert_eq!(outcome.additional_contexts, ["injected shell"]);
+    assert_eq!(
+        outcome.additional_contexts,
+        ["injected shell"],
+        "hook records: {:?}",
+        outcome.records
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
