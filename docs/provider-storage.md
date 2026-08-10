@@ -72,6 +72,12 @@ auth: stored credential or configured environment variable
 The seed writes provider/model metadata only. Actual API keys stay in
 `LlmProviderAuthStore` or the runtime/environment auth context.
 
+The built-in `openai-codex` seed is a documented public integration. It uses the
+OpenAI Responses protocol against the Codex backend and a small static model
+catalog. Its OAuth access token, refresh token, expiry, ChatGPT account id, and
+email are stored only as one credential record in the user auth store; no OAuth
+side file is created.
+
 Daemon config with no inline API key should select the catalog-backed provider
 path. The runtime then resolves auth from the metadata store or process
 environment using the priority order below.
@@ -89,9 +95,14 @@ Command-backed secrets are represented but not executed by default. A future
 executor-backed resolver can add command execution with explicit policy,
 timeouts, audit events, and cache semantics.
 
-OAuth credential records exist as a durable shape, but refresh is not part of
-the first implementation. Expired OAuth credentials currently fail closed rather
-than silently re-authenticating.
+The `openai-codex` client refreshes its OAuth credential within 60 seconds of
+expiry. Refresh is single-flight within a process and re-reads the durable store
+while holding the refresh gate, so concurrent callers adopt a token already
+rotated by another caller. Because OpenAI refresh tokens are single-use, a
+`refresh_token_reused` response deletes the unusable stored credential and tells
+the operator to run `verlet auth login openai-codex` again. Other refresh
+failures leave the credential intact and fail the request without exposing token
+material.
 
 ## Thread Metadata
 

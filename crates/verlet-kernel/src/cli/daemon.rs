@@ -736,6 +736,15 @@ pub(super) fn load_daemon_provider_config(
 ) -> crate::kernel::runtime_host::VerletResult<crate::cli::console::ChatProviderConfig> {
     match config.provider_name() {
         "local" | "local_offline" | "offline" => Ok(crate::cli::console::ChatProviderConfig::Local),
+        "openai-codex" | "openai_codex" => {
+            Ok(crate::cli::console::ChatProviderConfig::OpenAICodex {
+                model: config.model.clone().unwrap_or_else(|| {
+                    verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL.to_string()
+                }),
+                max_tokens: config.max_tokens.unwrap_or(4096),
+                stream: config.stream.unwrap_or(true),
+            })
+        }
         "bifrost" | "bifrost_openai" => {
             let env_file = config
                 .env_file
@@ -1107,7 +1116,7 @@ pub(super) fn load_daemon_provider_config(
             )
         }
         other => Err(crate::cli::usage_error(format!(
-            "unknown daemon provider {other:?}; expected local, bifrost_openai, openai_chat_completions, anthropic, anthropic_bedrock, or openai_compatible"
+            "unknown daemon provider {other:?}; expected local, openai-codex, bifrost_openai, openai_chat_completions, anthropic, anthropic_bedrock, or openai_compatible"
         ))),
     }
 }

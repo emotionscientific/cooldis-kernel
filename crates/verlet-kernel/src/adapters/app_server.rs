@@ -308,6 +308,18 @@ impl VerletAppServerConfig {
         self
     }
 
+    pub fn with_openai_codex(mut self, model: impl Into<String>) -> Self {
+        let model = model.into();
+        self.model = model.clone();
+        self.model_provider = verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID.to_string();
+        self.provider = AppServerProviderConfig::OpenAICodex {
+            model,
+            max_tokens: 4096,
+            stream: true,
+        };
+        self
+    }
+
     pub fn with_openai_chat_completions(
         mut self,
         provider: impl Into<String>,
@@ -557,6 +569,11 @@ fn is_false(value: &bool) -> bool {
 #[derive(Clone, Debug)]
 pub enum AppServerProviderConfig {
     LocalOffline,
+    OpenAICodex {
+        model: String,
+        max_tokens: u32,
+        stream: bool,
+    },
     BifrostOpenAIResponses {
         base_url: String,
         api_key: String,
@@ -2359,7 +2376,8 @@ async fn agent_manifest_provider_surface_from_parts(
             )
             .with_supports_streaming(false),
         ),
-        AppServerProviderConfig::BifrostOpenAIResponses { .. }
+        AppServerProviderConfig::OpenAICodex { .. }
+        | AppServerProviderConfig::BifrostOpenAIResponses { .. }
         | AppServerProviderConfig::OpenAIChatCompletions { .. }
         | AppServerProviderConfig::AnthropicMessages { .. }
         | AppServerProviderConfig::AnthropicBedrock { .. } => Ok(
@@ -2500,6 +2518,37 @@ where
                     selected_model,
                 )),
             )
+        }
+        AppServerProviderConfig::OpenAICodex {
+            model,
+            max_tokens,
+            stream,
+        } => {
+            let client = std::sync::Arc::new(
+                crate::openai_codex::OpenAICodexProviderClient::new(auth_store.clone()).map_err(
+                    |err| {
+                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                            "failed to build OpenAI Codex provider client: {err}"
+                        ))
+                    },
+                )?,
+            );
+            let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+                verlet_history::ProviderApi::OpenAIResponses,
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                model.clone(),
+            );
+            runtime_config.max_tokens = *max_tokens;
+            runtime_config.stream = *stream;
+            let secret_resolver = secret_resolver_from_config(config).await?;
+            Ok(runtime_factory_from_provider_parts_with_app_paths(
+                runtime_config,
+                client,
+                // lexicon-allow: capsule - existing app-server config field name
+                config.capsule_bindings.clone(),
+                secret_resolver,
+                config,
+            ))
         }
         AppServerProviderConfig::BifrostOpenAIResponses {
             base_url,

@@ -11,6 +11,34 @@ verlet chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>
 verlet chat [PROMPT] --provider <provider> [--model <model>] ...
 ```
 
+## OpenAI Codex With A ChatGPT Plan
+
+The `openai-codex` provider authenticates through OpenAI and charges usage to
+the signed-in user's ChatGPT plan. It does not use an OpenAI API key.
+
+```sh
+verlet auth login openai-codex
+verlet auth status openai-codex
+verlet chat --provider openai-codex
+```
+
+Login normally opens a browser and listens for the registered OAuth callback on
+`127.0.0.1:1455`. Use the device-code flow on a remote or headless machine, or
+when that port is unavailable:
+
+```sh
+verlet auth login openai-codex --device
+```
+
+Credentials are stored in the user provider store. `verlet auth status
+openai-codex` shows the account without exposing tokens, and `verlet auth delete
+openai-codex` signs the local Verlet installation out. Verlet refreshes expiring
+tokens automatically.
+
+The initial static catalog exposes `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6-luna`; `gpt-5.6-sol` is the default. A future catalog integration will
+replace this temporary curated list.
+
 ## Architecture
 
 The UI lives in the `verlet-chat` crate (`crates/verlet-chat`), built on

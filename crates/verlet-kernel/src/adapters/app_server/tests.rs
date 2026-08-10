@@ -2488,7 +2488,9 @@ async fn model_list_projects_catalog_provider_models() {
     );
     let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
         runtime_config,
+        // lexicon-allow: capsule - existing provider test client name
         std::sync::Arc::new(InspectingCapsuleClient::default()),
+        // lexicon-allow: capsule - existing app-server config type name
         crate::adapters::app_server::CapsuleBindingsConfig::default(),
     );
     let app =
@@ -3230,6 +3232,69 @@ async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
             .unwrap()["active"],
         true
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_list_projects_the_curated_openai_codex_models() {
+    let root = unique_test_root("app-server-openai-codex-model-list");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-openai-codex-model-list-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen, root.clone())
+            .with_openai_codex("gpt-5.6-terra");
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    verlet_metadata::provider_store::seed_default_llm_providers(&metadata_store)
+        .await
+        .unwrap();
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+        "gpt-5.6-terra",
+    );
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        std::sync::Arc::new(InspectingCapsuleClient::default()),
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let data = models["data"].as_array().unwrap();
+    // The merged listing also carries catalog and other store providers, so
+    // assert on the codex rows rather than the whole list.
+    let codex_ids: Vec<&str> = data
+        .iter()
+        .filter(|entry| entry["providerId"] == "openai-codex")
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(codex_ids, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+    let terra = data
+        .iter()
+        .find(|entry| entry["providerId"] == "openai-codex" && entry["id"] == "gpt-5.6-terra")
+        .unwrap();
+    assert_eq!(terra["isDefault"].as_bool(), Some(true));
     let _ = std::fs::remove_dir_all(root);
 }
 

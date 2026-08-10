@@ -40,6 +40,20 @@ Current built-in families:
 Adapters or clients that need gateway-specific behavior should override the
 capability record instead of smuggling quirks into canonical history.
 
+## OpenAI Codex Backend
+
+`openai-codex` reuses the `openai_responses` request, stream, response, and
+capability plumbing, but owns its authentication and endpoint policy. Each call
+loads a fresh OAuth credential from the user provider store, proactively
+refreshes it when needed, and sends the account-scoped request to
+`https://chatgpt.com/backend-api/codex/responses` with the bearer credential,
+ChatGPT account id, Responses beta header, and `originator: verlet`.
+
+This is deliberately a named provider client rather than a generic endpoint
+override: its ChatGPT-plan OAuth lifecycle and account-routing header are part
+of the integration contract. Canonical history and Responses wire compilation
+remain shared with the existing adapter.
+
 ## Fail-Closed Validation
 
 Provider dispatch rejects unsupported surfaces before wire dispatch. Validation
