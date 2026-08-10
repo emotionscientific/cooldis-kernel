@@ -1,3 +1,6 @@
+#[path = "support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 #[tokio::test]
 async fn daemon_run_serves_codex_remote_on_configured_unix_socket() {
     let smoke_id = uuid::Uuid::now_v7().simple().to_string();
@@ -105,7 +108,9 @@ struct DaemonChild {
 
 impl DaemonChild {
     async fn spawn(config_path: &std::path::Path) -> Self {
-        let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+        model_catalog_test_support::disable_for_tokio_command(&mut command);
+        let child = command
             .arg("daemon")
             .arg("run")
             .arg("--config")

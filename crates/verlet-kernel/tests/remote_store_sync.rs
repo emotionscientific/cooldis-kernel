@@ -7,6 +7,9 @@ use verlet::daemon::remote_store::lease::SyncCredentialAuthority as _;
 use verlet::daemon::remote_store::propagator::StreamPropagator as _;
 use verlet_history::EventStore as _;
 
+#[path = "support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 const LEASE_RACE_DST_SEED: u64 = 0x4290_0000_0000_0001;
 const OFFLINE_WINDOW_DST_SEED: u64 = 0x4290_0000_0000_0002;
 
@@ -1291,7 +1294,9 @@ provider = "local"
         escape_toml(sync_listen),
     );
     std::fs::write(&config_path, config).unwrap();
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut command);
+    let mut child = command
         .arg("daemon")
         .arg("run")
         .arg("--config")

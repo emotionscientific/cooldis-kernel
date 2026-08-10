@@ -43,7 +43,8 @@ blocks chat.
 
 The refresh endpoint defaults to `https://models.dev/api.json`. Set
 `VERLET_MODEL_CATALOG_URL` before starting the app-server to use a compatible
-endpoint instead. Catalog prices are informational model metadata only; they
+endpoint instead; setting it to an empty or whitespace-only value disables
+refresh entirely. Catalog prices are informational model metadata only; they
 are not the authority for cloud metering.
 
 ## Included Surface

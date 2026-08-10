@@ -2,6 +2,9 @@ use tokio::io::AsyncBufReadExt as _;
 use verlet::daemon::identity::IdentityAuthority as _;
 use verlet_history::EventStore as _;
 
+#[path = "support/model_catalog.rs"]
+mod model_catalog_test_support;
+
 static RPC_PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
@@ -65,7 +68,9 @@ async fn rpc_startup_lines(
     runtime_home: &std::path::Path,
     workspace: &std::path::Path,
 ) -> Vec<String> {
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut command);
+    let mut child = command
         .args([
             "rpc",
             "--listen",
@@ -372,6 +377,7 @@ struct DebugRpcServer {
 
 impl DebugRpcServer {
     async fn start(root: &std::path::Path, workspace: &std::path::Path) -> Self {
+        model_catalog_test_support::disable_in_process_refresh();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let listen = verlet::adapters::app_server::AppServerListenAddr::WebSocket(addr);
@@ -499,6 +505,7 @@ async fn wait_for_websocket(url: &str, token: &str) {
 
 async fn run_verlet<const N: usize>(args: [&str; N], token: Option<&str>) -> std::process::Output {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut command);
     command.args(args).stdin(std::process::Stdio::null());
     if let Some(token) = token {
         command.env("VERLET_APP_SERVER_TOKEN", token);

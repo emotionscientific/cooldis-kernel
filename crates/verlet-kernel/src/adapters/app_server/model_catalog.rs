@@ -118,29 +118,26 @@ struct CatalogRefreshOptions {
 }
 
 impl CatalogRefreshOptions {
-    fn for_runtime(state_home: std::path::PathBuf) -> Self {
-        Self::for_runtime_with_env(state_home, |name| std::env::var(name))
-    }
-
     fn for_runtime_with_env(
         state_home: std::path::PathBuf,
         read_env: impl FnOnce(&str) -> Result<String, std::env::VarError>,
-    ) -> Self {
-        let url = read_env(MODEL_CATALOG_URL_ENV)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL_CATALOG_URL.to_string());
+    ) -> Option<Self> {
+        let url = match read_env(MODEL_CATALOG_URL_ENV) {
+            Ok(value) if value.trim().is_empty() => return None,
+            Ok(value) => value,
+            Err(_) => DEFAULT_MODEL_CATALOG_URL.to_string(),
+        };
         let now_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        Self {
+        Some(Self {
             state_home,
             url,
             now_unix_secs,
             request_timeout: std::time::Duration::from_secs(4),
             retry_delays: jittered_retry_delays(),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -173,13 +170,33 @@ fn jittered_retry_delays() -> Vec<std::time::Duration> {
 pub(crate) fn spawn_runtime_refresh(
     tasks: &std::sync::Arc<super::lifecycle::InstanceTaskSet>,
     user_state_home: std::path::PathBuf,
-) {
-    let options = CatalogRefreshOptions::for_runtime(user_state_home);
-    tasks.spawn(async move {
+) -> bool {
+    spawn_runtime_refresh_with_env(tasks, user_state_home, |name| std::env::var(name))
+}
+
+fn spawn_runtime_refresh_with_env(
+    tasks: &std::sync::Arc<super::lifecycle::InstanceTaskSet>,
+    user_state_home: std::path::PathBuf,
+    read_env: impl FnOnce(&str) -> Result<String, std::env::VarError>,
+) -> bool {
+    let Some(options) = CatalogRefreshOptions::for_runtime_with_env(user_state_home, read_env)
+    else {
+        return false;
+    };
+    spawn_runtime_refresh_with_options(tasks, options)
+}
+
+fn spawn_runtime_refresh_with_options(
+    tasks: &std::sync::Arc<super::lifecycle::InstanceTaskSet>,
+    options: CatalogRefreshOptions,
+) -> bool {
+    // Abandonment is safe: awaits only cover network/sleep work, while every
+    // cache mutation is a non-awaiting atomic_write transaction.
+    tasks.spawn_cancellable(async move {
         if let Err(error) = refresh_catalog(&options).await {
             log::debug!("model catalog refresh failed; using cached or built-in data: {error}");
         }
-    });
+    })
 }
 
 fn built_in_snapshot() -> &'static ModelCatalogSnapshot {
@@ -780,7 +797,8 @@ mod tests {
             super::CatalogRefreshOptions::for_runtime_with_env(state_home.clone(), move |name| {
                 assert_eq!(name, super::MODEL_CATALOG_URL_ENV);
                 Ok(expected_url)
-            });
+            })
+            .expect("fixture URL enables refresh");
         options.now_unix_secs = FIRST_CHECK_SECS;
         options.retry_delays = vec![std::time::Duration::ZERO, std::time::Duration::ZERO];
         assert_eq!(options.url, server.url);
@@ -914,6 +932,51 @@ mod tests {
             FIRST_CHECK_SECS
         );
 
+        remove_test_state_home(&state_home);
+    }
+
+    #[test]
+    fn empty_runtime_url_disables_refresh_scheduling() {
+        let state_home = test_state_home("disabled");
+        let tasks = std::sync::Arc::new(super::super::lifecycle::InstanceTaskSet::new());
+
+        let scheduled = super::spawn_runtime_refresh_with_env(&tasks, state_home.clone(), |name| {
+            assert_eq!(name, super::MODEL_CATALOG_URL_ENV);
+            Ok(" \t ".to_string())
+        });
+
+        assert!(!scheduled);
+        assert_eq!(tasks.task_count(), 0);
+        assert!(!state_home.join(super::CATALOG_CACHE_DIR).exists());
+        remove_test_state_home(&state_home);
+    }
+
+    #[tokio::test]
+    async fn runtime_refresh_is_abandoned_at_instance_shutdown() {
+        let state_home = test_state_home("cancellable");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api.json", listener.local_addr().unwrap());
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let tasks = std::sync::Arc::new(super::super::lifecycle::InstanceTaskSet::new());
+        let mut options =
+            super::CatalogRefreshOptions::for_test(state_home.clone(), url, FIRST_CHECK_SECS);
+        options.request_timeout = std::time::Duration::from_secs(30);
+
+        assert!(super::spawn_runtime_refresh_with_options(&tasks, options));
+        accepted_rx.await.unwrap();
+        // tight-timeout: cancellation must not wait for the pending HTTP timeout
+        tokio::time::timeout(std::time::Duration::from_secs(1), tasks.shutdown())
+            .await
+            .expect("instance shutdown waited for the catalog request timeout");
+
+        server.abort();
+        let _ = server.await;
+        assert!(!state_home.join(super::CATALOG_CACHE_DIR).exists());
         remove_test_state_home(&state_home);
     }
 
