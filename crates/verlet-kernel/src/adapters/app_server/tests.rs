@@ -142,6 +142,10 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
             crate::daemon::identity::AuthorityClass::Host,
         ),
         (
+            "modelProvider/auth/setOAuth",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
             "modelProvider/auth/delete",
             crate::daemon::identity::AuthorityClass::Host,
         ),
@@ -1260,6 +1264,339 @@ async fn openai_codex_oauth_status_is_redacted_and_api_key_set_cannot_replace_it
         .await
         .unwrap();
     assert_eq!(deleted["auth"]["configured"], false);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_set_oauth_rotates_active_codex_endpoint_and_selects() {
+    let server = spawn_provider_sse_fixture(concat!(
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"SET_OAUTH_OK\"}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n",
+    ))
+    .await;
+    let root = unique_test_root("app-server-set-oauth-active-codex");
+    let config = local_model_select_test_config(&root, "set-oauth-active-codex");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let provider_id = verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID;
+    let mut provider = verlet_metadata::provider_store::default_openai_codex_llm_provider_record();
+    provider.base_url = format!("{}/backend-api/codex/responses", server.base_url);
+    app.inner
+        .metadata_store
+        .upsert_provider(provider)
+        .await
+        .unwrap();
+    app.inner
+        .user_metadata_store
+        .set_credential(
+            provider_id,
+            verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                access: "old-access".to_string(),
+                refresh: "old-refresh".to_string(),
+                expires_at_ms: verlet_history::now_ms() + 3_600_000,
+                account_id: Some("old-account".to_string()),
+                email: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let thread_id = start_model_select_test_thread(&app, &connection).await;
+    app.dispatch_request(
+        &connection,
+        "model/select",
+        Some(serde_json::json!({
+            "providerId": provider_id,
+            "model": verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL,
+        })),
+    )
+    .await
+    .unwrap();
+    let endpoint_before = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+
+    let set = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/setOAuth",
+            Some(serde_json::json!({
+                "providerId": provider_id,
+                "access": "new-access",
+                "refresh": "new-refresh",
+                "expiresAtMs": verlet_history::now_ms() + 7_200_000,
+                "accountId": "new-account",
+                "email": "new@example.com",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(set["auth"]["configured"], true);
+    assert_eq!(set["auth"]["source"], "stored");
+    let encoded = serde_json::to_string(&set).unwrap();
+    for secret in [
+        "new-access",
+        "new-refresh",
+        "new-account",
+        "new@example.com",
+    ] {
+        assert!(!encoded.contains(secret));
+    }
+    assert!(matches!(
+        app.inner
+            .user_metadata_store
+            .get_credential(provider_id)
+            .await
+            .unwrap(),
+        Some(verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+            access,
+            refresh,
+            account_id: Some(account_id),
+            email: Some(email),
+            ..
+        }) if access == "new-access"
+            && refresh == "new-refresh"
+            && account_id == "new-account"
+            && email == "new@example.com"
+    ));
+    let endpoint_after = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&endpoint_before.client, &endpoint_after.client),
+        "rotating active OAuth must replace the future-turn endpoint snapshot"
+    );
+
+    app.dispatch_request(
+        &connection,
+        "model/select",
+        Some(serde_json::json!({
+            "providerId": provider_id,
+            "model": verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL,
+        })),
+    )
+    .await
+    .unwrap();
+    let completed = start_and_wait_for_model_select_turn(
+        &app,
+        &connection,
+        &mut outbound_rx,
+        &thread_id,
+        "use the newly stored OAuth credential",
+    )
+    .await;
+    assert_eq!(
+        completed_turn_agent_text(&completed).as_deref(),
+        Some("SET_OAUTH_OK")
+    );
+    let request = server.request.await.unwrap().to_ascii_lowercase();
+    assert!(request.contains("authorization: bearer new-access"));
+    assert!(request.contains("chatgpt-account-id: new-account"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_set_oauth_rejects_api_key_provider_without_storing() {
+    let root = unique_test_root("app-server-set-oauth-api-key-provider");
+    let config = local_model_select_test_config(&root, "set-oauth-api-key-provider");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let provider_id = verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID;
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/setOAuth",
+            Some(serde_json::json!({
+                "providerId": provider_id,
+                "access": "must-not-store-access",
+                "refresh": "must-not-store-refresh",
+                "expiresAtMs": verlet_history::now_ms() + 3_600_000,
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(error.message.contains("modelProvider/auth/set"));
+    assert!(!error.message.contains("must-not-store-access"));
+    assert!(!error.message.contains("must-not-store-refresh"));
+    assert_eq!(
+        app.inner
+            .user_metadata_store
+            .get_credential(provider_id)
+            .await
+            .unwrap(),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_set_oauth_restores_previous_credential_on_rebuild_failure() {
+    let root = unique_test_root("app-server-set-oauth-rollback");
+    let config = local_model_select_test_config(&root, "set-oauth-rollback");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let provider_id = verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID;
+    let previous = verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+        access: "previous-access".to_string(),
+        refresh: "previous-refresh".to_string(),
+        expires_at_ms: verlet_history::now_ms() + 3_600_000,
+        account_id: Some("previous-account".to_string()),
+        email: Some("previous@example.com".to_string()),
+    };
+    app.inner
+        .user_metadata_store
+        .set_credential(provider_id, previous.clone())
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    app.dispatch_request(
+        &connection,
+        "model/select",
+        Some(serde_json::json!({
+            "providerId": provider_id,
+            "model": verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL,
+        })),
+    )
+    .await
+    .unwrap();
+    let mut provider = app
+        .inner
+        .metadata_store
+        .get_provider(provider_id)
+        .await
+        .unwrap()
+        .unwrap();
+    provider.base_url = "https://api.openai.com/v1/responses".to_string();
+    app.inner
+        .metadata_store
+        .upsert_provider(provider)
+        .await
+        .unwrap();
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/setOAuth",
+            Some(serde_json::json!({
+                "providerId": provider_id,
+                "access": "replacement-access",
+                "refresh": "replacement-refresh",
+                "expiresAtMs": verlet_history::now_ms() + 7_200_000,
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(!error.message.contains("replacement-access"));
+    assert!(!error.message.contains("replacement-refresh"));
+    assert_eq!(
+        app.inner
+            .user_metadata_store
+            .get_credential(provider_id)
+            .await
+            .unwrap(),
+        Some(previous)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_set_oauth_flips_model_list_auth_status() {
+    let root = unique_test_root("app-server-set-oauth-model-list");
+    let config = local_model_select_test_config(&root, "set-oauth-model-list");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let provider_id = verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID;
+    let codex_auth_statuses = |models: &serde_json::Value| {
+        models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["providerId"] == provider_id)
+            .map(|entry| entry["authStatus"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let missing = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        codex_auth_statuses(&missing)
+            .iter()
+            .all(|status| status == "missing")
+    );
+    app.dispatch_request(
+        &connection,
+        "modelProvider/auth/setOAuth",
+        Some(serde_json::json!({
+            "providerId": provider_id,
+            "access": "list-access",
+            "refresh": "list-refresh",
+            "expiresAtMs": verlet_history::now_ms() + 3_600_000,
+        })),
+    )
+    .await
+    .unwrap();
+    let configured = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        codex_auth_statuses(&configured)
+            .iter()
+            .all(|status| status == "configured")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_set_oauth_rejects_empty_tokens_before_mutation_lock() {
+    let root = unique_test_root("app-server-set-oauth-empty");
+    let config = local_model_select_test_config(&root, "set-oauth-empty");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let _mutation = app.inner.model_mutation.lock().await;
+
+    for (access, refresh) in [("   ", "refresh"), ("access", "\n\t")] {
+        // tight-timeout: rejection must return without waiting on the held mutation lock
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            app.dispatch_request(
+                &connection,
+                "modelProvider/auth/setOAuth",
+                Some(serde_json::json!({
+                    "providerId": verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                    "access": access,
+                    "refresh": refresh,
+                    "expiresAtMs": verlet_history::now_ms() + 3_600_000,
+                })),
+            ),
+        )
+        .await
+        .expect("empty OAuth tokens must be rejected before waiting on the mutation lock")
+        .unwrap_err();
+        assert_eq!(error.code, -32602);
+    }
     let _ = std::fs::remove_dir_all(root);
 }
 

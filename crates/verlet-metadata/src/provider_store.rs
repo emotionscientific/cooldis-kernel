@@ -333,9 +333,21 @@ impl LlmProviderAuthContext {
     }
 
     pub fn from_process_env() -> Self {
+        Self::from_env_vars(std::env::vars_os())
+    }
+
+    /// `std::env::vars()` panics on non-unicode values, and a foreign
+    /// non-UTF8 variable anywhere in the environment must not take down auth
+    /// resolution; such entries can never match a provider variable, so they
+    /// are skipped.
+    fn from_env_vars(vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>) -> Self {
         Self {
             runtime_api_keys: std::collections::BTreeMap::new(),
-            environment: std::env::vars().collect(),
+            environment: vars
+                .filter_map(|(name, value)| {
+                    Some((name.into_string().ok()?, value.into_string().ok()?))
+                })
+                .collect(),
         }
     }
 

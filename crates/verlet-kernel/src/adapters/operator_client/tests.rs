@@ -111,6 +111,37 @@ async fn operator_client_driver_runs_prompt_against_app_server() {
             .unwrap()
             .is_empty()
     );
+    let initial_auth = client.model_provider_auth_status_typed().await.unwrap();
+    assert!(initial_auth.auth.is_none());
+    assert!(
+        initial_auth
+            .data
+            .iter()
+            .any(|auth| auth.provider_id
+                == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
+    );
+    let api_key_auth = client
+        .model_provider_auth_set_typed(
+            verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID,
+            "operator-api-key",
+        )
+        .await
+        .unwrap();
+    assert!(api_key_auth.configured);
+    assert_eq!(api_key_auth.source.as_deref(), Some("stored"));
+    let oauth_auth = client
+        .model_provider_auth_set_oauth_typed(
+            verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            "operator-access",
+            "operator-refresh",
+            verlet_history::now_ms() + 3_600_000,
+            Some("operator-account"),
+            Some("operator@example.com"),
+        )
+        .await
+        .unwrap();
+    assert!(oauth_auth.configured);
+    assert_eq!(oauth_auth.label.as_deref(), Some("stored credential"));
 
     let completed = client
         .run_prompt("hello from copied tui", std::time::Duration::from_secs(5))

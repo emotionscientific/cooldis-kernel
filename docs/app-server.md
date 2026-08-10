@@ -824,11 +824,21 @@ Entries report `providerId`, optional `displayName`, whether a credential is
 configured, its non-secret source/label, and whether the provider uses an auth
 header. Credential values are never returned.
 
-`modelProvider/auth/set` and `modelProvider/auth/delete` serialize with
-`model/select`. When they target the active catalog provider, the app-server
-eagerly rebuilds and atomically replaces the future-turn endpoint. If deleting
-the credential would leave that provider unauthenticated, deletion fails and
-the credential is restored; an in-flight turn keeps its existing snapshot.
+### `modelProvider/auth/setOAuth`
+
+Params: `{ "providerId": "openai-codex", "access": "...", "refresh": "...", "expiresAtMs": 1720000000000, "accountId": "...", "email": "..." }`.
+`accountId` and `email` are optional. Access and refresh tokens must be
+non-empty. The method accepts only OAuth-backed providers; use
+`modelProvider/auth/set` for API-key providers.
+
+Result: `{ "auth": { ... } }` with the same redacted auth status returned by
+`modelProvider/auth/status`. Token and account values are never returned.
+
+`modelProvider/auth/set`, `modelProvider/auth/setOAuth`, and
+`modelProvider/auth/delete` serialize with `model/select`. When they target the
+active catalog provider, the app-server eagerly rebuilds and atomically replaces
+the future-turn endpoint. If rebuilding fails, the previous credential is
+restored; an in-flight turn keeps its existing snapshot.
 
 ### `mcpSource/list`
 

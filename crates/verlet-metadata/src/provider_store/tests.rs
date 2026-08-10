@@ -859,6 +859,32 @@ async fn command_auth_is_visible_but_not_executed_by_default() {
     ));
 }
 
+#[test]
+fn auth_context_skips_non_unicode_environment_entries_instead_of_panicking() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let non_unicode = std::ffi::OsString::from_vec(vec![b's', b'e', b'c', 0xff]);
+    let context = crate::provider_store::LlmProviderAuthContext::from_env_vars(
+        [
+            (
+                std::ffi::OsString::from("PLAIN_KEY"),
+                std::ffi::OsString::from("plain-value"),
+            ),
+            (
+                std::ffi::OsString::from("BROKEN_VALUE"),
+                non_unicode.clone(),
+            ),
+            (non_unicode, std::ffi::OsString::from("broken-name")),
+        ]
+        .into_iter(),
+    );
+    assert_eq!(
+        context.environment.get("PLAIN_KEY").map(String::as_str),
+        Some("plain-value")
+    );
+    assert_eq!(context.environment.len(), 1);
+}
+
 fn temp_db_path(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "{prefix}-{}.sqlite3",

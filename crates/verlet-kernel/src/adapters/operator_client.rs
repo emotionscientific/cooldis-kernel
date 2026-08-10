@@ -104,6 +104,31 @@ pub struct OperatorModelSelectResult {
     pub active: OperatorActiveModel,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorModelProviderAuth {
+    pub provider_id: String,
+    pub configured: bool,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorModelProviderAuthList {
+    #[serde(default)]
+    pub auth: Option<OperatorModelProviderAuth>,
+    pub data: Vec<OperatorModelProviderAuth>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct OperatorModelProviderAuthResult {
+    auth: OperatorModelProviderAuth,
+}
+
 #[derive(Clone, Debug)]
 pub struct OperatorCompletedTurn {
     pub thread_id: String,
@@ -281,6 +306,98 @@ where
         let value = self.model_select(provider_id, model).await?;
         serde_json::from_value(value)
             .map_err(|err| tui_error(format!("invalid model/select response: {err}")))
+    }
+
+    pub async fn model_provider_auth_status(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("modelProvider/auth/status", serde_json::json!({}))
+            .await
+    }
+
+    pub async fn model_provider_auth_status_typed(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorModelProviderAuthList> {
+        let value = self.model_provider_auth_status().await?;
+        serde_json::from_value(value)
+            .map_err(|err| tui_error(format!("invalid modelProvider/auth/status response: {err}")))
+    }
+
+    pub async fn model_provider_auth_set(
+        &mut self,
+        provider_id: &str,
+        api_key: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "modelProvider/auth/set",
+            serde_json::json!({
+                "providerId": provider_id,
+                "apiKey": api_key,
+            }),
+        )
+        .await
+    }
+
+    pub async fn model_provider_auth_set_typed(
+        &mut self,
+        provider_id: &str,
+        api_key: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorModelProviderAuth> {
+        let value = self.model_provider_auth_set(provider_id, api_key).await?;
+        serde_json::from_value::<OperatorModelProviderAuthResult>(value)
+            .map(|result| result.auth)
+            .map_err(|err| tui_error(format!("invalid modelProvider/auth/set response: {err}")))
+    }
+
+    pub async fn model_provider_auth_set_oauth(
+        &mut self,
+        provider_id: &str,
+        access: &str,
+        refresh: &str,
+        expires_at_ms: i64,
+        account_id: Option<&str>,
+        email: Option<&str>,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "modelProvider/auth/setOAuth",
+            serde_json::json!({
+                "providerId": provider_id,
+                "access": access,
+                "refresh": refresh,
+                "expiresAtMs": expires_at_ms,
+                "accountId": account_id,
+                "email": email,
+            }),
+        )
+        .await
+    }
+
+    pub async fn model_provider_auth_set_oauth_typed(
+        &mut self,
+        provider_id: &str,
+        access: &str,
+        refresh: &str,
+        expires_at_ms: i64,
+        account_id: Option<&str>,
+        email: Option<&str>,
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorModelProviderAuth> {
+        let value = self
+            .model_provider_auth_set_oauth(
+                provider_id,
+                access,
+                refresh,
+                expires_at_ms,
+                account_id,
+                email,
+            )
+            .await?;
+        serde_json::from_value::<OperatorModelProviderAuthResult>(value)
+            .map(|result| result.auth)
+            .map_err(|err| {
+                tui_error(format!(
+                    "invalid modelProvider/auth/setOAuth response: {err}"
+                ))
+            })
     }
 
     pub async fn config_read(
