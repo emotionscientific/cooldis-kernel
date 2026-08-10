@@ -100,7 +100,13 @@ fn working(app: &App, theme: &Theme) -> Element {
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" ({}s • Esc to interrupt)", app.elapsed_secs()),
+            // While the picker is open it owns Esc (dismiss, not interrupt),
+            // so the interrupt hint would lie.
+            if app.picker.is_some() {
+                format!(" ({}s)", app.elapsed_secs())
+            } else {
+                format!(" ({}s • Esc to interrupt)", app.elapsed_secs())
+            },
             theme.muted_style(),
         ),
     ]);
