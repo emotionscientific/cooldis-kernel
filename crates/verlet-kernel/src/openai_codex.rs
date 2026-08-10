@@ -496,13 +496,60 @@ fn credential_needs_refresh(expires_at_ms: i64, now_ms: i64) -> bool {
     expires_at_ms <= now_ms.saturating_add(60_000)
 }
 
+/// Provider-specific wire adapter for the ChatGPT-plan Codex endpoint.
+///
+/// The endpoint speaks the Responses protocol but does not accept every field
+/// supported by the public Responses API. Keep those differences here so the
+/// generic Responses adapter remains faithful to its own contract.
+#[derive(Clone)]
+struct OpenAICodexResponsesAdapter {
+    inner: verlet_provider::OpenAIResponsesAdapter,
+}
+
+impl OpenAICodexResponsesAdapter {
+    fn omit_unsupported_max_output_tokens(mut body: serde_json::Value) -> serde_json::Value {
+        if let Some(body) = body.as_object_mut() {
+            body.remove("max_output_tokens");
+        }
+        body
+    }
+}
+
+impl verlet_provider::ProviderWireAdapter for OpenAICodexResponsesAdapter {
+    fn api(&self) -> verlet_history::ProviderApi {
+        verlet_provider::ProviderWireAdapter::api(&self.inner)
+    }
+
+    fn build_request_body(
+        &self,
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<serde_json::Value> {
+        verlet_provider::ProviderWireAdapter::build_request_body(&self.inner, request)
+            .map(Self::omit_unsupported_max_output_tokens)
+    }
+
+    fn decode_response_body(
+        &self,
+        body: &serde_json::Value,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        verlet_provider::ProviderWireAdapter::decode_response_body(&self.inner, body)
+    }
+
+    fn decode_stream_events(
+        &self,
+        sse: &str,
+    ) -> verlet_provider::ProviderResult<Vec<verlet_provider::ProviderStreamEvent>> {
+        verlet_provider::ProviderWireAdapter::decode_stream_events(&self.inner, sse)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct OpenAICodexProviderClient {
     store: verlet_metadata::provider_store::SqliteMetadataStore,
     http: reqwest::Client,
     token_url: String,
     responses_url: String,
-    adapter: std::sync::Arc<verlet_provider::OpenAIResponsesAdapter>,
+    adapter: std::sync::Arc<OpenAICodexResponsesAdapter>,
 }
 
 impl OpenAICodexProviderClient {
@@ -535,9 +582,11 @@ impl OpenAICodexProviderClient {
             http,
             token_url: token_url.into(),
             responses_url: responses_url.into(),
-            adapter: std::sync::Arc::new(verlet_provider::OpenAIResponsesAdapter {
-                include_encrypted_reasoning: false,
-                reasoning_summary: verlet_provider::OpenAIReasoningSummary::Auto,
+            adapter: std::sync::Arc::new(OpenAICodexResponsesAdapter {
+                inner: verlet_provider::OpenAIResponsesAdapter {
+                    include_encrypted_reasoning: false,
+                    reasoning_summary: verlet_provider::OpenAIReasoningSummary::Auto,
+                },
             }),
         })
     }
@@ -760,7 +809,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use verlet_metadata::provider_store::LlmProviderAuthStore as _;
-    use verlet_provider::ProviderClient as _;
+    use verlet_provider::{ProviderClient as _, ProviderWireAdapter as _};
 
     static CALLBACK_TEST_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -1351,6 +1400,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_adapter_removes_only_max_output_tokens_from_complete_and_stream_requests() {
+        let inner = verlet_provider::OpenAIResponsesAdapter {
+            include_encrypted_reasoning: false,
+            reasoning_summary: verlet_provider::OpenAIReasoningSummary::Auto,
+        };
+        let adapter = OpenAICodexResponsesAdapter {
+            inner: inner.clone(),
+        };
+        let request = verlet_provider::ProviderRequest::new(
+            verlet_history::ProviderApi::OpenAIResponses,
+            verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            "gpt-5.6-sol",
+        );
+
+        let bodies = [
+            (
+                adapter.build_request_body(&request).unwrap(),
+                inner.build_request_body(&request).unwrap(),
+            ),
+            (
+                adapter.build_stream_request_body(&request).unwrap(),
+                inner.build_stream_request_body(&request).unwrap(),
+            ),
+        ];
+        for (codex_body, mut generic_body) in bodies {
+            assert_eq!(
+                generic_body
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("max_output_tokens"),
+                Some(serde_json::json!(request.max_tokens))
+            );
+            assert_eq!(codex_body, generic_body);
+        }
+    }
+
     #[tokio::test]
     async fn provider_reuses_responses_plumbing_with_codex_url_and_headers() {
         let server = fake_http_server(vec![(
@@ -1400,5 +1486,6 @@ mod tests {
         assert!(request.contains("openai-beta: responses=experimental"));
         assert!(request.contains("\"model\":\"gpt-5.6-sol\""));
         assert!(request.contains("\"store\":false"));
+        assert!(!request.contains("\"max_output_tokens\""));
     }
 }
