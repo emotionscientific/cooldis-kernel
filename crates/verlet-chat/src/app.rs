@@ -129,6 +129,9 @@ pub struct App {
     /// A model choice waiting on credentials: re-issued as
     /// [`Action::SelectModel`] once the provider's credential lands.
     pub(crate) pending_selection: Option<(String, String)>,
+    /// Submitted keys retained until one host reply so late generic errors
+    /// can be redacted after the user leaves the input step.
+    pub(crate) pending_key_redactions: Vec<(String, String)>,
     pub meta: SessionMeta,
     /// Turn state label for the footer: "idle", "running", "steered", ...
     pub turn_state: String,
@@ -165,6 +168,7 @@ impl App {
             picker: None,
             setup: None,
             pending_selection: None,
+            pending_key_redactions: Vec::new(),
             meta,
             turn_state: "idle".to_string(),
             turn_active: false,
@@ -540,8 +544,21 @@ impl App {
                     self.actions.push(Action::Compact);
                 }
             }
-            SlashCommand::Models => self.actions.push(Action::ListModels),
-            SlashCommand::Setup => self.actions.push(Action::ListProviders),
+            SlashCommand::Models => {
+                if matches!(
+                    self.setup,
+                    Some(SetupStep::AwaitModels { .. } | SetupStep::AwaitProviders { .. })
+                ) {
+                    self.setup = None;
+                    self.pending_selection = None;
+                }
+                self.actions.push(Action::ListModels);
+            }
+            SlashCommand::Setup => {
+                self.setup = None;
+                self.pending_selection = None;
+                self.actions.push(Action::ListProviders);
+            }
         }
     }
 
@@ -692,13 +709,6 @@ impl App {
                 self.follow();
             }
             ChatEvent::Models(rows) => {
-                // A model result supersedes completion and any older model
-                // result. Clear first so an empty refresh cannot leave stale
-                // selectable rows behind.
-                self.popup = None;
-                self.picker = None;
-                // The wizard's model step: the same picker, scoped to the
-                // provider that was just connected or chosen.
                 let rows = match self.setup.take() {
                     Some(SetupStep::AwaitModels { provider_id }) => {
                         let scoped: Vec<ModelRow> = rows
@@ -715,11 +725,17 @@ impl App {
                         }
                         scoped
                     }
+                    None => rows,
                     step => {
                         self.setup = step;
-                        rows
+                        return;
                     }
                 };
+                // A model result supersedes completion and any older model
+                // result. Clear first so an empty refresh cannot leave stale
+                // selectable rows behind.
+                self.popup = None;
+                self.picker = None;
                 if rows.is_empty() {
                     self.notice(Tone::Error, "no models available".to_string(), Vec::new());
                     return;
@@ -759,9 +775,7 @@ impl App {
                 }
             }
             ChatEvent::Info { title, body } => self.notice(Tone::Info, title, body),
-            ChatEvent::Error { title, body } => {
-                self.notice(Tone::Error, title, body);
-            }
+            ChatEvent::Error { title, body } => self.apply_error(title, body),
             ChatEvent::ResyncStarted => {
                 self.notice(
                     Tone::Warn,

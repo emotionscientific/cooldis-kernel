@@ -137,6 +137,44 @@ impl App {
     /// was waiting to route a "needs login" model row, jump straight to that
     /// provider's credential step.
     pub(crate) fn open_setup(&mut self, rows: Vec<ProviderRow>) {
+        let previous = self.setup.take();
+        match previous {
+            step @ Some(
+                SetupStep::Credential { .. }
+                | SetupStep::KeyInput { .. }
+                | SetupStep::LoginWait { .. }
+                | SetupStep::AwaitModels { .. },
+            ) => {
+                self.setup = step;
+                return;
+            }
+            Some(SetupStep::AwaitProviders { provider_id }) => {
+                if let Some(provider) = rows
+                    .iter()
+                    .find(|row| row.provider_id == provider_id)
+                    .cloned()
+                {
+                    self.popup = None;
+                    self.picker = None;
+                    self.setup = Some(SetupStep::Credential {
+                        rows,
+                        provider,
+                        state: SelectState::new(),
+                        error: None,
+                    });
+                    return;
+                }
+                self.pending_selection = None;
+                self.notice(
+                    Tone::Error,
+                    format!("provider {provider_id} is no longer available"),
+                    Vec::new(),
+                );
+            }
+            None | Some(SetupStep::Provider { .. }) => {
+                self.pending_selection = None;
+            }
+        }
         self.popup = None;
         self.picker = None;
         if rows.is_empty() {
@@ -147,18 +185,6 @@ impl App {
                 "no providers available".to_string(),
                 Vec::new(),
             );
-            return;
-        }
-        if let Some(SetupStep::AwaitProviders { provider_id }) = self.setup.as_ref()
-            && let Some(provider) = rows.iter().find(|row| row.provider_id == *provider_id)
-        {
-            let provider = provider.clone();
-            self.setup = Some(SetupStep::Credential {
-                rows,
-                provider,
-                state: SelectState::new(),
-                error: None,
-            });
             return;
         }
         let mut state = SelectState::new();
@@ -373,6 +399,7 @@ impl App {
         // typing into a submitted form would race the host's answer.
         if busy {
             if matches!(event, Event::Key(key) if key.plain() && key.code == KeyCode::Esc) {
+                self.pending_selection = None;
                 self.setup = Some(SetupStep::Credential {
                     rows,
                     provider,
@@ -434,8 +461,14 @@ impl App {
                 }
                 self.actions.push(Action::SetProviderKey {
                     provider_id: provider.provider_id.clone(),
-                    api_key: trimmed,
+                    api_key: trimmed.clone(),
                 });
+                self.pending_key_redactions
+                    .push((provider.provider_id.clone(), trimmed));
+                // Bound the belt-and-braces list if answers never arrive.
+                if self.pending_key_redactions.len() > 8 {
+                    self.pending_key_redactions.remove(0);
+                }
                 self.setup = Some(SetupStep::KeyInput {
                     rows,
                     provider,
@@ -486,6 +519,7 @@ impl App {
     ) {
         if matches!(event, Event::Key(key) if key.plain() && key.code == KeyCode::Esc) {
             self.actions.push(Action::CancelLogin);
+            self.pending_selection = None;
             self.setup = Some(SetupStep::Credential {
                 rows,
                 provider,
@@ -504,11 +538,16 @@ impl App {
 
     /// Fold a host credential answer into the wizard.
     pub(crate) fn apply_credential_result(&mut self, provider_id: String, error: Option<String>) {
+        let answered_provider = provider_id.clone();
         match self.setup.take() {
-            Some(SetupStep::KeyInput { rows, provider, .. })
-                if provider.provider_id == provider_id =>
-            {
+            Some(SetupStep::KeyInput {
+                rows,
+                provider,
+                busy: true,
+                ..
+            }) if provider.provider_id == provider_id => {
                 if let Some(message) = error {
+                    let message = self.redact_secrets(&message);
                     self.setup = Some(SetupStep::KeyInput {
                         rows,
                         provider,
@@ -524,6 +563,7 @@ impl App {
                 if provider.provider_id == provider_id =>
             {
                 if let Some(message) = error {
+                    let message = self.redact_secrets(&message);
                     self.setup = Some(SetupStep::Credential {
                         rows,
                         provider,
@@ -537,28 +577,30 @@ impl App {
             step => {
                 // The wizard moved on (or was dismissed): report out of band.
                 self.setup = step;
+                if self
+                    .pending_selection
+                    .as_ref()
+                    .is_some_and(|(pending_provider, _)| pending_provider == &provider_id)
+                {
+                    self.pending_selection = None;
+                }
                 match error {
-                    Some(message) => self.notice(
+                    Some(_) => self.notice(
                         Tone::Error,
                         format!("{provider_id}: credential failed"),
-                        vec![message],
+                        Vec::new(),
                     ),
-                    None => {
-                        self.notice(
-                            Tone::Info,
-                            format!("{provider_id}: credential saved"),
-                            Vec::new(),
-                        );
-                        // A wizard still showing pre-save rows is stale now.
-                        // (Await states are mid-fetch already; refreshing
-                        // them would clobber the answer they wait on.)
-                        if self.setup_visible() {
-                            self.actions.push(Action::ListProviders);
-                        }
-                    }
+                    None => self.notice(
+                        Tone::Info,
+                        format!("{provider_id}: credential saved"),
+                        Vec::new(),
+                    ),
                 }
             }
         }
+        // The submission is answered; its redaction entry has done its job.
+        self.pending_key_redactions
+            .retain(|(pending_provider, _)| pending_provider != &answered_provider);
     }
 
     /// A credential landed: re-issue the selection that routed us here, or
@@ -585,7 +627,12 @@ impl App {
     }
 
     pub(crate) fn apply_device_code(&mut self, verification_uri: String, user_code: String) {
-        if let Some(SetupStep::LoginWait { device_code, .. }) = self.setup.as_mut() {
+        if let Some(SetupStep::LoginWait {
+            method: LoginMethod::Device,
+            device_code,
+            ..
+        }) = self.setup.as_mut()
+        {
             *device_code = Some((verification_uri, user_code));
         }
     }
@@ -596,9 +643,92 @@ impl App {
             format!("{provider_id}: credential cleared"),
             Vec::new(),
         );
-        // The provider rows held by the wizard are stale now; refresh them.
-        if self.setup_visible() {
-            self.actions.push(Action::ListProviders);
+        match self.setup.as_ref() {
+            Some(SetupStep::Credential { provider, .. }) if provider.provider_id == provider_id => {
+                self.setup = Some(SetupStep::AwaitProviders {
+                    provider_id: provider_id.clone(),
+                });
+                self.actions.push(Action::ListProviders);
+            }
+            Some(SetupStep::Provider { rows, .. })
+                if rows.iter().any(|row| row.provider_id == provider_id) =>
+            {
+                self.actions.push(Action::ListProviders);
+            }
+            _ => {}
         }
     }
+
+    /// Replace any submitted key material occurring in `text`. Entries are
+    /// dropped on their matching [`crate::ChatEvent::CredentialResult`] and
+    /// capped at push time, so unmatched submissions keep redacting for the
+    /// rest of the session rather than expiring on unrelated errors.
+    pub(crate) fn redact_secrets(&self, text: &str) -> String {
+        let mut text = text.to_string();
+        for (_, secret) in &self.pending_key_redactions {
+            text = text.replace(secret, "[redacted]");
+        }
+        text
+    }
+
+    pub(crate) fn apply_error(&mut self, mut title: String, mut body: Vec<String>) {
+        title = self.redact_secrets(&title);
+        for line in &mut body {
+            *line = self.redact_secrets(line);
+        }
+        match self.setup.take() {
+            Some(SetupStep::KeyInput {
+                rows,
+                provider,
+                value,
+                busy,
+                error,
+            }) => {
+                let secret = value.trim();
+                if !secret.is_empty() {
+                    title = title.replace(secret, "[redacted]");
+                    for line in &mut body {
+                        *line = line.replace(secret, "[redacted]");
+                    }
+                }
+                if busy {
+                    self.setup = Some(SetupStep::KeyInput {
+                        rows,
+                        provider,
+                        value: String::new(),
+                        busy: false,
+                        error: Some(error_summary(&title, &body)),
+                    });
+                } else {
+                    self.setup = Some(SetupStep::KeyInput {
+                        rows,
+                        provider,
+                        value,
+                        busy,
+                        error,
+                    });
+                }
+            }
+            Some(SetupStep::LoginWait { rows, provider, .. }) => {
+                self.setup = Some(SetupStep::Credential {
+                    rows,
+                    provider,
+                    state: SelectState::new(),
+                    error: Some(error_summary(&title, &body)),
+                });
+            }
+            Some(SetupStep::AwaitModels { .. } | SetupStep::AwaitProviders { .. }) => {
+                self.setup = None;
+                self.pending_selection = None;
+            }
+            step => self.setup = step,
+        }
+        self.notice(Tone::Error, title, body);
+    }
+}
+
+fn error_summary(title: &str, body: &[String]) -> String {
+    body.first()
+        .map(|line| format!("{title}: {line}"))
+        .unwrap_or_else(|| title.to_string())
 }

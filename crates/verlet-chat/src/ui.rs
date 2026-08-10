@@ -289,21 +289,27 @@ fn setup_providers(
     theme: &Theme,
     width: u16,
 ) -> Element {
-    let content_w = width.saturating_sub(2);
+    let scrollbar_w = u16::from(rows.len() > MAX_PICKER_ROWS);
+    let content_w = width.saturating_sub(2).saturating_sub(scrollbar_w);
+    let max_suffix_w = u16::from(rows.iter().any(|row| row.active)) * 8;
     let max_name_w = rows
         .iter()
         .map(|row| tuika::width::str_cols(&row.display_name))
         .max()
         .unwrap_or(0);
-    let name_w = max_name_w.min(content_w / 2);
+    let name_w = max_name_w.min(content_w.saturating_sub(max_suffix_w.saturating_add(2)) / 2);
     let lines: Vec<Line<'static>> = rows
         .iter()
         .map(|row| {
+            let suffix_w = if row.active { 8 } else { 0 };
             let name = fit_columns(&row.display_name, name_w);
             let name_pad = name_w.saturating_sub(tuika::width::str_cols(&name));
             let status = fit_columns(
                 &provider_status(row),
-                content_w.saturating_sub(name_w).saturating_sub(2),
+                content_w
+                    .saturating_sub(name_w)
+                    .saturating_sub(2)
+                    .saturating_sub(suffix_w),
             );
             let connected = provider_connected(row);
             let mut spans = vec![
