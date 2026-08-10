@@ -12,10 +12,12 @@ mod model_catalog_test_support;
 mod support;
 
 const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CLOCK_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// EMO-564 process smoke: the config-driven CLI boots two managed
-/// instances, routes only by configured digests, and treats SIGTERM as a
-/// graceful successful shutdown that drains live connections.
+/// EMO-564/568 process smoke: the config-driven CLI boots two managed
+/// instances, routes only by configured digests, runs the default clock with
+/// per-instance opt-out, and drains live connections and clock tasks on
+/// SIGTERM.
 #[cfg(unix)]
 #[tokio::test]
 async fn host_run_boots_two_instances_and_drains_on_sigterm() {
@@ -68,6 +70,7 @@ cwd = "{}"
 tenant_id = "tenant-b"
 console_principal = "operator-b"
 hook_shell = "/bin/sh"
+clock = false
 route_digests = ["{}"]
 
 [instance.provider]
@@ -109,12 +112,14 @@ provider = "local_offline"
     })
     .await
     .expect("verlet host did not print its liveness line");
+    assert!(root.join("first/.verlet/queue/ingress.sqlite").is_file());
+    assert!(!root.join("second/.verlet/queue/ingress.sqlite").exists());
 
     let mut first = connect_rpc(addr, &first_token).await;
     let first_started = rpc_call(&mut first, 1, "thread/start", serde_json::json!({}))
         .await
         .unwrap();
-    let first_thread = first_started["thread"]["id"].as_str().unwrap();
+    let first_thread = first_started["thread"]["id"].as_str().unwrap().to_string();
     let mut second = connect_rpc(addr, &second_token).await;
     let cross_read = rpc_call(
         &mut second,
@@ -125,6 +130,42 @@ provider = "local_offline"
     .await
     .unwrap_err();
     assert_eq!(cross_read.code, -32001);
+    let second_started = rpc_call(&mut second, 3, "thread/start", serde_json::json!({}))
+        .await
+        .unwrap();
+    let second_thread = second_started["thread"]["id"].as_str().unwrap().to_string();
+    for (id, websocket, thread_id) in [
+        (4, &mut first, first_thread.as_str()),
+        (5, &mut second, second_thread.as_str()),
+    ] {
+        rpc_call(
+            websocket,
+            id,
+            "mandate/start",
+            serde_json::json!({
+                "threadId": thread_id,
+                "schedule": { "at": { "when": "2000-01-01T00:00:00Z" } },
+                "catchUp": "coalesce_missed",
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let fired = wait_for_control_event(&mut first, &first_thread, "timer.fired").await;
+    assert_eq!(fired["origin"].as_str(), Some("witnessed"));
+    let disabled_events = rpc_call(
+        &mut second,
+        1000,
+        "thread/events/list",
+        serde_json::json!({
+            "threadId": second_thread,
+            "stream": "control",
+            "kinds": ["timer.fired"],
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(disabled_events["data"].as_array().unwrap().is_empty());
     let unrouted = raw_websocket_response(addr, "not-in-host-config").await;
     assert!(unrouted.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
 
@@ -1390,6 +1431,36 @@ async fn rpc_call(
     })
     .await
     .expect("timed out waiting for host-routed RPC response")
+}
+
+async fn wait_for_control_event(
+    websocket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    thread_id: &str,
+    kind: &str,
+) -> serde_json::Value {
+    tokio::time::timeout(CLOCK_TEST_TIMEOUT, async {
+        for id in 100.. {
+            let page = rpc_call(
+                websocket,
+                id,
+                "thread/events/list",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "stream": "control",
+                    "kinds": [kind],
+                }),
+            )
+            .await
+            .unwrap();
+            if let Some(event) = page["data"].as_array().unwrap().first() {
+                return event.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        unreachable!()
+    })
+    .await
+    .unwrap_or_else(|_| panic!("host clock did not witness {kind} within hang-detection bound"))
 }
 
 async fn send_rpc_request(

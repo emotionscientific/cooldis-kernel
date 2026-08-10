@@ -91,7 +91,8 @@ The V1 work is focused on runtime primitives:
 
 - an embeddable multi-tenant host facade and `verlet host run` entry point with
   one authenticated listener, credential-digest-to-instance selection,
-  instance-owned authentication, and independently drainable lifecycles;
+  instance-owned authentication, default mandate clocks, and independently
+  drainable lifecycles;
 - agent manifest planning, publishing, listing, showing, and local running;
 - operation publication and ABI-backed invocation;
 - blob resource publication and folder-first prompt lowering;
