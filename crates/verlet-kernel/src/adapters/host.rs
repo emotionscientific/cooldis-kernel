@@ -488,22 +488,29 @@ fn host_error(message: impl Into<String>) -> crate::kernel::runtime_host::Verlet
 /// probe. Matched before any credential handling; everything else
 /// unauthenticated keeps the 401 refusal shape.
 fn is_health_check_request(request: &crate::adapters::app_server::HttpRequestHead) -> bool {
-    // EMO-564 stub: match method GET and path exactly "/healthz" from the
-    // peeked request head; no other paths, no query strings. Until
-    // implemented, no request matches, so health probes fall through to
-    // the ordinary 401 refusal.
-    let _ = request;
-    false
+    request.method() == "GET" && request.path() == "/healthz" && !request.has_query()
 }
 
 /// Answer a health probe with a minimal `200 OK` (no body detail — the
 /// health endpoint discloses liveness only, never instance names or
 /// counts) and close the stream.
-async fn respond_health_ok(stream: tokio::net::TcpStream) -> VerletResult<()> {
-    // EMO-564: write a fixed HTTP/1.1 200 response with Connection: close,
-    // mirroring the refusal writer's I/O and error handling shape.
-    let _ = stream;
-    unimplemented!("EMO-564: write the fixed 200 health response")
+async fn respond_health_ok(mut stream: tokio::net::TcpStream) -> VerletResult<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    crate::adapters::app_server::consume_http_request_headers(&mut stream).await?;
+    stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .await
+        .map_err(|error| {
+            host_error(format!(
+                "failed to write Verlet host health response: {error}"
+            ))
+        })?;
+    stream.shutdown().await.map_err(|error| {
+        host_error(format!(
+            "failed to close Verlet host health response: {error}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -674,5 +681,70 @@ mod tests {
         );
         host.shutdown().await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_requires_explicit_non_loopback_opt_in() {
+        let host = super::VerletHost::new();
+        let guarded = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let error = host.serve_websocket_listener(guarded).await.unwrap_err();
+        assert!(error.to_string().contains("is not loopback"), "{error}");
+
+        let allowed = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        host.serve_websocket_listener_with_options(
+            allowed,
+            super::HostListenerOptions {
+                allow_non_loopback: true,
+            },
+        )
+        .await
+        .unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn healthz_is_the_only_unauthenticated_success() {
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+
+        let host = super::VerletHost::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        host.serve_websocket_listener(listener).await.unwrap();
+
+        async fn request(addr: std::net::SocketAddr, target: &str) -> String {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(format!("GET {target} HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                stream.read_to_string(&mut response),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            response
+        }
+
+        let health = request(addr, "/healthz").await;
+        assert!(health.starts_with("HTTP/1.1 200 OK\r\n"), "{health}");
+        assert!(health.ends_with("\r\n\r\n"), "{health}");
+        assert!(health.contains("Content-Length: 0\r\n"), "{health}");
+
+        let other = request(addr, "/other").await;
+        assert!(
+            other.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{other}"
+        );
+        let queried = request(addr, "/healthz?detail=true").await;
+        assert!(
+            queried.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{queried}"
+        );
+
+        host.shutdown().await.unwrap();
     }
 }

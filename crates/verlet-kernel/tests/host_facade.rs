@@ -11,6 +11,135 @@ mod support;
 
 const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// EMO-564 process smoke: the config-driven CLI boots two managed
+/// instances, routes only by configured digests, and treats SIGTERM as a
+/// graceful successful shutdown that drains live connections.
+#[cfg(unix)]
+#[tokio::test]
+async fn host_run_boots_two_instances_and_drains_on_sigterm() {
+    use tokio::io::AsyncBufReadExt as _;
+
+    let root = test_root("host-run-process");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let first_roots =
+        verlet::adapters::app_server::instance::InstanceRoots::under(root.join("first"));
+    let second_roots =
+        verlet::adapters::app_server::instance::InstanceRoots::under(root.join("second"));
+    let first_token = mint_operator_credential(
+        &first_roots.state_home.join("session_history.sqlite3"),
+        "operator-a",
+    )
+    .await;
+    let second_token = mint_operator_credential(
+        &second_roots.state_home.join("session_history.sqlite3"),
+        "operator-b",
+    )
+    .await;
+    let port_reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = port_reservation.local_addr().unwrap();
+    drop(port_reservation);
+    let config_path = root.join("host.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[listen]
+addr = "{addr}"
+
+[[instance]]
+id = "first"
+root = "{}"
+cwd = "{}"
+tenant_id = "tenant-a"
+console_principal = "operator-a"
+hook_shell = "/bin/sh"
+route_digests = ["{}"]
+
+[instance.provider]
+provider = "local_offline"
+
+[[instance]]
+id = "second"
+root = "{}"
+cwd = "{}"
+tenant_id = "tenant-b"
+console_principal = "operator-b"
+hook_shell = "/bin/sh"
+route_digests = ["{}"]
+
+[instance.provider]
+provider = "local_offline"
+"#,
+            root.join("first").display(),
+            workspace.display(),
+            verlet::daemon::identity::identity_token_digest(&first_token),
+            root.join("second").display(),
+            workspace.display(),
+            verlet::daemon::identity::identity_token_digest(&second_token),
+        ),
+    )
+    .unwrap();
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+        .args(["host", "run", "--config"])
+        .arg(&config_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let child_pid = child.id().unwrap() as libc::pid_t;
+    let mut stderr = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+    tokio::time::timeout(RPC_TIMEOUT, async {
+        loop {
+            let line =
+                stderr.next_line().await.unwrap().unwrap_or_else(|| {
+                    panic!("verlet host exited before printing its liveness line")
+                });
+            if line.contains("verlet host listening") {
+                assert!(line.contains(&addr.to_string()), "{line}");
+                assert!(line.contains("2 instances"), "{line}");
+                return;
+            }
+        }
+    })
+    .await
+    .expect("verlet host did not print its liveness line");
+
+    let mut first = connect_rpc(addr, &first_token).await;
+    let first_started = rpc_call(&mut first, 1, "thread/start", serde_json::json!({}))
+        .await
+        .unwrap();
+    let first_thread = first_started["thread"]["id"].as_str().unwrap();
+    let mut second = connect_rpc(addr, &second_token).await;
+    let cross_read = rpc_call(
+        &mut second,
+        2,
+        "thread/read",
+        serde_json::json!({ "threadId": first_thread }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(cross_read.code, -32001);
+    let unrouted = raw_websocket_response(addr, "not-in-host-config").await;
+    assert!(unrouted.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+
+    // SAFETY: `child_pid` is the live child spawned above and SIGTERM is the
+    // production shutdown signal this process smoke is proving.
+    assert_eq!(unsafe { libc::kill(child_pid, libc::SIGTERM) }, 0);
+    let status = tokio::time::timeout(RPC_TIMEOUT, child.wait())
+        .await
+        .expect("verlet host did not exit after SIGTERM")
+        .unwrap();
+    assert!(status.success(), "host process exited with {status}");
+    assert!(websocket_ended(&mut first).await);
+    assert!(websocket_ended(&mut second).await);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// Criterion: host serves two instances through one listener; each
 /// credential reaches only its own instance.
 #[tokio::test]

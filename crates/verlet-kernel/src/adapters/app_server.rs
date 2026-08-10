@@ -2705,7 +2705,22 @@ async fn bind_websocket_listener(
 pub(crate) struct HttpRequestHead {
     method: String,
     path: String,
+    has_query: bool,
     headers: Vec<(String, String)>,
+}
+
+impl HttpRequestHead {
+    pub(crate) fn method(&self) -> &str {
+        &self.method
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn has_query(&self) -> bool {
+        self.has_query
+    }
 }
 
 pub(crate) async fn peek_http_request(
@@ -2797,11 +2812,10 @@ fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next()?.to_string();
     let target = parts.next()?;
-    let path = target
+    let (path, has_query) = target
         .split_once('?')
-        .map(|(path, _)| path)
-        .unwrap_or(target)
-        .to_string();
+        .map(|(path, _)| (path, true))
+        .unwrap_or((target, false));
     let headers = lines
         .filter_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -2810,7 +2824,8 @@ fn parse_http_request_head(bytes: &[u8]) -> Option<HttpRequestHead> {
         .collect();
     Some(HttpRequestHead {
         method,
-        path,
+        path: path.to_string(),
+        has_query,
         headers,
     })
 }
@@ -2934,7 +2949,7 @@ where
     Ok(())
 }
 
-async fn consume_http_request_headers<S>(
+pub(crate) async fn consume_http_request_headers<S>(
     stream: &mut S,
 ) -> crate::kernel::runtime_host::VerletResult<()>
 where

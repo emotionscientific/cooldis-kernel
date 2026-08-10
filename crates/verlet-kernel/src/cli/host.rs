@@ -50,8 +50,6 @@ mod tests;
 /// api_key_env = "VERLET_HOST_ORCH_PROVIDER_KEY"
 /// model = "..."
 /// ```
-// Skeleton-only (EMO-564): remove with the implementation.
-#[allow(dead_code)]
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VerletHostRunConfig {
@@ -61,8 +59,6 @@ pub(crate) struct VerletHostRunConfig {
 }
 
 /// `[listen]`: the one TCP listener every instance is served through.
-// Skeleton-only (EMO-564): remove with the implementation.
-#[allow(dead_code)]
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HostListenConfig {
@@ -75,8 +71,6 @@ pub(crate) struct HostListenConfig {
 
 /// One `[[instance]]` entry: everything needed to construct a hosted
 /// kernel instance ([`crate::adapters::app_server::VerletAppServerConfig::hosted`]).
-// Skeleton-only (EMO-564): remove with the implementation.
-#[allow(dead_code)]
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HostInstanceConfig {
@@ -93,6 +87,7 @@ pub(crate) struct HostInstanceConfig {
     pub(crate) console_principal: String,
     /// Absolute shell path injected for agent hooks (EMO-552: hosted
     /// instances never read `SHELL`/`COMSPEC`).
+    // lexicon-allow: hook - architect-fixed host config field from EMO-564.
     pub(crate) hook_shell: String,
     /// Credential digests routed to this instance (decision 1). May be
     /// empty (an instance reachable only in-process), but a digest listed
@@ -105,8 +100,6 @@ pub(crate) struct HostInstanceConfig {
 /// `[instance.provider]`: the injected provider auth for one instance
 /// (EMO-552: hosted instances never snapshot the process environment).
 /// Field names follow the daemon config `[provider]` section.
-// Skeleton-only (EMO-564): remove with the implementation.
-#[allow(dead_code)]
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HostInstanceProviderConfig {
@@ -120,6 +113,19 @@ pub(crate) struct HostInstanceProviderConfig {
     pub(crate) api_key_env: Option<String>,
     #[serde(default)]
     pub(crate) model: Option<String>,
+    /// Secret resolved once while loading the config. This is not part of
+    /// the TOML surface and its `Debug` implementation is always redacted.
+    #[serde(skip)]
+    resolved_api_key: Option<ResolvedProviderApiKey>,
+}
+
+#[derive(Clone)]
+struct ResolvedProviderApiKey(String);
+
+impl std::fmt::Debug for ResolvedProviderApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// Route `verlet host <subcommand>`.
@@ -153,12 +159,38 @@ pub(super) async fn run_host(
 pub(super) async fn host_run(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
-    // EMO-564: parse args (only `--config <path>`, required), then
-    // load_host_run_config → build_hosted_instances → serve_until_signal.
-    let _ = args;
-    Err(crate::cli::usage_error(
-        "EMO-564: `verlet host run` is not implemented yet",
-    ))
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_host_run_help();
+        return Ok(());
+    }
+    let config_path = parse_host_run_args(args)?;
+    let config = load_host_run_config(&config_path)?;
+    serve_until_signal(config).await
+}
+
+fn parse_host_run_args(
+    args: Vec<std::ffi::OsString>,
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
+    let mut config_path = None;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--config" => {
+                config_path = Some(crate::cli::tool::required_path_value(
+                    &mut iter, "--config",
+                )?)
+            }
+            other => {
+                return Err(crate::cli::usage_error(format!(
+                    "unknown host run argument {other:?}"
+                )));
+            }
+        }
+    }
+    config_path.ok_or_else(|| crate::cli::usage_error("host run requires --config <host.toml>"))
 }
 
 /// Read and validate one `host.toml` (decision 4 — every error names the
@@ -172,17 +204,192 @@ pub(super) async fn host_run(
 /// instances; provider is a known name; `bifrost_openai` requires
 /// `base_url`, `api_key_env`, and `model`, and the named env var must
 /// resolve non-empty at load time; `local_offline` requires none of them.
-// Skeleton-only (EMO-564): remove with the implementation.
-#[allow(dead_code)]
 pub(crate) fn load_host_run_config(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<VerletHostRunConfig> {
-    // EMO-564: std::fs::read_to_string + toml::from_str + the validation
-    // listed above (mirror daemon_config's error style).
-    let _ = path;
-    Err(crate::cli::usage_error(
-        "EMO-564: host config loading is not implemented yet",
-    ))
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        crate::cli::usage_error(format!(
+            "failed to read Verlet host config {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut config = toml::from_str::<VerletHostRunConfig>(&text).map_err(|error| {
+        crate::cli::usage_error(format!(
+            "failed to parse Verlet host config {}: {error}",
+            path.display()
+        ))
+    })?;
+    let errors = validate_host_run_config(&mut config);
+    if errors.is_empty() {
+        Ok(config)
+    } else {
+        Err(crate::cli::usage_error(format!(
+            "invalid Verlet host config {}:\n- {}",
+            path.display(),
+            errors.join("\n- ")
+        )))
+    }
+}
+
+fn validate_host_run_config(config: &mut VerletHostRunConfig) -> Vec<String> {
+    let mut errors = Vec::new();
+    if config.listen.addr.parse::<std::net::SocketAddr>().is_err() {
+        errors.push(format!(
+            "listen.addr must be a TCP socket address, got {:?}",
+            config.listen.addr
+        ));
+    }
+    if config.instance.is_empty() {
+        errors.push("host config requires at least one [[instance]]".to_string());
+    }
+
+    let mut instance_ids = std::collections::BTreeSet::new();
+    let mut route_digests = std::collections::BTreeSet::new();
+    for instance in &mut config.instance {
+        let scope = format!("instance {:?}", instance.id);
+        if let Err(error) = crate::adapters::host::InstanceId::new(instance.id.clone()) {
+            errors.push(format!("{scope}.id: {error}"));
+        } else if !instance_ids.insert(instance.id.clone()) {
+            errors.push(format!("instance id {:?} is duplicated", instance.id));
+        }
+        for (field, path) in [
+            ("root", instance.root.as_path()),
+            ("cwd", instance.cwd.as_path()),
+            ("hook_shell", std::path::Path::new(&instance.hook_shell)),
+        ] {
+            if !path.is_absolute() {
+                errors.push(format!(
+                    "{scope}.{field} must be absolute: {}",
+                    path.display()
+                ));
+            }
+        }
+        if instance.tenant_id.trim().is_empty() {
+            errors.push(format!("{scope}.tenant_id must be non-blank"));
+        }
+        if instance.console_principal.trim().is_empty() {
+            errors.push(format!("{scope}.console_principal must be non-blank"));
+        }
+        for digest in &instance.route_digests {
+            if digest.trim().is_empty() {
+                errors.push(format!("{scope}.route_digests must not contain blanks"));
+            } else if !route_digests.insert(digest.clone()) {
+                errors.push(format!("route digest {digest:?} is duplicated"));
+            }
+        }
+        validate_host_provider(&scope, &mut instance.provider, &mut errors);
+    }
+    validate_instance_root_overlaps(&config.instance, &mut errors);
+    errors
+}
+
+fn validate_host_provider(
+    scope: &str,
+    provider: &mut HostInstanceProviderConfig,
+    errors: &mut Vec<String>,
+) {
+    match provider.provider.as_str() {
+        "local_offline" => {
+            for (field, present) in [
+                ("base_url", provider.base_url.is_some()),
+                ("api_key_env", provider.api_key_env.is_some()),
+                ("model", provider.model.is_some()),
+            ] {
+                if present {
+                    errors.push(format!(
+                        "{scope}.provider.{field} is not allowed for local_offline"
+                    ));
+                }
+            }
+        }
+        "bifrost_openai" => {
+            validate_required_provider_field(
+                scope,
+                "base_url",
+                provider.base_url.as_deref(),
+                errors,
+            );
+            validate_required_provider_field(
+                scope,
+                "api_key_env",
+                provider.api_key_env.as_deref(),
+                errors,
+            );
+            validate_required_provider_field(scope, "model", provider.model.as_deref(), errors);
+            if let Some(name) = provider
+                .api_key_env
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+            {
+                match verlet_runtime_contracts::env_compat::var(name) {
+                    Ok(value) if !value.trim().is_empty() => {
+                        provider.resolved_api_key = Some(ResolvedProviderApiKey(value));
+                    }
+                    Ok(_) => errors.push(format!(
+                        "{scope}.provider.api_key_env {name:?} resolved to an empty value"
+                    )),
+                    Err(error) => errors.push(format!(
+                        "{scope}.provider.api_key_env {name:?} did not resolve: {error}"
+                    )),
+                }
+            }
+        }
+        other => errors.push(format!("{scope}.provider has unknown provider {other:?}")),
+    }
+}
+
+fn validate_required_provider_field(
+    scope: &str,
+    field: &str,
+    value: Option<&str>,
+    errors: &mut Vec<String>,
+) {
+    if value.is_none_or(|value| value.trim().is_empty()) {
+        errors.push(format!(
+            "{scope}.provider.{field} is required for bifrost_openai"
+        ));
+    }
+}
+
+fn validate_instance_root_overlaps(instances: &[HostInstanceConfig], errors: &mut Vec<String>) {
+    let roots = instances
+        .iter()
+        .filter(|instance| instance.root.is_absolute())
+        .map(|instance| {
+            let normalized = std::fs::canonicalize(&instance.root)
+                .unwrap_or_else(|_| normalize_absolute_path(&instance.root));
+            (instance, normalized)
+        })
+        .collect::<Vec<_>>();
+    for first_index in 0..roots.len() {
+        for second_index in (first_index + 1)..roots.len() {
+            let (first, first_root) = &roots[first_index];
+            let (second, second_root) = &roots[second_index];
+            if first_root.starts_with(second_root) || second_root.starts_with(first_root) {
+                errors.push(format!(
+                    "instance roots overlap: {:?} {} and {:?} {}",
+                    first.id,
+                    first.root.display(),
+                    second.id,
+                    second.root.display()
+                ));
+            }
+        }
+    }
+}
+
+fn normalize_absolute_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Build the hosted app-server config for one `[[instance]]` entry:
@@ -193,21 +400,79 @@ pub(crate) fn load_host_run_config(
 /// managed-mode identity config from `tenant_id`/`console_principal`,
 /// and the chat provider wiring (`with_bifrost_openai` for
 /// `bifrost_openai`; the local-offline default otherwise).
-// Skeleton-only (EMO-564): remove with the implementation.
-#[allow(dead_code)]
 pub(crate) fn hosted_instance_config(
     instance: &HostInstanceConfig,
 ) -> crate::kernel::runtime_host::VerletResult<(
     crate::adapters::host::InstanceId,
     crate::adapters::app_server::VerletAppServerConfig,
 )> {
-    // EMO-564: as documented above. Root reservation and hosted-env
-    // validation already live in VerletAppServerConfig::hosted; do not
-    // duplicate them here.
-    let _ = instance;
-    Err(crate::cli::usage_error(
-        "EMO-564: hosted instance config construction is not implemented yet",
-    ))
+    let id = crate::adapters::host::InstanceId::new(instance.id.clone())?;
+    let provider_key = instance
+        .provider
+        .resolved_api_key
+        .as_ref()
+        .map(|key| key.0.clone());
+    let provider_auth = match provider_key.as_deref() {
+        Some(key) => verlet_metadata::provider_store::LlmProviderAuthContext::new()
+            .with_runtime_api_key(
+                crate::adapters::app_server::APP_SERVER_BIFROST_PROVIDER,
+                key,
+            ),
+        None => verlet_metadata::provider_store::LlmProviderAuthContext::new(),
+    };
+    let environment = crate::adapters::app_server::instance::InstanceEnvironment {
+        provider_auth: crate::adapters::app_server::instance::ProviderAuthSource::Injected(
+            provider_auth,
+        ),
+        hook_shell: Some(instance.hook_shell.clone()),
+        process_ids: std::sync::Arc::new(verlet_process::process::RandomProcessIds),
+    };
+    let identity = crate::daemon::identity::VerletDaemonIdentityConfig {
+        mode: crate::daemon::identity::IdentityMode::Managed,
+        tenant_id: Some(instance.tenant_id.clone()),
+        console_principal: Some(crate::daemon::identity::PrincipalId::new(
+            instance.console_principal.clone(),
+        )),
+    };
+    identity.validate().map_err(|error| {
+        crate::cli::usage_error(format!("instance {:?} identity: {error}", instance.id))
+    })?;
+    let config = crate::adapters::app_server::VerletAppServerConfig::hosted(
+        crate::adapters::app_server::instance::InstanceRoots::under(&instance.root),
+        environment,
+        &instance.cwd,
+        &identity,
+    )?;
+    let config = match instance.provider.provider.as_str() {
+        "local_offline" => config,
+        "bifrost_openai" => config.with_bifrost_openai(
+            instance.provider.base_url.clone().ok_or_else(|| {
+                crate::cli::usage_error(format!(
+                    "instance {:?}.provider.base_url was not resolved",
+                    instance.id
+                ))
+            })?,
+            provider_key.ok_or_else(|| {
+                crate::cli::usage_error(format!(
+                    "instance {:?}.provider.api_key_env was not resolved",
+                    instance.id
+                ))
+            })?,
+            instance.provider.model.clone().ok_or_else(|| {
+                crate::cli::usage_error(format!(
+                    "instance {:?}.provider.model was not resolved",
+                    instance.id
+                ))
+            })?,
+        ),
+        other => {
+            return Err(crate::cli::usage_error(format!(
+                "instance {:?}.provider has unknown provider {other:?}",
+                instance.id
+            )));
+        }
+    };
+    Ok((id, config))
 }
 
 /// Boot sequence + signal wait: construct [`crate::adapters::host::VerletHost`],
@@ -216,18 +481,134 @@ pub(crate) fn hosted_instance_config(
 /// listener, `serve_websocket_listener_with_options` with the config's
 /// bind policy, print the liveness line, then wait for SIGTERM/SIGINT
 /// (`tokio::signal`) and run host shutdown.
-// Skeleton-only (EMO-564): remove with the implementation.
-#[allow(dead_code)]
 pub(crate) async fn serve_until_signal(
     config: VerletHostRunConfig,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
-    // EMO-564: as documented above. Factor the signal wait so tests can
-    // drive shutdown without delivering process signals (mirror the
-    // daemon service tests' approach).
-    let _ = config;
-    Err(crate::cli::usage_error(
-        "EMO-564: host serve loop is not implemented yet",
-    ))
+    #[cfg(unix)]
+    {
+        // Install both handlers before booting or printing liveness. Once an
+        // operator can see the liveness line, an immediate signal must be
+        // graceful rather than racing the platform's default action.
+        let mut terminate = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .map_err(|error| {
+            crate::cli::usage_error(format!("failed to install SIGTERM handler: {error}"))
+        })?;
+        let mut interrupt = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::interrupt(),
+        )
+        .map_err(|error| {
+            crate::cli::usage_error(format!("failed to install SIGINT handler: {error}"))
+        })?;
+        serve_until_shutdown(config, async move {
+            tokio::select! {
+                _ = terminate.recv() => Ok(()),
+                _ = interrupt.recv() => Ok(()),
+            }
+        })
+        .await
+    }
+    #[cfg(not(unix))]
+    {
+        let interrupt = tokio::spawn(async {
+            tokio::signal::ctrl_c().await.map_err(|error| {
+                crate::cli::usage_error(format!("failed to install Ctrl-C handler: {error}"))
+            })
+        });
+        serve_until_shutdown(config, async move {
+            interrupt.await.map_err(|error| {
+                crate::cli::usage_error(format!("Ctrl-C signal task failed: {error}"))
+            })?
+        })
+        .await
+    }
+}
+
+async fn serve_until_shutdown<F>(
+    config: VerletHostRunConfig,
+    shutdown_signal: F,
+) -> crate::kernel::runtime_host::VerletResult<()>
+where
+    F: std::future::Future<Output = crate::kernel::runtime_host::VerletResult<()>>,
+{
+    // Construct every config first. Hosted construction reserves canonical
+    // roots, so an overlap or other constructor failure happens before any
+    // instance starts; dropping this vector releases earlier reservations.
+    let mut pending = Vec::with_capacity(config.instance.len());
+    for instance in &config.instance {
+        let (id, hosted) = hosted_instance_config(instance)?;
+        pending.push((id, hosted, instance.route_digests.clone()));
+    }
+
+    let host = crate::adapters::host::VerletHost::new();
+    for (id, hosted, route_digests) in pending.drain(..) {
+        if let Err(error) = host.start_instance(id.clone(), hosted).await {
+            return shutdown_after_boot_error(&host, error).await;
+        }
+        for digest in route_digests {
+            host.register_credential_route_digest(digest, id.clone());
+        }
+    }
+
+    let listener = match tokio::net::TcpListener::bind(&config.listen.addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            return shutdown_after_boot_error(
+                &host,
+                crate::cli::usage_error(format!(
+                    "failed to bind Verlet host listener {}: {error}",
+                    config.listen.addr
+                )),
+            )
+            .await;
+        }
+    };
+    let listen_addr = match listener.local_addr() {
+        Ok(addr) => addr,
+        Err(error) => {
+            return shutdown_after_boot_error(
+                &host,
+                crate::cli::usage_error(format!(
+                    "failed to inspect Verlet host listener {}: {error}",
+                    config.listen.addr
+                )),
+            )
+            .await;
+        }
+    };
+    if let Err(error) = host
+        .serve_websocket_listener_with_options(
+            listener,
+            crate::adapters::host::HostListenerOptions {
+                allow_non_loopback: config.listen.allow_non_loopback,
+            },
+        )
+        .await
+    {
+        return shutdown_after_boot_error(&host, error).await;
+    }
+    eprintln!(
+        "verlet host listening on {listen_addr} with {} instances",
+        config.instance.len()
+    );
+
+    let signal_result = shutdown_signal.await;
+    let shutdown_result = host.shutdown().await;
+    signal_result?;
+    shutdown_result
+}
+
+async fn shutdown_after_boot_error(
+    host: &crate::adapters::host::VerletHost,
+    boot_error: crate::kernel::runtime_host::VerletError,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    match host.shutdown().await {
+        Ok(()) => Err(boot_error),
+        Err(shutdown_error) => Err(crate::cli::usage_error(format!(
+            "{boot_error}; host cleanup also failed: {shutdown_error}"
+        ))),
+    }
 }
 
 /// Print help for `verlet host`.
