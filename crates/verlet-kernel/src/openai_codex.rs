@@ -190,6 +190,20 @@ impl OpenAICodexOAuthClient {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_endpoints(base_url: &str) -> Result<Self> {
+        let mut endpoints = OAuthEndpoints::default();
+        endpoints.authorize = format!("{base_url}/authorize");
+        endpoints.token = format!("{base_url}/oauth/token");
+        endpoints.device_user_code = format!("{base_url}/device/usercode");
+        endpoints.device_token = format!("{base_url}/device/token");
+        endpoints.device_verification = format!("{base_url}/device/verify");
+        let mut client = Self::with_endpoints(endpoints)?;
+        client.device_poll_floor = std::time::Duration::ZERO;
+        client.user_auth_timeout = std::time::Duration::from_secs(5);
+        Ok(client)
+    }
+
     pub(crate) async fn begin_browser_login(&self) -> Result<BrowserLogin> {
         let listener = tokio::net::TcpListener::bind(CALLBACK_ADDR)
             .await

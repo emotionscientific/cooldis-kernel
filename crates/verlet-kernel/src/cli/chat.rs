@@ -159,6 +159,7 @@ struct ChatSessionInfo {
     connection_label: String,
     cwd: String,
     model_label: String,
+    initial_events: Vec<verlet_chat::ChatEvent>,
 }
 
 async fn run_chat_client<S>(
@@ -189,10 +190,11 @@ where
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let no_color = verlet_runtime_contracts::env_compat::var_os("NO_COLOR").is_some();
 
-    let mut driver = ChatDriver {
-        thread_id: thread.id,
-        active_turn_id: None,
-    };
+    for event in session.initial_events {
+        let _ = event_tx.send(event);
+    }
+
+    let mut driver = ChatDriver::new(thread.id)?;
 
     let run_result = {
         let ui = verlet_chat::run_ui(&mut app, no_color, action_tx, event_rx);
@@ -237,10 +239,21 @@ where
         .iter()
         .find(|model| model.active)
         .ok_or_else(|| crate::cli::usage_error("app-server returned no active model"))?;
+    let initial_events = if active.auth_status
+        == crate::adapters::operator_client::OperatorModelAuthStatus::Missing
+    {
+        let auth = client.model_provider_auth_status_typed().await?;
+        vec![verlet_chat::ChatEvent::Providers(provider_rows(
+            &auth, &models,
+        ))]
+    } else {
+        Vec::new()
+    };
     Ok(ChatSessionInfo {
         connection_label,
         cwd,
         model_label: format!("{}/{}", active.provider_id, active.model),
+        initial_events,
     })
 }
 
@@ -249,9 +262,52 @@ where
 struct ChatDriver {
     thread_id: String,
     active_turn_id: Option<String>,
+    oauth_client: crate::openai_codex::OpenAICodexOAuthClient,
+    pending_login: Option<PendingLogin>,
+    next_login_id: u64,
+}
+
+struct PendingLogin {
+    id: u64,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for PendingLogin {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+enum LoginTaskEvent {
+    DeviceCode {
+        id: u64,
+        verification_uri: String,
+        user_code: String,
+    },
+    BrowserOpenFailed {
+        id: u64,
+        authorization_url: String,
+    },
+    Finished {
+        id: u64,
+        provider_id: String,
+        result: Result<verlet_metadata::provider_store::LlmProviderCredential, String>,
+    },
 }
 
 impl ChatDriver {
+    fn new(thread_id: String) -> crate::kernel::runtime_host::VerletResult<Self> {
+        let oauth_client = crate::openai_codex::OpenAICodexOAuthClient::new()
+            .map_err(|err| crate::cli::usage_error(err.to_string()))?;
+        Ok(Self {
+            thread_id,
+            active_turn_id: None,
+            oauth_client,
+            pending_login: None,
+            next_login_id: 0,
+        })
+    }
+
     /// Run until the UI hangs up (returns `Ok`) or the transport fails
     /// (returns the error). RPC failures on individual commands are reported
     /// into the transcript and are not fatal.
@@ -264,13 +320,14 @@ impl ChatDriver {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        loop {
+        let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = loop {
             tokio::select! {
                 action = actions.recv() => {
                     let Some(action) = action else {
-                        return Ok(());
+                        break Ok(());
                     };
-                    if let Err(err) = self.execute(client, &events, action).await {
+                    if let Err(err) = self.execute(client, &events, &login_tx, action).await {
                         let _ = events.send(verlet_chat::ChatEvent::Error {
                             title: err.to_string(),
                             body: Vec::new(),
@@ -278,9 +335,25 @@ impl ChatDriver {
                     }
                 }
                 app_event = client.next_event() => {
-                    self.project(app_event?, &events);
+                    match app_event {
+                        Ok(event) => self.project(event, &events),
+                        Err(err) => break Err(err),
+                    }
+                }
+                login_event = login_rx.recv() => {
+                    if let Some(login_event) = login_event {
+                        self.apply_login_event(client, &events, login_event).await;
+                    }
                 }
             }
+        };
+        self.abort_pending_login();
+        result
+    }
+
+    fn abort_pending_login(&mut self) {
+        if let Some(login) = self.pending_login.take() {
+            login.task.abort();
         }
     }
 
@@ -288,6 +361,7 @@ impl ChatDriver {
         &mut self,
         client: &mut crate::adapters::operator_client::OperatorClient<S>,
         events: &tokio::sync::mpsc::UnboundedSender<verlet_chat::ChatEvent>,
+        login_tx: &tokio::sync::mpsc::UnboundedSender<LoginTaskEvent>,
         action: verlet_chat::Action,
     ) -> crate::kernel::runtime_host::VerletResult<()>
     where
@@ -365,20 +439,128 @@ impl ChatDriver {
                     model: selected.active.model,
                 });
             }
-            // Setup-wizard wiring lands with EMO-572; until then the wizard
-            // actions answer with an honest notice instead of dead air.
-            verlet_chat::Action::ListProviders
-            | verlet_chat::Action::SetProviderKey { .. }
-            | verlet_chat::Action::StartLogin { .. }
-            | verlet_chat::Action::CancelLogin
-            | verlet_chat::Action::ClearCredential { .. } => {
-                let _ = events.send(verlet_chat::ChatEvent::Error {
-                    title: "provider setup is not wired to this server yet".to_string(),
-                    body: vec!["use `verlet auth` from a shell for now".to_string()],
-                });
+            verlet_chat::Action::ListProviders => {
+                let auth = client.model_provider_auth_status_typed().await?;
+                let models = client.model_list_typed().await?;
+                let _ = events.send(verlet_chat::ChatEvent::Providers(provider_rows(
+                    &auth, &models,
+                )));
+            }
+            verlet_chat::Action::SetProviderKey {
+                provider_id,
+                api_key,
+            } => {
+                let error = if self.pending_login.is_some() {
+                    Some("a sign-in is already in progress".to_string())
+                } else {
+                    client
+                        .model_provider_auth_set_typed(&provider_id, &api_key)
+                        .await
+                        .err()
+                        .map(|err| redact_secret_values(err.to_string(), [&api_key]))
+                };
+                let _ =
+                    events.send(verlet_chat::ChatEvent::CredentialResult { provider_id, error });
+            }
+            verlet_chat::Action::StartLogin {
+                provider_id,
+                method,
+            } => {
+                if self.pending_login.is_some() {
+                    let _ = events.send(verlet_chat::ChatEvent::CredentialResult {
+                        provider_id,
+                        error: Some("a sign-in is already in progress".to_string()),
+                    });
+                } else {
+                    self.next_login_id = self.next_login_id.wrapping_add(1);
+                    let id = self.next_login_id;
+                    let oauth_client = self.oauth_client.clone();
+                    let task_events = login_tx.clone();
+                    let task_provider_id = provider_id.clone();
+                    let task = tokio::spawn(async move {
+                        run_login_task(id, task_provider_id, method, oauth_client, task_events)
+                            .await;
+                    });
+                    self.pending_login = Some(PendingLogin { id, task });
+                }
+            }
+            verlet_chat::Action::CancelLogin => self.abort_pending_login(),
+            verlet_chat::Action::ClearCredential { provider_id } => {
+                client
+                    .model_provider_auth_delete_typed(&provider_id)
+                    .await?;
+                let _ = events.send(verlet_chat::ChatEvent::CredentialCleared { provider_id });
             }
         }
         Ok(())
+    }
+
+    async fn apply_login_event<S>(
+        &mut self,
+        client: &mut crate::adapters::operator_client::OperatorClient<S>,
+        events: &tokio::sync::mpsc::UnboundedSender<verlet_chat::ChatEvent>,
+        event: LoginTaskEvent,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let current_id = self.pending_login.as_ref().map(|login| login.id);
+        match event {
+            LoginTaskEvent::DeviceCode {
+                id,
+                verification_uri,
+                user_code,
+            } if current_id == Some(id) => {
+                let _ = events.send(verlet_chat::ChatEvent::LoginDeviceCode {
+                    verification_uri,
+                    user_code,
+                });
+            }
+            LoginTaskEvent::BrowserOpenFailed {
+                id,
+                authorization_url,
+            } if current_id == Some(id) => {
+                let _ = events.send(verlet_chat::ChatEvent::Info {
+                    title: "open the sign-in page in your browser".to_string(),
+                    body: vec![authorization_url],
+                });
+            }
+            LoginTaskEvent::Finished {
+                id,
+                provider_id,
+                result,
+            } if current_id == Some(id) => {
+                self.pending_login = None;
+                let error = match result {
+                    Err(message) => Some(message),
+                    Ok(verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                        access,
+                        refresh,
+                        expires_at_ms,
+                        account_id,
+                        email,
+                    }) => client
+                        .model_provider_auth_set_oauth_typed(
+                            &provider_id,
+                            &access,
+                            &refresh,
+                            expires_at_ms,
+                            account_id.as_deref(),
+                            email.as_deref(),
+                        )
+                        .await
+                        .err()
+                        .map(|err| redact_secret_values(err.to_string(), [&access, &refresh])),
+                    Ok(verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                        ..
+                    }) => Some("OAuth sign-in returned an unsupported credential type".to_string()),
+                };
+                let _ =
+                    events.send(verlet_chat::ChatEvent::CredentialResult { provider_id, error });
+            }
+            LoginTaskEvent::DeviceCode { .. }
+            | LoginTaskEvent::BrowserOpenFailed { .. }
+            | LoginTaskEvent::Finished { .. } => {}
+        }
     }
 
     fn switch_thread(
@@ -583,6 +765,64 @@ impl ChatDriver {
     }
 }
 
+async fn run_login_task(
+    id: u64,
+    provider_id: String,
+    method: verlet_chat::LoginMethod,
+    client: crate::openai_codex::OpenAICodexOAuthClient,
+    events: tokio::sync::mpsc::UnboundedSender<LoginTaskEvent>,
+) {
+    let result = match method {
+        verlet_chat::LoginMethod::Browser => match client.begin_browser_login().await {
+            Ok(login) => {
+                let authorization_url = login.authorization_url().to_string();
+                if crate::cli::console::open_browser_url_checked(&authorization_url)
+                    .await
+                    .is_err()
+                {
+                    let _ = events.send(LoginTaskEvent::BrowserOpenFailed {
+                        id,
+                        authorization_url,
+                    });
+                }
+                client
+                    .complete_browser_login(login)
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            Err(err) => Err(err.to_string()),
+        },
+        verlet_chat::LoginMethod::Device => match client.start_device_login().await {
+            Ok(login) => {
+                let _ = events.send(LoginTaskEvent::DeviceCode {
+                    id,
+                    verification_uri: login.verification_uri.clone(),
+                    user_code: login.user_code.clone(),
+                });
+                client
+                    .complete_device_login(login)
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            Err(err) => Err(err.to_string()),
+        },
+    };
+    let _ = events.send(LoginTaskEvent::Finished {
+        id,
+        provider_id,
+        result,
+    });
+}
+
+fn redact_secret_values<const N: usize>(mut message: String, secrets: [&String; N]) -> String {
+    for secret in secrets {
+        if !secret.is_empty() {
+            message = message.replace(secret, "[redacted]");
+        }
+    }
+    message
+}
+
 /// An `item/started` payload for a tool call, as a UI event. Non-tool items
 /// (the assistant message itself) return `None`.
 fn tool_item_started(item: &serde_json::Value) -> Option<verlet_chat::ChatEvent> {
@@ -730,6 +970,36 @@ fn model_rows(
                 }
             },
             active: model.active,
+        })
+        .collect()
+}
+
+fn provider_rows(
+    auth: &crate::adapters::operator_client::OperatorModelProviderAuthList,
+    models: &crate::adapters::operator_client::OperatorModelList,
+) -> Vec<verlet_chat::ProviderRow> {
+    let active_provider = models
+        .data
+        .iter()
+        .find(|model| model.active)
+        .map(|model| model.provider_id.as_str());
+    auth.data
+        .iter()
+        .map(|provider| verlet_chat::ProviderRow {
+            provider_id: provider.provider_id.clone(),
+            display_name: provider.display_name.clone(),
+            auth_status: if !provider.configured {
+                "missing"
+            } else if provider.source.as_deref() == Some("environment") {
+                "env"
+            } else {
+                "configured"
+            }
+            .to_string(),
+            label: provider.label.clone().unwrap_or_default(),
+            oauth: provider.provider_id
+                == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            active: active_provider == Some(provider.provider_id.as_str()),
         })
         .collect()
 }
