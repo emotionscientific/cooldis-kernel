@@ -682,6 +682,9 @@ nothing and returns JSON-RPC `-32602` with the provider or credential problem.
 Store-backed selection supports OpenAI Chat Completions, OpenAI Responses, and
 Anthropic Messages provider APIs. The `openai-codex` provider id always uses
 the dedicated ChatGPT-plan OAuth client regardless of its stored API value.
+Its resolved `baseUrl` must be the canonical
+`https://chatgpt.com/backend-api/codex/responses` endpoint; loopback URLs with
+the same path are accepted for local endpoint tests.
 
 Selection applies to turns started after the call. A turn already running keeps
 the endpoint it resolved at its own start, including subsequent tool rounds.

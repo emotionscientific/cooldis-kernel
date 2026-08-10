@@ -3080,15 +3080,27 @@ async fn model_select_routes_anthropic_store_provider_with_stored_key() {
             .with_auth_header(true)
             .with_header(
                 "x-store-header",
-                verlet_metadata::provider_store::LlmProviderConfigValue::literal(
-                    "anthropic-header",
-                ),
+                verlet_metadata::provider_store::LlmProviderConfigValue::Env {
+                    name: "ANTHROPIC_HEADER_OVERRIDDEN_BY_MODEL".to_string(),
+                },
             )
-            .with_model(
-                verlet_metadata::provider_store::LlmProviderModelRecord::new(
+            .with_model({
+                let mut model = verlet_metadata::provider_store::LlmProviderModelRecord::new(
                     "claude-store-fixture",
-                ),
-            ),
+                )
+                .with_max_output_tokens(321);
+                model.headers.insert(
+                    "x-store-header".to_string(),
+                    verlet_metadata::provider_store::LlmProviderConfigValue::literal(
+                        "anthropic-model-header",
+                    ),
+                );
+                model.headers.insert(
+                    "anthropic-version".to_string(),
+                    verlet_metadata::provider_store::LlmProviderConfigValue::literal("2024-01-01"),
+                );
+                model
+            }),
         )
         .await
         .unwrap();
@@ -3125,6 +3137,12 @@ async fn model_select_routes_anthropic_store_provider_with_stored_key() {
     )
     .await
     .unwrap();
+    let endpoint = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    assert_eq!(endpoint.config.max_tokens, 321);
+    assert!(endpoint.config.stream);
     let completed = start_and_wait_for_model_select_turn(
         &app,
         &connection,
@@ -3139,10 +3157,53 @@ async fn model_select_routes_anthropic_store_provider_with_stored_key() {
     );
     let request = server.request.await.unwrap();
     assert!(request.starts_with("POST /v1/messages HTTP/1.1"));
-    let request = request.to_ascii_lowercase();
-    assert!(request.contains("x-api-key: anthropic-store-secret"));
-    assert!(request.contains("anthropic-version: 2023-06-01"));
-    assert!(request.contains("x-store-header: anthropic-header"));
+    let request_lower = request.to_ascii_lowercase();
+    assert!(request_lower.contains("x-api-key: anthropic-store-secret"));
+    assert!(request_lower.contains("anthropic-version: 2024-01-01"));
+    assert_eq!(request_lower.matches("anthropic-version:").count(), 1);
+    assert!(request_lower.contains("x-store-header: anthropic-model-header"));
+    let body = provider_request_body(&request);
+    assert_eq!(body["model"], "claude-store-fixture");
+    assert_eq!(body["max_tokens"], 321);
+    assert_eq!(body["stream"], true);
+    assert_latest_assistant_coordinates(
+        &app,
+        &thread_id,
+        "anthropic-store-fixture",
+        "claude-store-fixture",
+    )
+    .await;
+    app.dispatch_request(
+        &connection,
+        "modelProvider/auth/set",
+        Some(serde_json::json!({
+            "providerId": "anthropic-store-fixture",
+            "apiKey": "rotated-anthropic-secret",
+        })),
+    )
+    .await
+    .unwrap();
+    let rotated_endpoint = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&endpoint.client, &rotated_endpoint.client),
+        "rotating Anthropic auth must rebuild the cached endpoint"
+    );
+    let mutation_error = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/delete",
+            Some(serde_json::json!({ "providerId": "anthropic-store-fixture" })),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        mutation_error
+            .message
+            .contains("select a different provider")
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3178,7 +3239,8 @@ async fn model_select_routes_generic_openai_responses_store_provider() {
             .with_model(
                 verlet_metadata::provider_store::LlmProviderModelRecord::new(
                     "responses-store-model",
-                ),
+                )
+                .with_max_output_tokens(654),
             ),
         )
         .await
@@ -3216,6 +3278,12 @@ async fn model_select_routes_generic_openai_responses_store_provider() {
     )
     .await
     .unwrap();
+    let endpoint = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    assert_eq!(endpoint.config.max_tokens, 654);
+    assert!(endpoint.config.stream);
     let completed = start_and_wait_for_model_select_turn(
         &app,
         &connection,
@@ -3236,6 +3304,83 @@ async fn model_select_routes_generic_openai_responses_store_provider() {
             .contains("authorization: bearer responses-store-secret")
     );
     assert!(request.contains("x-store-header: responses-header"));
+    let body = provider_request_body(&request);
+    assert_eq!(body["model"], "responses-store-model");
+    assert_eq!(body["max_output_tokens"], 654);
+    assert_eq!(body["stream"], true);
+    assert_latest_assistant_coordinates(
+        &app,
+        &thread_id,
+        "responses-store-fixture",
+        "responses-store-model",
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_select_routes_auth_free_responses_without_authorization() {
+    let server = spawn_provider_sse_fixture(concat!(
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"AUTH_FREE_OK\"}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n",
+    ))
+    .await;
+    let root = unique_test_root("app-server-model-select-responses-auth-free");
+    let config = local_model_select_test_config(&root, "responses-auth-free");
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "responses-auth-free-fixture",
+                verlet_history::ProviderApi::OpenAIResponses,
+                format!("{}/v1", server.base_url),
+            )
+            .with_auth_header(false)
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new(
+                    "responses-auth-free-model",
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let thread_id = start_model_select_test_thread(&app, &connection).await;
+    app.dispatch_request(
+        &connection,
+        "model/select",
+        Some(serde_json::json!({
+            "providerId": "responses-auth-free-fixture",
+            "model": "responses-auth-free-model",
+        })),
+    )
+    .await
+    .unwrap();
+    let completed = start_and_wait_for_model_select_turn(
+        &app,
+        &connection,
+        &mut outbound_rx,
+        &thread_id,
+        "route without authorization",
+    )
+    .await;
+    assert_eq!(
+        completed_turn_agent_text(&completed).as_deref(),
+        Some("AUTH_FREE_OK")
+    );
+    let request = server.request.await.unwrap();
+    assert!(!request.to_ascii_lowercase().contains("authorization:"));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3316,6 +3461,62 @@ async fn model_select_rejects_missing_auth_without_changing_active_model() {
 }
 
 #[tokio::test]
+async fn model_select_names_missing_header_environment_and_remediation() {
+    let root = unique_test_root("app-server-model-select-missing-header-env");
+    let config = local_model_select_test_config(&root, "missing-header-env");
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "missing-header-fixture",
+                verlet_history::ProviderApi::OpenAIResponses,
+                "https://missing-header.example.invalid/v1",
+            )
+            .with_auth_header(false)
+            .with_header(
+                "x-required-header",
+                verlet_metadata::provider_store::LlmProviderConfigValue::Env {
+                    name: "MISSING_SELECT_HEADER_VALUE".to_string(),
+                },
+            )
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new(
+                    "missing-header-model",
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": "missing-header-fixture",
+                "model": "missing-header-model",
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(error.message.contains("missing-header-fixture"));
+    assert!(error.message.contains("x-required-header"));
+    assert!(error.message.contains("MISSING_SELECT_HEADER_VALUE"));
+    assert!(error.message.contains("modelProvider/upsert"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn model_select_rejects_unsupported_store_api_without_changing_active_model() {
     let root = unique_test_root("app-server-model-select-unsupported-api");
     let config = local_model_select_test_config(&root, "unsupported-api");
@@ -3360,6 +3561,7 @@ async fn model_select_rejects_unsupported_store_api_without_changing_active_mode
     assert!(error.message.contains("unsupported api"));
     assert!(error.message.contains("OpenAI Responses"));
     assert!(error.message.contains("Anthropic Messages"));
+    assert!(error.message.contains("modelProvider/upsert"));
     let active = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
         app.inner.turn_endpoint_router.as_ref(),
     )
@@ -3411,7 +3613,14 @@ async fn model_select_routes_store_backed_codex_through_oauth_client() {
         .unwrap();
     let mut provider = verlet_metadata::provider_store::default_openai_codex_llm_provider_record();
     provider.api = verlet_history::ProviderApi::Other("ignored-for-codex".to_string());
-    provider.base_url = format!("{}/backend-api/codex/responses", server.base_url);
+    provider.base_url = "https://api.openai.com/v1/responses".to_string();
+    let selected_model = provider
+        .models
+        .iter_mut()
+        .find(|model| model.model_id == verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL)
+        .unwrap();
+    selected_model.base_url = Some(format!("{}/backend-api/codex/responses", server.base_url));
+    selected_model.max_output_tokens = Some(733);
     app.inner
         .metadata_store
         .upsert_provider(provider)
@@ -3430,6 +3639,12 @@ async fn model_select_routes_store_backed_codex_through_oauth_client() {
     )
     .await
     .unwrap();
+    let endpoint = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+        app.inner.turn_endpoint_router.as_ref(),
+    )
+    .unwrap();
+    assert_eq!(endpoint.config.max_tokens, 733);
+    assert!(endpoint.config.stream);
     let completed = start_and_wait_for_model_select_turn(
         &app,
         &connection,
@@ -3449,6 +3664,20 @@ async fn model_select_routes_store_backed_codex_through_oauth_client() {
     assert!(request.contains("chatgpt-account-id: select-account"));
     assert!(request.contains("openai-beta: responses=experimental"));
     assert!(request.contains("originator: verlet"));
+    let body = provider_request_body(&request);
+    assert_eq!(
+        body["model"],
+        verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL
+    );
+    assert_eq!(body["max_output_tokens"], 733);
+    assert_eq!(body["stream"], true);
+    assert_latest_assistant_coordinates(
+        &app,
+        &thread_id,
+        verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+        verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL,
+    )
+    .await;
     let auth_delete_error = app
         .dispatch_request(
             &connection,
@@ -3502,6 +3731,179 @@ async fn model_select_rejects_missing_codex_oauth_with_login_command() {
     assert!(error.message.contains("verlet auth login openai-codex"));
     assert!(!error.message.contains("--api-key-stdin"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_select_accepts_expired_codex_oauth_for_request_time_refresh() {
+    let root = unique_test_root("app-server-model-select-codex-expired-auth");
+    let config = local_model_select_test_config(&root, "codex-expired-auth");
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                access: "expired-access".to_string(),
+                refresh: "expired-refresh".to_string(),
+                expires_at_ms: verlet_history::now_ms() - 1,
+                account_id: Some("expired-account".to_string()),
+                email: None,
+            },
+        )
+        .await
+        .unwrap();
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let selected = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                "model": verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        selected["active"]["providerId"],
+        verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_select_rejects_api_key_for_codex_with_login_command() {
+    let root = unique_test_root("app-server-model-select-codex-api-key");
+    let config = local_model_select_test_config(&root, "codex-api-key")
+        .with_openai_codex(verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL);
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "wrong-credential-kind".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let error = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                "model": verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL,
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(error.message.contains("openai-codex"));
+    assert!(error.message.contains("verlet auth login openai-codex"));
+    assert!(!error.message.contains("--api-key-stdin"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_select_rejects_invalid_codex_response_urls_eagerly() {
+    for (case, base_url) in [
+        ("empty", ""),
+        ("malformed", "not-a-url"),
+        ("wrong-endpoint", "https://api.openai.com/v1/responses"),
+        (
+            "wrong-host",
+            "https://example.com/backend-api/codex/responses",
+        ),
+    ] {
+        let root = unique_test_root(&format!("app-server-model-select-codex-url-{case}"));
+        let config = local_model_select_test_config(&root, &format!("codex-url-{case}"))
+            .with_openai_codex(verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL);
+        let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+            config.user_metadata_store_path(),
+        )
+        .await
+        .unwrap();
+        user_store
+            .set_credential(
+                verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                    access: "url-access".to_string(),
+                    refresh: "url-refresh".to_string(),
+                    expires_at_ms: verlet_history::now_ms() + 3_600_000,
+                    account_id: Some("url-account".to_string()),
+                    email: None,
+                },
+            )
+            .await
+            .unwrap();
+        drop(user_store);
+        let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+            .await
+            .unwrap();
+        let mut provider =
+            verlet_metadata::provider_store::default_openai_codex_llm_provider_record();
+        provider.base_url = base_url.to_string();
+        app.inner
+            .metadata_store
+            .upsert_provider(provider)
+            .await
+            .unwrap();
+        let (connection, _outbound_rx) = test_connection(app.clone()).await;
+        initialize_for_test(&connection).await;
+        let active_before = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+            app.inner.turn_endpoint_router.as_ref(),
+        )
+        .unwrap();
+
+        let error = app
+            .dispatch_request(
+                &connection,
+                "model/select",
+                Some(serde_json::json!({
+                    "providerId": verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+                    "model": verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL,
+                })),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, -32602, "case {case}");
+        assert!(error.message.contains("openai-codex"), "case {case}");
+        assert!(error.message.contains("base URL"), "case {case}");
+        assert!(
+            error.message.contains("modelProvider/upsert"),
+            "case {case}"
+        );
+        let active_after = crate::adapters::agent_loop::TurnEndpointRouter::resolve(
+            app.inner.turn_endpoint_router.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(active_after.config, active_before.config, "case {case}");
+        assert!(
+            std::sync::Arc::ptr_eq(&active_after.client, &active_before.client),
+            "case {case} must leave the active endpoint unchanged"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[tokio::test]
@@ -16440,6 +16842,41 @@ async fn start_model_select_test_thread(
         .await
         .unwrap();
     thread["thread"]["id"].as_str().unwrap().to_string()
+}
+
+fn provider_request_body(request: &str) -> serde_json::Value {
+    let (_, body) = request
+        .split_once("\r\n\r\n")
+        .expect("provider request must have an HTTP body");
+    serde_json::from_str(body).expect("provider request body must be JSON")
+}
+
+async fn assert_latest_assistant_coordinates(
+    app: &crate::adapters::app_server::VerletAppServer,
+    thread_id: &str,
+    expected_provider: &str,
+    expected_model: &str,
+) {
+    let session = app
+        .handle_for_thread(thread_id)
+        .await
+        .unwrap()
+        .session_context()
+        .await
+        .unwrap();
+    let (provider, model) = session
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            verlet_history::CanonicalMessage::Assistant {
+                provider, model, ..
+            } => Some((provider, model)),
+            _ => None,
+        })
+        .expect("completed routed turn must persist an assistant message");
+    assert_eq!(provider, expected_provider);
+    assert_eq!(model, expected_model);
 }
 
 struct ProviderSseFixture {

@@ -687,6 +687,17 @@ impl AppServerTurnEndpointRouter {
         self.write_state().cache.remove(provider_id);
     }
 
+    async fn invalidate_model(&self, provider_id: &str, model: &str) {
+        let mut state = self.write_state();
+        let remove_provider = state.cache.get_mut(provider_id).is_some_and(|models| {
+            models.remove(model);
+            models.is_empty()
+        });
+        if remove_provider {
+            state.cache.remove(provider_id);
+        }
+    }
+
     fn activate(&self, endpoint: crate::adapters::agent_loop::ResolvedTurnEndpoint) {
         let mut state = self.write_state();
         state
@@ -2179,7 +2190,7 @@ async fn resolve_catalog_provider(
         .map_err(provider_store_error)?
         .ok_or_else(|| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "catalog provider {provider_id:?} is not in the provider metadata store"
+                "catalog provider {provider_id:?} is not in the provider metadata store; add it with modelProvider/upsert"
             ))
         })?;
     let model_id = selected_catalog_model_id(&provider, model)?;
@@ -2223,6 +2234,7 @@ async fn resolve_catalog_provider(
                 ),
             ));
         }
+        validate_catalog_codex_responses_url(provider_id, &base_url)?;
         let client = std::sync::Arc::new(
             crate::openai_codex::OpenAICodexProviderClient::with_responses_url(
                 auth_store.clone(),
@@ -2230,7 +2242,7 @@ async fn resolve_catalog_provider(
             )
             .map_err(|err| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "failed to build catalog OpenAI Codex provider client: {err}"
+                    "failed to build catalog provider {provider_id:?} OpenAI Codex client: {err}; update its endpoint with modelProvider/upsert"
                 ))
             })?,
         );
@@ -2249,7 +2261,9 @@ async fn resolve_catalog_provider(
     .map_err(provider_store_error)?;
     if provider.auth_header && resolved_auth.is_none() {
         return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-            format!("catalog provider {provider_id:?} requires an API key but none was configured"),
+            format!(
+                "catalog provider {provider_id:?} requires an API key but none was configured; set its environment credential or run `verlet auth set {provider_id} --api-key-stdin`"
+            ),
         ));
     }
     let api_key = resolved_auth
@@ -2278,7 +2292,7 @@ async fn resolve_catalog_provider(
         verlet_history::ProviderApi::Other(_) => {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
-                    "catalog provider {provider_id:?} uses unsupported api {api:?}; supported store-backed provider APIs are OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages"
+                    "catalog provider {provider_id:?} uses unsupported api {api:?}; update it with modelProvider/upsert to use OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages"
                 ),
             ));
         }
@@ -2287,18 +2301,15 @@ async fn resolve_catalog_provider(
         endpoint.auth = verlet_provider::ProviderAuth::None;
     }
 
-    let mut headers = provider.headers.clone();
-    if let Some(model_record) = model_record {
-        headers.extend(model_record.headers.clone());
+    let headers = merged_catalog_headers(&provider, model_record);
+    for (name, value) in resolve_catalog_headers(provider_id, &headers, auth_context)? {
+        set_endpoint_header(&mut endpoint.headers, name, value);
     }
-    endpoint
-        .headers
-        .extend(resolve_catalog_headers(&headers, auth_context)?);
 
     let client = std::sync::Arc::new(
         verlet_provider::ProviderHttpClient::new(endpoint, adapter).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "failed to build catalog {api:?} provider client: {err}"
+                "failed to build catalog provider {provider_id:?} {api:?} client: {err}; update its endpoint with modelProvider/upsert"
             ))
         })?,
     );
@@ -2328,13 +2339,91 @@ fn selected_catalog_model_id(
         .map(|model| model.model_id.clone())
         .ok_or_else(|| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "catalog provider {:?} has no models",
+                "catalog provider {:?} has no models; add one with modelProvider/upsert",
                 provider.provider_id
             ))
         })
 }
 
+fn validate_catalog_codex_responses_url(
+    provider_id: &str,
+    base_url: &str,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    const CODEX_RESPONSES_PATH: &str = "/backend-api/codex/responses";
+    let parsed = reqwest::Url::parse(base_url).ok();
+    let valid = parsed.as_ref().is_some_and(|url| {
+        let host = url.host_str().unwrap_or_default();
+        let is_chatgpt = url.scheme() == "https"
+            && host.eq_ignore_ascii_case("chatgpt.com")
+            && url.port().is_none();
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        (is_chatgpt || (matches!(url.scheme(), "http" | "https") && is_loopback))
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == CODEX_RESPONSES_PATH
+            && url.query().is_none()
+            && url.fragment().is_none()
+    });
+    if valid {
+        return Ok(());
+    }
+    Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+        format!(
+            "catalog provider {provider_id:?} has an invalid Codex base URL {base_url:?}; set provider or model baseUrl to https://chatgpt.com{CODEX_RESPONSES_PATH} (or a loopback test endpoint) with modelProvider/upsert"
+        ),
+    ))
+}
+
+pub(super) fn merged_catalog_headers(
+    provider: &verlet_metadata::provider_store::LlmProviderRecord,
+    model_record: Option<&verlet_metadata::provider_store::LlmProviderModelRecord>,
+) -> std::collections::BTreeMap<String, verlet_metadata::provider_store::LlmProviderConfigValue> {
+    let mut headers = std::collections::BTreeMap::new();
+    for (name, value) in &provider.headers {
+        insert_catalog_header(&mut headers, name.clone(), value.clone());
+    }
+    if let Some(model_record) = model_record {
+        for (name, value) in &model_record.headers {
+            insert_catalog_header(&mut headers, name.clone(), value.clone());
+        }
+    }
+    headers
+}
+
+fn insert_catalog_header(
+    headers: &mut std::collections::BTreeMap<
+        String,
+        verlet_metadata::provider_store::LlmProviderConfigValue,
+    >,
+    name: String,
+    value: verlet_metadata::provider_store::LlmProviderConfigValue,
+) {
+    if let Some(existing) = headers
+        .keys()
+        .find(|existing| existing.eq_ignore_ascii_case(&name))
+        .cloned()
+    {
+        headers.remove(&existing);
+    }
+    headers.insert(name, value);
+}
+
+fn set_endpoint_header(headers: &mut Vec<(String, String)>, name: String, value: String) {
+    if let Some(existing) = headers
+        .iter_mut()
+        .find(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+    {
+        *existing = (name, value);
+    } else {
+        headers.push((name, value));
+    }
+}
+
 fn resolve_catalog_headers(
+    provider_id: &str,
     headers: &std::collections::BTreeMap<
         String,
         verlet_metadata::provider_store::LlmProviderConfigValue,
@@ -2346,13 +2435,15 @@ fn resolve_catalog_headers(
         .map(|(name, value)| {
             Ok((
                 name.clone(),
-                resolve_catalog_config_value(value, auth_context)?,
+                resolve_catalog_config_value(provider_id, name, value, auth_context)?,
             ))
         })
         .collect()
 }
 
 fn resolve_catalog_config_value(
+    provider_id: &str,
+    header_name: &str,
     value: &verlet_metadata::provider_store::LlmProviderConfigValue,
     auth_context: &verlet_metadata::provider_store::LlmProviderAuthContext,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
@@ -2367,13 +2458,13 @@ fn resolve_catalog_config_value(
             .cloned()
             .ok_or_else(|| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "catalog provider header env var {name} is not configured"
+                    "catalog provider {provider_id:?} header {header_name:?} requires environment variable {name}; set {name} or update/remove the header with modelProvider/upsert"
                 ))
             }),
         verlet_metadata::provider_store::LlmProviderConfigValue::Command { .. } => {
-            Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                "catalog provider command-backed header resolution is not enabled".to_string(),
-            ))
+            Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "catalog provider {provider_id:?} header {header_name:?} uses unsupported command-backed resolution; update or remove the header with modelProvider/upsert"
+            )))
         }
     }
 }
