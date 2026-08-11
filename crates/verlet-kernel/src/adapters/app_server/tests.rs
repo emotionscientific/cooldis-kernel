@@ -150,6 +150,10 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
             crate::daemon::identity::AuthorityClass::Host,
         ),
         (
+            "modelProvider/catalog",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
             "experimentalFeature/list",
             crate::daemon::identity::AuthorityClass::Interactive,
         ),
@@ -2856,7 +2860,7 @@ async fn registry_roots_resolve_against_configured_cwd() {
 }
 
 #[tokio::test]
-async fn model_list_includes_the_checked_in_offline_catalog() {
+async fn model_list_scopes_catalog_models_to_store_configured_providers() {
     let root = unique_test_root("app-server-model-catalog-offline");
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
         root.join("model-catalog-offline.sock"),
@@ -2879,17 +2883,331 @@ async fn model_list_includes_the_checked_in_offline_catalog() {
         .dispatch_request(&connection, "model/list", None)
         .await
         .unwrap();
-    let offline = models["data"]
+    let data = models["data"].as_array().unwrap();
+    assert!(
+        data.iter().all(|entry| entry["providerId"] != "anthropic"),
+        "unconfigured catalog providers belong to modelProvider/catalog, not model/list"
+    );
+    let active = data.iter().find(|entry| entry["active"] == true).unwrap();
+    assert_eq!(
+        active["providerId"],
+        crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+    );
+
+    let catalog = app
+        .dispatch_request(&connection, "modelProvider/catalog", None)
+        .await
+        .unwrap();
+    let anthropic = catalog["providers"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|entry| entry["providerId"] == "anthropic" && entry["model"] == "claude-sonnet-4-6")
-        .expect("model/list omitted the built-in offline catalog");
-    assert_eq!(offline["displayName"], "Claude Sonnet 4.6");
-    assert_eq!(offline["contextWindowTokens"], 1_000_000);
-    assert_eq!(offline["maxOutputTokens"], 128_000);
-    assert_eq!(offline["authStatus"], "missing");
+        .find(|provider| provider["providerId"] == "anthropic")
+        .expect("modelProvider/catalog omitted the built-in anthropic provider");
+    assert_eq!(anthropic["displayName"], "Anthropic");
+    assert_eq!(anthropic["baseUrl"], "https://api.anthropic.com");
+    assert_eq!(anthropic["api"], "anthropic_messages");
+    assert_eq!(anthropic["authKind"], "api_key");
+    assert!(
+        anthropic["envVars"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("ANTHROPIC_API_KEY"))
+    );
+    assert_eq!(anthropic["configured"], false);
+    assert_eq!(anthropic["authSource"], serde_json::Value::Null);
+    assert_eq!(anthropic["custom"], false);
+    assert_eq!(anthropic["active"], false);
+    assert!(anthropic["modelCount"].as_u64().unwrap() > 0);
+    assert!(
+        anthropic["defaultModel"]
+            .as_str()
+            .is_some_and(|model| !model.is_empty()),
+        "an unconfigured catalog provider must default to its first catalog model"
+    );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_catalog_merges_catalog_metadata_with_store_state() {
+    const ENV_NAME: &str = "VERLET_CATALOG_MERGE_ENV_FIXTURE";
+    let root = unique_test_root("app-server-provider-catalog-merge");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("provider-catalog-merge.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    config.instance_environment.provider_auth =
+        crate::adapters::app_server::instance::ProviderAuthSource::Injected(
+            verlet_metadata::provider_store::LlmProviderAuthContext::new()
+                .with_env(ENV_NAME, "env-secret"),
+        );
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    for provider in [
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "openai",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://api.openai.com/v1",
+        )
+        .with_auth_header(true)
+        .with_model(verlet_metadata::provider_store::LlmProviderModelRecord::new("gpt-zebra"))
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("gpt-alpha")
+                .with_metadata("default", "true"),
+        ),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "anthropic",
+            verlet_history::ProviderApi::AnthropicMessages,
+            "https://api.anthropic.com",
+        )
+        .with_auth(
+            verlet_metadata::provider_store::LlmProviderAuthConfig::Env {
+                name: ENV_NAME.to_string(),
+            },
+        )
+        .with_auth_header(true)
+        .with_model(verlet_metadata::provider_store::LlmProviderModelRecord::new("claude-fixture")),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "store-only-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://store-only.example.invalid/v1",
+        )
+        .with_display_name("Store Only Fixture")
+        .with_auth_header(true)
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("store-only-model"),
+        ),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "store-oauth-fixture",
+            verlet_history::ProviderApi::OpenAIResponses,
+            "https://store-oauth.example.invalid/v1",
+        )
+        .with_display_name("Store OAuth Fixture")
+        .with_auth_header(true)
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("store-oauth-model"),
+        ),
+    ] {
+        project_store.upsert_provider(provider).await.unwrap();
+    }
+    user_store
+        .set_credential(
+            "openai",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "stored-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    user_store
+        .set_credential(
+            "store-oauth-fixture",
+            verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                access: "oauth-access-secret".to_string(),
+                refresh: "oauth-refresh-secret".to_string(),
+                expires_at_ms: verlet_history::now_ms() + 3_600_000,
+                account_id: None,
+                email: None,
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let catalog = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/catalog",
+            Some(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+    let providers = catalog["providers"].as_array().unwrap();
+    let find = |provider_id: &str| {
+        providers
+            .iter()
+            .find(|provider| provider["providerId"] == provider_id)
+            .unwrap()
+    };
+
+    let openai = find("openai");
+    assert_eq!(openai["configured"], true);
+    assert_eq!(openai["authSource"], "stored");
+    assert_eq!(openai["custom"], false);
+    assert_eq!(openai["modelCount"], 2);
+    assert_eq!(
+        openai["defaultModel"], "gpt-alpha",
+        "the record's default-flagged model must win"
+    );
+    let anthropic = find("anthropic");
+    assert_eq!(anthropic["configured"], true);
+    assert_eq!(anthropic["authSource"], "env");
+    assert_eq!(anthropic["authLabel"], ENV_NAME);
+    let store_only = find("store-only-fixture");
+    assert_eq!(store_only["custom"], true);
+    assert_eq!(store_only["configured"], false);
+    assert_eq!(store_only["authKind"], "api_key");
+    assert_eq!(store_only["displayName"], "Store Only Fixture");
+    assert_eq!(
+        store_only["baseUrl"],
+        "https://store-only.example.invalid/v1"
+    );
+    assert_eq!(store_only["api"], "open_ai_chat_completions");
+    assert_eq!(store_only["defaultModel"], "store-only-model");
+    let store_oauth = find("store-oauth-fixture");
+    assert_eq!(store_oauth["custom"], true);
+    assert_eq!(store_oauth["configured"], true);
+    assert_eq!(
+        store_oauth["authKind"], "oauth",
+        "a custom record with a stored OAuth credential must report oauth"
+    );
+    assert_eq!(store_oauth["authSource"], "oauth");
+    let groq = find("groq");
+    assert_eq!(groq["configured"], false);
+    assert_eq!(groq["authSource"], serde_json::Value::Null);
+    assert_eq!(groq["custom"], false);
+    let codex = find("openai-codex");
+    assert_eq!(codex["authKind"], "oauth");
+
+    // Configured providers lead, then alphabetical display names; the
+    // remainder is unconfigured and stays alphabetical too.
+    assert_eq!(providers[0]["providerId"], "anthropic");
+    assert_eq!(providers[1]["providerId"], "openai");
+    assert_eq!(providers[2]["providerId"], "store-oauth-fixture");
+    assert!(
+        providers[3..]
+            .iter()
+            .all(|provider| provider["configured"] == false)
+    );
+    let unconfigured_names = providers[3..]
+        .iter()
+        .map(|provider| {
+            provider["displayName"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+        })
+        .collect::<Vec<_>>();
+    let mut sorted_names = unconfigured_names.clone();
+    sorted_names.sort();
+    assert_eq!(unconfigured_names, sorted_names);
+    let encoded = serde_json::to_string(&catalog).unwrap();
+    assert!(!encoded.contains("stored-secret"));
+    assert!(!encoded.contains("env-secret"));
+    assert!(!encoded.contains("oauth-access-secret"));
+    assert!(!encoded.contains("oauth-refresh-secret"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_catalog_marks_the_active_provider_and_oauth_source() {
+    let root = unique_test_root("app-server-provider-catalog-active");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-provider-catalog-active-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen, root.clone())
+            .with_openai_codex("gpt-5.6-terra");
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    verlet_metadata::provider_store::seed_default_llm_providers(&metadata_store)
+        .await
+        .unwrap();
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+        "gpt-5.6-terra",
+    );
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        std::sync::Arc::new(InspectingCapsuleClient::default()), // lexicon-allow: capsule - existing test client type.
+        crate::adapters::app_server::CapsuleBindingsConfig::default(), // lexicon-allow: capsule - existing config type.
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
+    app.inner
+        .user_metadata_store
+        .set_credential(
+            verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                access: "codex-access".to_string(),
+                refresh: "codex-refresh".to_string(),
+                expires_at_ms: verlet_history::now_ms() + 3_600_000,
+                account_id: None,
+                email: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let catalog = app
+        .dispatch_request(&connection, "modelProvider/catalog", None)
+        .await
+        .unwrap();
+    let providers = catalog["providers"].as_array().unwrap();
+    let codex = providers
+        .iter()
+        .find(|provider| provider["providerId"] == "openai-codex")
+        .unwrap();
+    assert_eq!(codex["authKind"], "oauth");
+    assert_eq!(codex["configured"], true);
+    assert_eq!(codex["authSource"], "oauth");
+    assert_eq!(codex["active"], true);
+    assert_eq!(codex["custom"], false);
+    assert_eq!(codex["modelCount"], 3);
+    assert_eq!(
+        codex["defaultModel"],
+        verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL
+    );
+    assert_eq!(
+        providers[0]["providerId"], "openai-codex",
+        "the configured active provider must sort first"
+    );
+    // The seeded example record has no catalog entry, so it reports as custom
+    // until EMO-575 retires it.
+    let example = providers
+        .iter()
+        .find(|provider| {
+            provider["providerId"] == verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID
+        })
+        .unwrap();
+    assert_eq!(example["custom"], true);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3384,6 +3702,103 @@ async fn model_select_switches_active_model_and_restart_restores_launch_default(
     assert_eq!(
         active["model"],
         crate::adapters::app_server::APP_SERVER_LOCAL_MODEL
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_list_suppresses_the_launch_row_when_another_model_is_active() {
+    let root = unique_test_root("app-server-launch-row-suppression");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("launch-row-suppression.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "suppression-fixture",
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                "https://suppression.example.invalid/v1",
+            )
+            .with_auth_header(true)
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("suppression-model"),
+            ),
+        )
+        .await
+        .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            "suppression-fixture",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "suppression-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        models["data"].as_array().unwrap().iter().any(|entry| {
+            entry["providerId"] == crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+                && entry["active"] == true
+        }),
+        "the launch row must be listed while it is the active selection"
+    );
+
+    app.dispatch_request(
+        &connection,
+        "model/select",
+        Some(serde_json::json!({
+            "providerId": "suppression-fixture",
+            "model": "suppression-model",
+        })),
+    )
+    .await
+    .unwrap();
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let data = models["data"].as_array().unwrap();
+    assert!(
+        data.iter().all(|entry| {
+            entry["providerId"] != crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+        }),
+        "the launch row must disappear once another model is active"
+    );
+    assert_eq!(
+        data.iter()
+            .find(|entry| entry["providerId"] == "suppression-fixture"
+                && entry["model"] == "suppression-model")
+            .unwrap()["active"],
+        true
     );
     let _ = std::fs::remove_dir_all(root);
 }

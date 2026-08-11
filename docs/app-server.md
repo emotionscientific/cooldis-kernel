@@ -738,14 +738,16 @@ grants.
 
 Params: none.
 
-Result: `{ "data": [...], "nextCursor": null }`. The list composes the
-checked-in models.dev catalog with its last valid background refresh and every
-model from every provider in the project metadata store; project metadata wins
-when the same provider/model pair appears in both sources.
-The launch-configured provider/model is appended when that pair is absent.
+Result: `{ "data": [...], "nextCursor": null }`. The list composes every model
+from every provider in the project metadata store with catalog metadata (the
+checked-in models.dev snapshot plus its last valid background refresh) for the
+same providers; project metadata wins when the same provider/model pair appears
+in both sources. Catalog providers without a store record do not appear here;
+the setup wizard discovers them through `modelProvider/catalog`. The
+launch-configured provider/model is appended only while it is the active
+selection and absent from the composed list.
 Each entry includes `providerId`, `model`, `displayName`, `authStatus`
-(`configured`, `env`, or `missing`), and `active`. Catalog providers that have
-not been configured in the project report `missing`. Compatibility fields such
+(`configured`, `env`, or `missing`), and `active`. Compatibility fields such
 as `id` and `isDefault` remain present; `isDefault` follows the session's active
 selection.
 
@@ -839,6 +841,24 @@ Result: `{ "auth": { ... } }` with the same redacted auth status returned by
 active catalog provider, the app-server eagerly rebuilds and atomically replaces
 the future-turn endpoint. If rebuilding fails, the previous credential is
 restored; an in-flight turn keeps its existing snapshot.
+
+### `modelProvider/catalog`
+
+Params: none (an empty object is accepted).
+
+Result: `{ "providers": [...] }`. A read-only merge of the models.dev provider
+catalog (checked-in snapshot plus its last valid background refresh) with
+provider-store state; it is the chat setup wizard's data source and never
+writes provider records or credentials. Each entry carries `providerId`,
+`displayName`, `baseUrl`, `api`, `authKind` (`api_key`, or `oauth` for
+`openai-codex`), `envVars`, `docUrl`, `modelCount`, `defaultModel` (the store
+record's default-flagged model when a record exists, else the first catalog
+model in sorted order), `configured`/`authSource` (`stored`, `env`, `oauth`, or
+null)/`authLabel` from the same auth-status resolution as
+`modelProvider/auth/status`, `custom` (true for store records without a catalog
+entry), and `active` (the provider of the runtime-active model). Configured
+providers sort first, then the active provider, then alphabetical display
+names. Credential values are never returned.
 
 ### `mcpSource/list`
 

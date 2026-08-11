@@ -892,6 +892,10 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
         crate::daemon::identity::AuthorityClass::Host,
     ),
     (
+        "modelProvider/catalog",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
         "experimentalFeature/list",
         crate::daemon::identity::AuthorityClass::Interactive,
     ),
@@ -1128,6 +1132,7 @@ pub(super) const HOST_EFFECT_METHODS: &[&str] = &[
     "modelProvider/auth/set",
     "modelProvider/auth/setOAuth",
     "modelProvider/auth/delete",
+    "modelProvider/catalog",
     // Runtime construction, reconstruction, and standing-grant changes.
     "thread/start",
     "thread/spawn",
@@ -1602,6 +1607,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 let params: ModelProviderAuthDeleteParams = parse_params(params)?;
                 self.model_provider_auth_delete(params).await
             }
+            "modelProvider/catalog" => self.model_provider_catalog().await,
             "experimentalFeature/list" => Ok(serde_json::json!({ "data": [], "nextCursor": null })),
             "experimentalFeature/enablement/set" => {
                 let params: ExperimentalFeatureEnablementSetParams = parse_params(params)?;
@@ -2269,6 +2275,164 @@ impl crate::adapters::app_server::VerletAppServer {
             data.push(self.model_provider_json(provider).await?);
         }
         Ok(serde_json::json!({ "data": data, "nextCursor": null }))
+    }
+
+    /// `modelProvider/catalog` (EMO-574): read-only merge of the models.dev
+    /// provider catalog with provider-store state for the chat setup wizard.
+    /// It never writes provider records or credentials.
+    pub(super) async fn model_provider_catalog(
+        &self,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let catalog_providers = self.inner.model_catalog.providers();
+        let mut catalog_models = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for entry in self.inner.model_catalog.entries() {
+            catalog_models
+                .entry(entry.provider_id)
+                .or_default()
+                .push(entry.model_id);
+        }
+        let records = self
+            .inner
+            .metadata_store
+            .list_providers()
+            .await
+            .map_err(|err| internal_error(crate::adapters::app_server::provider_store_error(err)))?
+            .into_iter()
+            .map(|record| (record.provider_id.clone(), record))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let auth_context = self.inner.instance_environment.provider_auth.resolve();
+        let active = self.inner.active_model.read().await.clone();
+        let mut rows = Vec::with_capacity(catalog_providers.len() + records.len());
+        for provider in &catalog_providers {
+            let record = records.get(&provider.provider_id);
+            let status = match record {
+                Some(record) => Some(
+                    verlet_metadata::provider_store::llm_provider_auth_status(
+                        &self.inner.user_metadata_store,
+                        record,
+                        &auth_context,
+                    )
+                    .await
+                    .map_err(|err| {
+                        internal_error(crate::adapters::app_server::provider_store_error(err))
+                    })?,
+                ),
+                None => None,
+            };
+            let (model_count, default_model) = model_provider_catalog_models(
+                record,
+                catalog_models
+                    .get(&provider.provider_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            );
+            rows.push(serde_json::json!({
+                "providerId": provider.provider_id,
+                "displayName": provider.display_name,
+                "baseUrl": provider.base_url,
+                "api": catalog_api_rpc_json(&provider.api),
+                "authKind": provider.auth_kind,
+                "envVars": provider.env_vars,
+                "docUrl": provider.doc_url,
+                "modelCount": model_count,
+                "defaultModel": default_model,
+                "configured": status.as_ref().is_some_and(|status| status.configured),
+                "authSource": model_provider_catalog_auth_source(
+                    status.as_ref(),
+                    provider.auth_kind
+                        == crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_OAUTH,
+                ),
+                "authLabel": status.and_then(|status| status.label),
+                "custom": false,
+                "active": provider.provider_id == active.model_provider,
+            }));
+        }
+        let catalog_ids = catalog_providers
+            .iter()
+            .map(|provider| provider.provider_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for record in records
+            .values()
+            .filter(|record| !catalog_ids.contains(record.provider_id.as_str()))
+        {
+            let status = verlet_metadata::provider_store::llm_provider_auth_status(
+                &self.inner.user_metadata_store,
+                record,
+                &auth_context,
+            )
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
+            let env_vars = match &record.auth {
+                verlet_metadata::provider_store::LlmProviderAuthConfig::Env { name } => {
+                    vec![name.clone()]
+                }
+                _ => record
+                    .metadata
+                    .get("auth_env")
+                    .map(|names| {
+                        names
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+            // The auth config has no OAuth variant, so an OAuth-backed custom
+            // record is recognized by the kind of its stored credential.
+            let oauth = self
+                .inner
+                .user_metadata_store
+                .get_credential(&record.provider_id)
+                .await
+                .map_err(|err| {
+                    internal_error(crate::adapters::app_server::provider_store_error(err))
+                })?
+                .is_some_and(|credential| {
+                    matches!(
+                        credential,
+                        verlet_metadata::provider_store::LlmProviderCredential::OAuth { .. }
+                    )
+                });
+            let auth_kind = if oauth {
+                crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_OAUTH
+            } else {
+                crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_API_KEY
+            };
+            let (model_count, default_model) = model_provider_catalog_models(Some(record), &[]);
+            rows.push(serde_json::json!({
+                "providerId": record.provider_id,
+                "displayName": catalog_provider_display_name(record),
+                "baseUrl": record.base_url,
+                "api": provider_api_rpc_json(&record.api),
+                "authKind": auth_kind,
+                "envVars": env_vars,
+                "docUrl": null,
+                "modelCount": model_count,
+                "defaultModel": default_model,
+                "configured": status.configured,
+                "authSource": model_provider_catalog_auth_source(Some(&status), oauth),
+                "authLabel": status.label,
+                "custom": true,
+                "active": record.provider_id == active.model_provider,
+            }));
+        }
+        let sort_key = |row: &serde_json::Value| {
+            (
+                !row["configured"].as_bool().unwrap_or(false),
+                !row["active"].as_bool().unwrap_or(false),
+                row["displayName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
+                row["providerId"].as_str().unwrap_or_default().to_string(),
+            )
+        };
+        rows.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
+        Ok(serde_json::json!({ "providers": rows }))
     }
 
     pub(super) async fn model_provider_read(
@@ -5516,12 +5680,22 @@ impl crate::adapters::app_server::VerletAppServer {
                 );
             }
         }
-        catalog_entries.extend(self.inner.model_catalog.entries());
+        // Catalog models are scoped to store-configured providers (EMO-574);
+        // unconfigured catalog providers surface via modelProvider/catalog.
+        catalog_entries.extend(
+            self.inner
+                .model_catalog
+                .entries()
+                .into_iter()
+                .filter(|entry| provider_records.contains_key(&entry.provider_id)),
+        );
         let launch_pair_in_catalog = catalog_entries.iter().any(|entry| {
             entry.provider_id == self.inner.model_provider && entry.model_id == self.inner.model
         });
         let active = self.inner.active_model.read().await.clone();
-        if !launch_pair_in_catalog {
+        let launch_pair_active =
+            active.model_provider == self.inner.model_provider && active.model == self.inner.model;
+        if !launch_pair_in_catalog && launch_pair_active {
             let display_name = match &self.inner.provider {
                 crate::adapters::app_server::AppServerProviderConfig::LocalOffline => {
                     "Verlet Local Offline".to_string()
@@ -6928,6 +7102,55 @@ fn provider_api_rpc_json(api: &verlet_history::ProviderApi) -> serde_json::Value
         }
         verlet_history::ProviderApi::AnthropicMessages => serde_json::json!("anthropic_messages"),
         verlet_history::ProviderApi::Other(other) => serde_json::json!({ "other": other }),
+    }
+}
+
+fn catalog_api_rpc_json(api: &str) -> serde_json::Value {
+    match api {
+        crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_CHAT_COMPLETIONS => {
+            provider_api_rpc_json(&verlet_history::ProviderApi::OpenAIChatCompletions)
+        }
+        crate::adapters::app_server::model_catalog::CATALOG_API_ANTHROPIC_MESSAGES => {
+            provider_api_rpc_json(&verlet_history::ProviderApi::AnthropicMessages)
+        }
+        crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_RESPONSES => {
+            provider_api_rpc_json(&verlet_history::ProviderApi::OpenAIResponses)
+        }
+        other => serde_json::json!({ "other": other }),
+    }
+}
+
+fn model_provider_catalog_auth_source(
+    status: Option<&verlet_metadata::provider_store::LlmProviderAuthStatus>,
+    oauth: bool,
+) -> serde_json::Value {
+    match status.and_then(|status| status.source) {
+        None => serde_json::Value::Null,
+        Some(verlet_metadata::provider_store::LlmProviderAuthSourceKind::Environment) => {
+            serde_json::json!("env")
+        }
+        Some(_) if oauth => serde_json::json!("oauth"),
+        Some(_) => serde_json::json!("stored"),
+    }
+}
+
+/// Deterministic `(modelCount, defaultModel)` rule: a store record's models
+/// win (its default-flagged model first), else the catalog's sorted order.
+fn model_provider_catalog_models(
+    record: Option<&verlet_metadata::provider_store::LlmProviderRecord>,
+    catalog_model_ids: &[String],
+) -> (usize, Option<String>) {
+    match record.filter(|record| !record.models.is_empty()) {
+        Some(record) => {
+            let default = record
+                .models
+                .iter()
+                .find(|model| model.metadata.get("default").map(String::as_str) == Some("true"))
+                .or_else(|| record.models.first())
+                .map(|model| model.model_id.clone());
+            (record.models.len(), default)
+        }
+        None => (catalog_model_ids.len(), catalog_model_ids.first().cloned()),
     }
 }
 
