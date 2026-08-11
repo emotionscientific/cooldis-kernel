@@ -916,30 +916,16 @@ pub enum AgentManifestBudgetRest {
     Rest,
 }
 
-/// Thread-level authority boundary (audit section 10). The manifest declares
-/// requirements, the operator grants them, the runtime enforces fail-closed.
-/// Effect grants live on tool bindings, not here.
+/// Thread-level runtime policy boundary.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestPolicies {
-    #[serde(default)]
-    pub network: AgentManifestNetworkPolicy,
     #[serde(default)]
     pub filesystem: AgentManifestFilesystemPolicy,
     #[serde(default)]
     pub allow_child_agents: bool,
     #[serde(default)]
     pub budgets: AgentManifestPolicyBudgets,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum AgentManifestNetworkPolicy {
-    #[default]
-    #[serde(rename = "deny")]
-    Deny,
-    /// Network reachable only through origins declared by tool grants.
-    #[serde(rename = "declared-origins")]
-    DeclaredOrigins,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

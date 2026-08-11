@@ -80,7 +80,6 @@ select = {{ stream = "thread", since = "anchor|start" }}
 budget_share = "rest"
 
 [policies]
-network = "declared-origins"
 filesystem = "vfs"
 allow_child_agents = true
 
@@ -118,6 +117,18 @@ fn manifest_operation_bindings_reject_legacy_grants() {
     let text = err.to_string();
     assert!(text.contains("unknown field"), "{text}");
     assert!(text.contains("grants"), "{text}");
+}
+
+#[test]
+fn manifest_policies_reject_legacy_network_declaration() {
+    let source = valid_manifest().replace(
+        "[policies]\n",
+        "[policies]\nnetwork = \"declared-origins\"\n",
+    );
+    let err = parse(&source).unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("unknown field"), "{text}");
+    assert!(text.contains("network"), "{text}");
 }
 
 fn manifest_with_coupling() -> String {

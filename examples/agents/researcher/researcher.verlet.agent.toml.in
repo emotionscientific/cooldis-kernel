@@ -64,6 +64,5 @@ streaming = true
 allow = ["default_cwd"]
 
 [policies]
-network = "declared-origins"
 filesystem = "vfs"
 allow_child_agents = false

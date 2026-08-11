@@ -14,15 +14,13 @@ manifest) in any agent picker.
   entry when running against a live model.
 - **Tools** (bash surface, content-addressed pins into the operation
   registry):
-  - `http_fetch` — GET a URL; origin-gated by the `net.http:GET:<origin>`
-    grants declared on the tool row. The example grants public HTTP(S) origins
-    with wildcards, while private/loopback destinations still require
-    `net.http.private`.
+  - `http_fetch` — GET a URL. The package declares its public HTTP(S) origins;
+    private or loopback destinations require explicit attachment config.
   - `file_read` — bounded reads from the thread's virtual filesystem.
   - `json_query` — RFC 6901 pointer extraction from a JSON document.
 - **Runtime** defaults: thread cwd `.`, streaming on, `default_cwd` the only
   allowlisted runtime override.
-- **Policies**: declared-origins network, VFS filesystem, no child agents.
+- **Policies**: VFS filesystem and no child agents.
 
 A commented `protocol_tool_import` block shows how a live MCP universe would
 join the manifest. It stays off in the committed example because it needs a
