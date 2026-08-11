@@ -286,14 +286,14 @@ fn render_at(app: &mut App, no_color: bool, width: u16, height: u16) -> String {
     let theme = crate::chat_theme(no_color);
     let sheet = tuika::StyleSheet::from_theme(&theme);
     let probe = tuika::probe::RectProbe::new();
-    let root = crate::ui::build(
+    let scene = crate::ui::build(
         app,
         ratatui::layout::Rect::new(0, 0, width, height),
         &theme,
         &sheet,
         &probe,
     );
-    let buffer = tuika::testing::render(root.as_ref(), width, height, &theme);
+    let buffer = tuika::testing::render(&scene, width, height, &theme);
     tuika::testing::grid(&buffer)
 }
 
@@ -842,14 +842,14 @@ fn models_event_replaces_popup_and_picker_and_empty_result_closes_stale_picker()
 }
 
 #[test]
-fn missing_auth_selection_routes_into_the_setup_wizard() {
+fn missing_auth_selection_routes_into_the_setup_window() {
     let mut app = app();
     app.apply(ChatEvent::Models(model_rows()));
     let _ = app.handle(&key(tuika::KeyCode::Down));
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     // No doomed SelectModel: the UI fetches the provider catalog to open the
     // credential step for `provider` instead.
-    assert_eq!(app.drain_actions(), vec![Action::ListProviders]);
+    assert_eq!(app.drain_actions(), vec![Action::FetchProviderCatalog]);
     assert!(app.picker.is_none());
 }
 
@@ -1061,14 +1061,14 @@ fn renders_a_welcome_screen_snapshot() {
     let theme = crate::chat_theme(false);
     let sheet = tuika::StyleSheet::from_theme(&theme);
     let probe = tuika::probe::RectProbe::new();
-    let root = crate::ui::build(
+    let scene = crate::ui::build(
         &mut app,
         ratatui::layout::Rect::new(0, 0, 80, 24),
         &theme,
         &sheet,
         &probe,
     );
-    let buffer = tuika::testing::render(root.as_ref(), 80, 24, &theme);
+    let buffer = tuika::testing::render(&scene, 80, 24, &theme);
     let grid = tuika::testing::grid(&buffer);
     assert!(grid.contains("Verlet chat"), "banner missing:\n{grid}");
     assert!(grid.contains("/help"), "tips missing:\n{grid}");
@@ -1093,14 +1093,14 @@ fn renders_a_turn_in_flight_snapshot() {
     let theme = crate::chat_theme(false);
     let sheet = tuika::StyleSheet::from_theme(&theme);
     let probe = tuika::probe::RectProbe::new();
-    let root = crate::ui::build(
+    let scene = crate::ui::build(
         &mut app,
         ratatui::layout::Rect::new(0, 0, 80, 24),
         &theme,
         &sheet,
         &probe,
     );
-    let buffer = tuika::testing::render(root.as_ref(), 80, 24, &theme);
+    let buffer = tuika::testing::render(&scene, 80, 24, &theme);
     let grid = tuika::testing::grid(&buffer);
     assert!(
         grid.contains("› why does the test fail?"),
@@ -1111,75 +1111,136 @@ fn renders_a_turn_in_flight_snapshot() {
     assert!(grid.contains("Looking at the snapshot…"), "answer:\n{grid}");
 }
 
-// --- setup wizard ---
+// --- setup window ---
 
-fn provider_rows() -> Vec<crate::ProviderRow> {
+fn catalog_rows() -> Vec<crate::CatalogProviderRow> {
     vec![
-        crate::ProviderRow {
+        crate::CatalogProviderRow {
             provider_id: "anthropic".to_string(),
             display_name: "Anthropic".to_string(),
-            auth_status: "configured".to_string(),
-            label: "stored credential".to_string(),
-            oauth: false,
+            base_url: "https://api.anthropic.com".to_string(),
+            api: "anthropic_messages".to_string(),
+            auth_kind: "api_key".to_string(),
+            env_vars: vec!["ANTHROPIC_API_KEY".to_string()],
+            configured: true,
+            auth_label: "stored key".to_string(),
+            custom: false,
             active: true,
+            model_count: 3,
+            default_model: Some("claude-best".to_string()),
         },
-        crate::ProviderRow {
+        crate::CatalogProviderRow {
+            provider_id: "local-llm".to_string(),
+            display_name: "Local LLM".to_string(),
+            base_url: "http://localhost:8080/v1".to_string(),
+            api: "openai_chat_completions".to_string(),
+            auth_kind: "api_key".to_string(),
+            env_vars: Vec::new(),
+            configured: true,
+            auth_label: "stored key".to_string(),
+            custom: true,
+            active: false,
+            model_count: 1,
+            default_model: Some("llama-local".to_string()),
+        },
+        crate::CatalogProviderRow {
             provider_id: "openai".to_string(),
             display_name: "OpenAI".to_string(),
-            auth_status: "missing".to_string(),
-            label: "no credential".to_string(),
-            oauth: false,
+            base_url: "https://api.openai.com/v1".to_string(),
+            api: "openai_chat_completions".to_string(),
+            auth_kind: "api_key".to_string(),
+            env_vars: vec!["OPENAI_API_KEY".to_string()],
+            configured: false,
+            auth_label: String::new(),
+            custom: false,
             active: false,
+            model_count: 2,
+            default_model: Some("gpt-best".to_string()),
         },
-        crate::ProviderRow {
+        crate::CatalogProviderRow {
             provider_id: "openai-codex".to_string(),
             display_name: "OpenAI Codex".to_string(),
-            auth_status: "missing".to_string(),
-            label: "no credential".to_string(),
-            oauth: true,
+            base_url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+            api: "openai_responses".to_string(),
+            auth_kind: "oauth".to_string(),
+            env_vars: Vec::new(),
+            configured: false,
+            auth_label: String::new(),
+            custom: false,
             active: false,
+            model_count: 1,
+            default_model: Some("gpt-5.6-codex".to_string()),
         },
     ]
 }
 
-fn open_wizard(app: &mut App) {
+/// `/setup` then the catalog answer: lands on the provider overview.
+fn open_home(app: &mut App) {
     app.submit("/setup");
-    assert_eq!(app.drain_actions(), vec![Action::ListProviders]);
-    app.apply(ChatEvent::Providers(provider_rows()));
+    assert_eq!(app.drain_actions(), vec![Action::FetchProviderCatalog]);
+    app.apply(ChatEvent::ProviderCatalog {
+        providers: catalog_rows(),
+    });
+}
+
+/// Overview has 2 configured rows (anthropic, local-llm); "Connect a
+/// provider" sits right under them.
+fn open_catalog(app: &mut App) {
+    open_home(app);
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
 }
 
 #[test]
-fn setup_command_opens_the_provider_step_preselecting_the_active_row() {
+fn setup_command_opens_the_provider_overview() {
     let mut app = app();
-    open_wizard(&mut app);
+    open_home(&mut app);
     let grid = render(&mut app, true);
-    assert!(grid.contains("Set up a provider"), "title:\n{grid}");
-    assert!(grid.contains("Anthropic"), "provider name:\n{grid}");
-    assert!(
-        grid.contains("✓ stored credential"),
-        "connected status:\n{grid}"
-    );
-    assert!(grid.contains("needs API key"), "key status:\n{grid}");
-    assert!(grid.contains("needs sign-in"), "oauth status:\n{grid}");
+    assert!(grid.contains("Providers"), "window title:\n{grid}");
+    assert!(grid.contains("Anthropic"), "configured row:\n{grid}");
+    assert!(grid.contains("✓ stored key"), "auth source:\n{grid}");
+    assert!(grid.contains("3 models"), "model count:\n{grid}");
     assert!(grid.contains("active"), "active marker:\n{grid}");
-    assert!(grid.contains("c configure"), "footer hints:\n{grid}");
+    assert!(
+        grid.contains("http://localhost:8080/v1"),
+        "custom base url:\n{grid}"
+    );
+    assert!(
+        grid.contains("Connect a provider"),
+        "connect action:\n{grid}"
+    );
+    assert!(
+        grid.contains("Add custom provider"),
+        "custom action:\n{grid}"
+    );
+    // The composer is behind the modal; no terminal caret.
+    assert_eq!(app.cursor(ratatui::layout::Rect::new(0, 0, 40, 1)), None);
+}
 
-    // Enter on the preselected (connected) row heads to the model step.
+#[test]
+fn providers_alias_matches_setup() {
+    let mut app = app();
+    app.submit("/providers");
+    assert_eq!(app.drain_actions(), vec![Action::FetchProviderCatalog]);
+}
+
+#[test]
+fn overview_enter_opens_the_provider_menu_and_scoped_models() {
+    let mut app = app();
+    open_home(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Pick a model"), "menu:\n{grid}");
+    assert!(grid.contains("Replace API key"), "replace option:\n{grid}");
+    assert!(grid.contains("Clear saved key"), "clear option:\n{grid}");
+    assert!(
+        !grid.contains("Delete provider"),
+        "catalog rows are not deletable:\n{grid}"
+    );
+
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     assert_eq!(app.drain_actions(), vec![Action::ListModels]);
-    let grid = render(&mut app, true);
-    assert!(
-        !grid.contains("Set up a provider"),
-        "wizard hidden:\n{grid}"
-    );
-}
-
-#[test]
-fn wizard_model_step_scopes_the_picker_to_the_chosen_provider() {
-    let mut app = app();
-    open_wizard(&mut app);
-    let _ = app.handle(&key(tuika::KeyCode::Enter));
-    let _ = app.drain_actions();
     app.apply(ChatEvent::Models(vec![
         crate::ModelRow {
             provider_id: "anthropic".to_string(),
@@ -1203,26 +1264,24 @@ fn wizard_model_step_scopes_the_picker_to_the_chosen_provider() {
 }
 
 #[test]
-fn unconnected_provider_routes_through_the_credential_step_to_key_entry() {
+fn catalog_picker_searches_and_routes_to_key_entry() {
     let mut app = app();
-    open_wizard(&mut app);
-    let _ = app.handle(&key(tuika::KeyCode::Down));
-    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    open_catalog(&mut app);
     let grid = render(&mut app, true);
-    assert!(grid.contains("Connect OpenAI"), "credential title:\n{grid}");
-    assert!(grid.contains("Paste API key"), "key option:\n{grid}");
-    assert!(grid.contains("Clear saved key"), "clear option:\n{grid}");
-    assert!(
-        !grid.contains("Sign in with browser"),
-        "oauth leaked:\n{grid}"
-    );
+    assert!(grid.contains("Connect a provider"), "title:\n{grid}");
+    assert!(grid.contains("Search:"), "search line:\n{grid}");
+    assert!(grid.contains("OpenAI"), "catalog row:\n{grid}");
+
+    // Typing filters; "openai" keeps OpenAI and OpenAI Codex only.
+    type_text(&mut app, "openai");
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("Anthropic"), "filter failed:\n{grid}");
+    assert!(grid.contains("OpenAI"), "match dropped:\n{grid}");
 
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     let grid = render(&mut app, true);
-    assert!(
-        grid.contains("Paste the OpenAI API key"),
-        "input title:\n{grid}"
-    );
+    assert!(grid.contains("Connect OpenAI"), "key entry title:\n{grid}");
+    assert!(grid.contains("or set OPENAI_API_KEY"), "env hint:\n{grid}");
 
     type_text(&mut app, "sk-secret-123");
     let grid = render(&mut app, true);
@@ -1240,7 +1299,7 @@ fn unconnected_provider_routes_through_the_credential_step_to_key_entry() {
     let grid = render(&mut app, true);
     assert!(grid.contains("saving…"), "busy hint:\n{grid}");
 
-    // Success continues into the provider's model list.
+    // Success with a usable current model: the picker opens scoped.
     app.apply(ChatEvent::CredentialResult {
         provider_id: "openai".to_string(),
         error: None,
@@ -1253,11 +1312,35 @@ fn unconnected_provider_routes_through_the_credential_step_to_key_entry() {
 }
 
 #[test]
+fn credential_success_auto_selects_the_default_model_when_current_is_unusable() {
+    let mut app = app();
+    app.meta.model_label = "local/echo".to_string();
+    open_catalog(&mut app);
+    type_text(&mut app, "openai");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    type_text(&mut app, "sk-key");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "openai".to_string(),
+        error: None,
+    });
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::SelectModel {
+            provider_id: "openai".to_string(),
+            model: "gpt-best".to_string(),
+        }]
+    );
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("Connect OpenAI"), "window closed:\n{grid}");
+}
+
+#[test]
 fn empty_and_failed_key_submissions_surface_errors_in_place() {
     let mut app = app();
-    open_wizard(&mut app);
-    let _ = app.handle(&key(tuika::KeyCode::Down));
-    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    open_catalog(&mut app);
+    type_text(&mut app, "openai");
     let _ = app.handle(&key(tuika::KeyCode::Enter));
 
     let _ = app.handle(&key(tuika::KeyCode::Enter));
@@ -1283,12 +1366,11 @@ fn empty_and_failed_key_submissions_surface_errors_in_place() {
 #[test]
 fn oauth_provider_offers_sign_in_and_shows_the_device_code() {
     let mut app = app();
-    open_wizard(&mut app);
-    let _ = app.handle(&key(tuika::KeyCode::Down));
-    let _ = app.handle(&key(tuika::KeyCode::Down));
+    open_catalog(&mut app);
+    type_text(&mut app, "codex");
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     let grid = render(&mut app, true);
-    assert!(grid.contains("Connect OpenAI Codex"), "title:\n{grid}");
+    assert!(grid.contains("Sign in to OpenAI Codex"), "title:\n{grid}");
     assert!(
         grid.contains("Sign in with browser"),
         "browser option:\n{grid}"
@@ -1306,10 +1388,6 @@ fn oauth_provider_offers_sign_in_and_shows_the_device_code() {
     );
     let grid = render(&mut app, true);
     assert!(
-        grid.contains("Sign in to OpenAI Codex"),
-        "wait title:\n{grid}"
-    );
-    assert!(
         grid.contains("requesting a device code"),
         "wait body:\n{grid}"
     );
@@ -1325,21 +1403,21 @@ fn oauth_provider_offers_sign_in_and_shows_the_device_code() {
     );
     assert!(grid.contains("ABCD-1234"), "user code:\n{grid}");
 
-    // Esc cancels the login and lands back on credentials with a notice.
+    // Esc cancels the login and lands back on the method choice.
     let _ = app.handle(&key(tuika::KeyCode::Esc));
     assert_eq!(app.drain_actions(), vec![Action::CancelLogin]);
     let grid = render(&mut app, true);
-    assert!(
-        grid.contains("Connect OpenAI Codex"),
-        "back on credentials:\n{grid}"
-    );
     assert!(grid.contains("sign-in canceled"), "cancel notice:\n{grid}");
+    assert!(
+        grid.contains("Sign in with browser"),
+        "back on methods:\n{grid}"
+    );
 }
 
 #[test]
-fn login_success_reissues_the_selection_that_started_the_wizard() {
+fn login_success_reissues_the_selection_that_started_the_window() {
     let mut app = app();
-    // Enter on a "needs login" model row routes into the wizard.
+    // Enter on a "needs login" model row routes into the window.
     app.apply(ChatEvent::Models(vec![crate::ModelRow {
         provider_id: "openai-codex".to_string(),
         model: "gpt-5.6-sol".to_string(),
@@ -1348,13 +1426,15 @@ fn login_success_reissues_the_selection_that_started_the_wizard() {
         active: false,
     }]));
     let _ = app.handle(&key(tuika::KeyCode::Enter));
-    assert_eq!(app.drain_actions(), vec![Action::ListProviders]);
+    assert_eq!(app.drain_actions(), vec![Action::FetchProviderCatalog]);
 
-    // The catalog answer lands directly on the provider's credential step.
-    app.apply(ChatEvent::Providers(provider_rows()));
+    // The catalog answer lands directly on the provider's sign-in step.
+    app.apply(ChatEvent::ProviderCatalog {
+        providers: catalog_rows(),
+    });
     let grid = render(&mut app, true);
     assert!(
-        grid.contains("Connect OpenAI Codex"),
+        grid.contains("Sign in to OpenAI Codex"),
         "credential step:\n{grid}"
     );
 
@@ -1366,6 +1446,7 @@ fn login_success_reissues_the_selection_that_started_the_wizard() {
             method: crate::LoginMethod::Browser,
         }]
     );
+    // A stale device code for a browser login must not corrupt the wait.
     app.apply(ChatEvent::LoginDeviceCode {
         verification_uri: "https://stale.example/device".to_string(),
         user_code: "STALE".to_string(),
@@ -1390,13 +1471,34 @@ fn login_success_reissues_the_selection_that_started_the_wizard() {
         }]
     );
     let grid = render(&mut app, true);
-    assert!(!grid.contains("Sign in to"), "wizard closed:\n{grid}");
+    assert!(!grid.contains("Sign in to"), "window closed:\n{grid}");
 }
 
 #[test]
-fn wizard_swallows_composer_input_and_esc_dismisses_from_the_provider_step() {
+fn esc_backs_out_level_by_level_and_closes_from_home() {
     let mut app = app();
-    open_wizard(&mut app);
+    open_catalog(&mut app);
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Search:"), "catalog open:\n{grid}");
+
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Connect a provider"), "back on home:\n{grid}");
+    assert!(!grid.contains("Search:"), "catalog closed:\n{grid}");
+
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    let grid = render(&mut app, true);
+    assert!(
+        !grid.contains("Add custom provider"),
+        "window closed:\n{grid}"
+    );
+    assert_eq!(app.drain_actions(), Vec::new());
+}
+
+#[test]
+fn window_swallows_composer_input_while_open() {
+    let mut app = app();
+    open_home(&mut app);
     app.apply(ChatEvent::TurnStarted {
         turn_id: "turn-1".to_string(),
     });
@@ -1413,27 +1515,316 @@ fn wizard_swallows_composer_input_and_esc_dismisses_from_the_provider_step() {
 
     let _ = app.handle(&key(tuika::KeyCode::Esc));
     assert_eq!(app.drain_actions(), Vec::new());
-    let grid = render(&mut app, true);
-    assert!(
-        !grid.contains("Set up a provider"),
-        "wizard closed:\n{grid}"
-    );
     type_text(&mut app, "hi");
     assert!(!app.composer.is_empty(), "composer usable again");
 }
 
 #[test]
-fn stale_credential_results_report_out_of_band_without_reopening_the_wizard() {
+fn first_run_gate_opens_the_catalog_and_nags_until_configured() {
+    let mut app = app();
+    app.apply(ChatEvent::NoConfiguredProviders);
+    assert_eq!(app.drain_actions(), vec![Action::FetchProviderCatalog]);
+    app.apply(ChatEvent::ProviderCatalog {
+        providers: catalog_rows()
+            .into_iter()
+            .map(|mut row| {
+                row.configured = false;
+                row.custom = false;
+                row.auth_label = String::new();
+                row
+            })
+            .collect(),
+    });
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Search:"), "catalog auto-opened:\n{grid}");
+
+    // Skipping is allowed but the footer nags.
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("no provider configured"),
+        "footer nag missing:\n{grid}"
+    );
+
+    // A saved credential clears the nag (out-of-band here).
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "openai".to_string(),
+        error: None,
+    });
+    let grid = render(&mut app, true);
+    assert!(
+        !grid.contains("no provider configured"),
+        "nag survived:\n{grid}"
+    );
+}
+
+#[test]
+fn first_run_gate_does_not_reopen_over_an_active_window() {
+    let mut app = app();
+    open_home(&mut app);
+    app.apply(ChatEvent::NoConfiguredProviders);
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Connect a provider"), "home kept:\n{grid}");
+}
+
+#[test]
+fn custom_form_derives_the_id_validates_and_submits() {
+    let mut app = app();
+    open_home(&mut app);
+    // Down past 2 provider rows and "Connect" to "Add custom provider".
+    for _ in 0..3 {
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+    }
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Custom provider"), "form title:\n{grid}");
+
+    type_text(&mut app, "My LLM Server");
+    let grid = render(&mut app, true);
+    assert!(grid.contains("my-llm-server"), "derived id:\n{grid}");
+
+    // Submit early: validation fails on the missing base URL.
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(grid.contains("base URL is required"), "validation:\n{grid}");
+
+    // API family cycles with arrows.
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Right));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("OpenAI Responses"), "family cycled:\n{grid}");
+    let _ = app.handle(&key(tuika::KeyCode::Left));
+
+    // A remote plain-http URL is rejected.
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    type_text(&mut app, "http://example.com/v1");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("plain http is only allowed for localhost"),
+        "http rejection:\n{grid}"
+    );
+    for _ in 0.."http://example.com/v1".len() {
+        let _ = app.handle(&key(tuika::KeyCode::Backspace));
+    }
+    type_text(&mut app, "https://llm.example/v1");
+
+    // Key field is masked.
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    type_text(&mut app, "sk-custom-secret");
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("sk-custom-secret"), "key echoed:\n{grid}");
+
+    // Models: at least one required; give two.
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    type_text(&mut app, "model-one, model-two");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::UpsertCustomProvider {
+            spec: crate::CustomProviderSpec {
+                provider_id: "my-llm-server".to_string(),
+                display_name: "My LLM Server".to_string(),
+                api: "openai_chat_completions".to_string(),
+                base_url: "https://llm.example/v1".to_string(),
+                header: None,
+                models: vec!["model-one".to_string(), "model-two".to_string()],
+                keyless: false,
+            },
+        }]
+    );
+    let grid = render(&mut app, true);
+    assert!(grid.contains("saving provider…"), "busy:\n{grid}");
+
+    // Upsert success chains into the key save.
+    app.apply(ChatEvent::CustomProviderResult {
+        provider_id: "my-llm-server".to_string(),
+        error: None,
+    });
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::SetProviderKey {
+            provider_id: "my-llm-server".to_string(),
+            api_key: "sk-custom-secret".to_string(),
+        }]
+    );
+    let grid = render(&mut app, true);
+    assert!(grid.contains("saving key…"), "key busy:\n{grid}");
+
+    // Key success finishes into the provider's model list.
+    app.apply(ChatEvent::CredentialResult {
+        provider_id: "my-llm-server".to_string(),
+        error: None,
+    });
+    assert_eq!(app.drain_actions(), vec![Action::ListModels]);
+}
+
+#[test]
+fn keyless_custom_provider_finishes_without_a_key_save() {
+    let mut app = app();
+    app.meta.model_label = "local/echo".to_string();
+    open_home(&mut app);
+    for _ in 0..3 {
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+    }
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    type_text(&mut app, "Ollama");
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    type_text(&mut app, "http://127.0.0.1:11434/v1");
+    for _ in 0..4 {
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+    }
+    type_text(&mut app, "llama-local");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::UpsertCustomProvider {
+            spec: crate::CustomProviderSpec {
+                provider_id: "ollama".to_string(),
+                display_name: "Ollama".to_string(),
+                api: "openai_chat_completions".to_string(),
+                base_url: "http://127.0.0.1:11434/v1".to_string(),
+                header: None,
+                models: vec!["llama-local".to_string()],
+                keyless: true,
+            },
+        }]
+    );
+    app.apply(ChatEvent::CustomProviderResult {
+        provider_id: "ollama".to_string(),
+        error: None,
+    });
+    // No key follow-up; the unusable echo model auto-selects the default.
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::SelectModel {
+            provider_id: "ollama".to_string(),
+            model: "llama-local".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn custom_form_upsert_errors_render_inline_and_redact() {
+    let mut app = app();
+    open_home(&mut app);
+    for _ in 0..3 {
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+    }
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    type_text(&mut app, "Broken");
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    type_text(&mut app, "https://broken.example/v1");
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    type_text(&mut app, "sk-broken-secret");
+    for _ in 0..3 {
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+    }
+    type_text(&mut app, "m1");
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::CustomProviderResult {
+        provider_id: "broken".to_string(),
+        error: Some("record for sk-broken-secret was rejected".to_string()),
+    });
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("sk-broken-secret"), "secret leaked:\n{grid}");
+    assert!(
+        grid.contains("record for [redacted] was rejected"),
+        "inline redacted error:\n{grid}"
+    );
+    // The form stays interactive for a retry.
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions().len(),
+        1,
+        "resubmission works after an error"
+    );
+}
+
+#[test]
+fn provider_menu_edits_and_deletes_custom_providers() {
+    let mut app = app();
+    open_home(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Edit provider"), "edit option:\n{grid}");
+    assert!(grid.contains("Delete provider"), "delete option:\n{grid}");
+
+    // Edit prefills the form.
+    for _ in 0..3 {
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+    }
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Custom provider"), "form title:\n{grid}");
+    assert!(grid.contains("Local LLM"), "prefilled name:\n{grid}");
+    assert!(
+        grid.contains("http://localhost:8080/v1"),
+        "prefilled url:\n{grid}"
+    );
+
+    // Esc back to home, then delete.
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    let _ = app.handle(&key(tuika::KeyCode::Down));
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    for _ in 0..4 {
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+    }
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![Action::DeleteCustomProvider {
+            provider_id: "local-llm".to_string(),
+        }]
+    );
+    let grid = render(&mut app, true);
+    assert!(grid.contains("deleting…"), "delete busy:\n{grid}");
+
+    app.apply(ChatEvent::CustomProviderResult {
+        provider_id: "local-llm".to_string(),
+        error: None,
+    });
+    assert_eq!(app.drain_actions(), vec![Action::FetchProviderCatalog]);
+    let without_custom: Vec<crate::CatalogProviderRow> = catalog_rows()
+        .into_iter()
+        .filter(|row| row.provider_id != "local-llm")
+        .collect();
+    app.apply(ChatEvent::ProviderCatalog {
+        providers: without_custom,
+    });
+    let grid = render(&mut app, true);
+    assert!(
+        !grid.contains("Local LLM"),
+        "deleted row still shown:\n{grid}"
+    );
+    assert!(app.cells.iter().any(|cell| matches!(
+        cell,
+        crate::Cell::Notice { title, .. } if title == "local-llm: provider deleted"
+    )));
+}
+
+#[test]
+fn stale_credential_results_report_out_of_band_without_reopening_the_window() {
     let mut app = app();
     app.apply(ChatEvent::CredentialResult {
         provider_id: "openai".to_string(),
         error: Some("boom".to_string()),
     });
     let grid = render(&mut app, true);
-    assert!(
-        !grid.contains("Set up a provider"),
-        "wizard stayed shut:\n{grid}"
-    );
+    assert!(!grid.contains("Providers"), "window stayed shut:\n{grid}");
     assert!(app.cells.iter().any(|cell| matches!(
         cell,
         crate::Cell::Notice { tone: crate::Tone::Error, title, .. }
@@ -1460,7 +1851,8 @@ fn setup_request_errors_release_invisible_wait_states() {
     assert!(app.setup.is_none());
     assert!(app.pending_selection.is_none());
 
-    open_wizard(&mut app);
+    open_home(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     let _ = app.drain_actions();
     app.apply(ChatEvent::Error {
@@ -1492,9 +1884,8 @@ fn setup_request_errors_release_invisible_wait_states() {
 #[test]
 fn setup_action_errors_return_busy_steps_to_interactive_state() {
     let mut app = app();
-    open_wizard(&mut app);
-    let _ = app.handle(&key(tuika::KeyCode::Down));
-    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    open_catalog(&mut app);
+    type_text(&mut app, "openai");
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     type_text(&mut app, "sk-secret");
     let _ = app.handle(&key(tuika::KeyCode::Enter));
@@ -1517,9 +1908,8 @@ fn setup_action_errors_return_busy_steps_to_interactive_state() {
     );
 
     let mut oauth_app = App::new(meta());
-    open_wizard(&mut oauth_app);
-    let _ = oauth_app.handle(&key(tuika::KeyCode::Down));
-    let _ = oauth_app.handle(&key(tuika::KeyCode::Down));
+    open_catalog(&mut oauth_app);
+    type_text(&mut oauth_app, "codex");
     let _ = oauth_app.handle(&key(tuika::KeyCode::Enter));
     let _ = oauth_app.handle(&key(tuika::KeyCode::Enter));
     let _ = oauth_app.drain_actions();
@@ -1529,11 +1919,11 @@ fn setup_action_errors_return_busy_steps_to_interactive_state() {
     });
     let grid = render(&mut oauth_app, true);
     assert!(
-        grid.contains("Connect OpenAI Codex"),
-        "login stayed busy:\n{grid}"
+        grid.contains("Sign in with browser"),
+        "back on the method choice:\n{grid}"
     );
     assert!(
-        !grid.contains("Sign in to OpenAI Codex"),
+        !grid.contains("waiting for the browser"),
         "login wait stayed open:\n{grid}"
     );
 }
@@ -1541,9 +1931,8 @@ fn setup_action_errors_return_busy_steps_to_interactive_state() {
 #[test]
 fn credential_failure_never_renders_the_submitted_secret() {
     let mut app = app();
-    open_wizard(&mut app);
-    let _ = app.handle(&key(tuika::KeyCode::Down));
-    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    open_catalog(&mut app);
+    type_text(&mut app, "openai");
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     type_text(&mut app, "sk-do-not-render");
     let _ = app.handle(&key(tuika::KeyCode::Enter));
@@ -1560,9 +1949,8 @@ fn credential_failure_never_renders_the_submitted_secret() {
     );
 
     let mut late_app = App::new(meta());
-    open_wizard(&mut late_app);
-    let _ = late_app.handle(&key(tuika::KeyCode::Down));
-    let _ = late_app.handle(&key(tuika::KeyCode::Enter));
+    open_catalog(&mut late_app);
+    type_text(&mut late_app, "openai");
     let _ = late_app.handle(&key(tuika::KeyCode::Enter));
     type_text(&mut late_app, "sk-late-error");
     let _ = late_app.handle(&key(tuika::KeyCode::Enter));
@@ -1582,13 +1970,14 @@ fn credential_failure_never_renders_the_submitted_secret() {
 #[test]
 fn catalog_events_do_not_clobber_open_credential_input() {
     let mut app = app();
-    open_wizard(&mut app);
-    let _ = app.handle(&key(tuika::KeyCode::Down));
-    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    open_catalog(&mut app);
+    type_text(&mut app, "openai");
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     type_text(&mut app, "sk-kept");
 
-    app.apply(ChatEvent::Providers(provider_rows()));
+    app.apply(ChatEvent::ProviderCatalog {
+        providers: catalog_rows(),
+    });
     app.apply(ChatEvent::Models(vec![crate::ModelRow {
         provider_id: "anthropic".to_string(),
         model: "model-a".to_string(),
@@ -1607,7 +1996,7 @@ fn catalog_events_do_not_clobber_open_credential_input() {
     assert_eq!(app.drain_actions(), Vec::new());
     let grid = render(&mut app, true);
     assert!(
-        grid.contains("Paste the OpenAI API key"),
+        grid.contains("Connect OpenAI"),
         "input was replaced:\n{grid}"
     );
     assert!(
@@ -1625,9 +2014,10 @@ fn catalog_events_do_not_clobber_open_credential_input() {
 }
 
 #[test]
-fn manual_models_command_supersedes_the_wizard_model_scope() {
+fn manual_models_command_supersedes_the_window_model_scope() {
     let mut app = app();
-    open_wizard(&mut app);
+    open_home(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     let _ = app.drain_actions();
 
@@ -1669,7 +2059,9 @@ fn missing_awaited_provider_and_canceled_login_clear_pending_selection() {
     }]));
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     let _ = app.drain_actions();
-    app.apply(ChatEvent::Providers(provider_rows()));
+    app.apply(ChatEvent::ProviderCatalog {
+        providers: catalog_rows(),
+    });
     assert!(app.pending_selection.is_none());
 
     let mut cancel_app = App::new(meta());
@@ -1682,7 +2074,9 @@ fn missing_awaited_provider_and_canceled_login_clear_pending_selection() {
     }]));
     let _ = cancel_app.handle(&key(tuika::KeyCode::Enter));
     let _ = cancel_app.drain_actions();
-    cancel_app.apply(ChatEvent::Providers(provider_rows()));
+    cancel_app.apply(ChatEvent::ProviderCatalog {
+        providers: catalog_rows(),
+    });
     let _ = cancel_app.handle(&key(tuika::KeyCode::Enter));
     let _ = cancel_app.drain_actions();
     let _ = cancel_app.handle(&key(tuika::KeyCode::Esc));
@@ -1692,6 +2086,8 @@ fn missing_awaited_provider_and_canceled_login_clear_pending_selection() {
         provider_id: "openai-codex".to_string(),
         error: None,
     });
+    // The user canceled and sits on the method choice: a late success is
+    // reported out of band without driving the flow forward.
     assert_eq!(cancel_app.drain_actions(), Vec::new());
 
     let mut key_app = App::new(meta());
@@ -1704,8 +2100,9 @@ fn missing_awaited_provider_and_canceled_login_clear_pending_selection() {
     }]));
     let _ = key_app.handle(&key(tuika::KeyCode::Enter));
     let _ = key_app.drain_actions();
-    key_app.apply(ChatEvent::Providers(provider_rows()));
-    let _ = key_app.handle(&key(tuika::KeyCode::Enter));
+    key_app.apply(ChatEvent::ProviderCatalog {
+        providers: catalog_rows(),
+    });
     type_text(&mut key_app, "sk-key");
     let _ = key_app.handle(&key(tuika::KeyCode::Enter));
     let _ = key_app.drain_actions();
@@ -1716,28 +2113,35 @@ fn missing_awaited_provider_and_canceled_login_clear_pending_selection() {
 #[test]
 fn long_and_wide_provider_rows_preserve_the_active_marker() {
     let mut app = app();
-    app.apply(ChatEvent::Providers(vec![crate::ProviderRow {
-        provider_id: "provider".to_string(),
-        display_name: "模型🙂 provider with a very long display name".repeat(2),
-        auth_status: "configured".to_string(),
-        label: "a very long stored credential status".repeat(2),
-        oauth: false,
-        active: true,
-    }]));
-    let grid = render_at(&mut app, true, 40, 12);
+    app.submit("/setup");
+    let _ = app.drain_actions();
+    app.apply(ChatEvent::ProviderCatalog {
+        providers: vec![crate::CatalogProviderRow {
+            provider_id: "provider".to_string(),
+            display_name: "模型🙂 provider with a very long display name".repeat(2),
+            base_url: "https://api.example/v1".to_string(),
+            api: "openai_chat_completions".to_string(),
+            auth_kind: "api_key".to_string(),
+            env_vars: Vec::new(),
+            configured: true,
+            auth_label: "a very long stored credential status".repeat(2),
+            custom: false,
+            active: true,
+            model_count: 4,
+            default_model: None,
+        }],
+    });
+    let grid = render_at(&mut app, true, 40, 14);
     assert!(grid.contains("active"), "active marker clipped:\n{grid}");
 }
 
 #[test]
-fn clearing_a_credential_refreshes_the_open_wizard() {
+fn clearing_a_credential_refreshes_the_open_window() {
     let mut app = app();
-    open_wizard(&mut app);
-    // `c` opens the credential step even on a connected provider.
-    let _ = app.handle(&key(tuika::KeyCode::Char('c')));
-    let grid = render(&mut app, true);
-    assert!(grid.contains("Connect Anthropic"), "config step:\n{grid}");
-
-    // Pick "Clear saved key" (second option for a key provider).
+    open_home(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    // "Clear saved key" is the third menu option for a key provider.
+    let _ = app.handle(&key(tuika::KeyCode::Down));
     let _ = app.handle(&key(tuika::KeyCode::Down));
     let _ = app.handle(&key(tuika::KeyCode::Enter));
     assert_eq!(
@@ -1749,23 +2153,69 @@ fn clearing_a_credential_refreshes_the_open_wizard() {
     app.apply(ChatEvent::CredentialCleared {
         provider_id: "anthropic".to_string(),
     });
-    assert_eq!(app.drain_actions(), vec![Action::ListProviders]);
+    assert_eq!(app.drain_actions(), vec![Action::FetchProviderCatalog]);
     assert!(app.cells.iter().any(|cell| matches!(
         cell,
         crate::Cell::Notice { title, .. } if title == "anthropic: credential cleared"
     )));
+    // The refreshed catalog demotes the provider; the menu falls back home.
+    let mut rows = catalog_rows();
+    rows[0].configured = false;
+    rows[0].auth_label = String::new();
+    app.apply(ChatEvent::ProviderCatalog { providers: rows });
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("API key"),
+        "unconfigured status shown:\n{grid}"
+    );
 }
 
 #[test]
-fn setup_wizard_build_is_safe_at_zero_and_tiny_terminal_sizes() {
+fn setup_window_build_is_safe_at_zero_and_tiny_terminal_sizes() {
     for (width, height) in [(0u16, 0u16), (1, 1), (20, 4)] {
         let mut app = app();
-        open_wizard(&mut app);
+        open_home(&mut app);
         let _ = render_at(&mut app, true, width, height);
         let _ = app.handle(&key(tuika::KeyCode::Down));
         let _ = app.handle(&key(tuika::KeyCode::Enter));
         let _ = render_at(&mut app, true, width, height);
         let _ = app.handle(&key(tuika::KeyCode::Enter));
         let _ = render_at(&mut app, true, width, height);
+
+        let mut form_app = App::new(meta());
+        open_home(&mut form_app);
+        for _ in 0..3 {
+            let _ = form_app.handle(&key(tuika::KeyCode::Down));
+        }
+        let _ = form_app.handle(&key(tuika::KeyCode::Enter));
+        let _ = render_at(&mut form_app, true, width, height);
     }
+}
+
+#[test]
+fn base_url_validation_accepts_https_and_local_http_only() {
+    use crate::app::setup::validate_base_url;
+    assert!(validate_base_url("https://api.example.com/v1").is_ok());
+    assert!(validate_base_url("http://localhost:8080/v1").is_ok());
+    assert!(validate_base_url("http://127.0.0.1:11434").is_ok());
+    assert!(validate_base_url("http://[::1]:8080/v1").is_ok());
+    assert!(validate_base_url("http://example.com/v1").is_err());
+    assert!(validate_base_url("ftp://example.com").is_err());
+    assert!(validate_base_url("https://").is_err());
+    assert!(validate_base_url("").is_err());
+}
+
+#[test]
+fn fuzzy_filter_matches_subsequences_and_ranks_substrings_first() {
+    use crate::app::setup::filtered_catalog;
+    let rows = catalog_rows();
+    let hits = filtered_catalog(&rows, "oai");
+    assert!(
+        hits.iter().any(|row| row.provider_id == "openai"),
+        "subsequence match failed"
+    );
+    let hits = filtered_catalog(&rows, "openai");
+    assert_eq!(hits[0].provider_id, "openai");
+    let hits = filtered_catalog(&rows, "zzz");
+    assert!(hits.is_empty());
 }

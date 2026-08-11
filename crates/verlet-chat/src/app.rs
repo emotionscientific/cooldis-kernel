@@ -39,6 +39,7 @@ pub const COMMANDS: &[(&str, &str, bool)] = &[
     ("/compact", "compact the current thread's context", false),
     ("/models", "pick the model for new turns", false),
     ("/setup", "connect a provider and pick a model", false),
+    ("/providers", "connect a provider and pick a model", false),
     ("/interrupt", "interrupt the active turn", false),
     ("/clear", "clear the transcript", false),
     ("/quit", "exit verlet chat", false),
@@ -89,7 +90,7 @@ pub fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, String> 
         "fork" => Ok(Some(SlashCommand::Fork)),
         "compact" => Ok(Some(SlashCommand::Compact)),
         "models" => Ok(Some(SlashCommand::Models)),
-        "setup" => Ok(Some(SlashCommand::Setup)),
+        "setup" | "providers" => Ok(Some(SlashCommand::Setup)),
         "" => Err("slash command is empty; type /help".to_string()),
         other => Err(format!("unknown slash command /{other}; type /help")),
     }
@@ -129,6 +130,9 @@ pub struct App {
     /// A model choice waiting on credentials: re-issued as
     /// [`Action::SelectModel`] once the provider's credential lands.
     pub(crate) pending_selection: Option<(String, String)>,
+    /// First-run gate: no configured providers yet. The footer nags until a
+    /// credential lands or a model is selected.
+    pub(crate) needs_provider: bool,
     /// Submitted keys retained until one host reply so late generic errors
     /// can be redacted after the user leaves the input step.
     pub(crate) pending_key_redactions: Vec<(String, String)>,
@@ -168,6 +172,7 @@ impl App {
             picker: None,
             setup: None,
             pending_selection: None,
+            needs_provider: false,
             pending_key_redactions: Vec::new(),
             meta,
             turn_state: "idle".to_string(),
@@ -207,8 +212,10 @@ impl App {
     }
 
     /// Where the terminal cursor belongs, given the composer's painted rect.
+    /// While a modal window owns the input surface the composer is dimmed
+    /// underneath it, so no terminal caret is shown.
     pub fn cursor(&self, composer_rect: Rect) -> Option<(u16, u16)> {
-        if composer_rect.width == 0 {
+        if composer_rect.width == 0 || self.setup_visible() || self.picker.is_some() {
             return None;
         }
         Some(self.composer.cursor_screen(composer_rect))
@@ -547,18 +554,14 @@ impl App {
             SlashCommand::Models => {
                 if matches!(
                     self.setup,
-                    Some(SetupStep::AwaitModels { .. } | SetupStep::AwaitProviders { .. })
+                    Some(SetupStep::AwaitModels { .. } | SetupStep::AwaitCatalog { .. })
                 ) {
                     self.setup = None;
                     self.pending_selection = None;
                 }
                 self.actions.push(Action::ListModels);
             }
-            SlashCommand::Setup => {
-                self.setup = None;
-                self.pending_selection = None;
-                self.actions.push(Action::ListProviders);
-            }
+            SlashCommand::Setup => self.open_setup_home(),
         }
     }
 
@@ -746,6 +749,9 @@ impl App {
             }
             ChatEvent::ModelSelected { provider_id, model } => {
                 self.pending_selection = None;
+                if provider_id != "local" {
+                    self.needs_provider = false;
+                }
                 self.meta.model_label = format!("{provider_id}/{model}");
                 let body = if self.turn_active {
                     vec!["applies to turns after the current one".to_string()]
@@ -758,7 +764,11 @@ impl App {
                     body,
                 );
             }
-            ChatEvent::Providers(rows) => self.open_setup(rows),
+            ChatEvent::ProviderCatalog { providers } => self.apply_provider_catalog(providers),
+            ChatEvent::CustomProviderResult { provider_id, error } => {
+                self.apply_custom_provider_result(provider_id, error);
+            }
+            ChatEvent::NoConfiguredProviders => self.apply_no_configured_providers(),
             ChatEvent::LoginDeviceCode {
                 verification_uri,
                 user_code,

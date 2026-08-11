@@ -53,9 +53,18 @@ pub enum Action {
     ListModels,
     /// A picker row was chosen: switch the app-server's active model.
     SelectModel { provider_id: String, model: String },
-    /// `/setup` — fetch the provider auth catalog; the host answers with
-    /// [`ChatEvent::Providers`], which opens the setup wizard.
-    ListProviders,
+    /// `/setup` (or the first-run gate): fetch the merged provider catalog;
+    /// the host answers with [`ChatEvent::ProviderCatalog`], which opens (or
+    /// refreshes) the setup window.
+    FetchProviderCatalog,
+    /// Create or update a custom provider from the setup window's form; the
+    /// host answers with [`ChatEvent::CustomProviderResult`]. The API key is
+    /// NOT part of the spec: the window follows up with [`Action::SetProviderKey`]
+    /// once the record exists.
+    UpsertCustomProvider { spec: CustomProviderSpec },
+    /// Delete a custom provider record; the host answers with
+    /// [`ChatEvent::CustomProviderResult`].
+    DeleteCustomProvider { provider_id: String },
     /// A pasted API key to store for the provider; the host answers with
     /// [`ChatEvent::CredentialResult`].
     SetProviderKey {
@@ -85,22 +94,54 @@ pub enum LoginMethod {
     Device,
 }
 
-/// One row of the setup wizard's provider step.
+/// One provider of the setup window: models.dev catalog metadata merged with
+/// provider-store and auth state, as reported by `modelProvider/catalog`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderRow {
+pub struct CatalogProviderRow {
     pub provider_id: String,
     pub display_name: String,
-    /// `configured` | `env` | `missing`, as reported by
-    /// `modelProvider/auth/status`.
-    pub auth_status: String,
+    pub base_url: String,
+    /// API family: `openai_chat_completions` | `openai_responses` |
+    /// `anthropic_messages`.
+    pub api: String,
+    /// `api_key` | `oauth`.
+    pub auth_kind: String,
+    /// Environment variables that can satisfy this provider's auth.
+    pub env_vars: Vec<String>,
+    /// Whether a usable credential exists (stored, env, or OAuth tokens).
+    pub configured: bool,
     /// The server's human status label ("stored credential",
-    /// "OPENAI_API_KEY detected", ...). Shown as the row hint.
-    pub label: String,
-    /// OAuth-shaped provider (openai-codex): sign-in options instead of a
-    /// pasted API key.
-    pub oauth: bool,
+    /// "OPENAI_API_KEY detected", ...). Empty when unconfigured.
+    pub auth_label: String,
+    /// Store-only provider with no catalog entry (user-created).
+    pub custom: bool,
     /// Whether this provider owns the active model selection.
     pub active: bool,
+    /// Models this provider would offer (store record or catalog).
+    pub model_count: usize,
+    /// The model auto-selected after a successful first credential.
+    pub default_model: Option<String>,
+}
+
+/// A custom provider definition submitted from the setup window's form. The
+/// API key is carried separately through [`Action::SetProviderKey`] so it
+/// never rides a value that gets logged or echoed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomProviderSpec {
+    pub provider_id: String,
+    pub display_name: String,
+    /// API family: `openai_chat_completions` | `openai_responses` |
+    /// `anthropic_messages`.
+    pub api: String,
+    pub base_url: String,
+    /// Optional extra header sent with every request.
+    pub header: Option<(String, String)>,
+    /// Model ids, first one is the provider's default.
+    pub models: Vec<String>,
+    /// True when the form was submitted without an API key: the provider
+    /// needs no auth (a local server), and the record should say so instead
+    /// of waiting for a credential.
+    pub keyless: bool,
 }
 
 /// One row of the `/models` picker.
@@ -168,9 +209,16 @@ pub enum ChatEvent {
     Models(Vec<ModelRow>),
     /// `model/select` succeeded; the active model changed for later turns.
     ModelSelected { provider_id: String, model: String },
-    /// Provider auth catalog: opens (or refreshes) the setup wizard. Sent
-    /// unsolicited at bootstrap when the active model has no credentials.
-    Providers(Vec<ProviderRow>),
+    /// The merged provider catalog: opens (or refreshes) the setup window.
+    ProviderCatalog { providers: Vec<CatalogProviderRow> },
+    /// A custom provider upsert or delete finished.
+    CustomProviderResult {
+        provider_id: String,
+        error: Option<String>,
+    },
+    /// Bootstrap found zero configured providers: the setup window opens on
+    /// the catalog list, and the footer nags until a provider is configured.
+    NoConfiguredProviders,
     /// A device-code login started: show the URL and code to the user.
     LoginDeviceCode {
         verification_uri: String,

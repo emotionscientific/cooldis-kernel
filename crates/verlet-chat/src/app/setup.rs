@@ -1,40 +1,241 @@
-//! Setup wizard state machine.
+//! Setup window state machine.
 //!
-//! Ported from yolop's `/setup` overlay (`yolop/src/app/setup.rs`, MIT) and
-//! rewired for the presentation-only discipline: the `SetupStep` enum is the
-//! wizard's state, these `impl App` methods are its transitions, and every
-//! side effect is an [`Action`] for the host to execute. The wizard owns the
-//! whole input surface while open — provider rows, credential options, key
-//! entry, and login-wait screens never echo through the composer. Rendering
-//! lives in `ui.rs`; this module is state and transitions only.
+//! The `/setup` experience is a modal window (rendered as a tuika dialog in
+//! `ui.rs`) whose home screen is an overview of configured providers, with a
+//! searchable catalog picker and a custom-provider form behind it. The pi
+//! coding agent's `/login` dialog is the UX reference. Presentation-only
+//! discipline holds: `SetupStep` is the window's state, these `impl App`
+//! methods are its transitions, and every side effect is an [`Action`] for
+//! the host to execute. The window owns the whole input surface while it has
+//! a visible step; Esc backs out one level at a time and closes from home.
 
 use tuika::prelude::*;
 
 use super::App;
 use crate::cells::Tone;
-use crate::{Action, LoginMethod, ProviderRow};
+use crate::{Action, CatalogProviderRow, CustomProviderSpec, LoginMethod};
 
-/// Where the wizard is. Steps carry everything they need to render and to
-/// return to the previous step, so transitions never re-fetch.
+/// What a catalog fetch was for, so [`crate::ChatEvent::ProviderCatalog`]
+/// knows which screen to open when the rows arrive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogIntent {
+    /// `/setup`: open the provider overview.
+    Home,
+    /// First-run gate: open the catalog picker directly.
+    Catalog,
+    /// A "needs login" model row routed here: land on the provider's
+    /// credential entry, then re-issue the model selection.
+    ForModel { provider_id: String },
+}
+
+/// Which screen a credential step returns to on Esc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CredentialOrigin {
+    Catalog,
+    Menu,
+}
+
+/// Where the custom form's submission currently is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CustomBusy {
+    Idle,
+    /// Waiting for [`crate::ChatEvent::CustomProviderResult`].
+    Upserting,
+    /// The record exists; waiting for the key's
+    /// [`crate::ChatEvent::CredentialResult`].
+    SavingKey,
+}
+
+/// The custom-provider form's fields, in focus order.
+pub(crate) const CUSTOM_FIELDS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CustomField {
+    Name,
+    Id,
+    Api,
+    BaseUrl,
+    ApiKey,
+    HeaderName,
+    HeaderValue,
+    Models,
+}
+
+pub(crate) const CUSTOM_FIELD_ORDER: [CustomField; CUSTOM_FIELDS] = [
+    CustomField::Name,
+    CustomField::Id,
+    CustomField::Api,
+    CustomField::BaseUrl,
+    CustomField::ApiKey,
+    CustomField::HeaderName,
+    CustomField::HeaderValue,
+    CustomField::Models,
+];
+
+/// The API families a custom provider can speak, as `(wire value, label)`.
+pub(crate) const API_FAMILIES: [(&str, &str); 3] = [
+    ("openai_chat_completions", "OpenAI Chat Completions"),
+    ("openai_responses", "OpenAI Responses"),
+    ("anthropic_messages", "Anthropic Messages"),
+];
+
+/// The custom-provider form. `id` mirrors a slug of `name` until the user
+/// edits it directly (`id_touched`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CustomForm {
+    pub name: String,
+    pub id: String,
+    pub id_touched: bool,
+    /// Index into [`API_FAMILIES`].
+    pub api_index: usize,
+    pub base_url: String,
+    pub api_key: String,
+    pub header_name: String,
+    pub header_value: String,
+    /// Raw model-id text, split on commas/whitespace at submit.
+    pub models: String,
+    /// Index into [`CUSTOM_FIELD_ORDER`].
+    pub focus: usize,
+}
+
+impl CustomForm {
+    pub(crate) fn new() -> Self {
+        Self {
+            name: String::new(),
+            id: String::new(),
+            id_touched: false,
+            api_index: 0,
+            base_url: String::new(),
+            api_key: String::new(),
+            header_name: String::new(),
+            header_value: String::new(),
+            models: String::new(),
+            focus: 0,
+        }
+    }
+
+    /// Prefill from an existing custom provider for editing. The key field
+    /// starts empty: an empty key on submit means "leave the credential
+    /// alone".
+    pub(crate) fn from_row(row: &CatalogProviderRow) -> Self {
+        let api_index = API_FAMILIES
+            .iter()
+            .position(|(value, _)| *value == row.api)
+            .unwrap_or(0);
+        Self {
+            name: row.display_name.clone(),
+            id: row.provider_id.clone(),
+            id_touched: true,
+            api_index,
+            base_url: row.base_url.clone(),
+            api_key: String::new(),
+            header_name: String::new(),
+            header_value: String::new(),
+            models: row.default_model.clone().unwrap_or_default(),
+            focus: 0,
+        }
+    }
+
+    pub(crate) fn focused(&self) -> CustomField {
+        CUSTOM_FIELD_ORDER[self.focus.min(CUSTOM_FIELDS - 1)]
+    }
+
+    fn field_mut(&mut self, field: CustomField) -> Option<&mut String> {
+        match field {
+            CustomField::Name => Some(&mut self.name),
+            CustomField::Id => Some(&mut self.id),
+            CustomField::Api => None,
+            CustomField::BaseUrl => Some(&mut self.base_url),
+            CustomField::ApiKey => Some(&mut self.api_key),
+            CustomField::HeaderName => Some(&mut self.header_name),
+            CustomField::HeaderValue => Some(&mut self.header_value),
+            CustomField::Models => Some(&mut self.models),
+        }
+    }
+
+    /// Validate and build the submission. Ok also carries the API key text
+    /// (possibly empty, meaning "no key follow-up").
+    pub(crate) fn build_spec(&self) -> Result<CustomProviderSpec, String> {
+        let display_name = self.name.trim();
+        if display_name.is_empty() {
+            return Err("name is required".to_string());
+        }
+        let provider_id = self.id.trim();
+        if provider_id.is_empty() {
+            return Err("provider id is required".to_string());
+        }
+        if !provider_id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+        {
+            return Err("provider id may only use a-z, 0-9, - and _".to_string());
+        }
+        validate_base_url(self.base_url.trim())?;
+        let models = split_model_ids(&self.models);
+        if models.is_empty() {
+            return Err("at least one model id is required".to_string());
+        }
+        let header_name = self.header_name.trim();
+        let header_value = self.header_value.trim();
+        let header = match (header_name.is_empty(), header_value.is_empty()) {
+            (true, true) => None,
+            (false, false) => Some((header_name.to_string(), header_value.to_string())),
+            _ => return Err("header name and value must both be set (or both empty)".to_string()),
+        };
+        Ok(CustomProviderSpec {
+            provider_id: provider_id.to_string(),
+            display_name: display_name.to_string(),
+            api: API_FAMILIES[self.api_index.min(API_FAMILIES.len() - 1)]
+                .0
+                .to_string(),
+            base_url: self.base_url.trim().to_string(),
+            header,
+            models,
+            keyless: self.api_key.trim().is_empty(),
+        })
+    }
+}
+
+/// Where the setup window is. Steps carry the catalog rows they need to
+/// render and to return to the previous screen, so transitions never
+/// re-fetch.
 pub(crate) enum SetupStep {
-    /// Pick a provider. Connected rows go straight to models; the rest go
-    /// through credentials.
-    Provider {
-        rows: Vec<ProviderRow>,
+    /// A catalog fetch is in flight; invisible (no input capture).
+    AwaitCatalog { intent: CatalogIntent },
+    /// The provider overview plus the `Connect` / `Add custom` actions.
+    Home {
+        rows: Vec<CatalogProviderRow>,
         state: SelectState,
     },
-    /// Pick how to authenticate the provider.
+    /// Actions for one configured provider.
+    ProviderMenu {
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        state: SelectState,
+        /// A delete is in flight; only Esc works.
+        busy: bool,
+        error: Option<String>,
+    },
+    /// The searchable catalog picker ("Connect a provider").
+    Catalog {
+        rows: Vec<CatalogProviderRow>,
+        filter: String,
+        state: SelectState,
+    },
+    /// OAuth sign-in method choice (browser / device code).
     Credential {
-        rows: Vec<ProviderRow>,
-        provider: ProviderRow,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        origin: CredentialOrigin,
         state: SelectState,
         error: Option<String>,
     },
     /// Masked API-key entry. `busy` is set between submitting the key and
     /// the host's [`crate::ChatEvent::CredentialResult`].
     KeyInput {
-        rows: Vec<ProviderRow>,
-        provider: ProviderRow,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        origin: CredentialOrigin,
         value: String,
         busy: bool,
         error: Option<String>,
@@ -42,141 +243,447 @@ pub(crate) enum SetupStep {
     /// An OAuth login is running in the host. Device logins fill
     /// `device_code` with `(verification_uri, user_code)` when it arrives.
     LoginWait {
-        rows: Vec<ProviderRow>,
-        provider: ProviderRow,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        origin: CredentialOrigin,
         method: LoginMethod,
         device_code: Option<(String, String)>,
     },
-    /// A model list was requested for the chosen provider; the wizard closes
-    /// into the model picker when [`crate::ChatEvent::Models`] arrives.
+    /// The custom-provider form. `editing` carries the original provider id
+    /// when this is an edit rather than a create.
+    CustomForm {
+        rows: Vec<CatalogProviderRow>,
+        form: Box<CustomForm>,
+        editing: Option<String>,
+        busy: CustomBusy,
+        error: Option<String>,
+    },
+    /// A model list was requested for the chosen provider; the window closes
+    /// into the (scoped) model picker when [`crate::ChatEvent::Models`]
+    /// arrives.
     AwaitModels { provider_id: String },
-    /// The provider catalog was requested to route a "needs login" model row
-    /// into its credential step.
-    AwaitProviders { provider_id: String },
 }
 
-/// One selectable row of the credential step.
+/// One selectable row of the credential / provider-menu steps.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CredentialOption {
-    pub action: CredentialAction,
+pub(crate) struct MenuOption {
+    pub action: MenuAction,
     pub label: &'static str,
     pub hint: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialAction {
+pub(crate) enum MenuAction {
+    PickModel,
+    ReplaceKey,
     BrowserLogin,
     DeviceLogin,
-    PasteKey,
     ClearSaved,
-    Skip,
+    EditCustom,
+    DeleteCustom,
+    Back,
 }
 
-/// The credential choices for a provider: sign-in flows for OAuth-shaped
-/// providers, key entry for the rest.
-pub(crate) fn credential_options(provider: &ProviderRow) -> Vec<CredentialOption> {
-    if provider.oauth {
-        vec![
-            CredentialOption {
-                action: CredentialAction::BrowserLogin,
-                label: "Sign in with browser",
-                hint: "opens on this machine",
-            },
-            CredentialOption {
-                action: CredentialAction::DeviceLogin,
-                label: "Sign in with device code",
-                hint: "works on headless terminals",
-            },
-            CredentialOption {
-                action: CredentialAction::ClearSaved,
-                label: "Clear saved login",
-                hint: "remove the stored tokens",
-            },
-            CredentialOption {
-                action: CredentialAction::Skip,
-                label: "Skip for now",
-                hint: "leave setup unchanged",
-            },
-        ]
+/// The actions for one configured provider on the overview.
+pub(crate) fn provider_menu_options(provider: &CatalogProviderRow) -> Vec<MenuOption> {
+    let mut options = vec![MenuOption {
+        action: MenuAction::PickModel,
+        label: "Pick a model",
+        hint: "from this provider",
+    }];
+    if provider.auth_kind == "oauth" {
+        options.push(MenuOption {
+            action: MenuAction::BrowserLogin,
+            label: "Sign in with browser",
+            hint: "opens on this machine",
+        });
+        options.push(MenuOption {
+            action: MenuAction::DeviceLogin,
+            label: "Sign in with device code",
+            hint: "works on headless terminals",
+        });
+        options.push(MenuOption {
+            action: MenuAction::ClearSaved,
+            label: "Clear saved login",
+            hint: "remove the stored tokens",
+        });
     } else {
-        vec![
-            CredentialOption {
-                action: CredentialAction::PasteKey,
-                label: "Paste API key",
-                hint: "stored by the server, never shown",
-            },
-            CredentialOption {
-                action: CredentialAction::ClearSaved,
-                label: "Clear saved key",
-                hint: "remove this provider's key",
-            },
-            CredentialOption {
-                action: CredentialAction::Skip,
-                label: "Skip for now",
-                hint: "leave setup unchanged",
-            },
-        ]
+        options.push(MenuOption {
+            action: MenuAction::ReplaceKey,
+            label: "Replace API key",
+            hint: "stored by the server, never shown",
+        });
+        options.push(MenuOption {
+            action: MenuAction::ClearSaved,
+            label: "Clear saved key",
+            hint: "remove this provider's key",
+        });
+    }
+    if provider.custom {
+        options.push(MenuOption {
+            action: MenuAction::EditCustom,
+            label: "Edit provider",
+            hint: "change URL, api, models",
+        });
+        options.push(MenuOption {
+            action: MenuAction::DeleteCustom,
+            label: "Delete provider",
+            hint: "remove the record and its key",
+        });
+    }
+    options.push(MenuOption {
+        action: MenuAction::Back,
+        label: "Back",
+        hint: "",
+    });
+    options
+}
+
+/// The credential choices for an OAuth provider.
+pub(crate) fn oauth_options() -> Vec<MenuOption> {
+    vec![
+        MenuOption {
+            action: MenuAction::BrowserLogin,
+            label: "Sign in with browser",
+            hint: "opens on this machine",
+        },
+        MenuOption {
+            action: MenuAction::DeviceLogin,
+            label: "Sign in with device code",
+            hint: "works on headless terminals",
+        },
+        MenuOption {
+            action: MenuAction::Back,
+            label: "Back",
+            hint: "",
+        },
+    ]
+}
+
+/// The rows the home overview lists: configured or custom providers, in
+/// catalog order (the server sorts configured first).
+pub(crate) fn overview_rows(rows: &[CatalogProviderRow]) -> Vec<&CatalogProviderRow> {
+    rows.iter()
+        .filter(|row| row.configured || row.custom)
+        .collect()
+}
+
+/// Fixed actions appended under the overview rows.
+pub(crate) const HOME_ACTIONS: [(&str, &str); 2] = [
+    ("Connect a provider", "browse the catalog"),
+    ("Add custom provider", "OpenAI- or Anthropic-compatible URL"),
+];
+
+/// The status suffix for a catalog row, pi-style.
+pub(crate) fn catalog_status(row: &CatalogProviderRow) -> String {
+    if row.configured {
+        if row.auth_label.is_empty() {
+            "✓ configured".to_string()
+        } else {
+            format!("✓ {}", row.auth_label)
+        }
+    } else if row.auth_kind == "oauth" {
+        "sign in".to_string()
+    } else {
+        "API key".to_string()
     }
 }
 
-/// The status suffix for a provider row, yolop-style.
-pub(crate) fn provider_status(row: &ProviderRow) -> String {
-    match row.auth_status.as_str() {
-        "configured" | "env" => format!("✓ {}", row.label),
-        _ if row.oauth => "needs sign-in".to_string(),
-        _ => "needs API key".to_string(),
+/// The one-line summary for an overview row: auth source, model count, and
+/// base URL for custom entries.
+pub(crate) fn overview_status(row: &CatalogProviderRow) -> String {
+    let mut status = catalog_status(row);
+    if row.custom {
+        status.push_str(&format!(" · {}", row.base_url));
     }
+    if row.model_count > 0 {
+        let plural = if row.model_count == 1 { "" } else { "s" };
+        status.push_str(&format!(" · {} model{plural}", row.model_count));
+    }
+    status
 }
 
-pub(crate) fn provider_connected(row: &ProviderRow) -> bool {
-    matches!(row.auth_status.as_str(), "configured" | "env")
+/// Case-insensitive subsequence match, pi's fuzzy-filter behavior: every
+/// query char must appear in order, not necessarily adjacent.
+pub(crate) fn fuzzy_matches(haystack: &str, query: &str) -> bool {
+    let mut chars = haystack.chars().flat_map(char::to_lowercase);
+    query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .all(|needle| chars.any(|ch| ch == needle))
+}
+
+/// Catalog rows matching `filter`, substring matches (on name or id) first.
+pub(crate) fn filtered_catalog<'a>(
+    rows: &'a [CatalogProviderRow],
+    filter: &str,
+) -> Vec<&'a CatalogProviderRow> {
+    let query = filter.trim().to_lowercase();
+    if query.is_empty() {
+        return rows.iter().collect();
+    }
+    let mut substring = Vec::new();
+    let mut fuzzy = Vec::new();
+    for row in rows {
+        let name = row.display_name.to_lowercase();
+        let id = row.provider_id.to_lowercase();
+        if name.contains(&query) || id.contains(&query) {
+            substring.push(row);
+        } else if fuzzy_matches(&row.display_name, &query)
+            || fuzzy_matches(&row.provider_id, &query)
+        {
+            fuzzy.push(row);
+        }
+    }
+    substring.extend(fuzzy);
+    substring
+}
+
+/// A kebab-case slug of a display name, for the custom form's derived id.
+pub(crate) fn slugify(name: &str) -> String {
+    let mut slug = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if (ch == ' ' || ch == '-' || ch == '_' || ch == '.')
+            && !slug.is_empty()
+            && !slug.ends_with('-')
+        {
+            slug.push('-');
+        }
+    }
+    slug.trim_end_matches('-').to_string()
+}
+
+/// Split raw model text on commas and whitespace, deduplicated in order.
+pub(crate) fn split_model_ids(text: &str) -> Vec<String> {
+    let mut models = Vec::new();
+    for id in text.split([',', ' ', '\t', '\n']) {
+        let id = id.trim();
+        if !id.is_empty() && !models.iter().any(|existing| existing == id) {
+            models.push(id.to_string());
+        }
+    }
+    models
+}
+
+/// HTTP(S) base-URL validation: https for remote hosts, plain http only for
+/// loopback/local hosts. Mirrors the app-server catalog's own sanitization.
+pub(crate) fn validate_base_url(url: &str) -> Result<(), String> {
+    if url.is_empty() {
+        return Err("base URL is required".to_string());
+    }
+    let rest = if let Some(rest) = url.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        let host = rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .rsplit_once(':')
+            .map_or_else(
+                || rest.split(['/', '?', '#']).next().unwrap_or(""),
+                |(host, port)| {
+                    if port.chars().all(|ch| ch.is_ascii_digit()) {
+                        host
+                    } else {
+                        rest.split(['/', '?', '#']).next().unwrap_or("")
+                    }
+                },
+            )
+            .trim_matches(['[', ']']);
+        if !(host == "localhost" || host == "::1" || host == "0.0.0.0" || host.starts_with("127."))
+        {
+            return Err("plain http is only allowed for localhost".to_string());
+        }
+        rest
+    } else {
+        return Err("base URL must start with https:// (or http:// for localhost)".to_string());
+    };
+    if rest.split(['/', '?', '#']).next().unwrap_or("").is_empty() {
+        return Err("base URL is missing a host".to_string());
+    }
+    Ok(())
 }
 
 impl App {
-    /// Open the wizard's provider step over a fresh catalog. If the wizard
-    /// was waiting to route a "needs login" model row, jump straight to that
-    /// provider's credential step.
-    pub(crate) fn open_setup(&mut self, rows: Vec<ProviderRow>) {
-        let previous = self.setup.take();
-        match previous {
-            step @ Some(
-                SetupStep::Credential { .. }
-                | SetupStep::KeyInput { .. }
-                | SetupStep::LoginWait { .. }
-                | SetupStep::AwaitModels { .. },
-            ) => {
-                self.setup = step;
-                return;
+    /// `/setup` and `/providers`: fetch the catalog and open the overview.
+    pub(crate) fn open_setup_home(&mut self) {
+        self.pending_selection = None;
+        self.setup = Some(SetupStep::AwaitCatalog {
+            intent: CatalogIntent::Home,
+        });
+        self.actions.push(Action::FetchProviderCatalog);
+    }
+
+    /// First-run gate: no configured providers, open the catalog picker.
+    pub(crate) fn apply_no_configured_providers(&mut self) {
+        self.needs_provider = true;
+        if self.setup.is_none() && self.picker.is_none() {
+            self.setup = Some(SetupStep::AwaitCatalog {
+                intent: CatalogIntent::Catalog,
+            });
+            self.actions.push(Action::FetchProviderCatalog);
+        }
+    }
+
+    /// Route a chosen "needs login" model row into the window: remember the
+    /// selection, fetch the catalog, and land on the provider's credential
+    /// entry when it arrives.
+    pub(crate) fn setup_for_model(&mut self, provider_id: String, model: String) {
+        self.pending_selection = Some((provider_id.clone(), model));
+        self.setup = Some(SetupStep::AwaitCatalog {
+            intent: CatalogIntent::ForModel { provider_id },
+        });
+        self.actions.push(Action::FetchProviderCatalog);
+    }
+
+    /// Fold an arrived catalog into the window.
+    pub(crate) fn apply_provider_catalog(&mut self, rows: Vec<CatalogProviderRow>) {
+        if rows.iter().any(|row| row.configured) {
+            self.needs_provider = false;
+        }
+        match self.setup.take() {
+            Some(SetupStep::AwaitCatalog { intent }) => match intent {
+                CatalogIntent::Home => self.open_home(rows),
+                CatalogIntent::Catalog => self.open_catalog(rows),
+                CatalogIntent::ForModel { provider_id } => {
+                    let Some(provider) = rows
+                        .iter()
+                        .find(|row| row.provider_id == provider_id)
+                        .cloned()
+                    else {
+                        self.pending_selection = None;
+                        self.notice(
+                            Tone::Error,
+                            format!("provider {provider_id} is no longer available"),
+                            Vec::new(),
+                        );
+                        return;
+                    };
+                    self.open_credential_entry(rows, provider, CredentialOrigin::Catalog);
+                }
+            },
+            // A refresh with the window open: swap the rows in place. The
+            // selection index is clamped by the next render.
+            Some(SetupStep::Home { state, .. }) => {
+                self.setup = Some(SetupStep::Home { rows, state })
             }
-            Some(SetupStep::AwaitProviders { provider_id }) => {
-                if let Some(provider) = rows
+            Some(SetupStep::Catalog { filter, state, .. }) => {
+                self.setup = Some(SetupStep::Catalog {
+                    rows,
+                    filter,
+                    state,
+                })
+            }
+            Some(SetupStep::ProviderMenu {
+                provider,
+                state,
+                busy,
+                error,
+                ..
+            }) => {
+                // The provider may have changed (credential cleared) or
+                // vanished (deleted); fall back to home in those cases.
+                match rows
                     .iter()
-                    .find(|row| row.provider_id == provider_id)
+                    .find(|row| row.provider_id == provider.provider_id)
                     .cloned()
                 {
-                    self.popup = None;
-                    self.picker = None;
-                    self.setup = Some(SetupStep::Credential {
-                        rows,
-                        provider,
-                        state: SelectState::new(),
-                        error: None,
-                    });
-                    return;
+                    Some(refreshed) => {
+                        self.setup = Some(SetupStep::ProviderMenu {
+                            rows,
+                            provider: refreshed,
+                            state,
+                            busy,
+                            error,
+                        })
+                    }
+                    None => self.open_home(rows),
                 }
-                self.pending_selection = None;
-                self.notice(
-                    Tone::Error,
-                    format!("provider {provider_id} is no longer available"),
-                    Vec::new(),
-                );
             }
-            None | Some(SetupStep::Provider { .. }) => {
-                self.pending_selection = None;
+            // Mid-flow steps keep their own provider snapshot; stash the
+            // fresher rows for when the user backs out.
+            Some(SetupStep::Credential {
+                provider,
+                origin,
+                state,
+                error,
+                ..
+            }) => {
+                self.setup = Some(SetupStep::Credential {
+                    rows,
+                    provider,
+                    origin,
+                    state,
+                    error,
+                })
             }
+            Some(SetupStep::KeyInput {
+                provider,
+                origin,
+                value,
+                busy,
+                error,
+                ..
+            }) => {
+                self.setup = Some(SetupStep::KeyInput {
+                    rows,
+                    provider,
+                    origin,
+                    value,
+                    busy,
+                    error,
+                })
+            }
+            Some(SetupStep::LoginWait {
+                provider,
+                origin,
+                method,
+                device_code,
+                ..
+            }) => {
+                self.setup = Some(SetupStep::LoginWait {
+                    rows,
+                    provider,
+                    origin,
+                    method,
+                    device_code,
+                })
+            }
+            Some(SetupStep::CustomForm {
+                form,
+                editing,
+                busy,
+                error,
+                ..
+            }) => {
+                self.setup = Some(SetupStep::CustomForm {
+                    rows,
+                    form,
+                    editing,
+                    busy,
+                    error,
+                })
+            }
+            // Stale: the window was dismissed while the fetch was in flight.
+            step @ (None | Some(SetupStep::AwaitModels { .. })) => self.setup = step,
         }
+    }
+
+    fn open_home(&mut self, rows: Vec<CatalogProviderRow>) {
         self.popup = None;
-        self.picker = None;
+        let mut state = SelectState::new();
+        let selected = overview_rows(&rows)
+            .iter()
+            .position(|row| row.active)
+            .unwrap_or(0);
+        state.select(Some(selected));
+        self.setup = Some(SetupStep::Home { rows, state });
+    }
+
+    fn open_catalog(&mut self, rows: Vec<CatalogProviderRow>) {
+        self.popup = None;
         if rows.is_empty() {
             self.setup = None;
             self.pending_selection = None;
@@ -188,26 +695,52 @@ impl App {
             return;
         }
         let mut state = SelectState::new();
-        state.select(rows.iter().position(|row| row.active).or(Some(0)));
-        self.setup = Some(SetupStep::Provider { rows, state });
+        state.select(Some(0));
+        self.setup = Some(SetupStep::Catalog {
+            rows,
+            filter: String::new(),
+            state,
+        });
     }
 
-    /// Route a chosen "needs login" model row into the wizard: remember the
-    /// selection, fetch the catalog, and land on the provider's credential
-    /// step when it arrives.
-    pub(crate) fn setup_for_model(&mut self, provider_id: String, model: String) {
-        self.pending_selection = Some((provider_id.clone(), model));
-        self.setup = Some(SetupStep::AwaitProviders { provider_id });
-        self.actions.push(Action::ListProviders);
+    /// The credential entry point for a provider: key input for API-key
+    /// providers, the sign-in method choice for OAuth ones.
+    fn open_credential_entry(
+        &mut self,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        origin: CredentialOrigin,
+    ) {
+        self.popup = None;
+        if provider.auth_kind == "oauth" {
+            let mut state = SelectState::new();
+            state.select(Some(0));
+            self.setup = Some(SetupStep::Credential {
+                rows,
+                provider,
+                origin,
+                state,
+                error: None,
+            });
+        } else {
+            self.setup = Some(SetupStep::KeyInput {
+                rows,
+                provider,
+                origin,
+                value: String::new(),
+                busy: false,
+                error: None,
+            });
+        }
     }
 
-    /// The wizard is modal while it has a visible step; every event lands
+    /// The window is modal while it has a visible step; every event lands
     /// here. Await states are invisible (a fetch is in flight) and do not
     /// capture input.
     pub(crate) fn setup_visible(&self) -> bool {
         !matches!(
             self.setup,
-            None | Some(SetupStep::AwaitModels { .. }) | Some(SetupStep::AwaitProviders { .. })
+            None | Some(SetupStep::AwaitModels { .. }) | Some(SetupStep::AwaitCatalog { .. })
         )
     }
 
@@ -216,73 +749,87 @@ impl App {
             return;
         };
         match step {
-            SetupStep::Provider { rows, state } => self.handle_provider_step(event, rows, state),
-            SetupStep::Credential {
+            SetupStep::Home { rows, state } => self.handle_home(event, rows, state),
+            SetupStep::ProviderMenu {
                 rows,
                 provider,
                 state,
+                busy,
                 error,
-            } => self.handle_credential_step(event, rows, provider, state, error),
+            } => self.handle_provider_menu(event, rows, provider, state, busy, error),
+            SetupStep::Catalog {
+                rows,
+                filter,
+                state,
+            } => self.handle_catalog(event, rows, filter, state),
+            SetupStep::Credential {
+                rows,
+                provider,
+                origin,
+                state,
+                error,
+            } => self.handle_credential(event, rows, provider, origin, state, error),
             SetupStep::KeyInput {
                 rows,
                 provider,
+                origin,
                 value,
                 busy,
                 error,
-            } => self.handle_key_input(event, rows, provider, value, busy, error),
+            } => self.handle_key_input(event, rows, provider, origin, value, busy, error),
             SetupStep::LoginWait {
                 rows,
                 provider,
+                origin,
                 method,
                 device_code,
-            } => self.handle_login_wait(event, rows, provider, method, device_code),
-            step @ (SetupStep::AwaitModels { .. } | SetupStep::AwaitProviders { .. }) => {
+            } => self.handle_login_wait(event, rows, provider, origin, method, device_code),
+            SetupStep::CustomForm {
+                rows,
+                form,
+                editing,
+                busy,
+                error,
+            } => self.handle_custom_form(event, rows, form, editing, busy, error),
+            step @ (SetupStep::AwaitModels { .. } | SetupStep::AwaitCatalog { .. }) => {
                 self.setup = Some(step);
             }
         }
     }
 
-    fn handle_provider_step(
+    fn handle_home(
         &mut self,
         event: &Event,
-        rows: Vec<ProviderRow>,
+        rows: Vec<CatalogProviderRow>,
         mut state: SelectState,
     ) {
-        // `c` forces the credential step even when connected (rotate or
-        // clear a key), mirroring yolop.
-        if let Event::Key(key) = event
-            && key.plain()
-            && key.code == KeyCode::Char('c')
-        {
-            if let Some(provider) = state.selected().and_then(|index| rows.get(index)).cloned() {
-                self.setup = Some(SetupStep::Credential {
-                    rows,
-                    provider,
-                    state: SelectState::new(),
-                    error: None,
-                });
-            } else {
-                self.setup = Some(SetupStep::Provider { rows, state });
-            }
-            return;
-        }
-        match state.handle(event, rows.len()) {
+        let overview_len = overview_rows(&rows).len();
+        let total = overview_len + HOME_ACTIONS.len();
+        match state.handle(event, total) {
             InputOutcome::Submitted => {
-                let Some(provider) = state.selected().and_then(|index| rows.get(index)).cloned()
-                else {
-                    self.setup = Some(SetupStep::Provider { rows, state });
+                let Some(index) = state.selected() else {
+                    self.setup = Some(SetupStep::Home { rows, state });
                     return;
                 };
-                if provider_connected(&provider) {
-                    self.setup = Some(SetupStep::AwaitModels {
-                        provider_id: provider.provider_id,
-                    });
-                    self.actions.push(Action::ListModels);
-                } else {
-                    self.setup = Some(SetupStep::Credential {
+                if index < overview_len {
+                    let provider = overview_rows(&rows)[index].clone();
+                    let mut menu_state = SelectState::new();
+                    menu_state.select(Some(0));
+                    self.setup = Some(SetupStep::ProviderMenu {
                         rows,
                         provider,
-                        state: SelectState::new(),
+                        state: menu_state,
+                        busy: false,
+                        error: None,
+                    });
+                } else if index == overview_len {
+                    self.open_catalog(rows);
+                } else {
+                    self.setup = Some(SetupStep::CustomForm {
+                        rows,
+                        form: Box::new(CustomForm::new()),
+                        editing: None,
+                        busy: CustomBusy::Idle,
                         error: None,
                     });
                 }
@@ -291,125 +838,297 @@ impl App {
                 self.setup = None;
                 self.pending_selection = None;
             }
-            _ => self.setup = Some(SetupStep::Provider { rows, state }),
+            _ => self.setup = Some(SetupStep::Home { rows, state }),
         }
     }
 
-    fn handle_credential_step(
+    fn handle_provider_menu(
         &mut self,
         event: &Event,
-        rows: Vec<ProviderRow>,
-        provider: ProviderRow,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
         mut state: SelectState,
+        busy: bool,
         error: Option<String>,
     ) {
-        let options = credential_options(&provider);
+        // While the delete is in flight only Esc (back to home) works.
+        if busy {
+            if matches!(event, Event::Key(key) if key.plain() && key.code == KeyCode::Esc) {
+                self.open_home(rows);
+            } else {
+                self.setup = Some(SetupStep::ProviderMenu {
+                    rows,
+                    provider,
+                    state,
+                    busy,
+                    error,
+                });
+            }
+            return;
+        }
+        let options = provider_menu_options(&provider);
         match state.handle(event, options.len()) {
             InputOutcome::Submitted => {
                 let action = state
                     .selected()
                     .and_then(|index| options.get(index))
                     .map(|option| option.action)
-                    .unwrap_or(CredentialAction::Skip);
+                    .unwrap_or(MenuAction::Back);
                 match action {
-                    CredentialAction::BrowserLogin => {
-                        self.actions.push(Action::StartLogin {
-                            provider_id: provider.provider_id.clone(),
-                            method: LoginMethod::Browser,
+                    MenuAction::PickModel => {
+                        self.setup = Some(SetupStep::AwaitModels {
+                            provider_id: provider.provider_id,
                         });
-                        self.setup = Some(SetupStep::LoginWait {
-                            rows,
-                            provider,
-                            method: LoginMethod::Browser,
-                            device_code: None,
-                        });
+                        self.actions.push(Action::ListModels);
                     }
-                    CredentialAction::DeviceLogin => {
-                        self.actions.push(Action::StartLogin {
-                            provider_id: provider.provider_id.clone(),
-                            method: LoginMethod::Device,
-                        });
-                        self.setup = Some(SetupStep::LoginWait {
-                            rows,
-                            provider,
-                            method: LoginMethod::Device,
-                            device_code: None,
-                        });
-                    }
-                    CredentialAction::PasteKey => {
+                    MenuAction::ReplaceKey => {
                         self.setup = Some(SetupStep::KeyInput {
                             rows,
                             provider,
+                            origin: CredentialOrigin::Menu,
                             value: String::new(),
                             busy: false,
                             error: None,
                         });
                     }
-                    CredentialAction::ClearSaved => {
+                    MenuAction::BrowserLogin | MenuAction::DeviceLogin => {
+                        let method = if action == MenuAction::BrowserLogin {
+                            LoginMethod::Browser
+                        } else {
+                            LoginMethod::Device
+                        };
+                        self.actions.push(Action::StartLogin {
+                            provider_id: provider.provider_id.clone(),
+                            method,
+                        });
+                        self.setup = Some(SetupStep::LoginWait {
+                            rows,
+                            provider,
+                            origin: CredentialOrigin::Menu,
+                            method,
+                            device_code: None,
+                        });
+                    }
+                    MenuAction::ClearSaved => {
                         self.actions.push(Action::ClearCredential {
                             provider_id: provider.provider_id.clone(),
                         });
-                        self.setup = Some(SetupStep::Credential {
+                        self.setup = Some(SetupStep::ProviderMenu {
                             rows,
                             provider,
                             state,
+                            busy: false,
                             error,
                         });
                     }
-                    CredentialAction::Skip => {
-                        self.setup = None;
-                        self.pending_selection = None;
-                        self.notice(Tone::Info, "setup skipped".to_string(), Vec::new());
+                    MenuAction::EditCustom => {
+                        let form = Box::new(CustomForm::from_row(&provider));
+                        self.setup = Some(SetupStep::CustomForm {
+                            rows,
+                            form,
+                            editing: Some(provider.provider_id),
+                            busy: CustomBusy::Idle,
+                            error: None,
+                        });
                     }
+                    MenuAction::DeleteCustom => {
+                        self.actions.push(Action::DeleteCustomProvider {
+                            provider_id: provider.provider_id.clone(),
+                        });
+                        self.setup = Some(SetupStep::ProviderMenu {
+                            rows,
+                            provider,
+                            state,
+                            busy: true,
+                            error: None,
+                        });
+                    }
+                    MenuAction::Back => self.open_home(rows),
                 }
             }
-            InputOutcome::Cancelled => {
-                let mut provider_state = SelectState::new();
-                provider_state.select(
-                    rows.iter()
-                        .position(|row| row.provider_id == provider.provider_id)
-                        .or(Some(0)),
-                );
-                self.setup = Some(SetupStep::Provider {
+            InputOutcome::Cancelled => self.open_home(rows),
+            _ => {
+                self.setup = Some(SetupStep::ProviderMenu {
                     rows,
-                    state: provider_state,
-                });
+                    provider,
+                    state,
+                    busy,
+                    error,
+                })
             }
+        }
+    }
+
+    fn handle_catalog(
+        &mut self,
+        event: &Event,
+        rows: Vec<CatalogProviderRow>,
+        mut filter: String,
+        mut state: SelectState,
+    ) {
+        // Typing edits the filter; the select list only sees navigation keys.
+        if let Event::Key(key) = event {
+            match key.code {
+                KeyCode::Char(ch) if !key.ctrl && !key.alt => {
+                    filter.push(ch);
+                    state.select(Some(0));
+                    self.setup = Some(SetupStep::Catalog {
+                        rows,
+                        filter,
+                        state,
+                    });
+                    return;
+                }
+                KeyCode::Backspace => {
+                    filter.pop();
+                    state.select(Some(0));
+                    self.setup = Some(SetupStep::Catalog {
+                        rows,
+                        filter,
+                        state,
+                    });
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let filtered_len = filtered_catalog(&rows, &filter).len();
+        match state.handle(event, filtered_len) {
+            InputOutcome::Submitted => {
+                let provider = state
+                    .selected()
+                    .and_then(|index| filtered_catalog(&rows, &filter).get(index).copied())
+                    .cloned();
+                let Some(provider) = provider else {
+                    self.setup = Some(SetupStep::Catalog {
+                        rows,
+                        filter,
+                        state,
+                    });
+                    return;
+                };
+                self.open_credential_entry(rows, provider, CredentialOrigin::Catalog);
+            }
+            InputOutcome::Cancelled => self.open_home(rows),
+            _ => {
+                self.setup = Some(SetupStep::Catalog {
+                    rows,
+                    filter,
+                    state,
+                })
+            }
+        }
+    }
+
+    fn handle_credential(
+        &mut self,
+        event: &Event,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        origin: CredentialOrigin,
+        mut state: SelectState,
+        error: Option<String>,
+    ) {
+        let options = oauth_options();
+        match state.handle(event, options.len()) {
+            InputOutcome::Submitted => {
+                let action = state
+                    .selected()
+                    .and_then(|index| options.get(index))
+                    .map(|option| option.action)
+                    .unwrap_or(MenuAction::Back);
+                match action {
+                    MenuAction::BrowserLogin | MenuAction::DeviceLogin => {
+                        let method = if action == MenuAction::BrowserLogin {
+                            LoginMethod::Browser
+                        } else {
+                            LoginMethod::Device
+                        };
+                        self.actions.push(Action::StartLogin {
+                            provider_id: provider.provider_id.clone(),
+                            method,
+                        });
+                        self.setup = Some(SetupStep::LoginWait {
+                            rows,
+                            provider,
+                            origin,
+                            method,
+                            device_code: None,
+                        });
+                    }
+                    _ => self.credential_back(rows, provider, origin),
+                }
+            }
+            InputOutcome::Cancelled => self.credential_back(rows, provider, origin),
             _ => {
                 self.setup = Some(SetupStep::Credential {
                     rows,
                     provider,
+                    origin,
                     state,
                     error,
+                })
+            }
+        }
+    }
+
+    /// Esc from a credential-flow step: back to where the flow started.
+    fn credential_back(
+        &mut self,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        origin: CredentialOrigin,
+    ) {
+        match origin {
+            CredentialOrigin::Catalog => {
+                let mut state = SelectState::new();
+                state.select(
+                    rows.iter()
+                        .position(|row| row.provider_id == provider.provider_id)
+                        .or(Some(0)),
+                );
+                self.setup = Some(SetupStep::Catalog {
+                    rows,
+                    filter: String::new(),
+                    state,
+                });
+            }
+            CredentialOrigin::Menu => {
+                let mut state = SelectState::new();
+                state.select(Some(0));
+                self.setup = Some(SetupStep::ProviderMenu {
+                    rows,
+                    provider,
+                    state,
+                    busy: false,
+                    error: None,
                 });
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_key_input(
         &mut self,
         event: &Event,
-        rows: Vec<ProviderRow>,
-        provider: ProviderRow,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        origin: CredentialOrigin,
         mut value: String,
         busy: bool,
         error: Option<String>,
     ) {
-        // While the key is being saved only Esc (back to credentials) works;
-        // typing into a submitted form would race the host's answer.
+        // While the key is being saved only Esc (back out) works; typing
+        // into a submitted form would race the host's answer.
         if busy {
             if matches!(event, Event::Key(key) if key.plain() && key.code == KeyCode::Esc) {
                 self.pending_selection = None;
-                self.setup = Some(SetupStep::Credential {
-                    rows,
-                    provider,
-                    state: SelectState::new(),
-                    error: None,
-                });
+                self.credential_back(rows, provider, origin);
             } else {
                 self.setup = Some(SetupStep::KeyInput {
                     rows,
                     provider,
+                    origin,
                     value,
                     busy,
                     error,
@@ -422,6 +1141,7 @@ impl App {
             self.setup = Some(SetupStep::KeyInput {
                 rows,
                 provider,
+                origin,
                 value,
                 busy: false,
                 error: None,
@@ -432,6 +1152,7 @@ impl App {
             self.setup = Some(SetupStep::KeyInput {
                 rows,
                 provider,
+                origin,
                 value,
                 busy,
                 error,
@@ -439,20 +1160,14 @@ impl App {
             return;
         };
         match key.code {
-            KeyCode::Esc => {
-                self.setup = Some(SetupStep::Credential {
-                    rows,
-                    provider,
-                    state: SelectState::new(),
-                    error: None,
-                });
-            }
+            KeyCode::Esc => self.credential_back(rows, provider, origin),
             KeyCode::Enter => {
                 let trimmed = value.trim().to_string();
                 if trimmed.is_empty() {
                     self.setup = Some(SetupStep::KeyInput {
                         rows,
                         provider,
+                        origin,
                         value,
                         busy: false,
                         error: Some("API key is empty — paste a key, or press Esc".to_string()),
@@ -463,15 +1178,11 @@ impl App {
                     provider_id: provider.provider_id.clone(),
                     api_key: trimmed.clone(),
                 });
-                self.pending_key_redactions
-                    .push((provider.provider_id.clone(), trimmed));
-                // Bound the belt-and-braces list if answers never arrive.
-                if self.pending_key_redactions.len() > 8 {
-                    self.pending_key_redactions.remove(0);
-                }
+                self.push_key_redaction(provider.provider_id.clone(), trimmed);
                 self.setup = Some(SetupStep::KeyInput {
                     rows,
                     provider,
+                    origin,
                     value,
                     busy: true,
                     error: None,
@@ -482,6 +1193,7 @@ impl App {
                 self.setup = Some(SetupStep::KeyInput {
                     rows,
                     provider,
+                    origin,
                     value,
                     busy: false,
                     error: None,
@@ -492,6 +1204,7 @@ impl App {
                 self.setup = Some(SetupStep::KeyInput {
                     rows,
                     provider,
+                    origin,
                     value,
                     busy: false,
                     error: None,
@@ -501,6 +1214,7 @@ impl App {
                 self.setup = Some(SetupStep::KeyInput {
                     rows,
                     provider,
+                    origin,
                     value,
                     busy,
                     error,
@@ -512,37 +1226,214 @@ impl App {
     fn handle_login_wait(
         &mut self,
         event: &Event,
-        rows: Vec<ProviderRow>,
-        provider: ProviderRow,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+        origin: CredentialOrigin,
         method: LoginMethod,
         device_code: Option<(String, String)>,
     ) {
         if matches!(event, Event::Key(key) if key.plain() && key.code == KeyCode::Esc) {
             self.actions.push(Action::CancelLogin);
             self.pending_selection = None;
+            let mut state = SelectState::new();
+            state.select(Some(0));
             self.setup = Some(SetupStep::Credential {
                 rows,
                 provider,
-                state: SelectState::new(),
+                origin,
+                state,
                 error: Some("sign-in canceled".to_string()),
             });
         } else {
             self.setup = Some(SetupStep::LoginWait {
                 rows,
                 provider,
+                origin,
                 method,
                 device_code,
             });
         }
     }
 
-    /// Fold a host credential answer into the wizard.
+    fn handle_custom_form(
+        &mut self,
+        event: &Event,
+        rows: Vec<CatalogProviderRow>,
+        mut form: Box<CustomForm>,
+        editing: Option<String>,
+        busy: CustomBusy,
+        error: Option<String>,
+    ) {
+        // A submitted form only honors Esc until the host answers.
+        if busy != CustomBusy::Idle {
+            if matches!(event, Event::Key(key) if key.plain() && key.code == KeyCode::Esc) {
+                self.open_home(rows);
+            } else {
+                self.setup = Some(SetupStep::CustomForm {
+                    rows,
+                    form,
+                    editing,
+                    busy,
+                    error,
+                });
+            }
+            return;
+        }
+        if let Event::Paste(pasted) = event {
+            let field = form.focused();
+            if let Some(value) = form.field_mut(field) {
+                value.push_str(pasted.trim());
+                if field == CustomField::Name && !form.id_touched {
+                    form.id = slugify(&form.name);
+                }
+            }
+            self.setup = Some(SetupStep::CustomForm {
+                rows,
+                form,
+                editing,
+                busy,
+                error: None,
+            });
+            return;
+        }
+        let Event::Key(key) = event else {
+            self.setup = Some(SetupStep::CustomForm {
+                rows,
+                form,
+                editing,
+                busy,
+                error,
+            });
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.open_home(rows),
+            KeyCode::Up | KeyCode::BackTab => {
+                form.focus = form.focus.checked_sub(1).unwrap_or(CUSTOM_FIELDS - 1);
+                self.setup = Some(SetupStep::CustomForm {
+                    rows,
+                    form,
+                    editing,
+                    busy,
+                    error,
+                });
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                form.focus = (form.focus + 1) % CUSTOM_FIELDS;
+                self.setup = Some(SetupStep::CustomForm {
+                    rows,
+                    form,
+                    editing,
+                    busy,
+                    error,
+                });
+            }
+            KeyCode::Left | KeyCode::Right if form.focused() == CustomField::Api => {
+                let len = API_FAMILIES.len();
+                form.api_index = if key.code == KeyCode::Right {
+                    (form.api_index + 1) % len
+                } else {
+                    form.api_index.checked_sub(1).unwrap_or(len - 1)
+                };
+                self.setup = Some(SetupStep::CustomForm {
+                    rows,
+                    form,
+                    editing,
+                    busy,
+                    error,
+                });
+            }
+            KeyCode::Enter => match form.build_spec() {
+                Ok(spec) => {
+                    if !form.api_key.trim().is_empty() {
+                        self.push_key_redaction(
+                            spec.provider_id.clone(),
+                            form.api_key.trim().to_string(),
+                        );
+                    }
+                    self.actions.push(Action::UpsertCustomProvider { spec });
+                    self.setup = Some(SetupStep::CustomForm {
+                        rows,
+                        form,
+                        editing,
+                        busy: CustomBusy::Upserting,
+                        error: None,
+                    });
+                }
+                Err(message) => {
+                    self.setup = Some(SetupStep::CustomForm {
+                        rows,
+                        form,
+                        editing,
+                        busy,
+                        error: Some(message),
+                    });
+                }
+            },
+            KeyCode::Backspace => {
+                let field = form.focused();
+                if let Some(value) = form.field_mut(field) {
+                    value.pop();
+                    if field == CustomField::Name && !form.id_touched {
+                        form.id = slugify(&form.name);
+                    } else if field == CustomField::Id {
+                        form.id_touched = true;
+                    }
+                }
+                self.setup = Some(SetupStep::CustomForm {
+                    rows,
+                    form,
+                    editing,
+                    busy,
+                    error: None,
+                });
+            }
+            KeyCode::Char(ch) if !key.ctrl => {
+                let field = form.focused();
+                if let Some(value) = form.field_mut(field) {
+                    value.push(ch);
+                    if field == CustomField::Name && !form.id_touched {
+                        form.id = slugify(&form.name);
+                    } else if field == CustomField::Id {
+                        form.id_touched = true;
+                    }
+                }
+                self.setup = Some(SetupStep::CustomForm {
+                    rows,
+                    form,
+                    editing,
+                    busy,
+                    error: None,
+                });
+            }
+            _ => {
+                self.setup = Some(SetupStep::CustomForm {
+                    rows,
+                    form,
+                    editing,
+                    busy,
+                    error,
+                });
+            }
+        }
+    }
+
+    fn push_key_redaction(&mut self, provider_id: String, secret: String) {
+        self.pending_key_redactions.push((provider_id, secret));
+        // Bound the belt-and-braces list if answers never arrive.
+        if self.pending_key_redactions.len() > 8 {
+            self.pending_key_redactions.remove(0);
+        }
+    }
+
+    /// Fold a host credential answer into the window.
     pub(crate) fn apply_credential_result(&mut self, provider_id: String, error: Option<String>) {
         let answered_provider = provider_id.clone();
         match self.setup.take() {
             Some(SetupStep::KeyInput {
                 rows,
                 provider,
+                origin,
                 busy: true,
                 ..
             }) if provider.provider_id == provider_id => {
@@ -551,31 +1442,59 @@ impl App {
                     self.setup = Some(SetupStep::KeyInput {
                         rows,
                         provider,
+                        origin,
                         value: String::new(),
                         busy: false,
                         error: Some(message),
                     });
                 } else {
-                    self.finish_credential(provider_id);
+                    self.finish_credential(rows, provider);
                 }
             }
-            Some(SetupStep::LoginWait { rows, provider, .. })
-                if provider.provider_id == provider_id =>
-            {
+            Some(SetupStep::LoginWait {
+                rows,
+                provider,
+                origin,
+                ..
+            }) if provider.provider_id == provider_id => {
                 if let Some(message) = error {
                     let message = self.redact_secrets(&message);
+                    let mut state = SelectState::new();
+                    state.select(Some(0));
                     self.setup = Some(SetupStep::Credential {
                         rows,
                         provider,
-                        state: SelectState::new(),
+                        origin,
+                        state,
                         error: Some(message),
                     });
                 } else {
-                    self.finish_credential(provider_id);
+                    self.finish_credential(rows, provider);
+                }
+            }
+            Some(SetupStep::CustomForm {
+                rows,
+                form,
+                editing,
+                busy: CustomBusy::SavingKey,
+                ..
+            }) if form.id.trim() == provider_id => {
+                if let Some(message) = error {
+                    let message = self.redact_secrets(&message);
+                    self.setup = Some(SetupStep::CustomForm {
+                        rows,
+                        form,
+                        editing,
+                        busy: CustomBusy::Idle,
+                        error: Some(message),
+                    });
+                } else {
+                    let provider = self.custom_form_row(&rows, &form);
+                    self.finish_credential(rows, provider);
                 }
             }
             step => {
-                // The wizard moved on (or was dismissed): report out of band.
+                // The window moved on (or was dismissed): report out of band.
                 self.setup = step;
                 if self
                     .pending_selection
@@ -590,11 +1509,14 @@ impl App {
                         format!("{provider_id}: credential failed"),
                         Vec::new(),
                     ),
-                    None => self.notice(
-                        Tone::Info,
-                        format!("{provider_id}: credential saved"),
-                        Vec::new(),
-                    ),
+                    None => {
+                        self.needs_provider = false;
+                        self.notice(
+                            Tone::Info,
+                            format!("{provider_id}: credential saved"),
+                            Vec::new(),
+                        )
+                    }
                 }
             }
         }
@@ -603,16 +1525,57 @@ impl App {
             .retain(|(pending_provider, _)| pending_provider != &answered_provider);
     }
 
-    /// A credential landed: re-issue the selection that routed us here, or
-    /// continue into the provider's model list.
-    fn finish_credential(&mut self, provider_id: String) {
+    /// The catalog row for a just-submitted custom form, synthesized when
+    /// the refreshed catalog has not arrived yet.
+    fn custom_form_row(
+        &self,
+        rows: &[CatalogProviderRow],
+        form: &CustomForm,
+    ) -> CatalogProviderRow {
+        let provider_id = form.id.trim();
+        rows.iter()
+            .find(|row| row.provider_id == provider_id)
+            .cloned()
+            .unwrap_or_else(|| CatalogProviderRow {
+                provider_id: provider_id.to_string(),
+                display_name: form.name.trim().to_string(),
+                base_url: form.base_url.trim().to_string(),
+                api: API_FAMILIES[form.api_index.min(API_FAMILIES.len() - 1)]
+                    .0
+                    .to_string(),
+                auth_kind: "api_key".to_string(),
+                env_vars: Vec::new(),
+                configured: true,
+                auth_label: "stored key".to_string(),
+                custom: true,
+                active: false,
+                model_count: split_model_ids(&form.models).len(),
+                default_model: split_model_ids(&form.models).into_iter().next(),
+            })
+    }
+
+    /// A credential landed for `provider`: report it, then continue.
+    fn finish_credential(&mut self, rows: Vec<CatalogProviderRow>, provider: CatalogProviderRow) {
         self.notice(
             Tone::Info,
-            format!("{provider_id}: credential saved"),
+            format!("{}: credential saved", provider.provider_id),
             Vec::new(),
         );
+        self.continue_after_configure(rows, provider);
+    }
+
+    /// The provider became usable: re-issue the selection that routed us
+    /// here, auto-select the provider's default model when the current model
+    /// is unusable, or open the picker scoped to the provider.
+    fn continue_after_configure(
+        &mut self,
+        rows: Vec<CatalogProviderRow>,
+        provider: CatalogProviderRow,
+    ) {
+        let model_was_unusable = self.model_unusable();
+        self.needs_provider = false;
         if let Some((pending_provider, model)) = self.pending_selection.take() {
-            if pending_provider == provider_id {
+            if pending_provider == provider.provider_id {
                 self.setup = None;
                 self.actions.push(Action::SelectModel {
                     provider_id: pending_provider,
@@ -622,8 +1585,123 @@ impl App {
             }
             self.pending_selection = Some((pending_provider, model));
         }
-        self.setup = Some(SetupStep::AwaitModels { provider_id });
+        if model_was_unusable && let Some(model) = provider.default_model.clone() {
+            self.setup = None;
+            self.actions.push(Action::SelectModel {
+                provider_id: provider.provider_id,
+                model,
+            });
+            return;
+        }
+        let _ = rows;
+        self.setup = Some(SetupStep::AwaitModels {
+            provider_id: provider.provider_id,
+        });
         self.actions.push(Action::ListModels);
+    }
+
+    /// Whether the active model cannot serve real turns: the first-run gate
+    /// is up, or the launch echo pair is still selected.
+    pub(crate) fn model_unusable(&self) -> bool {
+        self.needs_provider || self.meta.model_label.starts_with("local/")
+    }
+
+    /// Fold a custom-provider upsert/delete answer into the window.
+    pub(crate) fn apply_custom_provider_result(
+        &mut self,
+        provider_id: String,
+        error: Option<String>,
+    ) {
+        match self.setup.take() {
+            Some(SetupStep::CustomForm {
+                rows,
+                form,
+                editing,
+                busy: CustomBusy::Upserting,
+                ..
+            }) if form.id.trim() == provider_id => match error {
+                Some(message) => {
+                    let message = self.redact_secrets(&message);
+                    self.setup = Some(SetupStep::CustomForm {
+                        rows,
+                        form,
+                        editing,
+                        busy: CustomBusy::Idle,
+                        error: Some(message),
+                    });
+                }
+                None => {
+                    let api_key = form.api_key.trim().to_string();
+                    if api_key.is_empty() {
+                        self.notice(
+                            Tone::Info,
+                            format!("{provider_id}: provider saved"),
+                            Vec::new(),
+                        );
+                        let provider = self.custom_form_row(&rows, &form);
+                        // No key to save: continue as a configured provider.
+                        self.continue_after_configure(rows, provider);
+                    } else {
+                        self.actions.push(Action::SetProviderKey {
+                            provider_id: provider_id.clone(),
+                            api_key,
+                        });
+                        self.setup = Some(SetupStep::CustomForm {
+                            rows,
+                            form,
+                            editing,
+                            busy: CustomBusy::SavingKey,
+                            error: None,
+                        });
+                    }
+                }
+            },
+            Some(SetupStep::ProviderMenu {
+                rows,
+                provider,
+                state,
+                busy: true,
+                ..
+            }) if provider.provider_id == provider_id => match error {
+                Some(message) => {
+                    let message = self.redact_secrets(&message);
+                    self.setup = Some(SetupStep::ProviderMenu {
+                        rows,
+                        provider,
+                        state,
+                        busy: false,
+                        error: Some(message),
+                    });
+                }
+                None => {
+                    self.notice(
+                        Tone::Info,
+                        format!("{provider_id}: provider deleted"),
+                        Vec::new(),
+                    );
+                    // Refresh the overview so the deleted row disappears.
+                    self.setup = Some(SetupStep::AwaitCatalog {
+                        intent: CatalogIntent::Home,
+                    });
+                    self.actions.push(Action::FetchProviderCatalog);
+                }
+            },
+            step => {
+                self.setup = step;
+                match error {
+                    Some(_) => self.notice(
+                        Tone::Error,
+                        format!("{provider_id}: provider change failed"),
+                        Vec::new(),
+                    ),
+                    None => self.notice(
+                        Tone::Info,
+                        format!("{provider_id}: provider saved"),
+                        Vec::new(),
+                    ),
+                }
+            }
+        }
     }
 
     pub(crate) fn apply_device_code(&mut self, verification_uri: String, user_code: String) {
@@ -643,17 +1721,15 @@ impl App {
             format!("{provider_id}: credential cleared"),
             Vec::new(),
         );
+        // Refresh whatever screen shows auth state.
         match self.setup.as_ref() {
-            Some(SetupStep::Credential { provider, .. }) if provider.provider_id == provider_id => {
-                self.setup = Some(SetupStep::AwaitProviders {
-                    provider_id: provider_id.clone(),
-                });
-                self.actions.push(Action::ListProviders);
-            }
-            Some(SetupStep::Provider { rows, .. })
-                if rows.iter().any(|row| row.provider_id == provider_id) =>
+            Some(SetupStep::ProviderMenu { provider, .. })
+                if provider.provider_id == provider_id =>
             {
-                self.actions.push(Action::ListProviders);
+                self.actions.push(Action::FetchProviderCatalog);
+            }
+            Some(SetupStep::Home { .. } | SetupStep::Catalog { .. }) => {
+                self.actions.push(Action::FetchProviderCatalog);
             }
             _ => {}
         }
@@ -680,6 +1756,7 @@ impl App {
             Some(SetupStep::KeyInput {
                 rows,
                 provider,
+                origin,
                 value,
                 busy,
                 error,
@@ -695,6 +1772,7 @@ impl App {
                     self.setup = Some(SetupStep::KeyInput {
                         rows,
                         provider,
+                        origin,
                         value: String::new(),
                         busy: false,
                         error: Some(error_summary(&title, &body)),
@@ -703,21 +1781,63 @@ impl App {
                     self.setup = Some(SetupStep::KeyInput {
                         rows,
                         provider,
+                        origin,
                         value,
                         busy,
                         error,
                     });
                 }
             }
-            Some(SetupStep::LoginWait { rows, provider, .. }) => {
+            Some(SetupStep::LoginWait {
+                rows,
+                provider,
+                origin,
+                ..
+            }) => {
+                let mut state = SelectState::new();
+                state.select(Some(0));
                 self.setup = Some(SetupStep::Credential {
                     rows,
                     provider,
-                    state: SelectState::new(),
+                    origin,
+                    state,
                     error: Some(error_summary(&title, &body)),
                 });
             }
-            Some(SetupStep::AwaitModels { .. } | SetupStep::AwaitProviders { .. }) => {
+            Some(SetupStep::CustomForm {
+                rows,
+                mut form,
+                editing,
+                busy,
+                error,
+            }) => {
+                let secret = form.api_key.trim().to_string();
+                if !secret.is_empty() {
+                    title = title.replace(&secret, "[redacted]");
+                    for line in &mut body {
+                        *line = line.replace(&secret, "[redacted]");
+                    }
+                }
+                if busy != CustomBusy::Idle {
+                    form.api_key.clear();
+                    self.setup = Some(SetupStep::CustomForm {
+                        rows,
+                        form,
+                        editing,
+                        busy: CustomBusy::Idle,
+                        error: Some(error_summary(&title, &body)),
+                    });
+                } else {
+                    self.setup = Some(SetupStep::CustomForm {
+                        rows,
+                        form,
+                        editing,
+                        busy,
+                        error,
+                    });
+                }
+            }
+            Some(SetupStep::AwaitModels { .. } | SetupStep::AwaitCatalog { .. }) => {
                 self.setup = None;
                 self.pending_selection = None;
             }
