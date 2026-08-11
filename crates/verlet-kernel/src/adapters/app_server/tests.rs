@@ -8246,12 +8246,14 @@ streaming = false
         .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
     let thread_id = {
+        // lexicon-allow: capsule - existing app-server test client name
         let client = std::sync::Arc::new(InspectingCapsuleClient::default());
         let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
         let app = test_app_with_provider_root(
             &root,
             &workspace,
             provider_client,
+            // lexicon-allow: capsule - existing app-server test config type
             crate::adapters::app_server::CapsuleBindingsConfig::default()
                 .with_registry_root(&operation_registry_root),
         )
@@ -8325,12 +8327,14 @@ streaming = false
         std::fs::write(path, &encoded).unwrap();
     }
 
+    // lexicon-allow: capsule - existing app-server test client name
     let client = std::sync::Arc::new(InspectingCapsuleClient::default());
     let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
     let restarted = test_app_with_provider_root(
         &root,
         &workspace,
         provider_client,
+        // lexicon-allow: capsule - existing app-server test config type
         crate::adapters::app_server::CapsuleBindingsConfig::default()
             .with_registry_root(&operation_registry_root),
     )
