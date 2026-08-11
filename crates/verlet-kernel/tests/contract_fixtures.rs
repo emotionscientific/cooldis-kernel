@@ -2097,10 +2097,6 @@ fn std_queue_task_bound_coupling() -> verlet::agent::manifest_bind::BoundCouplin
             artifact_hash: "a".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2139,10 +2135,6 @@ fn std_queue_completion_callback_bound_coupling() -> verlet::agent::manifest_bin
             artifact_hash: "b".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:control".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2181,10 +2173,6 @@ fn std_context_spill_bound_coupling() -> verlet::agent::manifest_bind::BoundCoup
             artifact_hash: "c".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:derived:context".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(2),
@@ -2220,10 +2208,6 @@ fn std_context_truncate_bound_coupling() -> verlet::agent::manifest_bind::BoundC
             artifact_hash: "d".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2265,10 +2249,6 @@ fn std_context_summarize_bound_coupling() -> verlet::agent::manifest_bind::Bound
             artifact_hash: "e".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:derived:context".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(2),
@@ -2306,10 +2286,6 @@ fn std_memory_extract_bound_coupling() -> verlet::agent::manifest_bind::BoundCou
             artifact_hash: "f".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:derived:memory".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2342,10 +2318,6 @@ fn std_memory_recall_bound_coupling() -> verlet::agent::manifest_bind::BoundCoup
             artifact_hash: "g".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:derived:memory".to_string(),
-            "stream.write:derived:context".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2378,10 +2350,6 @@ fn std_prompt_steer_continuation_bound_coupling() -> verlet::agent::manifest_bin
             artifact_hash: "h".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2420,10 +2388,6 @@ fn std_prompt_steer_read_plan_bound_coupling() -> verlet::agent::manifest_bind::
             artifact_hash: "h".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:control".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2472,10 +2436,6 @@ fn std_prompt_dynamic_instructions_bound_coupling() -> verlet::agent::manifest_b
             artifact_hash: "h".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:derived:context".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(2),
@@ -2520,10 +2480,6 @@ fn std_permission_tool_gate_bound_coupling(
             artifact_hash: "p".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2564,10 +2520,6 @@ fn std_permission_approval_gate_bound_coupling(
             artifact_hash: "a".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(2),
@@ -2606,10 +2558,6 @@ fn std_failure_deadletter_bound_coupling() -> verlet::agent::manifest_bind::Boun
             artifact_hash: "d".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:control".to_string(),
-            "stream.write:derived:deadletter".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2650,10 +2598,6 @@ fn std_retry_with_budget_bound_coupling() -> verlet::agent::manifest_bind::Bound
             artifact_hash: "e".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:control".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2700,10 +2644,6 @@ fn std_schedule_cron_bound_coupling() -> verlet::agent::manifest_bind::BoundCoup
             artifact_hash: "s".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:control".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),
@@ -2755,10 +2695,6 @@ fn std_supervisor_child_completion_bound_coupling(
             artifact_hash: "j".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),

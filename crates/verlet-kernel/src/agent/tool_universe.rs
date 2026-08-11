@@ -170,7 +170,6 @@ impl ToolUniverseDiscovery {
 /// (`cooldis.agent.tool_universes`) so the runtime factory can remount the
 /// search surface on restore, exactly like operation bindings.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ToolUniverseBinding {
     /// Manifest tool id of the `protocol_tool_import`.
     pub import_id: String,
@@ -185,8 +184,6 @@ pub struct ToolUniverseBinding {
     pub include_tools: Option<std::collections::BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<verlet_agent::tool_ref::PinnedToolRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
     pub discovery: ToolUniverseDiscovery,
 }
 
@@ -222,7 +219,6 @@ impl ToolUniverseBinding {
 /// "which mutable surface could this thread reach, under which witnessed
 /// contracts, and which contracts were pinned to rows".
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ToolUniverseBindReceipt {
     pub import_id: String,
     pub server_ref: String,
@@ -232,8 +228,6 @@ pub struct ToolUniverseBindReceipt {
     /// Pin references resolved to rows, empty when the import is
     /// search-surface only.
     pub pinned: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -279,7 +273,6 @@ impl ToolUniverseBindReceipt {
                     )
                 })
                 .collect(),
-            grant_expiries: binding.grant_expiries.clone(),
         }
     }
 }

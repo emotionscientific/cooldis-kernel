@@ -884,15 +884,6 @@ impl ThreadSpawnProjector {
             metadata
                 .entry(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA.to_string())
                 .or_insert_with(|| bind_receipt.manifest_hash.clone());
-            let granted = serde_json::to_string(&bind_receipt.granted).map_err(|err| {
-                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "failed to encode thread spawn projector grants: {err}"
-                ))
-            })?;
-            metadata.insert(
-                crate::kernel::runtime_host::THREAD_SPAWN_GRANTED_METADATA.to_string(),
-                granted,
-            );
         }
         Ok((agent_binding, metadata))
     }
@@ -1301,10 +1292,6 @@ fn parent_allows_supervisor_spawn(
     })?;
     let allows_spawn = coupling_set.couplings.iter().any(|coupling| {
         coupling.id == crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
-            && coupling
-                .grants
-                .iter()
-                .any(|grant| grant == crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY)
     });
     if !allows_spawn {
         return Ok(false);
@@ -1462,8 +1449,6 @@ mod tests {
                     static_context_segments: Vec::new(),
                     tool_universes: Vec::new(),
                     couplings: Vec::new(),
-                    granted: Vec::new(),
-                    grant_bindings: Vec::new(),
                     effective_runtime: verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(),
                     overridden_keys: Vec::new(),
                     placement: Some(crate::agent::manifest_bind::AgentManifestPlacementBinding {
@@ -2898,11 +2883,6 @@ mod tests {
                 artifact_hash: "i".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-                crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY.to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
@@ -2944,10 +2924,6 @@ mod tests {
                 artifact_hash: "j".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,

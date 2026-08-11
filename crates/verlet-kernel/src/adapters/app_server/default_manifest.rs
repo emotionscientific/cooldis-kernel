@@ -259,18 +259,6 @@ fn default_manifest_tools(
                 crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
                 crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
             ] {
-                let grants = record
-                    .manifest
-                    .operation(operation_name)
-                    .map(|operation| {
-                        operation
-                            .required_capabilities
-                            .iter()
-                            .cloned()
-                            .map(Into::into)
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 tools.push(verlet_agent::manifest_schema::AgentManifestTool::Direct(
                     verlet_agent::manifest_schema::AgentManifestDirectTool {
                         id: format!(
@@ -284,7 +272,6 @@ fn default_manifest_tools(
                             record.active_artifact_hash
                         ),
                         effect_class: Default::default(),
-                        grants,
                         attachment: Default::default(),
                     },
                 ));
@@ -325,12 +312,14 @@ fn default_manifest_tools(
         if record.name == crate::operations::kernel_packages::VERLET_THREADS_PACKAGE {
             continue;
         }
-        let grants = record
-            .capability_grants
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect::<Vec<_>>();
+        let attachment_config =
+            crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                &record.capability_grants,
+            );
+        let attachment = verlet_agent::manifest_schema::AgentManifestAttachment {
+            allowed_secrets: attachment_config.allowed_secrets,
+            allowed_private_network: attachment_config.allowed_private_network,
+        };
         for operation in &record.projections.operations {
             tools.push(verlet_agent::manifest_schema::AgentManifestTool::Bash(
                 verlet_agent::manifest_schema::AgentManifestBashTool {
@@ -341,8 +330,7 @@ fn default_manifest_tools(
                         record.name, operation.operation_name, record.active_artifact_hash
                     ),
                     effect_class: Default::default(),
-                    grants: grants.clone(),
-                    attachment: Default::default(),
+                    attachment: attachment.clone(),
                 },
             ));
         }
@@ -397,7 +385,7 @@ fn default_manifest_source(
                         command: Some(&tool.command),
                         tool_name: None,
                         operation_ref: &tool.operation_ref,
-                        grants: &tool.grants,
+                        attachment: &tool.attachment,
                     }
                 }
                 verlet_agent::manifest_schema::AgentManifestTool::Direct(tool) => {
@@ -407,7 +395,7 @@ fn default_manifest_source(
                         command: None,
                         tool_name: Some(&tool.tool_name),
                         operation_ref: &tool.operation_ref,
-                        grants: &tool.grants,
+                        attachment: &tool.attachment,
                     }
                 }
                 verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(_) => {
@@ -541,8 +529,10 @@ struct DefaultManifestToolToml<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_name: Option<&'a str>,
     operation_ref: &'a str,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    grants: &'a Vec<verlet_agent::manifest_schema::AgentManifestGrant>,
+    #[serde(
+        skip_serializing_if = "verlet_agent::manifest_schema::AgentManifestAttachment::is_empty"
+    )]
+    attachment: &'a verlet_agent::manifest_schema::AgentManifestAttachment,
 }
 
 #[derive(serde::Serialize)]

@@ -2451,9 +2451,7 @@ impl CapsuleBindingRuntimeFactory {
                 name,
                 artifact_hash,
                 effect_class: _,
-                grants,
                 attachment_config,
-                grant_expiries: _,
                 operations,
                 direct_tools,
             } = binding;
@@ -2464,7 +2462,7 @@ impl CapsuleBindingRuntimeFactory {
                     operation_name: direct_tool.operation,
                 }
             }));
-            let mut record = registry
+            let record = registry
                 .load_version_record(&name, &artifact_hash)
                 .map_err(|err| {
                     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
@@ -2472,7 +2470,6 @@ impl CapsuleBindingRuntimeFactory {
                         name, artifact_hash
                     ))
                 })?;
-            apply_manifest_operation_grants(&mut record, grants);
             let record = if operations.is_empty() {
                 crate::operations::plugins::LocalPluginCatalogRecord::whole_record(record)
             } else {
@@ -2658,13 +2655,6 @@ pub(super) fn manifest_compaction_policy(
             Ok(crate::kernel::compaction::CompactionPolicy::auto_at_text_bytes(bytes))
         })
         .transpose()
-}
-
-pub(super) fn apply_manifest_operation_grants(
-    record: &mut verlet_operations::operation_store::PublishedOperationRecord,
-    grants: impl IntoIterator<Item = String>,
-) {
-    record.capability_grants.extend(grants);
 }
 
 pub(super) async fn operation_registry_capability_grants(

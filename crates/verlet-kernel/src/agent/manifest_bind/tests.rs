@@ -580,7 +580,6 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
                     bash_record.active_artifact_hash
                 ),
                 effect_class: verlet_agent::manifest_schema::EffectClass::Pure,
-                grants: Vec::new(),
                 attachment: Default::default(),
             },
         ),
@@ -593,7 +592,6 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
                     direct_record.active_artifact_hash
                 ),
                 effect_class: verlet_agent::manifest_schema::EffectClass::Idempotent,
-                grants: Vec::new(),
                 attachment: Default::default(),
             },
         ),
@@ -660,7 +658,6 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
                 command: "search".to_string(),
                 operation_ref: format!("op://lookup/search@sha256:{}", record.active_artifact_hash),
                 effect_class: Default::default(),
-                grants: Vec::new(),
                 attachment: verlet_agent::manifest_schema::AgentManifestAttachment {
                     allowed_secrets: std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]),
                     allowed_private_network: Default::default(),
@@ -676,7 +673,6 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
                     record.active_artifact_hash
                 ),
                 effect_class: Default::default(),
-                grants: Vec::new(),
                 attachment: verlet_agent::manifest_schema::AgentManifestAttachment {
                     allowed_secrets: Default::default(),
                     allowed_private_network: std::collections::BTreeMap::from([(
@@ -1124,7 +1120,6 @@ async fn manifest_coupling_binds_controller_receipt() {
                 "op://hitl_gate/pre_tool_gate@sha256:{}",
                 operation.active_artifact_hash
             ),
-            "thread.pause",
             "tool.call.requested",
             "thread",
             "tool.call.requested",
@@ -1183,7 +1178,6 @@ async fn manifest_coupling_binds_controller_receipt() {
         coupling.function.operation_name.as_deref(),
         Some("pre_tool_gate")
     );
-    assert_eq!(coupling.grants, vec!["thread.pause".to_string()]);
     assert_eq!(coupling.budget.max_ms, Some(250));
     assert_eq!(coupling.budget.max_discharge_events, Some(4));
     assert_eq!(
@@ -1218,8 +1212,6 @@ async fn manifest_coupling_binds_controller_receipt() {
             ),
             artifact_hash: operation.active_artifact_hash,
             operation_name: Some("pre_tool_gate".to_string()),
-            grants: vec!["thread.pause".to_string()],
-            grant_expiries: Vec::new(),
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_ms: Some(250),
                 max_discharge_events: Some(4),
@@ -1252,7 +1244,6 @@ async fn manifest_coupling_infers_projection_for_distinct_derived_sink() {
                 "op://memory_writer/extract@sha256:{}",
                 operation.active_artifact_hash
             ),
-            "stream.write:derived:memory",
             "turn.completed",
             "thread",
             "turn.completed",
@@ -1304,7 +1295,6 @@ async fn manifest_coupling_requires_content_addressed_function_ref() {
             "unpinned_agent",
             "std::permission.approval_gate",
             "op://hitl_gate/pre_tool_gate",
-            "thread.pause",
             "tool.call.requested",
             "thread",
             "tool.call.requested",
@@ -1337,57 +1327,6 @@ async fn manifest_coupling_requires_content_addressed_function_ref() {
 }
 
 #[tokio::test]
-async fn manifest_coupling_requires_declared_function_grants() {
-    let root = temp_dir("manifest-bind-coupling-grants");
-    let operation_root = root.join("operations");
-    let operation = publish_multi_operation_record(
-        &operation_root,
-        "hitl_gate",
-        &[("pre_tool_gate", vec!["thread.pause"])],
-    )
-    .await;
-    let record = publish_agent_manifest(
-        &root,
-        &manifest_with_coupling(
-            "grantless_agent",
-            "std::permission.approval_gate",
-            &format!(
-                "op://hitl_gate/pre_tool_gate@sha256:{}",
-                operation.active_artifact_hash
-            ),
-            "",
-            "tool.call.requested",
-            "thread",
-            "tool.call.requested",
-            "control",
-            r#""tool.call.suspended""#,
-            "",
-        ),
-    );
-    let surface =
-        crate::agent::manifest_bind::AgentManifestProviderSurface::single("local_offline", "echo")
-            .with_supports_streaming(false);
-
-    let err = crate::agent::manifest_bind::bind_published_agent_record(
-        &record,
-        None,
-        &surface,
-        Some(&operation_root),
-        None,
-        None,
-        &std::collections::BTreeSet::new(),
-        None,
-        &crate::agent::manifest_bind::AgentManifestModelProfileSelection::default(),
-        &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
-    )
-    .await
-    .unwrap_err();
-
-    assert!(err.to_string().contains("requires grants"));
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
 async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
     let root = temp_dir("manifest-bind-coupling-kind");
     let operation_root = root.join("operations");
@@ -1406,7 +1345,6 @@ async fn manifest_coupling_event_kinds_fail_closed_at_bind() {
                 "op://hitl_gate/pre_tool_gate@sha256:{}",
                 operation.active_artifact_hash
             ),
-            "thread.pause",
             "tool.call.requested",
             "thread",
             "tool.call.promised",
@@ -1445,7 +1383,6 @@ fn manifest_coupling_source_sink_identity_fails_closed_at_bind() {
     let coupling = verlet_agent::manifest_schema::AgentManifestCoupling {
         id: "std::prompt.steer".to_string(),
         function_ref: format!("op://gate/check@sha256:{}", "a".repeat(64)),
-        grants: Vec::new(),
         trigger: verlet_agent::manifest_schema::AgentManifestCouplingTrigger {
             kind: "turn.completed".to_string(),
             match_fields: std::collections::BTreeMap::new(),
@@ -1503,7 +1440,6 @@ async fn manifest_coupling_custom_id_binds_to_wasm_executor() {
                 "op://custom_policy/check@sha256:{}",
                 operation.active_artifact_hash
             ),
-            "",
             "turn.completed",
             "thread",
             "turn.completed",
@@ -1572,14 +1508,13 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
         } else {
             &template.source.stream
         };
-        let (function_ref, grant, policy) =
+        let (function_ref, policy) =
             if template.id == crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID {
                 (
                     format!(
                         "op://stdlib_supervisor_spawn/run@sha256:{}",
                         spawn_operation.active_artifact_hash
                     ),
-                    crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY,
                     "\n[policies]\nallow_child_agents = true\n",
                 )
             } else {
@@ -1588,7 +1523,6 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
                         "op://stdlib_policy/run@sha256:{}",
                         operation.active_artifact_hash
                     ),
-                    "",
                     "",
                 )
             };
@@ -1601,7 +1535,6 @@ async fn manifest_coupling_all_runtime_executable_std_templates_bind() {
                 ),
                 &template.id,
                 &function_ref,
-                grant,
                 template.trigger_kinds[0].as_ref(),
                 source_stream,
                 template.source.kinds[0].as_ref(),
@@ -1677,7 +1610,6 @@ async fn manifest_coupling_non_runtime_executable_std_templates_fail_closed_at_b
                     "op://reference_policy/run@sha256:{}",
                     operation.active_artifact_hash
                 ),
-                "",
                 template.trigger_kinds[0].as_ref(),
                 &template.source.stream,
                 template.source.kinds[0].as_ref(),
@@ -1743,7 +1675,6 @@ async fn manifest_supervisor_spawn_coupling_honors_child_agent_policy() {
             "op://stdlib_supervisor_spawn/run@sha256:{}",
             operation.active_artifact_hash
         ),
-        crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY,
         "turn.submitted",
         "thread",
         "turn.submitted",
@@ -1771,7 +1702,6 @@ async fn manifest_supervisor_spawn_coupling_honors_child_agent_policy() {
     let diagnostic = err.to_string();
     assert!(diagnostic.contains("allow_child_agents = false"));
     assert!(diagnostic.contains("std::supervisor.spawn"));
-    assert!(diagnostic.contains("threads.spawn"));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -2940,74 +2870,6 @@ fn skill_binding_witness_comparison_is_order_independent_but_exact() {
 }
 
 #[tokio::test]
-async fn operation_bind_requires_declared_grants() {
-    let root = temp_dir("manifest-bind-grants");
-    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&root);
-    let wasm = wat::parse_str(operation_guest_with_required_capability()).unwrap();
-    let artifact = root.join("search.wasm");
-    std::fs::write(&artifact, wasm).unwrap();
-    let record = registry
-        .publish_artifact(
-            verlet_operations::operation_store::PublishOperationRequest {
-                name: "search".to_string(),
-                artifact_path: artifact.clone(),
-                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
-                    bin_path: artifact,
-                },
-                interface: None,
-                capability_grants: std::collections::BTreeSet::from([
-                    "net:https://example.com".to_string()
-                ]),
-                metadata: Default::default(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let err = crate::agent::manifest_bind::bind_operation_ref(
-        "search",
-        &format!("op://search@sha256:{}", record.active_artifact_hash),
-        &[],
-        None,
-        Some(&root),
-        &mut std::collections::BTreeSet::new(),
-        &mut crate::agent::manifest_bind::OperationBindingMap::new(),
-    )
-    .await
-    .unwrap_err();
-    assert!(err.to_string().contains("requires grants"));
-
-    let mut granted = std::collections::BTreeSet::new();
-    let mut operation_bindings = crate::agent::manifest_bind::OperationBindingMap::new();
-    crate::agent::manifest_bind::bind_operation_ref(
-        "search",
-        &format!("op://search@sha256:{}", record.active_artifact_hash),
-        &["net:https://example.com".to_string()],
-        None,
-        Some(&root),
-        &mut granted,
-        &mut operation_bindings,
-    )
-    .await
-    .unwrap();
-    assert!(granted.contains("net:https://example.com"));
-    assert_eq!(
-        crate::agent::manifest_bind::operation_bindings_from_map(operation_bindings),
-        vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
-            name: "search".to_string(),
-            artifact_hash: record.active_artifact_hash,
-            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            grants: vec!["net:https://example.com".to_string()],
-            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            grant_expiries: Vec::new(),
-            operations: Vec::new(),
-            direct_tools: Vec::new(),
-        }]
-    );
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
 async fn two_segment_operation_ref_validates_only_named_operation() {
     let root = temp_dir("manifest-bind-operation-segment");
     let record = publish_multi_operation_record(
@@ -3020,7 +2882,6 @@ async fn two_segment_operation_ref_validates_only_named_operation() {
     )
     .await;
 
-    let mut granted = std::collections::BTreeSet::new();
     let mut operation_bindings = crate::agent::manifest_bind::OperationBindingMap::new();
     crate::agent::manifest_bind::bind_operation_ref(
         "profile",
@@ -3028,65 +2889,23 @@ async fn two_segment_operation_ref_validates_only_named_operation() {
             "op://analytics/profile@sha256:{}",
             record.active_artifact_hash
         ),
-        &["net:https://profile.example".to_string()],
         None,
         Some(&root),
-        &mut granted,
         &mut operation_bindings,
     )
     .await
     .unwrap();
 
     assert_eq!(
-        granted,
-        std::collections::BTreeSet::from(["net:https://profile.example".to_string()])
-    );
-    assert_eq!(
         crate::agent::manifest_bind::operation_bindings_from_map(operation_bindings),
         vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            grants: vec!["net:https://profile.example".to_string()],
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            grant_expiries: Vec::new(),
             operations: vec!["profile".to_string()],
             direct_tools: Vec::new(),
         }]
-    );
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn single_segment_operation_ref_still_validates_all_operations() {
-    let root = temp_dir("manifest-bind-whole-record-grants");
-    let record = publish_multi_operation_record(
-        &root,
-        "analytics",
-        &[
-            ("profile", vec!["net:https://profile.example"]),
-            ("summarize", vec!["net:https://summary.example"]),
-        ],
-    )
-    .await;
-    let mut granted = std::collections::BTreeSet::new();
-    let mut operation_bindings = crate::agent::manifest_bind::OperationBindingMap::new();
-
-    let err = crate::agent::manifest_bind::bind_operation_ref(
-        "analytics",
-        &format!("op://analytics@sha256:{}", record.active_artifact_hash),
-        &["net:https://profile.example".to_string()],
-        None,
-        Some(&root),
-        &mut granted,
-        &mut operation_bindings,
-    )
-    .await
-    .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("summarize:net:https://summary.example")
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -3100,7 +2919,6 @@ async fn two_segment_operation_ref_fails_closed_for_unknown_operation() {
         &[("profile", Vec::new()), ("summarize", Vec::new())],
     )
     .await;
-    let mut granted = std::collections::BTreeSet::new();
     let mut operation_bindings = crate::agent::manifest_bind::OperationBindingMap::new();
 
     let err = crate::agent::manifest_bind::bind_operation_ref(
@@ -3109,10 +2927,8 @@ async fn two_segment_operation_ref_fails_closed_for_unknown_operation() {
             "op://analytics/export@sha256:{}",
             record.active_artifact_hash
         ),
-        &[],
         None,
         Some(&root),
-        &mut granted,
         &mut operation_bindings,
     )
     .await
@@ -3121,79 +2937,6 @@ async fn two_segment_operation_ref_fails_closed_for_unknown_operation() {
     let text = err.to_string();
     assert!(text.contains("op://<record>/<operation>@sha256:<hash>"));
     assert!(text.contains("available operations: profile, summarize"));
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn operation_bindings_merge_grants_for_shared_artifact() {
-    let root = temp_dir("manifest-bind-merge-grants");
-    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&root);
-    let wasm = wat::parse_str(operation_guest_with_required_capability()).unwrap();
-    let artifact = root.join("search.wasm");
-    std::fs::write(&artifact, wasm).unwrap();
-    let record = registry
-        .publish_artifact(
-            verlet_operations::operation_store::PublishOperationRequest {
-                name: "search".to_string(),
-                artifact_path: artifact.clone(),
-                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
-                    bin_path: artifact,
-                },
-                interface: None,
-                capability_grants: std::collections::BTreeSet::from([
-                    "net:https://example.com".to_string()
-                ]),
-                metadata: Default::default(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let mut granted = std::collections::BTreeSet::new();
-    let mut operation_bindings = crate::agent::manifest_bind::OperationBindingMap::new();
-    for row_grants in [
-        vec!["net:https://example.com".to_string()],
-        vec![
-            "net:https://example.com".to_string(),
-            "fs.read:/workspace".to_string(),
-        ],
-    ] {
-        crate::agent::manifest_bind::bind_operation_ref(
-            "search",
-            &format!("op://search@sha256:{}", record.active_artifact_hash),
-            &row_grants,
-            None,
-            Some(&root),
-            &mut granted,
-            &mut operation_bindings,
-        )
-        .await
-        .unwrap();
-    }
-
-    assert_eq!(
-        granted,
-        std::collections::BTreeSet::from([
-            "fs.read:/workspace".to_string(),
-            "net:https://example.com".to_string(),
-        ])
-    );
-    assert_eq!(
-        crate::agent::manifest_bind::operation_bindings_from_map(operation_bindings),
-        vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
-            name: "search".to_string(),
-            artifact_hash: record.active_artifact_hash,
-            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            grants: vec![
-                "fs.read:/workspace".to_string(),
-                "net:https://example.com".to_string(),
-            ],
-            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            grant_expiries: Vec::new(),
-            operations: Vec::new(),
-            direct_tools: Vec::new(),
-        }]
-    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3364,7 +3107,6 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
         ],
     )
     .await;
-    let mut granted = std::collections::BTreeSet::new();
     let mut operation_bindings = crate::agent::manifest_bind::OperationBindingMap::new();
 
     crate::agent::manifest_bind::bind_operation_ref(
@@ -3373,10 +3115,8 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
             "op://analytics/profile@sha256:{}",
             record.active_artifact_hash
         ),
-        &["net:https://profile.example".to_string()],
         None,
         Some(&root),
-        &mut granted,
         &mut operation_bindings,
     )
     .await
@@ -3384,13 +3124,8 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
     crate::agent::manifest_bind::bind_operation_ref(
         "analytics",
         &format!("op://analytics@sha256:{}", record.active_artifact_hash),
-        &[
-            "net:https://profile.example".to_string(),
-            "net:https://summary.example".to_string(),
-        ],
         None,
         Some(&root),
-        &mut granted,
         &mut operation_bindings,
     )
     .await
@@ -3402,12 +3137,7 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
             name: "analytics".to_string(),
             artifact_hash: record.active_artifact_hash,
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            grants: vec![
-                "net:https://profile.example".to_string(),
-                "net:https://summary.example".to_string(),
-            ],
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -3418,59 +3148,26 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
 #[test]
 fn operation_binding_accumulator_merges_whole_record_order_independently() {
     let mut subset_then_whole = crate::agent::manifest_bind::OperationBindingAccumulator::default();
-    subset_then_whole.merge(
-        std::collections::BTreeSet::from(["net:https://profile.example".to_string()]),
-        Some("profile".to_string()),
-        None,
-    );
-    subset_then_whole.merge(
-        std::collections::BTreeSet::from(["net:https://summary.example".to_string()]),
-        None,
-        None,
-    );
+    subset_then_whole.merge(Some("profile".to_string()), None);
+    subset_then_whole.merge(None, None);
     assert_eq!(subset_then_whole.operation_names(), Vec::<String>::new());
-    assert_eq!(
-        subset_then_whole.grants,
-        std::collections::BTreeSet::from([
-            "net:https://profile.example".to_string(),
-            "net:https://summary.example".to_string(),
-        ])
-    );
 
     let mut whole_then_subset = crate::agent::manifest_bind::OperationBindingAccumulator::default();
-    whole_then_subset.merge(
-        std::collections::BTreeSet::from(["net:https://summary.example".to_string()]),
-        None,
-        None,
-    );
-    whole_then_subset.merge(
-        std::collections::BTreeSet::from(["net:https://profile.example".to_string()]),
-        Some("profile".to_string()),
-        None,
-    );
+    whole_then_subset.merge(None, None);
+    whole_then_subset.merge(Some("profile".to_string()), None);
     assert_eq!(whole_then_subset.operation_names(), Vec::<String>::new());
-    assert_eq!(whole_then_subset.grants, subset_then_whole.grants);
 
     let mut subsets = crate::agent::manifest_bind::OperationBindingAccumulator::default();
-    subsets.merge(
-        std::collections::BTreeSet::from(["net:https://summary.example".to_string()]),
-        Some("summarize".to_string()),
-        None,
-    );
-    subsets.merge(
-        std::collections::BTreeSet::from(["net:https://profile.example".to_string()]),
-        Some("profile".to_string()),
-        None,
-    );
+    subsets.merge(Some("summarize".to_string()), None);
+    subsets.merge(Some("profile".to_string()), None);
     assert_eq!(
         subsets.operation_names(),
         vec!["profile".to_string(), "summarize".to_string()]
     );
-    assert_eq!(subsets.grants, subset_then_whole.grants);
 }
 
 #[test]
-fn operation_binding_round_trips_legacy_metadata_without_attachment_config() {
+fn operation_binding_reads_legacy_grants_but_new_writes_drop_them() {
     let raw = r#"[{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net.http:GET:https://example.com"]}]"#;
     let bindings = serde_json::from_str::<
         Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
@@ -3484,14 +3181,15 @@ fn operation_binding_round_trips_legacy_metadata_without_attachment_config() {
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            grants: vec!["net.http:GET:https://example.com".to_string()],
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
     );
-    assert_eq!(serde_json::to_string(&bindings).unwrap(), raw);
+    assert_eq!(
+        serde_json::to_string(&bindings).unwrap(),
+        r#"[{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]"#
+    );
 }
 
 #[test]
@@ -3550,16 +3248,13 @@ fn operation_binding_rejects_unknown_fields() {
 #[tokio::test]
 async fn operation_bind_requires_published_operation() {
     let root = temp_dir("manifest-bind-missing-operation");
-    let mut granted = std::collections::BTreeSet::new();
     let mut operation_bindings = crate::agent::manifest_bind::OperationBindingMap::new();
 
     let err = crate::agent::manifest_bind::bind_operation_ref(
         "search",
         "op://search@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        &["net:https://example.com".to_string()],
         None,
         Some(&root),
-        &mut granted,
         &mut operation_bindings,
     )
     .await
@@ -3587,7 +3282,6 @@ async fn pinned_legacy_kernel_package_ref_resolves_only_preserved_legacy_record(
             "op://{legacy_name}/thread_spawn@sha256:{}",
             legacy.active_artifact_hash
         ),
-        &["threads.spawn".to_string()],
         &root,
     )
     .unwrap();
@@ -3605,7 +3299,6 @@ async fn pinned_legacy_kernel_package_ref_resolves_only_preserved_legacy_record(
             "op://{legacy_name}/thread_spawn@sha256:{}",
             canonical.active_artifact_hash
         ),
-        &["threads.spawn".to_string()],
         &fresh_root,
     )
     .unwrap_err();
@@ -3618,16 +3311,13 @@ async fn pinned_legacy_kernel_package_ref_resolves_only_preserved_legacy_record(
 #[tokio::test]
 async fn operation_bind_requires_content_addressed_ref() {
     let root = temp_dir("manifest-bind-unpinned-operation");
-    let mut granted = std::collections::BTreeSet::new();
     let mut operation_bindings = crate::agent::manifest_bind::OperationBindingMap::new();
 
     let err = crate::agent::manifest_bind::bind_operation_ref(
         "search",
         "op://search",
-        &[],
         None,
         Some(&root),
-        &mut granted,
         &mut operation_bindings,
     )
     .await
@@ -3686,7 +3376,6 @@ fn manifest_with_coupling(
     name: &str,
     coupling_id: &str,
     function_ref: &str,
-    grant: &str,
     trigger_kind: &str,
     source_stream: &str,
     source_kind: &str,
@@ -3694,11 +3383,6 @@ fn manifest_with_coupling(
     sink_kind: &str,
     config_body: &str,
 ) -> String {
-    let grants = if grant.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[\"{grant}\"]")
-    };
     let config_section = if config_body.trim().is_empty() {
         String::new()
     } else {
@@ -3715,7 +3399,6 @@ fn manifest_with_coupling(
 [[couplings]]
 id = "{coupling_id}"
 function_ref = "{function_ref}"
-grants = {grants}
 
 [couplings.trigger]
 kind = "{trigger_kind}"
@@ -3760,7 +3443,6 @@ fn protocol_import(
         expose,
         pin,
         include_tools,
-        grants: Vec::new(),
     }
 }
 
@@ -3781,10 +3463,6 @@ fn witnessed_tool(
         ),
     )
     .unwrap()
-}
-
-fn operation_guest_with_required_capability() -> String {
-    multi_operation_guest_with_required_capabilities(&[("search", vec!["net:https://example.com"])])
 }
 
 async fn publish_multi_operation_record(
@@ -3965,8 +3643,7 @@ fn wat_bytes(bytes: &[u8]) -> String {
 fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
     // This is the raw wire shape written before placement, workspace, skill
     // packages, and workspace skill discovery existed.
-    let legacy_wire = format!(
-        r#"{{
+    let legacy_wire = r#"{
             "ref_uri":"cooldis://agents/karl",
             "manifest_hash":"sha256-manifest",
             "model_profile_id":"default",
@@ -3974,19 +3651,16 @@ fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
             "model_id":"claude-sonnet-5",
             "tool_ids":["threads/spawn"],
             "operation_bindings":[],
-            "granted":["{THREADS_SPAWN_CAPABILITY}"],
-            "effective_runtime":{{
+            "effective_runtime":{
                 "default_cwd":"workspace",
                 "streaming":true,
                 "turn_timeout_ms":1000,
                 "cancellation_grace_ms":null,
-                "compaction":{{"auto_at_text_bytes":500}},
-                "overrides":{{"allow":[]}}
-            }},
+                "compaction":{"auto_at_text_bytes":500},
+                "overrides":{"allow":[]}
+            },
             "overridden_keys":[]
-        }}"#,
-        THREADS_SPAWN_CAPABILITY = crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
-    );
+        }"#;
     let legacy_receipt: crate::agent::manifest_bind::AgentManifestBindReceipt =
         serde_json::from_str(&legacy_wire).unwrap();
     assert_eq!(legacy_receipt.placement, None);
@@ -4046,7 +3720,6 @@ fn bind_receipt_placement_tolerates_future_wire_fields() {
         "model_id": "claude-sonnet-5",
         "tool_ids": [],
         "operation_bindings": [],
-        "granted": [],
         "effective_runtime": {},
         "overridden_keys": [],
         "placement": {

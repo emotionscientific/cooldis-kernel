@@ -801,7 +801,6 @@ fn mounted_universe(
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             include_tools: None,
             pin,
-            grant_expiries: Vec::new(),
             discovery: crate::agent::tool_universe::ToolUniverseDiscovery::witness(
                 server_ref, tools, 1,
             )

@@ -36,14 +36,12 @@ type = "bash_tool"
 id = "tailcat"
 command = "tailcat"
 operation_ref = "op://tailcat@sha256:{hash}"
-grants = ["fs.read:/workspace"]
 
 [[tools]]
 type = "direct_tool"
 id = "risk_lookup"
 tool_name = "risk_lookup"
 operation_ref = "op://risk-lookup@sha256:{hash}"
-grants = ["net.http:GET:https://example.test"]
 
 [[tools]]
 type = "protocol_tool_import"
@@ -51,7 +49,6 @@ id = "mcp_docs"
 protocol = "mcp"
 server_ref = "mcp://docs"
 include_tools = ["docs.search"]
-grants = ["net.localhost"]
 
 [[resources]]
 name = "system_prompt"
@@ -110,6 +107,19 @@ allow = ["default_cwd", "streaming", "compaction.auto_at_text_bytes"]
     )
 }
 
+#[test]
+fn manifest_operation_bindings_reject_legacy_grants() {
+    let source = valid_manifest().replace(
+        "operation_ref = \"op://tailcat@sha256:",
+        "grants = [\"fs.read:/workspace\"]\noperation_ref = \"op://tailcat@sha256:",
+    );
+
+    let err = parse(&source).unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("unknown field"), "{text}");
+    assert!(text.contains("grants"), "{text}");
+}
+
 fn manifest_with_coupling() -> String {
     let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     valid_manifest()
@@ -118,7 +128,6 @@ fn manifest_with_coupling() -> String {
 [[couplings]]
 id = "bash_regex_gate"
 function_ref = "op://policy/regex-tool-gate@sha256:{hash}"
-grants = ["stream.read:thread", "stream.write:control"]
 
 [couplings.trigger]
 kind = "tool.call.requested"
@@ -175,8 +184,10 @@ fn full_fixture_manifest_parses_and_validates() {
 #[test]
 fn operation_attachment_config_parses_with_the_wasm_attachment_shape() {
     let source = valid_manifest().replace(
-        "grants = [\"fs.read:/workspace\"]",
-        r#"[tools.attachment]
+        "operation_ref = \"op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+        r#"operation_ref = "op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[tools.attachment]
 allowed_secrets = ["WORKSPACE_TOKEN"]
 
 [tools.attachment.allowed_private_network]
@@ -259,127 +270,6 @@ fn tool_rows_accept_effect_classes_and_reject_unknown_values_by_row() {
     assert!(text.contains("tool \"risk_lookup\""), "{text}");
     assert!(text.contains("effect_class"), "{text}");
     assert!(text.contains("retryable"), "{text}");
-}
-
-#[test]
-fn grants_accept_legacy_strings_and_expiring_objects_everywhere() {
-    let expires_at = "2026-07-16T20:00:00Z";
-    let source = manifest_with_coupling()
-        .replace(
-            "grants = [\"fs.read:/workspace\"]",
-            &format!(
-                "grants = [\"fs.read:/workspace\", {{ capability = \"fs.write:/workspace\", expires_at = \"{expires_at}\" }}]"
-            ),
-        )
-        .replace(
-            "grants = [\"net.http:GET:https://example.test\"]",
-            &format!(
-                "grants = [{{ capability = \"net.http:GET:https://example.test\", expires_at = \"{expires_at}\" }}]"
-            ),
-        )
-        .replace(
-            "grants = [\"net.localhost\"]",
-            &format!(
-                "grants = [{{ capability = \"net.localhost\", expires_at = \"{expires_at}\" }}]"
-            ),
-        )
-        .replace(
-            "grants = [\"stream.read:thread\", \"stream.write:control\"]",
-            &format!(
-                "grants = [\"stream.read:thread\", {{ capability = \"stream.write:control\", expires_at = \"{expires_at}\" }}]"
-            ),
-        );
-
-    let manifest = parse(&source).unwrap();
-    let encoded = serde_json::to_value(&manifest).unwrap();
-
-    assert_eq!(encoded["tools"][0]["grants"][0], "fs.read:/workspace");
-    assert_eq!(
-        encoded["tools"][0]["grants"][1],
-        serde_json::json!({
-            "capability": "fs.write:/workspace",
-            "expires_at": expires_at,
-        })
-    );
-    assert_eq!(encoded["tools"][1]["grants"][0]["expires_at"], expires_at);
-    assert_eq!(encoded["tools"][2]["grants"][0]["expires_at"], expires_at);
-    assert_eq!(encoded["couplings"][0]["grants"][0], "stream.read:thread");
-    assert_eq!(
-        encoded["couplings"][0]["grants"][1]["expires_at"],
-        expires_at
-    );
-
-    let decoded: crate::manifest_schema::AgentManifestSchema =
-        serde_json::from_value(encoded.clone()).unwrap();
-    assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
-
-    #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-    struct GrantEnvelope {
-        grants: Vec<crate::manifest_schema::AgentManifestGrant>,
-    }
-
-    let grant_wire = GrantEnvelope {
-        grants: vec![crate::manifest_schema::AgentManifestGrant::Expiring(
-            crate::manifest_schema::AgentManifestGrantExpiry {
-                capability: "fs.write:/workspace".to_string(),
-                expires_at: expires_at.to_string(),
-            },
-        )],
-    };
-    let first_encoding = toml::to_string(&grant_wire).unwrap();
-    let decoded: GrantEnvelope = toml::from_str(&first_encoding).unwrap();
-    assert_eq!(decoded, grant_wire);
-    assert_eq!(toml::to_string(&decoded).unwrap(), first_encoding);
-}
-
-#[test]
-fn expiring_grants_reject_unknown_fields_invalid_instants_and_non_utc_offsets() {
-    for (grant, expected) in [
-        (
-            r#"{ capability = "fs.read:/workspace", expires_at = "2026-07-16T20:00:00Z", expires_in = "1h" }"#,
-            &["tool \"tailcat\"", "unknown field", "expires_in"][..],
-        ),
-        (
-            r#"{ capability = "fs.read:/workspace", expires_at = "tomorrow" }"#,
-            &["tool \"tailcat\"", "RFC3339"][..],
-        ),
-        (
-            r#"{ capability = "fs.read:/workspace", expires_at = "2026-07-16T13:00:00-07:00" }"#,
-            &["tool \"tailcat\"", "UTC"][..],
-        ),
-        (
-            r#"{ capability = "fs.read:/workspace", expires_at = 123 }"#,
-            &["tool \"tailcat\"", "expires_at", "string"][..],
-        ),
-        (
-            r#"{ capability = "fs.read:/workspace", expires_at = 2026-07-16T20:00:00Z }"#,
-            &[
-                "tool \"tailcat\"",
-                "expires_at",
-                "quoted RFC3339 UTC string",
-            ][..],
-        ),
-    ] {
-        let source = valid_manifest().replace(
-            "grants = [\"fs.read:/workspace\"]",
-            &format!("grants = [{grant}]"),
-        );
-        let err = parse(&source).unwrap_err().to_string();
-        for expected in expected {
-            assert!(
-                err.contains(expected),
-                "expected {expected:?} for {grant}, got {err}"
-            );
-        }
-    }
-
-    let coupling = manifest_with_coupling().replace(
-        "grants = [\"stream.read:thread\", \"stream.write:control\"]",
-        r#"grants = [{ capability = "stream.read:thread", expires_at = 2026-07-16T20:00:00Z }]"#,
-    );
-    let err = parse(&coupling).unwrap_err().to_string();
-    assert!(err.contains("coupling \"bash_regex_gate\""), "{err}");
-    assert!(err.contains("quoted RFC3339 UTC string"), "{err}");
 }
 
 #[test]
@@ -583,7 +473,7 @@ fn coupling_rows_reject_role_duplicate_ids_and_source_sink_identity() {
     assert!(err.to_string().contains("unknown field"));
     assert!(err.to_string().contains("role"));
 
-    let err = parse(&(manifest_with_coupling() + "\n[[couplings]]\nid = \"bash_regex_gate\"\nfunction_ref = \"op://policy/other@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\ngrants = []\n[couplings.trigger]\nkind = \"turn.completed\"\n[[couplings.source.selectors]]\nstream = \"thread\"\nkind = \"turn.completed\"\n[couplings.sink]\nstream = \"control\"\nkind = \"loop.completed\"\n"))
+    let err = parse(&(manifest_with_coupling() + "\n[[couplings]]\nid = \"bash_regex_gate\"\nfunction_ref = \"op://policy/other@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n[couplings.trigger]\nkind = \"turn.completed\"\n[[couplings.source.selectors]]\nstream = \"thread\"\nkind = \"turn.completed\"\n[couplings.sink]\nstream = \"control\"\nkind = \"loop.completed\"\n"))
         .unwrap_err();
     assert!(err.to_string().contains("duplicate coupling id"));
 

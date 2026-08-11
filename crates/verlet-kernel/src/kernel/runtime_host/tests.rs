@@ -404,10 +404,6 @@ fn runtime_std_context_spill_coupling() -> crate::agent::manifest_bind::BoundCou
             artifact_hash: "c".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:derived:context".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_discharge_events: Some(2),
             max_ms: None,
@@ -447,10 +443,6 @@ fn runtime_std_schedule_cron_timer_coupling() -> crate::agent::manifest_bind::Bo
             artifact_hash: "s".repeat(64),
             operation_name: Some("run".to_string()),
         },
-        grants: vec![
-            "stream.read:control".to_string(),
-            "stream.write:control".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_discharge_events: Some(1),
             max_ms: None,

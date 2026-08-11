@@ -7392,7 +7392,6 @@ pub(super) fn coupling_binding_json(
         "functionRef": binding.function_ref.clone(),
         "artifactHash": binding.artifact_hash.clone(),
         "operationName": binding.operation_name.clone(),
-        "grants": binding.grants.clone(),
         "budget": {
             "maxMs": binding.budget.max_ms,
             "maxDischargeEvents": binding.budget.max_discharge_events,

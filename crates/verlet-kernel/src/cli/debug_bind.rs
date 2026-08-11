@@ -27,7 +27,6 @@ pub struct BindExplanation {
     pub tools: Vec<BindToolExplanation>,
     pub universes: Vec<BindUniverseExplanation>,
     pub couplings: Vec<BindCouplingExplanation>,
-    pub grants: Vec<BindGrantExplanation>,
     pub skills: Vec<BindSkillExplanation>,
     pub context: Vec<BindContextExplanation>,
 }
@@ -105,16 +104,6 @@ pub struct BindCouplingExplanation {
     pub function_ref: String,
     pub artifact_hash: String,
     pub config_hash: String,
-}
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-pub struct BindGrantExplanation {
-    pub capability: String,
-    pub subject_kind: String,
-    pub subject_id: String,
-    pub expires_at: Option<String>,
-    pub lapsed_at_bind: bool,
-    pub excluded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -532,18 +521,6 @@ pub fn assemble_bind_explanation(
                 config_hash: coupling.config_hash.clone(),
             })
             .collect(),
-        grants: bind
-            .grant_bindings
-            .iter()
-            .map(|grant| BindGrantExplanation {
-                capability: grant.capability.clone(),
-                subject_kind: grant.subject_kind.clone(),
-                subject_id: grant.subject_id.clone(),
-                expires_at: grant.expires_at.clone(),
-                lapsed_at_bind: grant.lapsed_at_bind,
-                excluded: grant.surface_excluded,
-            })
-            .collect(),
         skills: bind
             .skill_packages
             .iter()
@@ -724,28 +701,6 @@ pub fn render_bind_explanation(explanation: &BindExplanation) -> String {
                 short_hash(&coupling.artifact_hash),
                 short_hash(&coupling.config_hash),
             ));
-        }
-    }
-    if !explanation.grants.is_empty() {
-        out.push_str("\ngrants\n");
-        for grant in &explanation.grants {
-            out.push_str(&format!(
-                "  {}  <- {} {}  [{}]",
-                grant.capability,
-                grant.subject_kind,
-                grant.subject_id,
-                grant
-                    .expires_at
-                    .as_ref()
-                    .map(|expiry| format!("expires {expiry}"))
-                    .unwrap_or_else(|| "no expiry".to_string()),
-            ));
-            if grant.lapsed_at_bind {
-                out.push_str("  [lapsed-at-bind]");
-            } else if grant.excluded {
-                out.push_str("  [excluded]");
-            }
-            out.push('\n');
         }
     }
     if !explanation.skills.is_empty() {

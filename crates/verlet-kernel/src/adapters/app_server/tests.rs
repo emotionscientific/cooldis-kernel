@@ -6679,10 +6679,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
                 .as_str()
             )
         );
-        assert_eq!(
-            json_array_string_set(&row["grants"]),
-            std::collections::BTreeSet::from([thread_operation_capability(operation).to_string()])
-        );
+        assert!(row.get("grants").is_none());
     }
 
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -6739,14 +6736,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .map(|operation| (*operation).to_string())
             .collect::<std::collections::BTreeSet<_>>()
     );
-    assert_eq!(
-        json_array_string_set(&binding["grants"]),
-        std::collections::BTreeSet::from([
-            crate::operations::kernel_packages::THREADS_CONTROL_CAPABILITY.to_string(),
-            crate::operations::kernel_packages::THREADS_READ_CAPABILITY.to_string(),
-            crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY.to_string()
-        ])
-    );
+    assert!(binding.get("grants").is_none());
     let direct_tools = binding["direct_tools"].as_array().unwrap();
     assert_eq!(direct_tools.len(), thread_operation_names().len());
     for direct_tool in direct_tools {
@@ -7586,7 +7576,6 @@ type = "direct_tool"
 id = "thread_spawn"
 tool_name = "thread_spawn"
 operation_ref = "op://verlet-threads/thread_spawn@sha256:{}"
-grants = ["threads.spawn"]
 
 [policies]
 allow_child_agents = false
@@ -7625,12 +7614,11 @@ streaming = false
         .unwrap_err();
     assert!(err.message.contains("allow_child_agents = false"));
     assert!(err.message.contains("thread_spawn"));
-    assert!(err.message.contains("threads.spawn"));
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
-async fn schedule_manifest_direct_tool_starts_mandate_and_requires_grant() {
+async fn schedule_manifest_direct_tool_starts_mandate_when_attached() {
     let root = unique_test_root("app-server-schedule-direct-tool");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -7663,43 +7651,6 @@ type = "direct_tool"
 id = "mandate_start"
 tool_name = "mandate_start"
 operation_ref = "op://verlet-schedule/mandate_start@sha256:{}"
-grants = ["{}"]
-
-[runtime]
-default_cwd = "."
-streaming = false
-"#,
-            operation_record.active_artifact_hash,
-            crate::operations::kernel_packages::SCHEDULE_MANAGE_CAPABILITY
-        ),
-    )
-    .unwrap();
-    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
-        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
-        .unwrap();
-
-    let no_grant_manifest_path = root.join("scheduler-no-grant.verlet.agent.toml");
-    std::fs::write(
-        &no_grant_manifest_path,
-        format!(
-            r#"
-[agent]
-name = "scheduler-no-grant"
-version = "0.1.0"
-kind = "verlet.agent-manifest"
-schema_version = 1
-
-[[model_profiles]]
-id = "default"
-provider_ref = "provider://local_offline"
-model_ref = "model://local_offline/echo"
-
-[[tools]]
-type = "direct_tool"
-id = "mandate_start"
-tool_name = "mandate_start"
-operation_ref = "op://verlet-schedule/mandate_start@sha256:{}"
-grants = []
 
 [runtime]
 default_cwd = "."
@@ -7709,14 +7660,9 @@ streaming = false
         ),
     )
     .unwrap();
-    let err = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
-        .publish_manifest_path_with_operation_registry(
-            &no_grant_manifest_path,
-            &operation_registry_root,
-        )
-        .unwrap_err();
-    assert!(err.to_string().contains("requires grants"));
-    assert!(err.to_string().contains("mandate_start:schedule.manage"));
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
+        .unwrap();
 
     let client = std::sync::Arc::new(ScheduleMandateStartClient::default());
     let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
@@ -10058,7 +10004,6 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             "parent_thread_id": lifecycle.coordinates.thread_id.to_string(),
             "child_thread_id": child_thread_id.to_string(),
             "child_manifest_hash": "sha256:debug-child",
-            "granted": [],
             "inputs_hash": "sha256:debug-inputs",
         }),
     );
@@ -11219,7 +11164,6 @@ model_ref = "model://local_offline/echo"
 [[couplings]]
 id = "std::context.spill"
 function_ref = "op://std-context-spill/run@sha256:{}"
-grants = []
 
 [couplings.trigger]
 kind = "context.compile.completed"
@@ -11546,9 +11490,7 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            grants: vec!["net:https://example.com".to_string()],
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -11622,35 +11564,6 @@ fn apply_manifest_runtime_metadata_injects_legacy_tool_use_instruction() {
     assert_eq!(config.system.len(), 1);
     assert!(config.system[0].text.contains("agent://legacy@0.1.0"));
     assert!(config.system[0].text.contains("call the tool immediately"));
-}
-
-#[tokio::test]
-async fn manifest_operation_grants_extend_loaded_record_without_duplicates() {
-    let root = unique_test_root("app-server-manifest-operation-grants");
-    let operation_registry_root = root.join("operations");
-    let mut record =
-        publish_echo_operation(&operation_registry_root, "search", "search", "search").await;
-    record
-        .capability_grants
-        .insert("package:required".to_string());
-
-    crate::adapters::app_server::threads::apply_manifest_operation_grants(
-        &mut record,
-        [
-            "net.http:GET:https://example.com".to_string(),
-            "package:required".to_string(),
-            "net.http:GET:https://example.com".to_string(),
-        ],
-    );
-
-    assert_eq!(
-        record.capability_grants,
-        std::collections::BTreeSet::from([
-            "net.http:GET:https://example.com".to_string(),
-            "package:required".to_string(),
-        ])
-    );
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -20342,23 +20255,6 @@ fn thread_operation_names() -> Vec<&'static str> {
         crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
         crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
     ]
-}
-
-fn thread_operation_capability(operation: &str) -> &'static str {
-    match operation {
-        crate::operations::kernel_packages::THREAD_SPAWN_OPERATION => {
-            crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
-        }
-        crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION
-        | crate::operations::kernel_packages::THREAD_CANCEL_OPERATION => {
-            crate::operations::kernel_packages::THREADS_CONTROL_CAPABILITY
-        }
-        crate::operations::kernel_packages::THREAD_WAIT_OPERATION
-        | crate::operations::kernel_packages::THREAD_STATUS_OPERATION => {
-            crate::operations::kernel_packages::THREADS_READ_CAPABILITY
-        }
-        other => panic!("unknown thread operation {other}"),
-    }
 }
 
 fn json_array_string_set(value: &serde_json::Value) -> std::collections::BTreeSet<String> {

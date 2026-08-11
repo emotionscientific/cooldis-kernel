@@ -342,14 +342,6 @@ where
         let mut selected = Vec::new();
         let mut seen_event_ids = std::collections::HashSet::new();
         for selector in &coupling.source_selectors {
-            if !has_stream_grant(&coupling.grants, "read", &selector.stream) {
-                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                    format!(
-                        "coupling {:?} is missing stream.read grant for {:?}",
-                        coupling.id, selector.stream
-                    ),
-                ));
-            }
             let stream_id = stream_id_for(&trigger_event.coordinates, &selector.stream);
             let events = self
                 .store
@@ -793,13 +785,6 @@ fn validate_discharges(
             coupling.id
         ));
     }
-    if !discharges.is_empty() && !has_stream_grant(&coupling.grants, "write", &coupling.sink.stream)
-    {
-        return Err(format!(
-            "coupling {:?} is missing stream.write grant for {:?}",
-            coupling.id, coupling.sink.stream
-        ));
-    }
     for discharge in discharges {
         if discharge.stream != coupling.sink.stream {
             return Err(format!(
@@ -815,14 +800,6 @@ fn validate_discharges(
         }
     }
     Ok(())
-}
-
-fn has_stream_grant(grants: &[String], action: &str, stream: &str) -> bool {
-    let exact = format!("stream.{action}:{stream}");
-    let wildcard = format!("stream.{action}:*");
-    grants
-        .iter()
-        .any(|grant| grant == &exact || grant == &wildcard || grant == "stream.*:*")
 }
 
 fn event_provenance(
@@ -1415,10 +1392,6 @@ mod tests {
                 artifact_hash: "a".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                format!("stream.write:{sink_stream}"),
-            ],
             budget: Default::default(),
             config: serde_json::json!({}),
             config_hash: "sha256:test".to_string(),

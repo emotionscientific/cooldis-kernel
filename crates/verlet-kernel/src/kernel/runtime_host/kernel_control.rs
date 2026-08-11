@@ -22,17 +22,6 @@ async fn append_thread_spawned_event(
         .get(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
         .cloned()
         .unwrap_or_else(|| "unbound".to_string());
-    let granted = metadata
-        .get(crate::kernel::runtime_host::THREAD_SPAWN_GRANTED_METADATA)
-        .map(|raw| {
-            serde_json::from_str::<Vec<String>>(raw).map_err(|err| {
-                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "thread_spawn granted metadata is invalid: {err}"
-                ))
-            })
-        })
-        .transpose()?
-        .unwrap_or_default();
     let inputs_hash = metadata
         .get(crate::kernel::runtime_host::THREAD_SPAWN_INPUTS_HASH_METADATA)
         .cloned()
@@ -63,8 +52,8 @@ async fn append_thread_spawned_event(
         parent_turn_id: witness.parent_turn_id.clone(),
         child_thread_id: child.coordinates.thread_id,
         child_manifest_hash,
+        granted: Vec::new(),
         child_policy_hash,
-        granted,
         inputs_hash,
         fork: None,
     };

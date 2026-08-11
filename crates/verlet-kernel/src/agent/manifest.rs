@@ -701,7 +701,6 @@ impl AgentPublishPlan {
             crate::agent::manifest_bind::verify_operation_ref(
                 &tool_ref.name,
                 &tool_ref.reference,
-                &tool_ref.grants,
                 operation_registry_root,
             )?;
             verifications.push(AgentManifestRefVerification {
@@ -999,10 +998,6 @@ pub struct AgentToolRef {
     pub reference: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grants: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
 }
 
 impl AgentToolRef {
@@ -1019,20 +1014,6 @@ impl AgentToolRef {
                     self.name
                 ),
             ));
-        }
-        for grant in &self.grants {
-            if grant.trim().is_empty() {
-                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                    format!("agent tool ref {:?} has an empty grant", self.name),
-                ));
-            }
-        }
-        for expiry in &self.grant_expiries {
-            if expiry.capability.trim().is_empty() || expiry.expires_at.trim().is_empty() {
-                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                    format!("agent tool ref {:?} has an invalid grant expiry", self.name),
-                ));
-            }
         }
         Ok(())
     }
@@ -1218,32 +1199,12 @@ fn parse_agent_tool_refs(
                 kind: "bash_tool".to_string(),
                 reference: tool.operation_ref.clone(),
                 operation: Some(tool.command.clone()),
-                grants: tool
-                    .grants
-                    .iter()
-                    .map(|grant| grant.capability().to_string())
-                    .collect(),
-                grant_expiries: tool
-                    .grants
-                    .iter()
-                    .filter_map(|grant| grant.expiry().cloned())
-                    .collect(),
             },
             verlet_agent::manifest_schema::AgentManifestTool::Direct(tool) => AgentToolRef {
                 name: tool.id.clone(),
                 kind: "direct_tool".to_string(),
                 reference: tool.operation_ref.clone(),
                 operation: Some(tool.tool_name.clone()),
-                grants: tool
-                    .grants
-                    .iter()
-                    .map(|grant| grant.capability().to_string())
-                    .collect(),
-                grant_expiries: tool
-                    .grants
-                    .iter()
-                    .filter_map(|grant| grant.expiry().cloned())
-                    .collect(),
             },
             verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(tool) => {
                 AgentToolRef {
@@ -1251,16 +1212,6 @@ fn parse_agent_tool_refs(
                     kind: "protocol_tool_import".to_string(),
                     reference: tool.server_ref.clone(),
                     operation: None,
-                    grants: tool
-                        .grants
-                        .iter()
-                        .map(|grant| grant.capability().to_string())
-                        .collect(),
-                    grant_expiries: tool
-                        .grants
-                        .iter()
-                        .filter_map(|grant| grant.expiry().cloned())
-                        .collect(),
                 }
             }
         };

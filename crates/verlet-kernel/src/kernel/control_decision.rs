@@ -1764,8 +1764,6 @@ mod tests {
                 static_context_segments: Vec::new(),
                 tool_universes: Vec::new(),
                 couplings,
-                granted: Vec::new(),
-                grant_bindings: Vec::new(),
                 effective_runtime:
                     verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(),
                 overridden_keys: Vec::new(),
@@ -1854,8 +1852,6 @@ mod tests {
             function_ref: "op://policy/bash-gate@sha256:abc".to_string(),
             artifact_hash: "abc".to_string(),
             operation_name: Some("bash_gate".to_string()),
-            grants: Vec::new(),
-            grant_expiries: Vec::new(),
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget::default(),
             config_hash: "config".to_string(),
         }
