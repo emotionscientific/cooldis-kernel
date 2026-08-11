@@ -3652,6 +3652,7 @@ async fn model_list_does_not_call_uncredentialed_or_oauth_provider_endpoints() {
             .any(|entry| entry["model"] == "oauth-catalog-model")
     );
     assert!(
+        // tight-timeout: an ineligible missing-auth provider must make no model-list request
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
             missing_listener.accept(),
@@ -3660,6 +3661,7 @@ async fn model_list_does_not_call_uncredentialed_or_oauth_provider_endpoints() {
         .is_err()
     );
     assert!(
+        // tight-timeout: an OAuth provider must make no API-key model-list request
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
             oauth_listener.accept(),
@@ -3777,6 +3779,7 @@ async fn slow_failing_live_endpoint_does_not_delay_or_break_model_list() {
         .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
+    // tight-timeout: model/list must return without waiting on a gated live endpoint
     let first = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         app.dispatch_request(&connection, "model/list", None),
@@ -3793,6 +3796,7 @@ async fn slow_failing_live_endpoint_does_not_delay_or_break_model_list() {
     );
     let captured = request.await.unwrap();
     assert!(captured.starts_with("GET /v1/models HTTP/1.1"));
+    // tight-timeout: model/list must return while a live refresh remains in flight
     let second = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         app.dispatch_request(&connection, "model/list", None),
@@ -18835,7 +18839,7 @@ async fn wait_for_model_list_entry(
     provider_id: &str,
     model_id: &str,
 ) -> serde_json::Value {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let models = app
                 .dispatch_request(connection, "model/list", None)

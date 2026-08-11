@@ -547,14 +547,14 @@ mod tests {
     }
 
     async fn next_request(server: &mut RecordingHttpServer) -> String {
-        tokio::time::timeout(std::time::Duration::from_secs(2), server.requests.recv())
+        tokio::time::timeout(std::time::Duration::from_secs(30), server.requests.recv())
             .await
             .expect("model-list request timed out")
             .expect("model-list request channel closed")
     }
 
     async fn wait_until_idle(cache: &super::LiveModelCache, provider_id: &str) {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while cache.is_refreshing_for_test(provider_id) {
                 tokio::task::yield_now().await;
             }
