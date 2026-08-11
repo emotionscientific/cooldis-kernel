@@ -19,7 +19,10 @@ pub(crate) fn attachment_config_from_legacy_grants(
         } else if let Some(origin) = rule.strip_prefix("*:") {
             ("*", origin)
         } else if let Some((method, origin)) = rule.split_once(':') {
-            if origin.starts_with("//") {
+            if origin.starts_with("//")
+                || matches!(method, "http" | "https")
+                || method.contains('*')
+            {
                 ("*", rule)
             } else {
                 (method, origin)

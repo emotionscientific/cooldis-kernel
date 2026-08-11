@@ -96,10 +96,14 @@ impl LocalPluginCatalogRecord {
     pub fn whole_record(
         record: verlet_operations::operation_store::PublishedOperationRecord,
     ) -> Self {
+        let attachment_config =
+            crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                &record.capability_grants,
+            );
         Self {
             record,
             operation_names: std::collections::BTreeSet::new(),
-            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
+            attachment_config,
         }
     }
 
@@ -111,10 +115,14 @@ impl LocalPluginCatalogRecord {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        let attachment_config =
+            crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                &record.capability_grants,
+            );
         Self {
             record,
             operation_names: operation_names.into_iter().map(Into::into).collect(),
-            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
+            attachment_config,
         }
     }
 

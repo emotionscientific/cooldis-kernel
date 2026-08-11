@@ -162,12 +162,9 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
         .unwrap();
 
     let catalog =
-        verlet::operations::plugins::LocalPluginCatalog::load_selected_records_with_secret_resolver(
+        verlet::operations::plugins::LocalPluginCatalog::load_records_with_secret_resolver(
             &registry_root,
-            vec![
-                verlet::operations::plugins::LocalPluginCatalogRecord::whole_record(record)
-                    .with_attachment_config(search_attachment_config(&base_url)),
-            ],
+            vec![record],
             Vec::new(),
             std::sync::Arc::new(secret_store),
         )

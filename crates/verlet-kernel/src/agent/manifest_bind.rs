@@ -3435,8 +3435,7 @@ impl AgentManifestCouplingBinding {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub struct AgentManifestOperationBinding {
     pub name: String,
     pub artifact_hash: String,
@@ -3460,6 +3459,62 @@ pub struct AgentManifestOperationBinding {
     /// Direct model/tool-router aliases declared by manifest `direct_tool` rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub direct_tools: Vec<AgentManifestDirectToolBinding>,
+}
+
+#[derive(Default)]
+struct OptionalWasmAttachmentConfig(Option<verlet_wasm::WasmAttachmentConfig>);
+
+impl<'de> serde::Deserialize<'de> for OptionalWasmAttachmentConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        <verlet_wasm::WasmAttachmentConfig as serde::Deserialize>::deserialize(deserializer)
+            .map(|config| Self(Some(config)))
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentManifestOperationBindingWire {
+    name: String,
+    artifact_hash: String,
+    #[serde(default)]
+    effect_class: verlet_agent::manifest_schema::EffectClass,
+    #[serde(default)]
+    grants: Vec<String>,
+    #[serde(default)]
+    attachment_config: OptionalWasmAttachmentConfig,
+    #[serde(default)]
+    grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
+    #[serde(default)]
+    operations: Vec<String>,
+    #[serde(default)]
+    direct_tools: Vec<AgentManifestDirectToolBinding>,
+}
+
+impl<'de> serde::Deserialize<'de> for AgentManifestOperationBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let binding = AgentManifestOperationBindingWire::deserialize(deserializer)?;
+        let attachment_config = binding.attachment_config.0.unwrap_or_else(|| {
+            crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                &binding.grants.iter().cloned().collect(),
+            )
+        });
+        Ok(Self {
+            name: binding.name,
+            artifact_hash: binding.artifact_hash,
+            effect_class: binding.effect_class,
+            grants: binding.grants,
+            attachment_config,
+            grant_expiries: binding.grant_expiries,
+            operations: binding.operations,
+            direct_tools: binding.direct_tools,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]

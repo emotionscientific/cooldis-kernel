@@ -3278,6 +3278,130 @@ fn legacy_attachment_config_derivation_extracts_only_live_enforcement_grants() {
     );
 }
 
+#[test]
+fn legacy_private_http_derivation_preserves_matcher_semantics() {
+    fn legacy_matches(grant: &str, method: &str, origin: &str) -> bool {
+        let Some(rest) = grant.strip_prefix("net.http.private:") else {
+            return false;
+        };
+        if rest == "*" {
+            return true;
+        }
+        if let Some(origin_pattern) = rest.strip_prefix("*:") {
+            return wildcard_match(origin_pattern, origin);
+        }
+        if let Some(origin_pattern) = rest
+            .strip_prefix(method)
+            .and_then(|tail| tail.strip_prefix(':'))
+        {
+            return wildcard_match(origin_pattern, origin);
+        }
+        wildcard_match(rest, origin)
+    }
+
+    fn wildcard_match(pattern: &str, value: &str) -> bool {
+        let pattern = pattern.as_bytes();
+        let value = value.as_bytes();
+        let (mut pattern_index, mut value_index) = (0, 0);
+        let mut star_index = None;
+        let mut star_value_index = 0;
+
+        while value_index < value.len() {
+            if pattern_index < pattern.len() && pattern[pattern_index] == value[value_index] {
+                pattern_index += 1;
+                value_index += 1;
+            } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+                star_index = Some(pattern_index);
+                star_value_index = value_index;
+                pattern_index += 1;
+            } else if let Some(index) = star_index {
+                pattern_index = index + 1;
+                star_value_index += 1;
+                value_index = star_value_index;
+            } else {
+                return false;
+            }
+        }
+
+        while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            pattern_index += 1;
+        }
+        pattern_index == pattern.len()
+    }
+
+    let cases = [
+        ("net.http.private:*", "GET", "http://127.0.0.1:9000"),
+        (
+            "net.http.private:*:http://127.0.0.1:9000",
+            "POST",
+            "http://127.0.0.1:9000",
+        ),
+        (
+            "net.http.private:*:http://127.0.0.1:9000",
+            "POST",
+            "http://127.0.0.1:9001",
+        ),
+        (
+            "net.http.private:GET:http://127.0.0.1:*",
+            "GET",
+            "http://127.0.0.1:9000",
+        ),
+        (
+            "net.http.private:GET:http://127.0.0.1:*",
+            "POST",
+            "http://127.0.0.1:9000",
+        ),
+        (
+            "net.http.private:http://127.0.0.1:9000",
+            "PATCH",
+            "http://127.0.0.1:9000",
+        ),
+        ("net.http.private:http:*", "GET", "http://127.0.0.1:9000"),
+        ("net.http.private:http*:*", "GET", "https://127.0.0.1:9000"),
+        (
+            "net.http.private:*127.0.0.1:*",
+            "GET",
+            "http://127.0.0.1:9000",
+        ),
+        (
+            "net.http.private:post:http://127.0.0.1:9000",
+            "POST",
+            "http://127.0.0.1:9000",
+        ),
+        (
+            "net.http.private:post:http://127.0.0.1:9000",
+            "post",
+            "http://127.0.0.1:9000",
+        ),
+        ("net.http.private:", "GET", "http://127.0.0.1:9000"),
+        ("net.http.private:*:", "GET", "http://127.0.0.1:9000"),
+        ("net.http.private::", "GET", "http://127.0.0.1:9000"),
+        ("net.http.private:GET:", "GET", "http://127.0.0.1:9000"),
+    ];
+
+    for (grant, method, origin) in cases {
+        let config = crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+            &std::collections::BTreeSet::from([grant.to_string()]),
+        );
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let actual = verlet_wasm::runner::ensure_http_capability(
+            &std::collections::BTreeSet::new(),
+            &config,
+            &method,
+            origin,
+            true,
+        )
+        .is_ok();
+
+        assert_eq!(
+            actual,
+            legacy_matches(grant, method.as_str(), origin),
+            "grant={grant:?} method={} origin={origin:?}",
+            method.as_str()
+        );
+    }
+}
+
 #[tokio::test]
 async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
     let root = temp_dir("manifest-bind-merge-whole-record");
@@ -3396,11 +3520,12 @@ fn operation_binding_accumulator_merges_whole_record_order_independently() {
 }
 
 #[test]
-fn operation_binding_accepts_legacy_metadata_without_grants_or_operations() {
-    let bindings = serde_json::from_str::<Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>>(
-            r#"[{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]"#,
-        )
-        .unwrap();
+fn operation_binding_round_trips_legacy_metadata_without_attachment_config() {
+    let raw = r#"[{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net.http:GET:https://example.com"]}]"#;
+    let bindings = serde_json::from_str::<
+        Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
+    >(raw)
+    .unwrap();
 
     assert_eq!(
         bindings,
@@ -3409,13 +3534,67 @@ fn operation_binding_accepts_legacy_metadata_without_grants_or_operations() {
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            grants: Vec::new(),
+            grants: vec!["net.http:GET:https://example.com".to_string()],
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
             grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
     );
+    assert_eq!(serde_json::to_string(&bindings).unwrap(), raw);
+}
+
+#[test]
+fn operation_binding_derives_attachment_config_from_legacy_metadata() {
+    let binding = serde_json::from_str::<crate::agent::manifest_bind::AgentManifestOperationBinding>(
+        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net.http.private:POST:http://127.0.0.1:9000","secret:API_TOKEN"]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        binding.attachment_config,
+        verlet_wasm::WasmAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::from(["API_TOKEN".to_string()]),
+            allowed_private_network: std::collections::BTreeMap::from([(
+                "http://127.0.0.1:9000".to_string(),
+                std::collections::BTreeSet::from(["POST".to_string()]),
+            )]),
+        }
+    );
+}
+
+#[test]
+fn operation_binding_preserves_explicit_empty_attachment_config() {
+    let binding = serde_json::from_str::<crate::agent::manifest_bind::AgentManifestOperationBinding>(
+        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net.http.private:POST:http://127.0.0.1:9000","secret:API_TOKEN"],"attachment_config":{}}"#,
+    )
+    .unwrap();
+
+    assert!(binding.attachment_config.is_empty());
+}
+
+#[test]
+fn operation_binding_rejects_null_attachment_config() {
+    let err = serde_json::from_str::<crate::agent::manifest_bind::AgentManifestOperationBinding>(
+        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","attachment_config":null}"#,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("invalid type"), "{err}");
+}
+
+#[test]
+fn operation_binding_rejects_unknown_fields() {
+    for raw in [
+        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","unknown":[]}"#,
+        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","attachment_config":{"unknown":[]}}"#,
+    ] {
+        let err =
+            serde_json::from_str::<crate::agent::manifest_bind::AgentManifestOperationBinding>(raw)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
 }
 
 #[tokio::test]
