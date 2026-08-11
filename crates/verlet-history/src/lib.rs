@@ -19,7 +19,7 @@ pub const STREAM_APPEND_ACK_SCHEMA_V1: &str = "cooldis.stream.append_ack/1";
 pub const STREAM_ROUTING_DECISION_SCHEMA_V1: &str = "cooldis.stream.routing_decision/1";
 pub const CONTEXT_READ_PLAN_SCHEMA_V1: &str = "cooldis.context.read_plan/1";
 pub const DEBUG_THREAD_EXPORT_SCHEMA_V1: &str = "cooldis.debug.thread_export/1";
-pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.3";
+pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.4";
 
 pub const COMPACTION_SUMMARY_PREFIX: &str = "Compacted conversation summary:";
 
@@ -198,7 +198,7 @@ impl std::fmt::Display for EventRecordId {
     }
 }
 
-/// Frozen event-kind vocabulary, version `cooldis.events/0.3`.
+/// Frozen event-kind vocabulary, version `cooldis.events/0.4`.
 ///
 /// Laws:
 /// - The vocabulary is append-only: kinds may be added in later versions,
@@ -244,6 +244,13 @@ pub enum EventKind {
     /// the payload is the bind receipt. Emitted at publish and at run time.
     #[strum(serialize = "manifest.bind.completed")]
     ManifestBindCompleted,
+    /// An operation package binding became active. Its event id is the
+    /// binding identity referenced by a later detach.
+    #[strum(serialize = "binding.attached")]
+    BindingAttached,
+    /// An active operation package binding ended.
+    #[strum(serialize = "binding.detached")]
+    BindingDetached,
     /// A tool universe's contracts were witnessed (at bind or on demand);
     /// the payload is `ToolUniverseDiscoveryReceipt` — server ref, discovery
     /// hash, and per-tool schema hashes. Witnessed origin: the contracts

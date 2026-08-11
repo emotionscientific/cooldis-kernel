@@ -523,6 +523,8 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "context.read_plan.set",
         "manifest.compile.completed",
         "manifest.bind.completed",
+        "binding.attached",
+        "binding.detached",
         "tool.universe.discovery.completed",
         "tool.universe.call.completed",
         "tool.call.requested",
@@ -564,7 +566,7 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "io.egress.failed",
         "admission.decided",
     ];
-    assert_eq!(crate::EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.3");
+    assert_eq!(crate::EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.4");
     let kinds = <crate::EventKind as strum::VariantArray>::VARIANTS;
     let actual: Vec<&str> = kinds.iter().map(|kind| kind.as_ref()).collect();
     assert_eq!(actual, expected);
@@ -588,6 +590,14 @@ fn event_kind_parse_round_trips_and_fails_closed() {
 
 #[test]
 fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
+    assert_eq!(
+        crate::EventKind::BindingAttached.payload_schema_id(),
+        "cooldis.event.binding.attached/1"
+    );
+    assert_eq!(
+        crate::EventKind::BindingDetached.payload_schema_id(),
+        "cooldis.event.binding.detached/1"
+    );
     assert_eq!(
         crate::EventKind::ContextCompileCompleted.payload_schema_id(),
         "cooldis.event.context.compile.completed/1"
