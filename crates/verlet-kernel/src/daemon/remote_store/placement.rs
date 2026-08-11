@@ -16,6 +16,8 @@ pub struct RemoteThreadSpawnRequest {
     pub spawned_event_id: verlet_history::EventRecordId,
     pub compile_payload: Option<serde_json::Value>,
     pub bind_payload: Option<serde_json::Value>,
+    #[serde(default)]
+    pub binding_principal_id: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

@@ -4076,15 +4076,11 @@ impl crate::adapters::app_server::VerletAppServer {
                 })
             })
             .transpose()?;
-        let workspace_metadata = workspace
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                    format!("source thread workspace binding could not be encoded: {err}"),
-                ))
-            })?;
+        let operation_bindings =
+            crate::adapters::app_server::threads::thread_manifest_operation_bindings(
+                source_handle.context(),
+            )
+            .map_err(internal_error)?;
         let skill_packages = crate::adapters::app_server::threads::thread_manifest_skill_packages(
             source_handle.context(),
         )
@@ -4099,28 +4095,34 @@ impl crate::adapters::app_server::VerletAppServer {
                 source_handle.context(),
             )
             .map_err(internal_error)?;
-        let skill_packages_metadata = source_handle
-            .context()
-            .metadata
-            .get(crate::agent::manifest_bind::THREAD_AGENT_SKILL_PACKAGES_METADATA)
-            .cloned();
-        let skill_discovery_metadata = source_handle
-            .context()
-            .metadata
-            .get(crate::agent::manifest_bind::THREAD_AGENT_SKILL_DISCOVERY_METADATA)
-            .cloned();
-        let skill_context_metadata = source_handle
-            .context()
-            .metadata
-            .get(crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA)
-            .cloned();
+        let inherited_binding_metadata = [
+            crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA,
+            crate::kernel::runtime_host::THREAD_OPERATION_REGISTRY_ROOT_METADATA,
+            crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA,
+            crate::agent::manifest_bind::THREAD_AGENT_SKILL_PACKAGES_METADATA,
+            crate::agent::manifest_bind::THREAD_AGENT_SKILL_DISCOVERY_METADATA,
+            crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA,
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            source_handle
+                .context()
+                .metadata
+                .get(key)
+                .cloned()
+                .map(|value| (key.to_string(), value))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
         let inherited_manifest_receipts = if workspace.is_some()
+            || !operation_bindings.is_empty()
             || !skill_packages.is_empty()
             || skill_discovery.is_some()
             || !skill_context_segments.is_empty()
         {
             let missing_witness = if workspace.is_some() {
                 "source thread workspace binding has no durable manifest bind witness"
+            } else if !operation_bindings.is_empty() {
+                "source thread operation binding has no durable manifest bind witness"
             } else {
                 "source thread skill package binding has no durable manifest bind witness"
             };
@@ -4152,6 +4154,27 @@ impl crate::adapters::app_server::VerletAppServer {
             if witnessed_workspace.as_ref() != workspace.as_ref() {
                 return Err(internal_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     "source thread workspace metadata disagrees with its durable manifest bind witness"
+                        .to_string(),
+                )));
+            }
+            let witnessed_operation_bindings = bind_payload
+                .get("operation_bindings")
+                .cloned()
+                .map(
+                    serde_json::from_value::<
+                        Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
+                    >,
+                )
+                .transpose()
+                .map_err(|err| {
+                    internal_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                        format!("source thread manifest operation witness is invalid: {err}"),
+                    ))
+                })?
+                .unwrap_or_default();
+            if witnessed_operation_bindings != operation_bindings {
+                return Err(internal_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    "source thread operation metadata disagrees with its durable manifest bind witness"
                         .to_string(),
                 )));
             }
@@ -4271,31 +4294,7 @@ impl crate::adapters::app_server::VerletAppServer {
         } else {
             None
         };
-        if let Some(raw) = &workspace_metadata {
-            checkpoint_metadata.insert(
-                crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA.to_string(),
-                raw.clone(),
-            );
-        }
-        if let Some(raw) = &skill_packages_metadata {
-            checkpoint_metadata.insert(
-                crate::agent::manifest_bind::THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(),
-                raw.clone(),
-            );
-        }
-        if let Some(raw) = &skill_discovery_metadata {
-            checkpoint_metadata.insert(
-                crate::agent::manifest_bind::THREAD_AGENT_SKILL_DISCOVERY_METADATA.to_string(),
-                raw.clone(),
-            );
-        }
-        if let Some(raw) = &skill_context_metadata {
-            checkpoint_metadata.insert(
-                crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA
-                    .to_string(),
-                raw.clone(),
-            );
-        }
+        checkpoint_metadata.extend(inherited_binding_metadata.clone());
         let mut checkpoint = match params.checkpoint_id.as_deref() {
             Some(checkpoint_id) => {
                 let checkpoint_id =
@@ -4329,31 +4328,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 .await
                 .map_err(internal_error)?,
         };
-        if let Some(raw) = workspace_metadata {
-            checkpoint.metadata.insert(
-                crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA.to_string(),
-                raw,
-            );
-        }
-        if let Some(raw) = skill_packages_metadata {
-            checkpoint.metadata.insert(
-                crate::agent::manifest_bind::THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(),
-                raw,
-            );
-        }
-        if let Some(raw) = skill_discovery_metadata {
-            checkpoint.metadata.insert(
-                crate::agent::manifest_bind::THREAD_AGENT_SKILL_DISCOVERY_METADATA.to_string(),
-                raw,
-            );
-        }
-        if let Some(raw) = skill_context_metadata {
-            checkpoint.metadata.insert(
-                crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA
-                    .to_string(),
-                raw,
-            );
-        }
+        checkpoint.metadata.extend(inherited_binding_metadata);
         let source_cut = thread_source_cut_json(&coordinates, &checkpoint, None);
         let handle = self
             .inner
@@ -4839,6 +4814,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 self.app_server_thread_spawn_agent_resolver(
                     params.placement.clone(),
                     params.workspace.clone(),
+                    connection.resolved_principal.principal_id.to_string(),
                 )
                 .await
                 .map_err(internal_error)?,

@@ -86,6 +86,19 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             .await
     }
 
+    pub(crate) async fn record_remote_manifest_receipts_for_principal(
+        &self,
+        compile_payload: serde_json::Value,
+        bind_payload: serde_json::Value,
+        principal_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<(
+        verlet_history::EventRecord,
+        verlet_history::EventRecord,
+    )> {
+        self.record_manifest_receipts_inner(compile_payload, bind_payload, principal_id, true)
+            .await
+    }
+
     async fn record_manifest_receipts_inner(
         &self,
         compile_payload: serde_json::Value,

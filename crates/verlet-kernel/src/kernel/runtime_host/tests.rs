@@ -5174,6 +5174,59 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
 }
 
 #[tokio::test]
+async fn manifest_binding_rejects_an_empty_principal_before_append() {
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "empty-bind-principal"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    let error = thread
+        .record_manifest_receipts_for_principal(
+            serde_json::json!({
+                "ref_uri": "agent://principal@0.1.0",
+                "manifest_hash": "snapshot-principal",
+                "source_hash": "sha256:source"
+            }),
+            serde_json::json!({
+                "ref_uri": "agent://principal@0.1.0",
+                "manifest_hash": "snapshot-principal",
+                "operation_bindings": [{
+                    "name": "search",
+                    "artifact_hash": "sha256:search"
+                }]
+            }),
+            "  ",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("principal is required"));
+    let events = store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(events.iter().all(|event| {
+        !matches!(
+            event.kind,
+            verlet_history::EventKind::ManifestCompileCompleted
+                | verlet_history::EventKind::ManifestBindCompleted
+                | verlet_history::EventKind::BindingAttached
+        )
+    }));
+}
+
+#[tokio::test]
 async fn cancelled_manifest_receipt_caller_cannot_leave_a_half_witnessed_workspace() {
     let barrier = std::sync::Arc::new(AdmissionAppendBarrier::default());
     let store = std::sync::Arc::new(AdmissionTestStore::blocking_manifest(barrier.clone()));
@@ -5296,6 +5349,57 @@ async fn remote_manifest_receipt_rejects_a_workspace_before_witnessing_it() {
             .iter()
             .all(|event| event.kind != verlet_history::EventKind::ManifestBindCompleted)
     );
+}
+
+#[tokio::test]
+async fn remote_manifest_binding_preserves_the_resolved_principal() {
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "thread-user", "remote-principal-bind"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    thread
+        .record_remote_manifest_receipts_for_principal(
+            serde_json::json!({
+                "manifest_hash": "snapshot-remote-principal",
+                "source_hash": "sha256:source"
+            }),
+            serde_json::json!({
+                "manifest_hash": "snapshot-remote-principal",
+                "placement": {"target": "remote"},
+                "operation_bindings": [{
+                    "name": "search",
+                    "artifact_hash": "sha256:search"
+                }]
+            }),
+            "principal:remote-operator",
+        )
+        .await
+        .unwrap();
+
+    let events = store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let attached = events
+        .iter()
+        .find(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .unwrap();
+    let payload: verlet_history::BindingAttachedPayload =
+        serde_json::from_value(attached.payload.clone()).unwrap();
+    assert_eq!(payload.requested_by, "principal:remote-operator");
+    assert_eq!(payload.decided_by, "principal:remote-operator");
 }
 
 #[tokio::test]

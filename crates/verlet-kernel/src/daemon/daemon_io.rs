@@ -3331,7 +3331,11 @@ impl VerletDaemonIoBridge {
             };
             if let Some(binding) = agent_binding
                 && let Err(err) = handle
-                    .record_manifest_receipts(binding.compile_receipt, binding.bind_receipt)
+                    .record_manifest_receipts_for_principal(
+                        binding.compile_receipt,
+                        binding.bind_receipt,
+                        &binding.principal_id,
+                    )
                     .await
             {
                 let _ = supervisor

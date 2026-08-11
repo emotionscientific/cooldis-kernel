@@ -9195,6 +9195,7 @@ async fn cancelled_daemon_start_finishes_the_workspace_bind_witness() {
             "placement": {"target": "local"},
             "workspace": workspace
         }),
+        principal_id: coordinates.user_id.clone(),
     };
     let request = crate::kernel::supervisor::ThreadStartRequest {
         tenant_id: coordinates.tenant_id.clone(),

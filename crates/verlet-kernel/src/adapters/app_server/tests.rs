@@ -483,6 +483,47 @@ fn event_by_kind(
         .unwrap_or_else(|| panic!("expected {kind} event"))
 }
 
+fn assert_binding_fold_matches_latest_bind(
+    events: &[verlet_history::EventRecord],
+    expected_principal: &str,
+) {
+    let bind = events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+        .max_by_key(|event| event.sequence.get())
+        .expect("expected a manifest bind receipt");
+    let receipt = serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
+        bind.payload.clone(),
+    )
+    .unwrap();
+    let folded = crate::kernel::binding_projector::fold_thread_bindings(events);
+
+    assert!(folded.anomalies.is_empty());
+    assert_eq!(
+        folded
+            .active
+            .iter()
+            .map(|binding| binding.payload.clone())
+            .collect::<Vec<_>>(),
+        receipt
+            .operation_bindings
+            .iter()
+            .map(|binding| {
+                crate::agent::manifest_bind::binding_attached_payload(binding, expected_principal)
+            })
+            .collect::<Vec<_>>()
+    );
+    for binding in folded.active {
+        let event = events
+            .iter()
+            .find(|event| event.id == binding.attach_event_id)
+            .expect("active binding must retain its attach event");
+        assert_eq!(event.provenance.source_event_ids, vec![bind.id]);
+        assert_eq!(binding.payload.requested_by, expected_principal);
+        assert_eq!(binding.payload.decided_by, expected_principal);
+    }
+}
+
 #[test]
 fn thinking_params_parse_supported_shapes() {
     let effort: crate::adapters::app_server::connection::ThreadStartParams =
@@ -13073,7 +13114,7 @@ async fn model_provider_capabilities_read_reports_bedrock_streaming() {
 }
 
 #[tokio::test]
-async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bash() {
+async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle() {
     let registry_root = unique_test_root("capsule-global-registry");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
     let client = std::sync::Arc::new(BashCallingCapsuleClient::new(
@@ -13090,7 +13131,9 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
             .with_global_operation_name("search"),
     )
     .await;
-    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    let mut principal = operator_principal(&app);
+    principal.principal_id = crate::daemon::identity::PrincipalId::new("principal:binding-review");
+    let (connection, _outbound_rx) = test_connection_for_principal(app.clone(), principal).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -13119,6 +13162,93 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
         Some(record.active_artifact_hash.as_str())
     );
     assert_eq!(exa_binding["operations"], serde_json::json!(["search"]));
+    assert_binding_fold_matches_latest_bind(
+        &events,
+        connection.resolved_principal.principal_id.as_str(),
+    );
+
+    app.inner
+        .supervisor
+        .shutdown_thread_at(&lifecycle.coordinates)
+        .await
+        .unwrap();
+    app.inner.state.write().await.threads.remove(&thread_id);
+    app.dispatch_request(
+        &connection,
+        "thread/resume",
+        Some(serde_json::json!({
+            "threadId": thread_id,
+            "excludeTurns": true,
+        })),
+    )
+    .await
+    .unwrap();
+    let resumed_events = session_store.read_events(&stream_id, None).await.unwrap();
+    assert_eq!(
+        resumed_events
+            .iter()
+            .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+            .count(),
+        2
+    );
+    assert_binding_fold_matches_latest_bind(&resumed_events, &lifecycle.coordinates.user_id);
+    let expected_fork_bindings =
+        crate::adapters::app_server::threads::thread_manifest_operation_bindings(
+            app.handle_for_thread(&thread_id).await.unwrap().context(),
+        )
+        .unwrap();
+
+    let fork = app
+        .dispatch_request(
+            &connection,
+            "thread/fork",
+            Some(serde_json::json!({"threadId": thread_id})),
+        )
+        .await
+        .unwrap();
+    let fork_id =
+        verlet_runtime_contracts::ThreadId::parse_str(fork["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let fork_lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(fork_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let fork_events = session_store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&fork_lifecycle.coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fork_events
+            .iter()
+            .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+            .count(),
+        1
+    );
+    assert_binding_fold_matches_latest_bind(
+        &fork_events,
+        connection.resolved_principal.principal_id.as_str(),
+    );
+    let fork_handle = app
+        .inner
+        .supervisor
+        .get_thread(&app.inner.tenant_id, fork_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::adapters::app_server::threads::thread_manifest_operation_bindings(
+            fork_handle.context()
+        )
+        .unwrap()
+        .as_slice(),
+        expected_fork_bindings.as_slice()
+    );
+
     app.dispatch_request(
         &connection,
         "turn/start",
@@ -13134,6 +13264,55 @@ async fn app_server_capsule_bindings_expose_published_operation_to_tools_and_bas
     let requests = client.requests();
     assert!(tool_names(&requests[0]).contains(&"search".to_string()));
     assert_bash_tool_describes(&requests[0], "search");
+
+    let spawned = app
+        .dispatch_request(
+            &connection,
+            "thread/spawn",
+            Some(serde_json::json!({
+                "threadId": thread_id,
+                "taskName": "binding-review-child",
+                "message": "use search",
+                "agentRef": crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
+            })),
+        )
+        .await
+        .unwrap();
+    let spawned_id =
+        verlet_runtime_contracts::ThreadId::parse_str(spawned["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let spawned_lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(spawned_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let spawned_events = session_store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&spawned_lifecycle.coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_binding_fold_matches_latest_bind(
+        &spawned_events,
+        connection.resolved_principal.principal_id.as_str(),
+    );
+    let spawned_handle = app
+        .inner
+        .supervisor
+        .get_thread(&app.inner.tenant_id, spawned_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::adapters::app_server::threads::thread_manifest_operation_bindings(
+            spawned_handle.context()
+        )
+        .unwrap()
+        .as_slice(),
+        expected_fork_bindings.as_slice()
+    );
     let _ = std::fs::remove_dir_all(registry_root);
 }
 
@@ -18068,10 +18247,20 @@ async fn test_connection(
     crate::adapters::app_server::connection::ConnectionState,
     tokio::sync::mpsc::UnboundedReceiver<crate::adapters::app_server::connection::JsonRpcMessage>,
 ) {
+    let resolved_principal = operator_principal(&app);
+    test_connection_for_principal(app, resolved_principal).await
+}
+
+async fn test_connection_for_principal(
+    app: crate::adapters::app_server::VerletAppServer,
+    resolved_principal: crate::daemon::identity::ResolvedPrincipal,
+) -> (
+    crate::adapters::app_server::connection::ConnectionState,
+    tokio::sync::mpsc::UnboundedReceiver<crate::adapters::app_server::connection::JsonRpcMessage>,
+) {
     let (outbound, rx) = tokio::sync::mpsc::unbounded_channel::<
         crate::adapters::app_server::connection::JsonRpcMessage,
     >();
-    let resolved_principal = operator_principal(&app);
     let witnessed_session_id = format!("test-session-{}", uuid::Uuid::now_v7());
     app.inner
         .identity_authority

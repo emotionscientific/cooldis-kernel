@@ -514,6 +514,7 @@ impl crate::adapters::app_server::VerletAppServer {
             &self.inner.cwd,
             self.inner.capsule_bindings.registry_root.as_deref(),
             None,
+            self.inner.user_id.clone(),
         )
     }
 
@@ -1867,6 +1868,7 @@ fn kernel_thread_spawn_agent_binding(
     cwd_root: &std::path::Path,
     operation_registry_root: Option<&std::path::Path>,
     overrides: Option<&crate::agent::manifest_bind::AgentManifestBindOverrides>,
+    principal_id: String,
 ) -> crate::kernel::runtime_host::VerletResult<
     crate::agent::agent_process::KernelThreadSpawnAgentBinding,
 > {
@@ -1891,6 +1893,7 @@ fn kernel_thread_spawn_agent_binding(
         metadata,
         compile_receipt,
         bind_receipt,
+        principal_id,
     })
 }
 
@@ -2213,6 +2216,7 @@ pub(super) struct AppServerThreadSpawnAgentResolver {
     remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
     placement_override: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
     workspace_override: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    binding_principal_id: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -2228,7 +2232,7 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
 
     async fn resolve_agent_ref(
         &self,
-        _caller: &verlet_runtime_contracts::ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         agent_ref: &str,
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::agent::agent_process::KernelThreadSpawnAgentBinding,
@@ -2267,6 +2271,9 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
             &self.cwd,
             self.operation_registry_root.as_deref(),
             None,
+            self.binding_principal_id
+                .clone()
+                .unwrap_or_else(|| caller.coordinates.user_id.clone()),
         )
     }
 }
@@ -2331,6 +2338,7 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         placement_override: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
         workspace_override: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+        binding_principal_id: String,
     ) -> crate::kernel::runtime_host::VerletResult<AppServerThreadSpawnAgentResolver> {
         Ok(AppServerThreadSpawnAgentResolver {
             agent_registry_root: self.inner.agent_registry_root.clone(),
@@ -2346,6 +2354,7 @@ impl crate::adapters::app_server::VerletAppServer {
             remote_event_store_served: std::sync::Arc::clone(&self.inner.remote_event_store_served),
             placement_override,
             workspace_override,
+            binding_principal_id: Some(binding_principal_id),
         })
     }
 }
@@ -2370,6 +2379,7 @@ impl CapsuleBindingRuntimeFactory {
             remote_event_store_served: std::sync::Arc::clone(&self.remote_event_store_served),
             placement_override: None,
             workspace_override: None,
+            binding_principal_id: None,
         })
     }
 
