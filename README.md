@@ -142,7 +142,8 @@ flows, and stateful product harnesses are future direction. See
 - [Command contracts](docs/command-contracts.md): command/manual projection
   rules.
 - [Chat console](docs/chat.md): local terminal console over the app-server RPC
-  boundary.
+  boundary. First run opens an in-TUI provider setup window; see
+  [Provider setup](docs/provider-setup.md).
 - [Provider adapters](docs/provider-adapters.md): agent loop boundary.
 - [Daemon and RPC](docs/app-server.md): app-server control plane.
 - [Threat model](docs/threat-model.md): stable threat IDs, current status, and

@@ -35,6 +35,7 @@ provider adapters, and release gates.
 - [Verlet Daemon](daemon.md)
 - [Verlet IO](io.md)
 - [Chat Console](chat.md)
+- [Provider Setup](provider-setup.md)
 - [RPC Control Plane](app-server.md)
 - [Verlet MCP Server](mcp-server.md)
 - [Provider Adapter Surface](provider-adapters.md)

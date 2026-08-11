@@ -13,11 +13,97 @@ const REFRESH_STATE_FILE: &str = "refresh.json";
 const MAX_REMOTE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const REFRESH_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
+pub(crate) const CATALOG_API_OPENAI_CHAT_COMPLETIONS: &str = "openai_chat_completions";
+pub(crate) const CATALOG_API_ANTHROPIC_MESSAGES: &str = "anthropic_messages";
+pub(crate) const CATALOG_API_OPENAI_RESPONSES: &str = "openai_responses";
+pub(crate) const CATALOG_AUTH_KIND_API_KEY: &str = "api_key";
+pub(crate) const CATALOG_AUTH_KIND_OAUTH: &str = "oauth";
+
+/// Trust-bearing base-URL/family pins for majors whose models.dev entry has no
+/// `api` URL (or a non-derivable SDK); each URL is verified against the
+/// provider's public API docs. Overrides win over derivation.
+const PROVIDER_OVERRIDES: &[(&str, &str, &str)] = &[
+    (
+        "anthropic",
+        "https://api.anthropic.com",
+        CATALOG_API_ANTHROPIC_MESSAGES,
+    ),
+    (
+        "cerebras",
+        "https://api.cerebras.ai/v1",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "deepinfra",
+        "https://api.deepinfra.com/v1/openai",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "deepseek",
+        "https://api.deepseek.com",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "groq",
+        "https://api.groq.com/openai/v1",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "mistral",
+        "https://api.mistral.ai/v1",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "openai",
+        "https://api.openai.com/v1",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "openrouter",
+        "https://openrouter.ai/api/v1",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "perplexity",
+        "https://api.perplexity.ai",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "togetherai",
+        "https://api.together.xyz/v1",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+    (
+        "xai",
+        "https://api.x.ai/v1",
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS,
+    ),
+];
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelCatalogSnapshot {
     #[serde(rename = "_comment", default, skip_serializing_if = "Option::is_none")]
     comment: Option<String>,
+    // Cache files written before EMO-574 have no provider section; defaulting
+    // keeps their models usable while providers fall back to the built-in set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    providers: Vec<ModelCatalogProvider>,
     models: Vec<ModelCatalogModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ModelCatalogProvider {
+    pub(crate) provider_id: String,
+    pub(crate) display_name: String,
+    pub(crate) base_url: String,
+    /// One of the `CATALOG_API_*` families verlet-provider can speak.
+    pub(crate) api: String,
+    /// `api_key` for every provider except the OAuth-only `openai-codex`.
+    pub(crate) auth_kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) env_vars: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) doc_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -44,7 +130,17 @@ pub(crate) struct ModelCatalogModel {
 #[derive(serde::Deserialize)]
 struct ModelsDevProvider {
     #[serde(default)]
-    models: std::collections::BTreeMap<String, ModelsDevModel>,
+    name: Option<String>,
+    #[serde(default)]
+    env: Vec<String>,
+    #[serde(default)]
+    npm: Option<String>,
+    #[serde(default)]
+    doc: Option<String>,
+    #[serde(default)]
+    api: Option<String>,
+    #[serde(default)]
+    models: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -212,28 +308,56 @@ fn built_in_snapshot() -> &'static ModelCatalogSnapshot {
 }
 
 fn normalize_models_dev_json(bytes: &[u8]) -> Result<ModelCatalogSnapshot, CatalogRefreshError> {
-    let mut upstream: std::collections::BTreeMap<String, ModelsDevProvider> =
+    let upstream: std::collections::BTreeMap<String, serde_json::Value> =
         serde_json::from_slice(bytes)?;
-    let anthropic = upstream.remove("anthropic").unwrap_or(ModelsDevProvider {
-        models: std::collections::BTreeMap::new(),
-    });
-    let openai = upstream.remove("openai").unwrap_or(ModelsDevProvider {
-        models: std::collections::BTreeMap::new(),
-    });
-    let mut models = normalize_provider("anthropic", &anthropic);
-    let openai_models = normalize_provider("openai", &openai);
-    models.extend(openai_models.iter().cloned());
-    models.extend(
-        openai_models
-            .into_iter()
-            .filter(|model| is_openai_codex_model(&model.model_id))
-            .map(|mut model| {
-                model.provider_id = "openai-codex".to_string();
-                model
-            }),
-    );
+    let mut providers = Vec::new();
+    let mut models = Vec::new();
+    for (provider_id, value) in upstream {
+        // The static OAuth entry below is authoritative for openai-codex.
+        if provider_id == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
+            continue;
+        }
+        let Ok(provider) = serde_json::from_value::<ModelsDevProvider>(value) else {
+            continue;
+        };
+        let Some((base_url, api)) = derive_provider_endpoint(&provider_id, &provider) else {
+            continue;
+        };
+        providers.push(ModelCatalogProvider {
+            display_name: provider
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&provider_id)
+                .to_string(),
+            base_url,
+            api: api.to_string(),
+            auth_kind: CATALOG_AUTH_KIND_API_KEY.to_string(),
+            env_vars: provider.env.clone(),
+            doc_url: provider.doc.clone(),
+            provider_id: provider_id.clone(),
+        });
+        let provider_models = normalize_provider(&provider_id, &provider);
+        if provider_id == "openai" {
+            models.extend(
+                provider_models
+                    .iter()
+                    .filter(|model| is_openai_codex_model(&model.model_id))
+                    .cloned()
+                    .map(|mut model| {
+                        model.provider_id =
+                            verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID.to_string();
+                        model
+                    }),
+            );
+        }
+        models.extend(provider_models);
+    }
+    providers.push(openai_codex_catalog_provider());
     let snapshot = sanitize_snapshot(ModelCatalogSnapshot {
         comment: None,
+        providers,
         models,
     });
     if snapshot.models.is_empty() {
@@ -242,11 +366,48 @@ fn normalize_models_dev_json(bytes: &[u8]) -> Result<ModelCatalogSnapshot, Catal
     Ok(snapshot)
 }
 
+fn derive_provider_endpoint(
+    provider_id: &str,
+    provider: &ModelsDevProvider,
+) -> Option<(String, &'static str)> {
+    if let Some((_, base_url, api)) = PROVIDER_OVERRIDES
+        .iter()
+        .find(|(overridden, _, _)| *overridden == provider_id)
+    {
+        return Some(((*base_url).to_string(), api));
+    }
+    let base_url = provider
+        .api
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())?;
+    match provider.npm.as_deref() {
+        Some("@ai-sdk/openai-compatible") => {
+            Some((base_url.to_string(), CATALOG_API_OPENAI_CHAT_COMPLETIONS))
+        }
+        Some("@ai-sdk/anthropic") => Some((base_url.to_string(), CATALOG_API_ANTHROPIC_MESSAGES)),
+        _ => None,
+    }
+}
+
+fn openai_codex_catalog_provider() -> ModelCatalogProvider {
+    ModelCatalogProvider {
+        provider_id: verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID.to_string(),
+        display_name: "OpenAI Codex (ChatGPT plan)".to_string(),
+        base_url: verlet_metadata::provider_store::OPENAI_CODEX_RESPONSES_URL.to_string(),
+        api: CATALOG_API_OPENAI_RESPONSES.to_string(),
+        auth_kind: CATALOG_AUTH_KIND_OAUTH.to_string(),
+        env_vars: Vec::new(),
+        doc_url: None,
+    }
+}
+
 fn normalize_provider(provider_id: &str, provider: &ModelsDevProvider) -> Vec<ModelCatalogModel> {
     provider
         .models
         .iter()
-        .filter_map(|(key, model)| {
+        .filter_map(|(key, value)| {
+            let model: ModelsDevModel = serde_json::from_value(value.clone()).ok()?;
             let model_id = model
                 .id
                 .as_deref()
@@ -282,7 +443,82 @@ fn is_openai_codex_model(model_id: &str) -> bool {
     normalized.contains("codex") || matches!(normalized.as_str(), "gpt-5.6-sol" | "gpt-5.6-terra")
 }
 
+/// Providers must publish an absolute `https` URL; plain `http` is accepted
+/// only for loopback hosts (local inference servers), because a cleartext
+/// remote endpoint would leak API keys, and `${...}` templates never resolve.
+fn valid_catalog_base_url(base_url: &str) -> bool {
+    if base_url.contains("${") {
+        return false;
+    }
+    let Some((scheme, rest)) = base_url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed
+            .split_once(']')
+            .map(|(host, _)| host)
+            .unwrap_or_default(),
+        None => host.split_once(':').map_or(host, |(host, _)| host),
+    };
+    if host.is_empty() {
+        return false;
+    }
+    match scheme {
+        "https" => true,
+        "http" => matches!(
+            host.to_ascii_lowercase().as_str(),
+            "localhost" | "127.0.0.1" | "::1"
+        ),
+        _ => false,
+    }
+}
+
 fn sanitize_snapshot(snapshot: ModelCatalogSnapshot) -> ModelCatalogSnapshot {
+    let mut providers = snapshot
+        .providers
+        .into_iter()
+        .filter_map(|mut provider| {
+            provider.provider_id = provider.provider_id.trim().to_string();
+            provider.display_name = provider.display_name.trim().to_string();
+            if provider.display_name.is_empty() {
+                provider.display_name.clone_from(&provider.provider_id);
+            }
+            provider.base_url = provider.base_url.trim().to_string();
+            provider.env_vars = provider
+                .env_vars
+                .iter()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect();
+            provider.doc_url = provider
+                .doc_url
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty());
+            (!provider.provider_id.is_empty()
+                && valid_catalog_base_url(&provider.base_url)
+                && matches!(
+                    provider.api.as_str(),
+                    CATALOG_API_OPENAI_CHAT_COMPLETIONS
+                        | CATALOG_API_ANTHROPIC_MESSAGES
+                        | CATALOG_API_OPENAI_RESPONSES
+                )
+                && matches!(
+                    provider.auth_kind.as_str(),
+                    CATALOG_AUTH_KIND_API_KEY | CATALOG_AUTH_KIND_OAUTH
+                ))
+            .then_some(provider)
+        })
+        .collect::<Vec<_>>();
+    providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+    providers.dedup_by(|left, right| left.provider_id == right.provider_id);
+    let provider_ids = providers
+        .iter()
+        .map(|provider| provider.provider_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut models = snapshot
         .models
         .into_iter()
@@ -301,16 +537,16 @@ fn sanitize_snapshot(snapshot: ModelCatalogSnapshot) -> ModelCatalogSnapshot {
             model.output_price = model
                 .output_price
                 .filter(|value| value.is_finite() && *value >= 0.0);
-            matches!(
-                model.provider_id.as_str(),
-                "anthropic" | "openai" | "openai-codex"
-            )
-            .then_some(model)
-            .filter(|model| {
-                !model.model_id.is_empty()
-                    && (model.provider_id != "openai-codex"
-                        || is_openai_codex_model(&model.model_id))
-            })
+            // A pre-providers snapshot carries no provider set to check against.
+            (provider_ids.is_empty() || provider_ids.contains(&model.provider_id))
+                .then_some(model)
+                .filter(|model| {
+                    !model.provider_id.is_empty()
+                        && !model.model_id.is_empty()
+                        && (model.provider_id
+                            != verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID
+                            || is_openai_codex_model(&model.model_id))
+                })
         })
         .collect::<Vec<_>>();
     models.sort_by(|left, right| {
@@ -321,6 +557,7 @@ fn sanitize_snapshot(snapshot: ModelCatalogSnapshot) -> ModelCatalogSnapshot {
     });
     ModelCatalogSnapshot {
         comment: snapshot.comment,
+        providers,
         models,
     }
 }
@@ -362,6 +599,29 @@ impl MergedModelCatalog {
             .into_values()
             .filter(|model| !model.deprecated)
             .collect()
+    }
+
+    pub(crate) fn providers(&self) -> Vec<ModelCatalogProvider> {
+        let mut merged = built_in_snapshot()
+            .providers
+            .iter()
+            .cloned()
+            .map(|provider| (provider.provider_id.clone(), provider))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        match read_catalog_cache(&self.state_home) {
+            // A pre-providers cache keeps its models but contributes no
+            // provider metadata; the built-in provider set stays authoritative.
+            Ok(Some(cached)) => {
+                for provider in cached.providers {
+                    merged.insert(provider.provider_id.clone(), provider);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::debug!("model catalog cache could not be read; using built-in data: {error}");
+            }
+        }
+        merged.into_values().collect()
     }
 }
 
@@ -570,10 +830,19 @@ fn write_catalog_cache(
     state_home: &std::path::Path,
     snapshot: &ModelCatalogSnapshot,
 ) -> Result<(), CatalogRefreshError> {
+    atomic_write(
+        &catalog_cache_path(state_home),
+        &render_snapshot_json(snapshot)?,
+    )?;
+    Ok(())
+}
+
+/// Deterministic snapshot serialization shared by the cache writer and the
+/// checked-in snapshot regeneration entry point.
+fn render_snapshot_json(snapshot: &ModelCatalogSnapshot) -> Result<Vec<u8>, CatalogRefreshError> {
     let mut bytes = serde_json::to_vec_pretty(snapshot)?;
     bytes.push(b'\n');
-    atomic_write(&catalog_cache_path(state_home), &bytes)?;
-    Ok(())
+    Ok(bytes)
 }
 
 fn read_refresh_state(
@@ -729,10 +998,56 @@ mod tests {
         let snapshot = super::built_in_snapshot();
 
         assert!(!snapshot.models.is_empty());
-        assert!(snapshot.models.iter().all(|model| matches!(
-            model.provider_id.as_str(),
-            "anthropic" | "openai" | "openai-codex"
-        )));
+        assert!(snapshot.providers.len() > 100);
+        let provider_ids = snapshot
+            .providers
+            .iter()
+            .map(|provider| provider.provider_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            snapshot
+                .models
+                .iter()
+                .all(|model| provider_ids.contains(model.provider_id.as_str()))
+        );
+        let anthropic = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "anthropic")
+            .unwrap();
+        assert_eq!(anthropic.base_url, "https://api.anthropic.com");
+        assert_eq!(anthropic.api, super::CATALOG_API_ANTHROPIC_MESSAGES);
+        assert_eq!(anthropic.auth_kind, super::CATALOG_AUTH_KIND_API_KEY);
+        assert!(
+            anthropic
+                .env_vars
+                .contains(&"ANTHROPIC_API_KEY".to_string())
+        );
+        let openai = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "openai")
+            .unwrap();
+        assert_eq!(openai.base_url, "https://api.openai.com/v1");
+        assert_eq!(openai.api, super::CATALOG_API_OPENAI_CHAT_COMPLETIONS);
+        let codex = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "openai-codex")
+            .unwrap();
+        assert_eq!(
+            codex.base_url,
+            verlet_metadata::provider_store::OPENAI_CODEX_RESPONSES_URL
+        );
+        assert_eq!(codex.api, super::CATALOG_API_OPENAI_RESPONSES);
+        assert_eq!(codex.auth_kind, super::CATALOG_AUTH_KIND_OAUTH);
+        assert!(
+            snapshot
+                .providers
+                .iter()
+                .all(|provider| super::valid_catalog_base_url(&provider.base_url)),
+            "the checked-in snapshot must not carry unusable or cleartext base URLs"
+        );
         assert!(snapshot.models.iter().any(|model| {
             model.provider_id == "anthropic"
                 && model.model_id == "claude-sonnet-4-6"
@@ -776,7 +1091,7 @@ mod tests {
         let snapshot = super::normalize_models_dev_json(raw_models_dev_fixture().as_bytes())
             .expect("fixture must normalize");
 
-        assert_eq!(snapshot.models.len(), 5);
+        assert_eq!(snapshot.models.len(), 9);
         assert!(snapshot.models.iter().any(|model| {
             model.provider_id == "anthropic" && model.model_id == "claude-test" && model.deprecated
         }));
@@ -786,6 +1101,32 @@ mod tests {
         assert!(snapshot.models.iter().any(|model| {
             model.provider_id == "openai-codex" && model.model_id == "gpt-5.6-sol"
         }));
+        assert!(
+            snapshot
+                .models
+                .iter()
+                .any(|model| model.provider_id == "compat-fixture"
+                    && model.model_id == "compat-model"),
+            "well-formed models must survive a malformed sibling entry"
+        );
+        assert!(
+            !snapshot
+                .models
+                .iter()
+                .any(|model| model.model_id == "bad-model" || model.model_id == "gemini-fixture")
+        );
+        assert!(
+            !snapshot.models.iter().any(|model| {
+                model.model_id == "template-model" || model.model_id == "cleartext-model"
+            }),
+            "models of providers with unusable base URLs must be dropped with them"
+        );
+        assert!(
+            snapshot
+                .models
+                .iter()
+                .any(|model| model.model_id == "loopback-model")
+        );
 
         let normalized = serde_json::to_value(snapshot).unwrap();
         let first = normalized["models"].as_array().unwrap().first().unwrap();
@@ -795,9 +1136,135 @@ mod tests {
     }
 
     #[test]
+    fn models_dev_normalization_derives_the_full_provider_set() {
+        let snapshot = super::normalize_models_dev_json(raw_models_dev_fixture().as_bytes())
+            .expect("fixture must normalize");
+        let provider = |id: &str| {
+            snapshot
+                .providers
+                .iter()
+                .find(|provider| provider.provider_id == id)
+        };
+
+        let anthropic = provider("anthropic").expect("override row for anthropic");
+        assert_eq!(anthropic.display_name, "Anthropic");
+        assert_eq!(anthropic.base_url, "https://api.anthropic.com");
+        assert_eq!(anthropic.api, super::CATALOG_API_ANTHROPIC_MESSAGES);
+        assert_eq!(anthropic.auth_kind, super::CATALOG_AUTH_KIND_API_KEY);
+        assert_eq!(anthropic.env_vars, vec!["ANTHROPIC_API_KEY".to_string()]);
+        assert_eq!(
+            anthropic.doc_url.as_deref(),
+            Some("https://docs.anthropic.example/models")
+        );
+        let openai = provider("openai").expect("override row for openai");
+        assert_eq!(openai.base_url, "https://api.openai.com/v1");
+        assert_eq!(openai.api, super::CATALOG_API_OPENAI_CHAT_COMPLETIONS);
+        let compat = provider("compat-fixture").expect("derived openai-compatible row");
+        assert_eq!(compat.base_url, "https://compat.example.invalid/v1");
+        assert_eq!(compat.api, super::CATALOG_API_OPENAI_CHAT_COMPLETIONS);
+        let anthropic_compat =
+            provider("anthropic-compat-fixture").expect("derived anthropic-sdk row");
+        assert_eq!(
+            anthropic_compat.base_url,
+            "https://anthropic-compat.example.invalid/v1"
+        );
+        assert_eq!(anthropic_compat.api, super::CATALOG_API_ANTHROPIC_MESSAGES);
+        assert_eq!(anthropic_compat.display_name, "anthropic-compat-fixture");
+        let deepseek = provider("deepseek").expect("override row for deepseek");
+        assert_eq!(
+            deepseek.base_url, "https://api.deepseek.com",
+            "the curated override must win over the upstream api URL"
+        );
+        let codex = provider("openai-codex").expect("static openai-codex row");
+        assert_eq!(codex.auth_kind, super::CATALOG_AUTH_KIND_OAUTH);
+        assert!(
+            provider("google").is_none(),
+            "unsupported API families must be skipped"
+        );
+        assert!(provider("compat-without-api").is_none());
+        assert!(provider("malformed-provider").is_none());
+        assert!(provider("ignored-provider").is_none());
+        assert!(
+            provider("template-url-fixture").is_none(),
+            "${{...}} template base URLs never resolve and must be dropped"
+        );
+        assert!(
+            provider("cleartext-fixture").is_none(),
+            "non-loopback http base URLs would leak API keys and must be dropped"
+        );
+        let loopback = provider("loopback-fixture").expect("loopback http row");
+        assert_eq!(loopback.base_url, "http://127.0.0.1:1234/v1");
+        let ordered = snapshot
+            .providers
+            .iter()
+            .map(|provider| provider.provider_id.as_str())
+            .collect::<Vec<_>>();
+        let mut sorted = ordered.clone();
+        sorted.sort_unstable();
+        assert_eq!(ordered, sorted, "provider ordering must be deterministic");
+    }
+
+    #[test]
+    fn base_url_validation_requires_https_or_loopback_http() {
+        assert!(super::valid_catalog_base_url("https://api.example.com/v1"));
+        assert!(super::valid_catalog_base_url("http://localhost:1234/v1"));
+        assert!(super::valid_catalog_base_url("http://127.0.0.1/v1"));
+        assert!(super::valid_catalog_base_url("http://[::1]:8080/v1"));
+        assert!(!super::valid_catalog_base_url(
+            "http://cleartext.example.invalid/v1"
+        ));
+        assert!(!super::valid_catalog_base_url("${GATEWAY_BASE_URL}/v1"));
+        assert!(!super::valid_catalog_base_url("https://${HOST}/v1"));
+        assert!(!super::valid_catalog_base_url("ftp://example.com"));
+        assert!(!super::valid_catalog_base_url("https://"));
+        assert!(!super::valid_catalog_base_url("api.example.com/v1"));
+    }
+
+    #[test]
+    fn snapshot_rendering_is_byte_stable() {
+        // Regeneration determinism: the same upstream bytes must produce the
+        // same snapshot bytes, and re-rendering a parsed snapshot must too.
+        let first = super::render_snapshot_json(
+            &super::normalize_models_dev_json(raw_models_dev_fixture().as_bytes()).unwrap(),
+        )
+        .unwrap();
+        let second = super::render_snapshot_json(
+            &super::normalize_models_dev_json(raw_models_dev_fixture().as_bytes()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        let reparsed: super::ModelCatalogSnapshot = serde_json::from_slice(&first).unwrap();
+        assert_eq!(
+            super::render_snapshot_json(&super::sanitize_snapshot(reparsed)).unwrap(),
+            first
+        );
+    }
+
+    // Regeneration entry point for scripts/update-model-catalog.sh: the
+    // checked-in snapshot flows through the same normalization as the runtime.
+    #[test]
+    #[ignore = "regeneration entry point; run via scripts/update-model-catalog.sh"]
+    fn regenerate_built_in_snapshot_from_env() {
+        let input = std::env::var("VERLET_MODEL_CATALOG_REGEN_INPUT")
+            .expect("VERLET_MODEL_CATALOG_REGEN_INPUT must point at a models.dev api.json file");
+        let output = std::env::var("VERLET_MODEL_CATALOG_REGEN_OUTPUT")
+            .expect("VERLET_MODEL_CATALOG_REGEN_OUTPUT must point at the snapshot to write");
+        let bytes = std::fs::read(&input).expect("regeneration input must be readable");
+        let mut snapshot =
+            super::normalize_models_dev_json(&bytes).expect("upstream payload must normalize");
+        snapshot.comment = Some(
+            "Generated by scripts/update-model-catalog.sh from models.dev; do not edit by hand."
+                .to_string(),
+        );
+        std::fs::write(&output, super::render_snapshot_json(&snapshot).unwrap())
+            .expect("regeneration output must be writable");
+    }
+
+    #[test]
     fn sanitization_normalizes_strings_limits_and_prices() {
         let snapshot = super::sanitize_snapshot(super::ModelCatalogSnapshot {
             comment: None,
+            providers: Vec::new(),
             models: vec![
                 super::ModelCatalogModel {
                     provider_id: " openai ".to_string(),
@@ -858,6 +1325,7 @@ mod tests {
             .unwrap();
         let cached = super::ModelCatalogSnapshot {
             comment: None,
+            providers: Vec::new(),
             models: vec![
                 super::ModelCatalogModel {
                     provider_id: target.provider_id.clone(),
@@ -909,6 +1377,34 @@ mod tests {
         assert_eq!(projected.display_name, "Remote replacement");
         assert_eq!(projected.context_window, Some(123));
         assert_eq!(projected.max_output_tokens, Some(45));
+
+        remove_test_state_home(&state_home);
+    }
+
+    #[test]
+    fn old_format_cache_keeps_models_and_falls_back_to_built_in_providers() {
+        let state_home = test_state_home("old-format");
+        let old_format = serde_json::json!({
+            "models": [{
+                "provider_id": "legacy-provider",
+                "model_id": "legacy-model",
+                "display_name": "Legacy Model",
+                "reasoning": false,
+                "deprecated": false
+            }]
+        });
+        std::fs::create_dir_all(state_home.join(super::CATALOG_CACHE_DIR)).unwrap();
+        std::fs::write(
+            super::catalog_cache_path(&state_home),
+            old_format.to_string(),
+        )
+        .unwrap();
+
+        let catalog = super::MergedModelCatalog::new(&state_home);
+        assert_eq!(catalog.providers(), super::built_in_snapshot().providers);
+        assert!(catalog.entries().iter().any(
+            |entry| entry.provider_id == "legacy-provider" && entry.model_id == "legacy-model"
+        ));
 
         remove_test_state_home(&state_home);
     }
@@ -1111,6 +1607,7 @@ mod tests {
         let state_home = test_state_home("fallback");
         let cached = super::ModelCatalogSnapshot {
             comment: None,
+            providers: Vec::new(),
             models: vec![super::ModelCatalogModel {
                 provider_id: "openai".to_string(),
                 model_id: "cached-model".to_string(),
@@ -1255,6 +1752,9 @@ mod tests {
             "anthropic": {
                 "id": "anthropic",
                 "name": "Anthropic",
+                "npm": "@ai-sdk/anthropic",
+                "env": ["ANTHROPIC_API_KEY"],
+                "doc": "https://docs.anthropic.example/models",
                 "models": {
                     "claude-test": {
                         "id": "claude-test",
@@ -1272,6 +1772,8 @@ mod tests {
             "openai": {
                 "id": "openai",
                 "name": "OpenAI",
+                "npm": "@ai-sdk/openai",
+                "env": ["OPENAI_API_KEY"],
                 "models": {
                     "gpt-test-codex": {
                         "id": "gpt-test-codex",
@@ -1289,6 +1791,76 @@ mod tests {
                     }
                 }
             },
+            "compat-fixture": {
+                "id": "compat-fixture",
+                "name": "Compat Fixture",
+                "npm": "@ai-sdk/openai-compatible",
+                "api": " https://compat.example.invalid/v1 ",
+                "env": ["COMPAT_FIXTURE_API_KEY"],
+                "doc": "https://compat.example.invalid/docs",
+                "models": {
+                    "compat-model": { "id": "compat-model", "name": "Compat Model" },
+                    "bad-model": "not an object"
+                }
+            },
+            "anthropic-compat-fixture": {
+                "id": "anthropic-compat-fixture",
+                "npm": "@ai-sdk/anthropic",
+                "api": "https://anthropic-compat.example.invalid/v1",
+                "models": {
+                    "anthropic-compat-model": { "id": "anthropic-compat-model" }
+                }
+            },
+            "deepseek": {
+                "id": "deepseek",
+                "name": "DeepSeek",
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "https://upstream-must-lose.example.invalid",
+                "models": {
+                    "deepseek-chat": { "id": "deepseek-chat", "name": "DeepSeek Chat" }
+                }
+            },
+            "google": {
+                "id": "google",
+                "name": "Google",
+                "npm": "@ai-sdk/google",
+                "api": "https://google.example.invalid/v1beta",
+                "models": {
+                    "gemini-fixture": { "id": "gemini-fixture", "name": "Gemini Fixture" }
+                }
+            },
+            "compat-without-api": {
+                "id": "compat-without-api",
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    "unreachable-model": { "id": "unreachable-model" }
+                }
+            },
+            "template-url-fixture": {
+                "id": "template-url-fixture",
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "${TEMPLATE_FIXTURE_BASE_URL}/v1",
+                "models": {
+                    "template-model": { "id": "template-model" }
+                }
+            },
+            "cleartext-fixture": {
+                "id": "cleartext-fixture",
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "http://cleartext.example.invalid/v1",
+                "models": {
+                    "cleartext-model": { "id": "cleartext-model" }
+                }
+            },
+            "loopback-fixture": {
+                "id": "loopback-fixture",
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "http://127.0.0.1:1234/v1",
+                "models": {
+                    "loopback-model": { "id": "loopback-model" }
+                }
+            },
+            "malformed-provider": "not an object",
             "ignored-provider": {
                 "id": "ignored-provider",
                 "models": {

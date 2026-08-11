@@ -225,34 +225,37 @@ where
     client.account_read().await?;
     let config = client.config_read(false).await?;
     let models = client.model_list_typed().await?;
-    if models.data.is_empty() {
-        return Err(crate::cli::usage_error("app-server returned no models"));
-    }
     let cwd = config
         .get("config")
         .and_then(|config| config.get("cwd"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("?")
         .to_string();
-    let active = models
-        .data
-        .iter()
-        .find(|model| model.active)
-        .ok_or_else(|| crate::cli::usage_error("app-server returned no active model"))?;
-    let initial_events = if active.auth_status
-        == crate::adapters::operator_client::OperatorModelAuthStatus::Missing
-    {
+    // EMO-575 hides the offline echo launch pair from model/list, so a fresh
+    // install legitimately reports no rows and no active model. That is the
+    // first-run state: label the hidden launch pair and let the setup window
+    // take over.
+    let active = models.data.iter().find(|model| model.active);
+    let model_label = active
+        .map(|model| format!("{}/{}", model.provider_id, model.model))
+        .unwrap_or_else(|| "local/echo".to_string());
+    let auth_missing = active.is_none_or(|model| {
+        model.auth_status == crate::adapters::operator_client::OperatorModelAuthStatus::Missing
+    });
+    let initial_events = if auth_missing {
         let auth = client.model_provider_auth_status_typed().await?;
-        vec![verlet_chat::ChatEvent::Providers(provider_rows(
-            &auth, &models,
-        ))]
+        if auth.data.iter().any(|provider| provider.configured) {
+            Vec::new()
+        } else {
+            vec![verlet_chat::ChatEvent::NoConfiguredProviders]
+        }
     } else {
         Vec::new()
     };
     Ok(ChatSessionInfo {
         connection_label,
         cwd,
-        model_label: format!("{}/{}", active.provider_id, active.model),
+        model_label,
         initial_events,
     })
 }
@@ -439,12 +442,30 @@ impl ChatDriver {
                     model: selected.active.model,
                 });
             }
-            verlet_chat::Action::ListProviders => {
-                let auth = client.model_provider_auth_status_typed().await?;
-                let models = client.model_list_typed().await?;
-                let _ = events.send(verlet_chat::ChatEvent::Providers(provider_rows(
-                    &auth, &models,
-                )));
+            verlet_chat::Action::FetchProviderCatalog => {
+                let catalog = client.model_provider_catalog_typed().await?;
+                let _ = events.send(verlet_chat::ChatEvent::ProviderCatalog {
+                    providers: catalog_provider_rows(&catalog),
+                });
+            }
+            verlet_chat::Action::UpsertCustomProvider { spec } => {
+                let provider_id = spec.provider_id.clone();
+                let error = client
+                    .model_provider_upsert(&custom_provider_upsert_params(&spec))
+                    .await
+                    .err()
+                    .map(|err| err.to_string());
+                let _ = events
+                    .send(verlet_chat::ChatEvent::CustomProviderResult { provider_id, error });
+            }
+            verlet_chat::Action::DeleteCustomProvider { provider_id } => {
+                let error = client
+                    .model_provider_delete(&provider_id)
+                    .await
+                    .err()
+                    .map(|err| err.to_string());
+                let _ = events
+                    .send(verlet_chat::ChatEvent::CustomProviderResult { provider_id, error });
             }
             verlet_chat::Action::SetProviderKey {
                 provider_id,
@@ -974,34 +995,101 @@ fn model_rows(
         .collect()
 }
 
-fn provider_rows(
-    auth: &crate::adapters::operator_client::OperatorModelProviderAuthList,
-    models: &crate::adapters::operator_client::OperatorModelList,
-) -> Vec<verlet_chat::ProviderRow> {
-    let active_provider = models
-        .data
-        .iter()
-        .find(|model| model.active)
-        .map(|model| model.provider_id.as_str());
-    auth.data
-        .iter()
-        .map(|provider| verlet_chat::ProviderRow {
-            provider_id: provider.provider_id.clone(),
-            display_name: provider.display_name.clone(),
-            auth_status: if !provider.configured {
-                "missing"
-            } else if provider.source.as_deref() == Some("environment") {
-                "env"
-            } else {
-                "configured"
+/// The RPC `api` value for one row, translated to the chat contract's
+/// family strings (`openai_chat_completions`, ...).
+fn catalog_api_family(api: &crate::adapters::operator_client::OperatorProviderApi) -> String {
+    match api {
+        crate::adapters::operator_client::OperatorProviderApi::Family(family) => {
+            match family.as_str() {
+                "open_ai_chat_completions" => "openai_chat_completions".to_string(),
+                "open_ai_responses" => "openai_responses".to_string(),
+                other => other.to_string(),
             }
-            .to_string(),
-            label: provider.label.clone().unwrap_or_default(),
-            oauth: provider.provider_id
-                == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
-            active: active_provider == Some(provider.provider_id.as_str()),
+        }
+        crate::adapters::operator_client::OperatorProviderApi::Other { other } => other.clone(),
+    }
+}
+
+fn catalog_provider_rows(
+    catalog: &crate::adapters::operator_client::OperatorModelProviderCatalog,
+) -> Vec<verlet_chat::CatalogProviderRow> {
+    catalog
+        .providers
+        .iter()
+        .map(|row| verlet_chat::CatalogProviderRow {
+            provider_id: row.provider_id.clone(),
+            display_name: row.display_name.clone(),
+            base_url: row.base_url.clone(),
+            api: catalog_api_family(&row.api),
+            auth_kind: row.auth_kind.clone(),
+            env_vars: row.env_vars.clone(),
+            configured: row.configured,
+            auth_label: row.auth_label.clone().unwrap_or_default(),
+            custom: row.custom,
+            active: row.active,
+            model_count: row.model_count,
+            default_model: row.default_model.clone(),
         })
         .collect()
+}
+
+/// `modelProvider/upsert` params for a custom provider from the setup form.
+/// The API key never rides here; it follows through `modelProvider/auth/set`.
+fn custom_provider_upsert_params(
+    spec: &verlet_chat::CustomProviderSpec,
+) -> crate::adapters::operator_client::OperatorModelProviderUpsertParams {
+    let api = match spec.api.as_str() {
+        "openai_responses" => "open_ai_responses",
+        "anthropic_messages" => "anthropic_messages",
+        _ => "open_ai_chat_completions",
+    };
+    let headers = spec
+        .header
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                verlet_metadata::provider_store::LlmProviderConfigValue::literal(value),
+            )
+        })
+        .collect();
+    let models = spec
+        .models
+        .iter()
+        .enumerate()
+        .map(|(index, model_id)| {
+            crate::adapters::operator_client::OperatorModelProviderModelUpsertRecord {
+                model_id: model_id.clone(),
+                display_name: None,
+                metadata: if index == 0 {
+                    std::collections::BTreeMap::from([("default".to_string(), "true".to_string())])
+                } else {
+                    std::collections::BTreeMap::new()
+                },
+            }
+        })
+        .collect();
+    let auth = if spec.keyless {
+        verlet_metadata::provider_store::LlmProviderAuthConfig::None
+    } else {
+        verlet_metadata::provider_store::LlmProviderAuthConfig::StoredOrEnvironment
+    };
+    crate::adapters::operator_client::OperatorModelProviderUpsertParams {
+        provider: crate::adapters::operator_client::OperatorModelProviderUpsertRecord {
+            provider_id: spec.provider_id.clone(),
+            api: crate::adapters::operator_client::OperatorProviderApi::Family(api.to_string()),
+            base_url: spec.base_url.clone(),
+            display_name: Some(spec.display_name.clone()),
+            auth,
+            headers,
+            auth_header: !spec.keyless,
+            models,
+            metadata: std::collections::BTreeMap::from([(
+                "origin".to_string(),
+                "custom".to_string(),
+            )]),
+        },
+    }
 }
 
 fn thread_name(thread: &serde_json::Value) -> Option<String> {

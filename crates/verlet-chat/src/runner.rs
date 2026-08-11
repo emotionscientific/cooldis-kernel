@@ -80,8 +80,8 @@ pub async fn run_ui(
     loop {
         terminal.draw(|f| {
             let area = f.area();
-            let root = crate::ui::build(app, area, &theme, &sheet, &probe);
-            paint(f.buffer_mut(), area, &theme, root.as_ref(), &[]);
+            let scene = crate::ui::build(app, area, &theme, &sheet, &probe);
+            paint(f.buffer_mut(), area, &theme, &scene, &[]);
             // The composer's rect is only known after layout; the probe
             // reports where it landed, and the real terminal caret goes there.
             if let Some(pos) = app.cursor(probe.rect()) {
@@ -110,7 +110,15 @@ pub async fn run_ui(
             }
             host_event = events.recv() => {
                 match host_event {
-                    Some(event) => app.apply(event),
+                    Some(event) => {
+                        app.apply(event);
+                        // Applying a host event can queue follow-up work
+                        // (the first-run gate fetches the catalog, a saved
+                        // credential re-issues a model selection).
+                        for action in app.drain_actions() {
+                            let _ = actions.send(action);
+                        }
+                    }
                     // Host loop ended (server closed or errored); its error
                     // surfaces through the host's own return value.
                     None => break,

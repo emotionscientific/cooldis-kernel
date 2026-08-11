@@ -150,6 +150,10 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
             crate::daemon::identity::AuthorityClass::Host,
         ),
         (
+            "modelProvider/catalog",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
             "experimentalFeature/list",
             crate::daemon::identity::AuthorityClass::Interactive,
         ),
@@ -977,7 +981,7 @@ async fn app_server_retains_identity_boundary_config() {
 }
 
 #[tokio::test]
-async fn app_server_new_local_seeds_default_provider_store() {
+async fn app_server_new_local_seeds_codex_without_placeholder_provider() {
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
         format!("verlet-provider-store-{}.sock", uuid::Uuid::now_v7()),
     ));
@@ -1002,18 +1006,26 @@ async fn app_server_new_local_seeds_default_provider_store() {
     let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
         .await
         .unwrap();
-    let openai_compatible = store
-        .get_provider(verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
+    assert!(
+        store
+            .get_provider(verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "app-server boot must not seed the openai_compatible placeholder (EMO-575)"
+    );
+    let openai_codex = store
+        .get_provider(verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
         .await
         .unwrap()
-        .expect("app-server boot should seed OpenAI Compatible provider metadata");
+        .expect("app-server boot should seed the OpenAI Codex OAuth template");
     assert_eq!(
-        openai_compatible.base_url,
-        verlet_metadata::provider_store::OPENAI_COMPATIBLE_BASE_URL
+        openai_codex.base_url,
+        verlet_metadata::provider_store::OPENAI_CODEX_RESPONSES_URL
     );
     assert_eq!(
-        openai_compatible.models[0].model_id,
-        verlet_metadata::provider_store::OPENAI_COMPATIBLE_DEFAULT_MODEL
+        openai_codex.models[0].model_id,
+        verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1150,6 +1162,377 @@ async fn model_provider_auth_methods_store_redacted_credentials() {
         .unwrap()
         .is_none()
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_set_templates_a_catalog_provider_record_on_demand() {
+    let root = unique_test_root("app-server-auth-set-catalog-template");
+    let config = local_model_select_test_config(&root, "auth-set-catalog-template");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    assert!(
+        app.inner
+            .metadata_store
+            .get_provider("anthropic")
+            .await
+            .unwrap()
+            .is_none(),
+        "the catalog provider must start without a store record"
+    );
+
+    let set = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/set",
+            Some(serde_json::json!({
+                "providerId": "anthropic",
+                "apiKey": "anthropic-template-secret",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(set["auth"]["providerId"], "anthropic");
+    assert_eq!(set["auth"]["configured"], true);
+    assert_eq!(set["auth"]["source"], "stored");
+    assert!(
+        !serde_json::to_string(&set)
+            .unwrap()
+            .contains("anthropic-template-secret")
+    );
+
+    let record = app
+        .inner
+        .metadata_store
+        .get_provider("anthropic")
+        .await
+        .unwrap()
+        .expect("auth/set must create the record from the catalog template");
+    assert_eq!(record.api, verlet_history::ProviderApi::AnthropicMessages);
+    assert_eq!(record.base_url, "https://api.anthropic.com");
+    assert_eq!(record.display_name.as_deref(), Some("Anthropic"));
+    assert!(record.auth_header);
+    assert_eq!(
+        record.metadata.get("origin").map(String::as_str),
+        Some("catalog"),
+        "templated records must carry the origin=catalog marker"
+    );
+    assert!(!record.models.is_empty());
+    assert!(record.models.iter().all(|model| {
+        model.input_modalities
+            == vec![verlet_metadata::provider_store::LlmProviderInputModality::Text]
+    }));
+    assert!(
+        record
+            .models
+            .iter()
+            .any(|model| model.context_window_tokens.is_some()),
+        "templated models must carry the catalog's context-window limits"
+    );
+    let defaults = record
+        .models
+        .iter()
+        .filter(|model| model.metadata.get("default").map(String::as_str) == Some("true"))
+        .collect::<Vec<_>>();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(
+        defaults[0].model_id, record.models[0].model_id,
+        "the catalog's first (sorted) model is the default choice"
+    );
+    assert_eq!(
+        app.inner
+            .user_metadata_store
+            .get_credential("anthropic")
+            .await
+            .unwrap(),
+        Some(
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "anthropic-template-secret".to_string(),
+            }
+        )
+    );
+
+    let status = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": "anthropic" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status["auth"]["configured"], true);
+    assert_eq!(status["auth"]["source"], "stored");
+
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["providerId"] == "anthropic"),
+        "model/list must include the newly configured provider's models"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_set_keeps_not_found_for_unknown_provider() {
+    let root = unique_test_root("app-server-auth-set-unknown");
+    let config = local_model_select_test_config(&root, "auth-set-unknown");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/set",
+            Some(serde_json::json!({
+                "providerId": "unknown-everywhere",
+                "apiKey": "must-not-store",
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(
+        error.message,
+        "model provider \"unknown-everywhere\" was not found"
+    );
+    assert!(
+        app.inner
+            .metadata_store
+            .get_provider("unknown-everywhere")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        app.inner
+            .user_metadata_store
+            .get_credential("unknown-everywhere")
+            .await
+            .unwrap(),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_status_reports_record_less_catalog_provider_unconfigured() {
+    let root = unique_test_root("app-server-auth-status-recordless");
+    let config = local_model_select_test_config(&root, "auth-status-recordless");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let status = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": "anthropic" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status["auth"]["providerId"], "anthropic");
+    assert_eq!(status["auth"]["displayName"], "Anthropic");
+    assert_eq!(status["auth"]["configured"], false);
+    assert_eq!(status["auth"]["source"], serde_json::Value::Null);
+    assert_eq!(status["auth"]["authHeader"], true);
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": "unknown-everywhere" })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(
+        error.message,
+        "model provider \"unknown-everywhere\" was not found"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_delete_removes_an_unmodified_templated_record() {
+    let root = unique_test_root("app-server-auth-delete-templated");
+    let config = local_model_select_test_config(&root, "auth-delete-templated");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    app.dispatch_request(
+        &connection,
+        "modelProvider/auth/set",
+        Some(serde_json::json!({
+            "providerId": "groq",
+            "apiKey": "groq-template-secret",
+        })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        app.inner
+            .metadata_store
+            .get_provider("groq")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let deleted = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/delete",
+            Some(serde_json::json!({ "providerId": "groq" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted["auth"]["configured"], false);
+    assert!(
+        app.inner
+            .metadata_store
+            .get_provider("groq")
+            .await
+            .unwrap()
+            .is_none(),
+        "deleting the credential of an untouched templated record must remove the record"
+    );
+    assert_eq!(
+        app.inner
+            .user_metadata_store
+            .get_credential("groq")
+            .await
+            .unwrap(),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_auth_delete_keeps_a_modified_templated_record() {
+    let root = unique_test_root("app-server-auth-delete-modified");
+    let config = local_model_select_test_config(&root, "auth-delete-modified");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    app.dispatch_request(
+        &connection,
+        "modelProvider/auth/set",
+        Some(serde_json::json!({
+            "providerId": "groq",
+            "apiKey": "groq-modified-secret",
+        })),
+    )
+    .await
+    .unwrap();
+    let mut modified = app
+        .inner
+        .metadata_store
+        .get_provider("groq")
+        .await
+        .unwrap()
+        .unwrap();
+    modified.base_url = "https://groq.internal.example/v1".to_string();
+    app.inner
+        .metadata_store
+        .upsert_provider(modified)
+        .await
+        .unwrap();
+
+    let deleted = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/delete",
+            Some(serde_json::json!({ "providerId": "groq" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted["auth"]["configured"], false);
+    let record = app
+        .inner
+        .metadata_store
+        .get_provider("groq")
+        .await
+        .unwrap()
+        .expect("a user-modified record must survive credential deletion");
+    assert_eq!(record.base_url, "https://groq.internal.example/v1");
+    assert_eq!(
+        app.inner
+            .user_metadata_store
+            .get_credential("groq")
+            .await
+            .unwrap(),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_list_shows_the_echo_pair_only_for_explicit_launches() {
+    let root = unique_test_root("app-server-echo-visibility");
+    let hidden_config = local_model_select_test_config(&root, "echo-hidden");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(hidden_config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        models["data"].as_array().unwrap().iter().all(|entry| {
+            entry["providerId"] != crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+        }),
+        "the echo pair must stay hidden when the launch model was not explicit"
+    );
+    drop(connection);
+    app.shutdown().await.unwrap();
+    drop(app);
+
+    let mut explicit_config = local_model_select_test_config(&root, "echo-explicit");
+    explicit_config.runtime_home = root.join("runtime-explicit");
+    explicit_config.state_home = root.join("state-explicit");
+    explicit_config.user_state_home = root.join("user-state-explicit");
+    explicit_config.model_explicit = true;
+    let app = crate::adapters::app_server::VerletAppServer::new_local(explicit_config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let echo = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["providerId"] == crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER)
+        .expect("an explicitly launched echo pair must stay listable");
+    assert_eq!(
+        echo["model"],
+        crate::adapters::app_server::APP_SERVER_LOCAL_MODEL
+    );
+    assert_eq!(echo["active"], true);
+    assert_eq!(echo["authStatus"], "configured");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1411,6 +1794,11 @@ async fn model_provider_auth_set_oauth_rejects_api_key_provider_without_storing(
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let provider_id = verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID;
+    app.inner
+        .metadata_store
+        .upsert_provider(verlet_metadata::provider_store::example_openai_compatible_record())
+        .await
+        .unwrap();
 
     let error = app
         .dispatch_request(
@@ -2856,7 +3244,7 @@ async fn registry_roots_resolve_against_configured_cwd() {
 }
 
 #[tokio::test]
-async fn model_list_includes_the_checked_in_offline_catalog() {
+async fn model_list_scopes_catalog_models_to_store_configured_providers() {
     let root = unique_test_root("app-server-model-catalog-offline");
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
         root.join("model-catalog-offline.sock"),
@@ -2879,17 +3267,331 @@ async fn model_list_includes_the_checked_in_offline_catalog() {
         .dispatch_request(&connection, "model/list", None)
         .await
         .unwrap();
-    let offline = models["data"]
+    let data = models["data"].as_array().unwrap();
+    assert!(
+        data.iter().all(|entry| entry["providerId"] != "anthropic"),
+        "unconfigured catalog providers belong to modelProvider/catalog, not model/list"
+    );
+    assert!(
+        data.iter().all(|entry| {
+            entry["providerId"] != crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+        }),
+        "the offline echo pair must stay hidden when the launch model was not explicit (EMO-575)"
+    );
+
+    let catalog = app
+        .dispatch_request(&connection, "modelProvider/catalog", None)
+        .await
+        .unwrap();
+    let anthropic = catalog["providers"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|entry| entry["providerId"] == "anthropic" && entry["model"] == "claude-sonnet-4-6")
-        .expect("model/list omitted the built-in offline catalog");
-    assert_eq!(offline["displayName"], "Claude Sonnet 4.6");
-    assert_eq!(offline["contextWindowTokens"], 1_000_000);
-    assert_eq!(offline["maxOutputTokens"], 128_000);
-    assert_eq!(offline["authStatus"], "missing");
+        .find(|provider| provider["providerId"] == "anthropic")
+        .expect("modelProvider/catalog omitted the built-in anthropic provider");
+    assert_eq!(anthropic["displayName"], "Anthropic");
+    assert_eq!(anthropic["baseUrl"], "https://api.anthropic.com");
+    assert_eq!(anthropic["api"], "anthropic_messages");
+    assert_eq!(anthropic["authKind"], "api_key");
+    assert!(
+        anthropic["envVars"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("ANTHROPIC_API_KEY"))
+    );
+    assert_eq!(anthropic["configured"], false);
+    assert_eq!(anthropic["authSource"], serde_json::Value::Null);
+    assert_eq!(anthropic["custom"], false);
+    assert_eq!(anthropic["active"], false);
+    assert!(anthropic["modelCount"].as_u64().unwrap() > 0);
+    assert!(
+        anthropic["defaultModel"]
+            .as_str()
+            .is_some_and(|model| !model.is_empty()),
+        "an unconfigured catalog provider must default to its first catalog model"
+    );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_catalog_merges_catalog_metadata_with_store_state() {
+    const ENV_NAME: &str = "VERLET_CATALOG_MERGE_ENV_FIXTURE";
+    let root = unique_test_root("app-server-provider-catalog-merge");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("provider-catalog-merge.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    config.instance_environment.provider_auth =
+        crate::adapters::app_server::instance::ProviderAuthSource::Injected(
+            verlet_metadata::provider_store::LlmProviderAuthContext::new()
+                .with_env(ENV_NAME, "env-secret"),
+        );
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    for provider in [
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "openai",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://api.openai.com/v1",
+        )
+        .with_auth_header(true)
+        .with_model(verlet_metadata::provider_store::LlmProviderModelRecord::new("gpt-zebra"))
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("gpt-alpha")
+                .with_metadata("default", "true"),
+        ),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "anthropic",
+            verlet_history::ProviderApi::AnthropicMessages,
+            "https://api.anthropic.com",
+        )
+        .with_auth(
+            verlet_metadata::provider_store::LlmProviderAuthConfig::Env {
+                name: ENV_NAME.to_string(),
+            },
+        )
+        .with_auth_header(true)
+        .with_model(verlet_metadata::provider_store::LlmProviderModelRecord::new("claude-fixture")),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "store-only-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            "https://store-only.example.invalid/v1",
+        )
+        .with_display_name("Store Only Fixture")
+        .with_auth_header(true)
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("store-only-model"),
+        ),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "store-oauth-fixture",
+            verlet_history::ProviderApi::OpenAIResponses,
+            "https://store-oauth.example.invalid/v1",
+        )
+        .with_display_name("Store OAuth Fixture")
+        .with_auth_header(true)
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("store-oauth-model"),
+        ),
+    ] {
+        project_store.upsert_provider(provider).await.unwrap();
+    }
+    user_store
+        .set_credential(
+            "openai",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "stored-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    user_store
+        .set_credential(
+            "store-oauth-fixture",
+            verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                access: "oauth-access-secret".to_string(),
+                refresh: "oauth-refresh-secret".to_string(),
+                expires_at_ms: verlet_history::now_ms() + 3_600_000,
+                account_id: None,
+                email: None,
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let catalog = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/catalog",
+            Some(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+    let providers = catalog["providers"].as_array().unwrap();
+    let find = |provider_id: &str| {
+        providers
+            .iter()
+            .find(|provider| provider["providerId"] == provider_id)
+            .unwrap()
+    };
+
+    let openai = find("openai");
+    assert_eq!(openai["configured"], true);
+    assert_eq!(openai["authSource"], "stored");
+    assert_eq!(openai["custom"], false);
+    assert_eq!(openai["modelCount"], 2);
+    assert_eq!(
+        openai["defaultModel"], "gpt-alpha",
+        "the record's default-flagged model must win"
+    );
+    let anthropic = find("anthropic");
+    assert_eq!(anthropic["configured"], true);
+    assert_eq!(anthropic["authSource"], "env");
+    assert_eq!(anthropic["authLabel"], ENV_NAME);
+    let store_only = find("store-only-fixture");
+    assert_eq!(store_only["custom"], true);
+    assert_eq!(store_only["configured"], false);
+    assert_eq!(store_only["authKind"], "api_key");
+    assert_eq!(store_only["displayName"], "Store Only Fixture");
+    assert_eq!(
+        store_only["baseUrl"],
+        "https://store-only.example.invalid/v1"
+    );
+    assert_eq!(store_only["api"], "open_ai_chat_completions");
+    assert_eq!(store_only["defaultModel"], "store-only-model");
+    let store_oauth = find("store-oauth-fixture");
+    assert_eq!(store_oauth["custom"], true);
+    assert_eq!(store_oauth["configured"], true);
+    assert_eq!(
+        store_oauth["authKind"], "oauth",
+        "a custom record with a stored OAuth credential must report oauth"
+    );
+    assert_eq!(store_oauth["authSource"], "oauth");
+    let groq = find("groq");
+    assert_eq!(groq["configured"], false);
+    assert_eq!(groq["authSource"], serde_json::Value::Null);
+    assert_eq!(groq["custom"], false);
+    let codex = find("openai-codex");
+    assert_eq!(codex["authKind"], "oauth");
+
+    // Configured providers lead, then alphabetical display names; the
+    // remainder is unconfigured and stays alphabetical too.
+    assert_eq!(providers[0]["providerId"], "anthropic");
+    assert_eq!(providers[1]["providerId"], "openai");
+    assert_eq!(providers[2]["providerId"], "store-oauth-fixture");
+    assert!(
+        providers[3..]
+            .iter()
+            .all(|provider| provider["configured"] == false)
+    );
+    let unconfigured_names = providers[3..]
+        .iter()
+        .map(|provider| {
+            provider["displayName"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+        })
+        .collect::<Vec<_>>();
+    let mut sorted_names = unconfigured_names.clone();
+    sorted_names.sort();
+    assert_eq!(unconfigured_names, sorted_names);
+    let encoded = serde_json::to_string(&catalog).unwrap();
+    assert!(!encoded.contains("stored-secret"));
+    assert!(!encoded.contains("env-secret"));
+    assert!(!encoded.contains("oauth-access-secret"));
+    assert!(!encoded.contains("oauth-refresh-secret"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_provider_catalog_marks_the_active_provider_and_oauth_source() {
+    let root = unique_test_root("app-server-provider-catalog-active");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(format!(
+            "verlet-provider-catalog-active-{}.sock",
+            uuid::Uuid::now_v7()
+        )));
+    let mut config =
+        crate::adapters::app_server::VerletAppServerConfig::local(listen, root.clone())
+            .with_openai_codex("gpt-5.6-terra");
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    verlet_metadata::provider_store::seed_default_llm_providers(&metadata_store)
+        .await
+        .unwrap();
+    let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+        "gpt-5.6-terra",
+    );
+    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        runtime_config,
+        std::sync::Arc::new(InspectingCapsuleClient::default()), // lexicon-allow: capsule - existing test client type.
+        crate::adapters::app_server::CapsuleBindingsConfig::default(), // lexicon-allow: capsule - existing config type.
+    );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+            config,
+            runtime_factory,
+            metadata_store,
+        )
+        .await
+        .unwrap();
+    app.inner
+        .user_metadata_store
+        .set_credential(
+            verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID,
+            verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                access: "codex-access".to_string(),
+                refresh: "codex-refresh".to_string(),
+                expires_at_ms: verlet_history::now_ms() + 3_600_000,
+                account_id: None,
+                email: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let catalog = app
+        .dispatch_request(&connection, "modelProvider/catalog", None)
+        .await
+        .unwrap();
+    let providers = catalog["providers"].as_array().unwrap();
+    let codex = providers
+        .iter()
+        .find(|provider| provider["providerId"] == "openai-codex")
+        .unwrap();
+    assert_eq!(codex["authKind"], "oauth");
+    assert_eq!(codex["configured"], true);
+    assert_eq!(codex["authSource"], "oauth");
+    assert_eq!(codex["active"], true);
+    assert_eq!(codex["custom"], false);
+    assert_eq!(codex["modelCount"], 3);
+    assert_eq!(
+        codex["defaultModel"],
+        verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL
+    );
+    assert_eq!(
+        providers[0]["providerId"], "openai-codex",
+        "the configured active provider must sort first"
+    );
+    // EMO-575 retired the seeded example placeholder; it must not surface in
+    // the catalog at all.
+    assert!(
+        providers.iter().all(|provider| {
+            provider["providerId"] != verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID
+        }),
+        "the retired openai_compatible placeholder must not appear in modelProvider/catalog"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3205,6 +3907,9 @@ async fn model_select_switches_active_model_and_restart_restores_launch_default(
         config.state_home = root.join("state");
         config.user_state_home = root.join("user-state");
         config.agent_registry_root = root.join("agents");
+        // Keep the launch echo row listable so the restart assertion can see
+        // the restored launch default (EMO-575 hides non-explicit launches).
+        config.model_explicit = true;
         config
     };
     let config = make_config();
@@ -3384,6 +4089,105 @@ async fn model_select_switches_active_model_and_restart_restores_launch_default(
     assert_eq!(
         active["model"],
         crate::adapters::app_server::APP_SERVER_LOCAL_MODEL
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_list_suppresses_the_launch_row_when_another_model_is_active() {
+    let root = unique_test_root("app-server-launch-row-suppression");
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        root.join("launch-row-suppression.sock"),
+    );
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
+        listen,
+        std::env::current_dir().unwrap(),
+    );
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.user_state_home = root.join("user-state");
+    config.agent_registry_root = root.join("agents");
+    // Explicitly launched echo: the row is listable while active (EMO-575).
+    config.model_explicit = true;
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "suppression-fixture",
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                "https://suppression.example.invalid/v1",
+            )
+            .with_auth_header(true)
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("suppression-model"),
+            ),
+        )
+        .await
+        .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            "suppression-fixture",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "suppression-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        models["data"].as_array().unwrap().iter().any(|entry| {
+            entry["providerId"] == crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+                && entry["active"] == true
+        }),
+        "the launch row must be listed while it is the active selection"
+    );
+
+    app.dispatch_request(
+        &connection,
+        "model/select",
+        Some(serde_json::json!({
+            "providerId": "suppression-fixture",
+            "model": "suppression-model",
+        })),
+    )
+    .await
+    .unwrap();
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let data = models["data"].as_array().unwrap();
+    assert!(
+        data.iter().all(|entry| {
+            entry["providerId"] != crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER
+        }),
+        "the launch row must disappear once another model is active"
+    );
+    assert_eq!(
+        data.iter()
+            .find(|entry| entry["providerId"] == "suppression-fixture"
+                && entry["model"] == "suppression-model")
+            .unwrap()["active"],
+        true
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -3721,6 +4525,166 @@ async fn model_select_routes_auth_free_responses_without_authorization() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// EMO-577: a keyless custom provider (auth `none`, the chat setup window's
+/// "no API key" form path) counts as configured end to end: model/list,
+/// modelProvider/auth/status, modelProvider/catalog, model/select, and a
+/// routed turn that sends no Authorization header.
+#[tokio::test]
+async fn keyless_custom_provider_counts_configured_and_routes_without_authorization() {
+    let server = spawn_provider_sse_fixture(concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"KEYLESS_OK\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    let root = unique_test_root("app-server-keyless-custom-provider");
+    let config = local_model_select_test_config(&root, "keyless-custom");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    // The exact payload the chat driver builds for a keyless custom provider.
+    app.dispatch_request(
+        &connection,
+        "modelProvider/upsert",
+        Some(serde_json::json!({
+            "provider": {
+                "providerId": "local-keyless",
+                "api": "open_ai_chat_completions",
+                "baseUrl": format!("{}/v1", server.base_url),
+                "displayName": "Local Keyless",
+                "auth": { "type": "none" },
+                "authHeader": false,
+                "headers": {},
+                "models": [{ "modelId": "keyless-model", "metadata": { "default": "true" } }],
+                "metadata": { "origin": "custom" },
+            }
+        })),
+    )
+    .await
+    .unwrap();
+
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let row = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["providerId"] == "local-keyless")
+        .expect("keyless provider models must appear in model/list");
+    assert_eq!(row["model"], "keyless-model");
+    assert_eq!(row["authStatus"], "configured");
+
+    let auth = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": "local-keyless" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auth["auth"]["configured"], true);
+    assert_eq!(auth["auth"]["source"], "none");
+    assert_eq!(auth["auth"]["label"], "no auth required");
+
+    let catalog = app
+        .dispatch_request(&connection, "modelProvider/catalog", None)
+        .await
+        .unwrap();
+    let catalog_row = catalog["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["providerId"] == "local-keyless")
+        .expect("keyless provider must appear in modelProvider/catalog");
+    assert_eq!(catalog_row["configured"], true);
+    assert_eq!(catalog_row["custom"], true);
+    assert_eq!(catalog_row["authSource"], "none");
+
+    // Threads bind their manifest at start; keep the start-before-select
+    // order the other model/select routing tests use.
+    let thread_id = start_model_select_test_thread(&app, &connection).await;
+    let selected = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": "local-keyless",
+                "model": "keyless-model",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected["active"]["providerId"], "local-keyless");
+    assert_eq!(selected["active"]["model"], "keyless-model");
+
+    let completed = start_and_wait_for_model_select_turn(
+        &app,
+        &connection,
+        &mut outbound_rx,
+        &thread_id,
+        "route keyless",
+    )
+    .await;
+    assert_eq!(
+        completed_turn_agent_text(&completed).as_deref(),
+        Some("KEYLESS_OK")
+    );
+    let request = server.request.await.unwrap();
+    assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+    assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// EMO-577: `auth: none` with `authHeader: true` (a record shaped outside the
+/// chat form) must still select without a credential instead of erroring
+/// "requires an API key"; the endpoint is built with no Authorization header.
+#[tokio::test]
+async fn keyless_provider_with_auth_header_still_selects_without_credential() {
+    let root = unique_test_root("app-server-keyless-auth-header");
+    let config = local_model_select_test_config(&root, "keyless-auth-header");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    app.dispatch_request(
+        &connection,
+        "modelProvider/upsert",
+        Some(serde_json::json!({
+            "provider": {
+                "providerId": "keyless-header-fixture",
+                "api": "open_ai_chat_completions",
+                "baseUrl": "http://127.0.0.1:1/v1",
+                "auth": { "type": "none" },
+                "authHeader": true,
+                "models": [{ "modelId": "keyless-header-model" }],
+            }
+        })),
+    )
+    .await
+    .unwrap();
+
+    let selected = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": "keyless-header-fixture",
+                "model": "keyless-header-model",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected["active"]["providerId"], "keyless-header-fixture");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn model_select_rejects_missing_auth_without_changing_active_model() {
     let root = unique_test_root("app-server-model-select-missing-auth");
@@ -3735,6 +4699,9 @@ async fn model_select_rejects_missing_auth_without_changing_active_model() {
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
     config.agent_registry_root = root.join("agents");
+    // Explicitly launched echo keeps the launch row listable so the active
+    // assertion below can observe it (EMO-575).
+    config.model_explicit = true;
     let project_store =
         verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
             .await
@@ -10686,14 +11653,15 @@ async fn manifest_operation_grants_extend_loaded_record_without_duplicates() {
 }
 
 #[tokio::test]
-async fn catalog_provider_resolution_uses_seeded_openai_compatible_store_and_stored_auth() {
+async fn catalog_provider_resolution_uses_openai_compatible_store_record_and_stored_auth() {
     let root =
         std::env::temp_dir().join(format!("verlet-provider-resolve-{}", uuid::Uuid::now_v7()));
     let store_path = root.join("metadata.sqlite3");
     let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&store_path)
         .await
         .unwrap();
-    verlet_metadata::provider_store::seed_default_llm_providers(&store)
+    store
+        .upsert_provider(verlet_metadata::provider_store::example_openai_compatible_record())
         .await
         .unwrap();
     store
@@ -13720,6 +14688,9 @@ async fn app_server_websocket_query_methods_are_callable() {
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
+    // Explicitly launched echo keeps the active launch row selectable for the
+    // typed model/list + model/select round trip below (EMO-575).
+    config.model_explicit = true;
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();

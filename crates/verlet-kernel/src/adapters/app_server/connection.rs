@@ -892,6 +892,10 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
         crate::daemon::identity::AuthorityClass::Host,
     ),
     (
+        "modelProvider/catalog",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
         "experimentalFeature/list",
         crate::daemon::identity::AuthorityClass::Interactive,
     ),
@@ -1128,6 +1132,7 @@ pub(super) const HOST_EFFECT_METHODS: &[&str] = &[
     "modelProvider/auth/set",
     "modelProvider/auth/setOAuth",
     "modelProvider/auth/delete",
+    "modelProvider/catalog",
     // Runtime construction, reconstruction, and standing-grant changes.
     "thread/start",
     "thread/spawn",
@@ -1602,6 +1607,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 let params: ModelProviderAuthDeleteParams = parse_params(params)?;
                 self.model_provider_auth_delete(params).await
             }
+            "modelProvider/catalog" => self.model_provider_catalog().await,
             "experimentalFeature/list" => Ok(serde_json::json!({ "data": [], "nextCursor": null })),
             "experimentalFeature/enablement/set" => {
                 let params: ExperimentalFeatureEnablementSetParams = parse_params(params)?;
@@ -2271,6 +2277,164 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "nextCursor": null }))
     }
 
+    /// `modelProvider/catalog` (EMO-574): read-only merge of the models.dev
+    /// provider catalog with provider-store state for the chat setup wizard.
+    /// It never writes provider records or credentials.
+    pub(super) async fn model_provider_catalog(
+        &self,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let catalog_providers = self.inner.model_catalog.providers();
+        let mut catalog_models = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for entry in self.inner.model_catalog.entries() {
+            catalog_models
+                .entry(entry.provider_id)
+                .or_default()
+                .push(entry.model_id);
+        }
+        let records = self
+            .inner
+            .metadata_store
+            .list_providers()
+            .await
+            .map_err(|err| internal_error(crate::adapters::app_server::provider_store_error(err)))?
+            .into_iter()
+            .map(|record| (record.provider_id.clone(), record))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let auth_context = self.inner.instance_environment.provider_auth.resolve();
+        let active = self.inner.active_model.read().await.clone();
+        let mut rows = Vec::with_capacity(catalog_providers.len() + records.len());
+        for provider in &catalog_providers {
+            let record = records.get(&provider.provider_id);
+            let status = match record {
+                Some(record) => Some(
+                    verlet_metadata::provider_store::llm_provider_auth_status(
+                        &self.inner.user_metadata_store,
+                        record,
+                        &auth_context,
+                    )
+                    .await
+                    .map_err(|err| {
+                        internal_error(crate::adapters::app_server::provider_store_error(err))
+                    })?,
+                ),
+                None => None,
+            };
+            let (model_count, default_model) = model_provider_catalog_models(
+                record,
+                catalog_models
+                    .get(&provider.provider_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            );
+            rows.push(serde_json::json!({
+                "providerId": provider.provider_id,
+                "displayName": provider.display_name,
+                "baseUrl": provider.base_url,
+                "api": catalog_api_rpc_json(&provider.api),
+                "authKind": provider.auth_kind,
+                "envVars": provider.env_vars,
+                "docUrl": provider.doc_url,
+                "modelCount": model_count,
+                "defaultModel": default_model,
+                "configured": status.as_ref().is_some_and(|status| status.configured),
+                "authSource": model_provider_catalog_auth_source(
+                    status.as_ref(),
+                    provider.auth_kind
+                        == crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_OAUTH,
+                ),
+                "authLabel": status.and_then(|status| status.label),
+                "custom": false,
+                "active": provider.provider_id == active.model_provider,
+            }));
+        }
+        let catalog_ids = catalog_providers
+            .iter()
+            .map(|provider| provider.provider_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for record in records
+            .values()
+            .filter(|record| !catalog_ids.contains(record.provider_id.as_str()))
+        {
+            let status = verlet_metadata::provider_store::llm_provider_auth_status(
+                &self.inner.user_metadata_store,
+                record,
+                &auth_context,
+            )
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
+            let env_vars = match &record.auth {
+                verlet_metadata::provider_store::LlmProviderAuthConfig::Env { name } => {
+                    vec![name.clone()]
+                }
+                _ => record
+                    .metadata
+                    .get("auth_env")
+                    .map(|names| {
+                        names
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+            // The auth config has no OAuth variant, so an OAuth-backed custom
+            // record is recognized by the kind of its stored credential.
+            let oauth = self
+                .inner
+                .user_metadata_store
+                .get_credential(&record.provider_id)
+                .await
+                .map_err(|err| {
+                    internal_error(crate::adapters::app_server::provider_store_error(err))
+                })?
+                .is_some_and(|credential| {
+                    matches!(
+                        credential,
+                        verlet_metadata::provider_store::LlmProviderCredential::OAuth { .. }
+                    )
+                });
+            let auth_kind = if oauth {
+                crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_OAUTH
+            } else {
+                crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_API_KEY
+            };
+            let (model_count, default_model) = model_provider_catalog_models(Some(record), &[]);
+            rows.push(serde_json::json!({
+                "providerId": record.provider_id,
+                "displayName": catalog_provider_display_name(record),
+                "baseUrl": record.base_url,
+                "api": provider_api_rpc_json(&record.api),
+                "authKind": auth_kind,
+                "envVars": env_vars,
+                "docUrl": null,
+                "modelCount": model_count,
+                "defaultModel": default_model,
+                "configured": status.configured,
+                "authSource": model_provider_catalog_auth_source(Some(&status), oauth),
+                "authLabel": status.label,
+                "custom": true,
+                "active": record.provider_id == active.model_provider,
+            }));
+        }
+        let sort_key = |row: &serde_json::Value| {
+            (
+                !row["configured"].as_bool().unwrap_or(false),
+                !row["active"].as_bool().unwrap_or(false),
+                row["displayName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
+                row["providerId"].as_str().unwrap_or_default().to_string(),
+            )
+        };
+        rows.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
+        Ok(serde_json::json!({ "providers": rows }))
+    }
+
     pub(super) async fn model_provider_read(
         &self,
         params: ModelProviderReadParams,
@@ -2363,7 +2527,38 @@ impl crate::adapters::app_server::VerletAppServer {
         params: ModelProviderAuthStatusParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let providers = if let Some(provider_id) = params.provider_id.as_deref() {
-            vec![self.model_provider_record(provider_id).await?]
+            let record = self
+                .inner
+                .metadata_store
+                .get_provider(provider_id)
+                .await
+                .map_err(|err| {
+                    internal_error(crate::adapters::app_server::provider_store_error(err))
+                })?;
+            match record {
+                Some(provider) => vec![provider],
+                None => {
+                    // A record-less catalog provider reports configured=false
+                    // instead of not-found so clients can probe it before the
+                    // first modelProvider/auth/set (EMO-575).
+                    let provider = self
+                        .catalog_provider(provider_id)
+                        .ok_or_else(|| model_provider_not_found(provider_id))?;
+                    let auth = serde_json::json!({
+                        "providerId": provider.provider_id,
+                        "displayName": provider.display_name,
+                        "configured": false,
+                        "source": serde_json::Value::Null,
+                        "label": serde_json::Value::Null,
+                        "authHeader": true,
+                    });
+                    return Ok(serde_json::json!({
+                        "auth": auth,
+                        "data": [auth],
+                        "nextCursor": null,
+                    }));
+                }
+            }
         } else {
             let mut providers =
                 self.inner
@@ -2400,7 +2595,33 @@ impl crate::adapters::app_server::VerletAppServer {
             ));
         }
         let _mutation = self.inner.model_mutation.lock().await;
-        let provider = self.model_provider_record(&params.provider_id).await?;
+        let existing = self
+            .inner
+            .metadata_store
+            .get_provider(&params.provider_id)
+            .await
+            .map_err(|err| {
+                internal_error(crate::adapters::app_server::provider_store_error(err))
+            })?;
+        let (provider, created_from_catalog) = match existing {
+            Some(provider) => (provider, false),
+            None => {
+                // No store record yet: materialize one from the catalog
+                // template before storing the credential (EMO-575). Ids in
+                // neither store nor catalog keep the not-found error.
+                let template = self
+                    .catalog_template_provider_record(&params.provider_id)
+                    .ok_or_else(|| model_provider_not_found(&params.provider_id))?;
+                self.inner
+                    .metadata_store
+                    .upsert_provider(template.clone())
+                    .await
+                    .map_err(|err| {
+                        internal_error(crate::adapters::app_server::provider_store_error(err))
+                    })?;
+                (template, true)
+            }
+        };
         if provider.provider_id == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID {
             return Err(jsonrpc_error(
                 -32602,
@@ -2415,7 +2636,8 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(|err| {
                 internal_error(crate::adapters::app_server::provider_store_error(err))
             })?;
-        self.inner
+        if let Err(err) = self
+            .inner
             .user_metadata_store
             .set_credential(
                 &provider.provider_id,
@@ -2424,9 +2646,13 @@ impl crate::adapters::app_server::VerletAppServer {
                 },
             )
             .await
-            .map_err(|err| {
-                internal_error(crate::adapters::app_server::provider_store_error(err))
-            })?;
+        {
+            self.remove_created_catalog_record(created_from_catalog, &provider.provider_id)
+                .await;
+            return Err(internal_error(
+                crate::adapters::app_server::provider_store_error(err),
+            ));
+        }
         match self
             .rebuild_active_catalog_provider_endpoint(&provider.provider_id)
             .await
@@ -2441,6 +2667,8 @@ impl crate::adapters::app_server::VerletAppServer {
             Err(error) => {
                 self.restore_model_provider_credential(&provider.provider_id, previous)
                     .await?;
+                self.remove_created_catalog_record(created_from_catalog, &provider.provider_id)
+                    .await;
                 return Err(error);
             }
         }
@@ -2558,6 +2786,23 @@ impl crate::adapters::app_server::VerletAppServer {
                 return Err(error);
             }
         }
+        // Deleting the credential of an untouched catalog-templated record
+        // returns the catalog to pristine: the record only existed to hold
+        // the credential (EMO-575). A record whose fields no longer match
+        // today's template counts as user-modified and stays.
+        if provider.metadata.get("origin").map(String::as_str) == Some("catalog")
+            && self
+                .catalog_template_provider_record(&provider.provider_id)
+                .is_some_and(|template| record_matches_catalog_template(&provider, &template))
+        {
+            self.inner
+                .metadata_store
+                .delete_provider(&provider.provider_id)
+                .await
+                .map_err(|err| {
+                    internal_error(crate::adapters::app_server::provider_store_error(err))
+                })?;
+        }
         Ok(serde_json::json!({ "auth": self.model_provider_auth_json(&provider).await? }))
     }
 
@@ -2647,12 +2892,86 @@ impl crate::adapters::app_server::VerletAppServer {
             .get_provider(provider_id)
             .await
             .map_err(|err| internal_error(crate::adapters::app_server::provider_store_error(err)))?
-            .ok_or_else(|| {
-                jsonrpc_error(
-                    -32602,
-                    format!("model provider {provider_id:?} was not found"),
-                )
-            })
+            .ok_or_else(|| model_provider_not_found(provider_id))
+    }
+
+    fn catalog_provider(
+        &self,
+        provider_id: &str,
+    ) -> Option<crate::adapters::app_server::model_catalog::ModelCatalogProvider> {
+        self.inner
+            .model_catalog
+            .providers()
+            .into_iter()
+            .find(|provider| provider.provider_id == provider_id)
+    }
+
+    /// Store-record template for a catalog provider: what
+    /// `modelProvider/auth/set` materializes on demand (EMO-575). Kept
+    /// minimal: id, api family, base URL, display name, auth-header flag,
+    /// the catalog's non-deprecated models (with their catalog limits and the
+    /// catalog default marked), and an `origin=catalog` marker so
+    /// `modelProvider/auth/delete` can recognize an untouched templated
+    /// record. Record writes stay in the auth handlers; the catalog itself is
+    /// read-only advisory.
+    fn catalog_template_provider_record(
+        &self,
+        provider_id: &str,
+    ) -> Option<verlet_metadata::provider_store::LlmProviderRecord> {
+        let provider = self.catalog_provider(provider_id)?;
+        let api = catalog_api_to_provider_api(&provider.api)?;
+        let mut record = verlet_metadata::provider_store::LlmProviderRecord::new(
+            provider.provider_id.clone(),
+            api,
+            provider.base_url.clone(),
+        )
+        .with_display_name(provider.display_name.clone())
+        .with_auth_header(true)
+        .with_metadata("origin", "catalog");
+        // Catalog entries are sorted by (provider, model); the first model is
+        // the catalog's defaultModel choice, same as modelProvider/catalog.
+        let mut default_marked = false;
+        for entry in self
+            .inner
+            .model_catalog
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.provider_id == provider_id)
+        {
+            let mut model =
+                verlet_metadata::provider_store::LlmProviderModelRecord::new(entry.model_id)
+                    .with_display_name(entry.display_name)
+                    .with_input_modality(
+                        verlet_metadata::provider_store::LlmProviderInputModality::Text,
+                    );
+            if let Some(context_window) = entry.context_window {
+                model = model.with_context_window_tokens(context_window);
+            }
+            // The record field is u32; skip out-of-range catalog values
+            // rather than truncating them.
+            if let Some(max_output) = entry.max_output_tokens.and_then(|v| u32::try_from(v).ok()) {
+                model = model.with_max_output_tokens(max_output);
+            }
+            if !default_marked {
+                model = model.with_metadata("default", "true");
+                default_marked = true;
+            }
+            record = record.with_model(model);
+        }
+        Some(record)
+    }
+
+    /// Best-effort rollback of a record that `modelProvider/auth/set`
+    /// templated in the same request; the primary error stays authoritative.
+    async fn remove_created_catalog_record(&self, created_from_catalog: bool, provider_id: &str) {
+        if !created_from_catalog {
+            return;
+        }
+        if let Err(err) = self.inner.metadata_store.delete_provider(provider_id).await {
+            log::debug!(
+                "failed to roll back templated provider record {provider_id:?} after credential storage failed: {err}"
+            );
+        }
     }
 
     async fn model_provider_auth_json(
@@ -5516,12 +5835,28 @@ impl crate::adapters::app_server::VerletAppServer {
                 );
             }
         }
-        catalog_entries.extend(self.inner.model_catalog.entries());
+        // Catalog models are scoped to store-configured providers (EMO-574);
+        // unconfigured catalog providers surface via modelProvider/catalog.
+        catalog_entries.extend(
+            self.inner
+                .model_catalog
+                .entries()
+                .into_iter()
+                .filter(|entry| provider_records.contains_key(&entry.provider_id)),
+        );
         let launch_pair_in_catalog = catalog_entries.iter().any(|entry| {
             entry.provider_id == self.inner.model_provider && entry.model_id == self.inner.model
         });
         let active = self.inner.active_model.read().await.clone();
-        if !launch_pair_in_catalog {
+        let launch_pair_active =
+            active.model_provider == self.inner.model_provider && active.model == self.inner.model;
+        // The offline echo pair stays hidden unless the user explicitly asked
+        // for the launch model or its provider really exists in the store
+        // (EMO-575). Turn submission against the hidden pair still works; this
+        // is a display-plane gate only.
+        let launch_pair_visible =
+            self.inner.model_explicit || provider_records.contains_key(&self.inner.model_provider);
+        if !launch_pair_in_catalog && launch_pair_active && launch_pair_visible {
             let display_name = match &self.inner.provider {
                 crate::adapters::app_server::AppServerProviderConfig::LocalOffline => {
                     "Verlet Local Offline".to_string()
@@ -6928,6 +7263,98 @@ fn provider_api_rpc_json(api: &verlet_history::ProviderApi) -> serde_json::Value
         }
         verlet_history::ProviderApi::AnthropicMessages => serde_json::json!("anthropic_messages"),
         verlet_history::ProviderApi::Other(other) => serde_json::json!({ "other": other }),
+    }
+}
+
+fn model_provider_not_found(provider_id: &str) -> JsonRpcErrorError {
+    jsonrpc_error(
+        -32602,
+        format!("model provider {provider_id:?} was not found"),
+    )
+}
+
+fn catalog_api_to_provider_api(api: &str) -> Option<verlet_history::ProviderApi> {
+    match api {
+        crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_CHAT_COMPLETIONS => {
+            Some(verlet_history::ProviderApi::OpenAIChatCompletions)
+        }
+        crate::adapters::app_server::model_catalog::CATALOG_API_ANTHROPIC_MESSAGES => {
+            Some(verlet_history::ProviderApi::AnthropicMessages)
+        }
+        crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_RESPONSES => {
+            Some(verlet_history::ProviderApi::OpenAIResponses)
+        }
+        _ => None,
+    }
+}
+
+/// A record still equals its catalog template when every field except the
+/// timestamps matches. A catalog refresh that changed the template since the
+/// record was created counts as a mismatch, which errs on keeping the record.
+fn record_matches_catalog_template(
+    record: &verlet_metadata::provider_store::LlmProviderRecord,
+    template: &verlet_metadata::provider_store::LlmProviderRecord,
+) -> bool {
+    record.provider_id == template.provider_id
+        && record.api == template.api
+        && record.base_url == template.base_url
+        && record.display_name == template.display_name
+        && record.auth == template.auth
+        && record.headers == template.headers
+        && record.auth_header == template.auth_header
+        && record.models == template.models
+        && record.metadata == template.metadata
+}
+
+fn catalog_api_rpc_json(api: &str) -> serde_json::Value {
+    match api {
+        crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_CHAT_COMPLETIONS => {
+            provider_api_rpc_json(&verlet_history::ProviderApi::OpenAIChatCompletions)
+        }
+        crate::adapters::app_server::model_catalog::CATALOG_API_ANTHROPIC_MESSAGES => {
+            provider_api_rpc_json(&verlet_history::ProviderApi::AnthropicMessages)
+        }
+        crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_RESPONSES => {
+            provider_api_rpc_json(&verlet_history::ProviderApi::OpenAIResponses)
+        }
+        other => serde_json::json!({ "other": other }),
+    }
+}
+
+fn model_provider_catalog_auth_source(
+    status: Option<&verlet_metadata::provider_store::LlmProviderAuthStatus>,
+    oauth: bool,
+) -> serde_json::Value {
+    match status.and_then(|status| status.source) {
+        None => serde_json::Value::Null,
+        Some(verlet_metadata::provider_store::LlmProviderAuthSourceKind::Environment) => {
+            serde_json::json!("env")
+        }
+        Some(verlet_metadata::provider_store::LlmProviderAuthSourceKind::None) => {
+            serde_json::json!("none")
+        }
+        Some(_) if oauth => serde_json::json!("oauth"),
+        Some(_) => serde_json::json!("stored"),
+    }
+}
+
+/// Deterministic `(modelCount, defaultModel)` rule: a store record's models
+/// win (its default-flagged model first), else the catalog's sorted order.
+fn model_provider_catalog_models(
+    record: Option<&verlet_metadata::provider_store::LlmProviderRecord>,
+    catalog_model_ids: &[String],
+) -> (usize, Option<String>) {
+    match record.filter(|record| !record.models.is_empty()) {
+        Some(record) => {
+            let default = record
+                .models
+                .iter()
+                .find(|model| model.metadata.get("default").map(String::as_str) == Some("true"))
+                .or_else(|| record.models.first())
+                .map(|model| model.model_id.clone());
+            (record.models.len(), default)
+        }
+        None => (catalog_model_ids.len(), catalog_model_ids.first().cloned()),
     }
 }
 

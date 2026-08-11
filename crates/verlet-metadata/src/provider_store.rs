@@ -374,6 +374,9 @@ pub enum LlmProviderAuthSourceKind {
     Environment,
     CatalogInline,
     CatalogCommand,
+    /// The provider declares `auth: none` (a keyless local endpoint): it is
+    /// configured without any credential. Serializes as `"none"` over RPC.
+    None,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -455,7 +458,11 @@ pub trait ThreadMetadataStore: Send + Sync {
     ) -> MetadataStoreResult<Vec<verlet_runtime_contracts::ThreadLifecycleRecord>>;
 }
 
-pub fn default_openai_compatible_llm_provider_record() -> LlmProviderRecord {
+/// Test-support template for a generic OpenAI-compatible provider. It points
+/// at the unusable `example.invalid` endpoint and is never seeded as a
+/// product default (EMO-575); tests upsert it explicitly when they exercise
+/// generic provider behavior.
+pub fn example_openai_compatible_record() -> LlmProviderRecord {
     LlmProviderRecord::new(
         OPENAI_COMPATIBLE_PROVIDER_ID,
         verlet_history::ProviderApi::OpenAIChatCompletions,
@@ -508,14 +515,6 @@ pub fn default_openai_codex_llm_provider_record() -> LlmProviderRecord {
     provider
 }
 
-pub async fn seed_openai_compatible_llm_provider(
-    store: &dyn LlmProviderCatalogStore,
-) -> LlmProviderStoreResult<()> {
-    store
-        .upsert_provider(default_openai_compatible_llm_provider_record())
-        .await
-}
-
 pub async fn seed_openai_codex_llm_provider(
     store: &dyn LlmProviderCatalogStore,
 ) -> LlmProviderStoreResult<()> {
@@ -524,11 +523,43 @@ pub async fn seed_openai_codex_llm_provider(
         .await
 }
 
-pub async fn seed_default_llm_providers(
-    store: &dyn LlmProviderCatalogStore,
-) -> LlmProviderStoreResult<()> {
-    seed_openai_compatible_llm_provider(store).await?;
+pub async fn seed_default_llm_providers<S>(store: &S) -> LlmProviderStoreResult<()>
+where
+    S: LlmProviderCatalogStore + LlmProviderAuthStore,
+{
+    remove_placeholder_openai_compatible_record(store, store).await?;
     seed_openai_codex_llm_provider(store).await
+}
+
+/// Migration (EMO-575): earlier releases seeded a placeholder
+/// `openai_compatible` record pointing at `example.invalid`. Delete it IFF it
+/// is pristine (base_url still the placeholder AND no credential stored in
+/// this store) so a record the user modified or credentialed survives as a
+/// custom provider. Idempotent: once removed, later opens see no record and
+/// do nothing.
+async fn remove_placeholder_openai_compatible_record(
+    catalog_store: &dyn LlmProviderCatalogStore,
+    auth_store: &dyn LlmProviderAuthStore,
+) -> LlmProviderStoreResult<()> {
+    let Some(record) = catalog_store
+        .get_provider(OPENAI_COMPATIBLE_PROVIDER_ID)
+        .await?
+    else {
+        return Ok(());
+    };
+    if record.base_url != OPENAI_COMPATIBLE_BASE_URL {
+        return Ok(());
+    }
+    if auth_store
+        .get_credential(OPENAI_COMPATIBLE_PROVIDER_ID)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    catalog_store
+        .delete_provider(OPENAI_COMPATIBLE_PROVIDER_ID)
+        .await
 }
 
 #[derive(Clone)]
@@ -958,9 +989,13 @@ pub async fn llm_provider_auth_status(
     }
 
     match &provider.auth {
-        LlmProviderAuthConfig::StoredOrEnvironment | LlmProviderAuthConfig::None => {
-            Ok(LlmProviderAuthStatus::missing())
-        }
+        LlmProviderAuthConfig::StoredOrEnvironment => Ok(LlmProviderAuthStatus::missing()),
+        // Keyless providers need no credential: they count as configured so
+        // model/list and the chat setup window do not demand a sign-in.
+        LlmProviderAuthConfig::None => Ok(LlmProviderAuthStatus::configured(
+            LlmProviderAuthSourceKind::None,
+            "no auth required",
+        )),
         LlmProviderAuthConfig::Env { name } => {
             if environment_value(context, name).is_some_and(|key| !key.is_empty()) {
                 Ok(LlmProviderAuthStatus::configured(

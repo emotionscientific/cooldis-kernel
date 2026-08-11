@@ -35,14 +35,15 @@ openai-codex` shows the account without exposing tokens, and `verlet auth delete
 openai-codex` signs the local Verlet installation out. Verlet refreshes expiring
 tokens automatically.
 
-The same setup is available inside the TUI through `/setup`. The wizard lists
-providers, accepts pasted API keys for key-based providers, and offers browser
-or device-code sign-in for `openai-codex`. Browser sign-in opens on the machine
+The same setup is available inside the TUI through `/setup` (see
+[Provider Setup](provider-setup.md)). The setup window lists configured
+providers, offers the full provider catalog and a custom-provider form,
+accepts pasted API keys for key-based providers, and offers browser or
+device-code sign-in for `openai-codex`. Browser sign-in opens on the machine
 running `verlet chat` and listens on that machine's localhost callback, even
 when the chat was started with `--attach`; the OAuth flow is client-side and
-only the completed credential is sent to the attached app-server. If the
-active model is missing credentials, the wizard opens automatically at
-startup.
+only the completed credential is sent to the attached app-server. When no
+provider is configured, the window opens automatically at startup.
 
 An attached app-server must support `modelProvider/auth/setOAuth` to complete
 in-TUI OpenAI Codex sign-in (use a kernel build containing this chat credential
@@ -74,20 +75,29 @@ changes.
 
 ## Model Catalog
 
-Model metadata comes from a small models.dev snapshot checked into the kernel
-for the `anthropic`, `openai`, and `openai-codex` providers. The app-server can
-therefore list models with no network access. On startup it also schedules a
-background models.dev refresh, capped at once per 24 hours, and stores the last
-valid normalized response under the same user state home as the provider
-metadata store. A valid cached response overlays the built-in snapshot; a
-refresh or cache failure silently falls back to the built-in data and never
-blocks chat.
+Provider and model metadata comes from a models.dev snapshot checked into the
+kernel: every OpenAI-compatible and Anthropic-compatible provider the upstream
+data can derive (about 160), plus the static `openai-codex` entry. The
+app-server can therefore list providers and models with no network access. On
+startup it also schedules a background models.dev refresh, capped at once per
+24 hours, and stores the last valid normalized response under the same user
+state home as the provider metadata store. A valid cached response overlays
+the built-in snapshot; a refresh or cache failure silently falls back to the
+built-in data and never blocks chat.
 
 The refresh endpoint defaults to `https://models.dev/api.json`. Set
 `VERLET_MODEL_CATALOG_URL` before starting the app-server to use a compatible
 endpoint instead; setting it to an empty or whitespace-only value disables
 refresh entirely. Catalog prices are informational model metadata only; they
 are not the authority for cloud metering.
+
+Before a release, regenerate the checked-in snapshot with
+`scripts/update-model-catalog.sh` and review the resulting diff by hand:
+catalog base URLs decide where credentials are sent, so a changed or added
+URL is trust-bearing. The script writes the snapshot through the same Rust
+normalization the runtime refresh uses (HTTPS required for remote hosts,
+plain HTTP only for loopback), so regeneration is byte-stable for unchanged
+upstream data.
 
 ## Included Surface
 
@@ -100,14 +110,17 @@ are not the authority for cloud metering.
 - Slash-command popup with filtering and Tab completion:
   `/help`, `/quit`, `/q`, `/interrupt`, `/clear`, `/status`, `/new`,
   `/sessions`, `/resume <thread-id>`, `/rename <name>`, `/fork`, `/compact`,
-  `/models`, and `/setup`.
-- `/setup` opens the provider credential wizard. It stores pasted keys through
-  the app-server RPC boundary and runs OpenAI Codex browser/device OAuth in the
-  chat client process before sending the completed credential to the server.
+  `/models`, `/setup`, and `/providers`.
+- `/setup` (alias `/providers`) opens the provider setup window: a centered
+  modal with a configured-provider overview, a searchable catalog picker, a
+  custom-provider form, and credential entry. Pasted keys cross the app-server
+  RPC boundary; OpenAI Codex browser/device OAuth runs in the chat client
+  process before the completed credential is sent to the server. See
+  [Provider Setup](provider-setup.md).
 - `/models` opens a modal picker backed by a fresh `model/list` request.
   Selecting a row calls `model/select`; missing credentials are reported by
-  the app-server without changing the active model. While the picker is open,
-  it owns keyboard input and Esc dismisses it.
+  the app-server without changing the active model. While a modal window is
+  open, it owns keyboard input and Esc dismisses it one level at a time.
 - Working indicator with elapsed time while a turn is in flight; Esc or
   Ctrl+C interrupts, Ctrl+C on an idle session quits, Ctrl+D quits.
 - Footer with key hints, the thread short id, and the turn state; banner

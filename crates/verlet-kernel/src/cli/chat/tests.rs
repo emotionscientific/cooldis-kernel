@@ -629,132 +629,349 @@ fn model_rows_preserve_coordinates_auth_and_active_selection() {
 }
 
 #[test]
-fn provider_rows_match_auth_catalog_status_and_active_model() {
-    let auth = crate::adapters::operator_client::OperatorModelProviderAuthList {
-        auth: None,
-        data: vec![
-            crate::adapters::operator_client::OperatorModelProviderAuth {
-                provider_id: "openai-codex".to_string(),
-                display_name: "OpenAI Codex".to_string(),
-                configured: true,
-                source: Some("stored".to_string()),
-                label: Some("signed in".to_string()),
+fn catalog_provider_rows_map_the_typed_rpc_response() {
+    let catalog = serde_json::json!({
+        "providers": [
+            {
+                "providerId": "anthropic",
+                "displayName": "Anthropic",
+                "baseUrl": "https://api.anthropic.com",
+                "api": "anthropic_messages",
+                "authKind": "api_key",
+                "envVars": ["ANTHROPIC_API_KEY"],
+                "configured": true,
+                "authSource": "stored",
+                "authLabel": "stored credential",
+                "custom": false,
+                "active": true,
+                "modelCount": 4,
+                "defaultModel": "claude-best"
             },
-            crate::adapters::operator_client::OperatorModelProviderAuth {
-                provider_id: "anthropic".to_string(),
-                display_name: String::new(),
-                configured: true,
-                source: Some("environment".to_string()),
-                label: Some("ANTHROPIC_API_KEY detected".to_string()),
-            },
-            crate::adapters::operator_client::OperatorModelProviderAuth {
-                provider_id: "openai".to_string(),
-                display_name: "OpenAI".to_string(),
-                configured: false,
-                source: None,
-                label: None,
-            },
+            {
+                "providerId": "my-llm",
+                "displayName": "My LLM",
+                "baseUrl": "https://llm.example/v1",
+                "api": "open_ai_chat_completions",
+                "authKind": "api_key",
+                "configured": false,
+                "authLabel": null,
+                "custom": true,
+                "active": false,
+                "modelCount": 0,
+                "defaultModel": null
+            }
         ],
-        next_cursor: None,
-    };
-    let models = crate::adapters::operator_client::OperatorModelList {
-        data: vec![crate::adapters::operator_client::OperatorModel {
-            provider_id: "anthropic".to_string(),
-            model: "claude".to_string(),
-            display_name: "Claude".to_string(),
-            auth_status: crate::adapters::operator_client::OperatorModelAuthStatus::Env,
-            active: true,
-        }],
-        next_cursor: None,
-    };
-
+        "nextCursor": null
+    });
+    let catalog = serde_json::from_value::<
+        crate::adapters::operator_client::OperatorModelProviderCatalog,
+    >(catalog)
+    .expect("catalog response must deserialize into the typed client struct");
     assert_eq!(
-        super::provider_rows(&auth, &models),
+        super::catalog_provider_rows(&catalog),
         vec![
-            verlet_chat::ProviderRow {
-                provider_id: "openai-codex".to_string(),
-                display_name: "OpenAI Codex".to_string(),
-                auth_status: "configured".to_string(),
-                label: "signed in".to_string(),
-                oauth: true,
-                active: false,
-            },
-            verlet_chat::ProviderRow {
+            verlet_chat::CatalogProviderRow {
                 provider_id: "anthropic".to_string(),
-                display_name: String::new(),
-                auth_status: "env".to_string(),
-                label: "ANTHROPIC_API_KEY detected".to_string(),
-                oauth: false,
+                display_name: "Anthropic".to_string(),
+                base_url: "https://api.anthropic.com".to_string(),
+                api: "anthropic_messages".to_string(),
+                auth_kind: "api_key".to_string(),
+                env_vars: vec!["ANTHROPIC_API_KEY".to_string()],
+                configured: true,
+                auth_label: "stored credential".to_string(),
+                custom: false,
                 active: true,
+                model_count: 4,
+                default_model: Some("claude-best".to_string()),
             },
-            verlet_chat::ProviderRow {
-                provider_id: "openai".to_string(),
-                display_name: "OpenAI".to_string(),
-                auth_status: "missing".to_string(),
-                label: String::new(),
-                oauth: false,
+            verlet_chat::CatalogProviderRow {
+                provider_id: "my-llm".to_string(),
+                display_name: "My LLM".to_string(),
+                base_url: "https://llm.example/v1".to_string(),
+                api: "openai_chat_completions".to_string(),
+                auth_kind: "api_key".to_string(),
+                env_vars: Vec::new(),
+                configured: false,
+                auth_label: String::new(),
+                custom: true,
                 active: false,
+                model_count: 0,
+                default_model: None,
             },
         ]
     );
 }
 
+#[test]
+fn custom_provider_upsert_params_carry_no_key_and_mark_the_default_model() {
+    let params = super::custom_provider_upsert_params(&verlet_chat::CustomProviderSpec {
+        provider_id: "my-llm".to_string(),
+        display_name: "My LLM".to_string(),
+        api: "anthropic_messages".to_string(),
+        base_url: "https://llm.example".to_string(),
+        header: Some(("X-Team".to_string(), "research".to_string())),
+        models: vec!["model-one".to_string(), "model-two".to_string()],
+        keyless: false,
+    });
+    assert_eq!(
+        serde_json::to_value(&params).unwrap(),
+        serde_json::json!({
+            "provider": {
+                "providerId": "my-llm",
+                "api": "anthropic_messages",
+                "baseUrl": "https://llm.example",
+                "displayName": "My LLM",
+                "auth": { "type": "stored_or_environment" },
+                "authHeader": true,
+                "headers": { "X-Team": { "type": "literal", "value": "research" } },
+                "models": [
+                    { "modelId": "model-one", "metadata": { "default": "true" } },
+                    { "modelId": "model-two" }
+                ],
+                "metadata": { "origin": "custom" },
+            }
+        })
+    );
+}
+
+#[test]
+fn keyless_custom_provider_upsert_params_declare_auth_none_without_auth_header() {
+    let params = super::custom_provider_upsert_params(&verlet_chat::CustomProviderSpec {
+        provider_id: "local-llm".to_string(),
+        display_name: "Local LLM".to_string(),
+        api: "openai_chat_completions".to_string(),
+        base_url: "http://127.0.0.1:11434/v1".to_string(),
+        header: None,
+        models: vec!["llama-local".to_string()],
+        keyless: true,
+    });
+    assert_eq!(
+        serde_json::to_value(&params).unwrap(),
+        serde_json::json!({
+            "provider": {
+                "providerId": "local-llm",
+                "api": "open_ai_chat_completions",
+                "baseUrl": "http://127.0.0.1:11434/v1",
+                "displayName": "Local LLM",
+                "auth": { "type": "none" },
+                "authHeader": false,
+                "headers": {},
+                "models": [
+                    { "modelId": "llama-local", "metadata": { "default": "true" } }
+                ],
+                "metadata": { "origin": "custom" },
+            }
+        })
+    );
+}
+
 #[tokio::test]
-async fn list_providers_fetches_catalog_and_active_model() {
+async fn fetch_provider_catalog_action_maps_the_catalog_rpc() {
     let (events, requests) = drive_actions(
-        vec![
-            rpc_ok(
-                "modelProvider/auth/status",
-                serde_json::json!({
-                    "auth": null,
-                    "data": [{
-                        "providerId": "openai-codex",
-                        "displayName": "OpenAI Codex",
-                        "configured": false,
-                        "source": null,
-                        "label": null
-                    }],
-                    "nextCursor": null
-                }),
-            ),
-            rpc_ok(
-                "model/list",
-                serde_json::json!({
-                    "data": [{
-                        "providerId": "openai-codex",
-                        "model": "gpt-5.6-sol",
-                        "displayName": "GPT-5.6 Sol",
-                        "authStatus": "missing",
-                        "active": true
-                    }],
-                    "nextCursor": null
-                }),
-            ),
-        ],
-        vec![verlet_chat::Action::ListProviders],
+        vec![rpc_ok(
+            "modelProvider/catalog",
+            serde_json::json!({
+                "providers": [{
+                    "providerId": "openai-codex",
+                    "displayName": "OpenAI Codex",
+                    "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
+                    "api": "open_ai_responses",
+                    "authKind": "oauth",
+                    "configured": false,
+                    "authLabel": null,
+                    "custom": false,
+                    "active": false,
+                    "modelCount": 1,
+                    "defaultModel": "gpt-5.6-codex"
+                }],
+                "nextCursor": null
+            }),
+        )],
+        vec![verlet_chat::Action::FetchProviderCatalog],
     )
     .await;
 
     assert_eq!(
         events,
-        vec![verlet_chat::ChatEvent::Providers(vec![
-            verlet_chat::ProviderRow {
+        vec![verlet_chat::ChatEvent::ProviderCatalog {
+            providers: vec![verlet_chat::CatalogProviderRow {
                 provider_id: "openai-codex".to_string(),
                 display_name: "OpenAI Codex".to_string(),
-                auth_status: "missing".to_string(),
-                label: String::new(),
-                oauth: true,
-                active: true,
-            }
-        ])]
+                base_url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+                api: "openai_responses".to_string(),
+                auth_kind: "oauth".to_string(),
+                env_vars: Vec::new(),
+                configured: false,
+                auth_label: String::new(),
+                custom: false,
+                active: false,
+                model_count: 1,
+                default_model: Some("gpt-5.6-codex".to_string()),
+            }],
+        }]
     );
     assert_eq!(
         requests
             .iter()
             .map(|request| request.method.as_str())
             .collect::<Vec<_>>(),
-        ["modelProvider/auth/status", "model/list"]
+        ["modelProvider/catalog"]
     );
+}
+
+#[tokio::test]
+async fn upsert_custom_provider_sends_one_upsert_and_reports_success() {
+    let spec = verlet_chat::CustomProviderSpec {
+        provider_id: "local-llm".to_string(),
+        display_name: "Local LLM".to_string(),
+        api: "openai_chat_completions".to_string(),
+        base_url: "http://127.0.0.1:11434/v1".to_string(),
+        header: None,
+        models: vec!["llama-local".to_string()],
+        keyless: true,
+    };
+    let expected_params =
+        serde_json::to_value(super::custom_provider_upsert_params(&spec)).unwrap();
+    let (events, requests) = drive_actions(
+        vec![rpc_ok(
+            "modelProvider/upsert",
+            serde_json::json!({ "provider": { "providerId": "local-llm" } }),
+        )],
+        vec![verlet_chat::Action::UpsertCustomProvider { spec }],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CustomProviderResult {
+            provider_id: "local-llm".to_string(),
+            error: None,
+        }]
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "modelProvider/upsert");
+    assert_eq!(requests[0].params.as_ref().unwrap(), &expected_params);
+}
+
+#[tokio::test]
+async fn upsert_custom_provider_rpc_error_maps_into_the_result_event() {
+    let spec = verlet_chat::CustomProviderSpec {
+        provider_id: "my-llm".to_string(),
+        display_name: "My LLM".to_string(),
+        api: "openai_chat_completions".to_string(),
+        base_url: "https://llm.example/v1".to_string(),
+        header: None,
+        models: vec!["model-one".to_string()],
+        keyless: false,
+    };
+    let (events, requests) = drive_actions(
+        vec![rpc_err(
+            "modelProvider/upsert",
+            "cannot update active model provider \"my-llm\"; select a different provider first",
+        )],
+        vec![verlet_chat::Action::UpsertCustomProvider { spec }],
+    )
+    .await;
+
+    // The RPC refusal lands in the result event, never as a transport error.
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CustomProviderResult {
+            provider_id: "my-llm".to_string(),
+            error: Some(
+                "request `modelProvider/upsert` was refused: cannot update active model provider \"my-llm\"; select a different provider first"
+                    .to_string(),
+            ),
+        }]
+    );
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn upsert_rpc_error_text_passes_through_verbatim() {
+    // The driver only redacts values it submitted itself (SetProviderKey);
+    // upsert carries no secrets, so server text passes through untouched and
+    // the UI stays responsible for redacting anything the user typed.
+    let spec = verlet_chat::CustomProviderSpec {
+        provider_id: "my-llm".to_string(),
+        display_name: "My LLM".to_string(),
+        api: "openai_chat_completions".to_string(),
+        base_url: "https://llm.example/v1".to_string(),
+        header: None,
+        models: vec!["model-one".to_string()],
+        keyless: false,
+    };
+    let (events, _) = drive_actions(
+        vec![rpc_err(
+            "modelProvider/upsert",
+            "header value sk-fixture-lookalike-value was rejected",
+        )],
+        vec![verlet_chat::Action::UpsertCustomProvider { spec }],
+    )
+    .await;
+
+    let verlet_chat::ChatEvent::CustomProviderResult {
+        error: Some(error), ..
+    } = &events[0]
+    else {
+        panic!("expected an upsert error result, got {events:?}");
+    };
+    assert!(error.contains("sk-fixture-lookalike-value"), "{error}");
+    assert!(!error.contains("[redacted]"), "{error}");
+}
+
+#[tokio::test]
+async fn delete_custom_provider_sends_one_delete_and_reports_success() {
+    let (events, requests) = drive_actions(
+        vec![rpc_ok(
+            "modelProvider/delete",
+            serde_json::json!({ "deleted": true, "providerId": "my-llm" }),
+        )],
+        vec![verlet_chat::Action::DeleteCustomProvider {
+            provider_id: "my-llm".to_string(),
+        }],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CustomProviderResult {
+            provider_id: "my-llm".to_string(),
+            error: None,
+        }]
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "modelProvider/delete");
+    assert_eq!(
+        requests[0].params.as_ref().unwrap(),
+        &serde_json::json!({ "providerId": "my-llm" })
+    );
+}
+
+#[tokio::test]
+async fn delete_custom_provider_rpc_error_maps_into_the_result_event() {
+    let (events, requests) = drive_actions(
+        vec![rpc_err(
+            "modelProvider/delete",
+            "model provider \"my-llm\" was not found",
+        )],
+        vec![verlet_chat::Action::DeleteCustomProvider {
+            provider_id: "my-llm".to_string(),
+        }],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CustomProviderResult {
+            provider_id: "my-llm".to_string(),
+            error: Some(
+                "request `modelProvider/delete` was refused: model provider \"my-llm\" was not found"
+                    .to_string(),
+            ),
+        }]
+    );
+    assert_eq!(requests.len(), 1);
 }
 
 #[tokio::test]
@@ -1142,25 +1359,18 @@ async fn clear_credential_rpc_failure_is_a_transcript_error() {
 }
 
 #[tokio::test]
-async fn bootstrap_missing_active_model_emits_provider_catalog() {
+async fn bootstrap_without_configured_providers_emits_the_first_run_gate() {
     let (mut client, requests, server) = mock_operator_client(vec![
         rpc_ok("account/read", serde_json::json!({})),
         rpc_ok(
             "config/read",
             serde_json::json!({"config": {"cwd": "/tmp/work"}}),
         ),
+        // EMO-575 hides the offline echo launch pair: a fresh install
+        // reports no model rows at all.
         rpc_ok(
             "model/list",
-            serde_json::json!({
-                "data": [{
-                    "providerId": "openai-codex",
-                    "model": "gpt-5.6-sol",
-                    "displayName": "GPT-5.6 Sol",
-                    "authStatus": "missing",
-                    "active": true
-                }],
-                "nextCursor": null
-            }),
+            serde_json::json!({ "data": [], "nextCursor": null }),
         ),
         rpc_ok(
             "modelProvider/auth/status",
@@ -1184,18 +1394,45 @@ async fn bootstrap_missing_active_model_emits_provider_catalog() {
         .unwrap();
     assert_eq!(
         session.initial_events,
-        vec![verlet_chat::ChatEvent::Providers(vec![
-            verlet_chat::ProviderRow {
-                provider_id: "openai-codex".to_string(),
-                display_name: "OpenAI Codex".to_string(),
-                auth_status: "missing".to_string(),
-                label: String::new(),
-                oauth: true,
-                active: true,
-            }
-        ])]
+        vec![verlet_chat::ChatEvent::NoConfiguredProviders]
     );
+    assert_eq!(session.model_label, "local/echo");
     assert_eq!(requests.lock().unwrap().len(), 4);
+
+    client.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn bootstrap_with_a_configured_provider_skips_the_first_run_gate() {
+    let (mut client, requests, server) = mock_operator_client(vec![
+        rpc_ok("account/read", serde_json::json!({})),
+        rpc_ok(
+            "config/read",
+            serde_json::json!({"config": {"cwd": "/tmp/work"}}),
+        ),
+        rpc_ok(
+            "model/list",
+            serde_json::json!({
+                "data": [{
+                    "providerId": "anthropic",
+                    "model": "claude",
+                    "displayName": "Claude",
+                    "authStatus": "configured",
+                    "active": true
+                }],
+                "nextCursor": null
+            }),
+        ),
+    ])
+    .await;
+
+    let session = super::bootstrap_chat_client(&mut client, "attach ws://test".to_string())
+        .await
+        .unwrap();
+    assert_eq!(session.initial_events, Vec::new());
+    assert_eq!(session.model_label, "anthropic/claude");
+    assert_eq!(requests.lock().unwrap().len(), 3);
 
     client.close().await.unwrap();
     server.await.unwrap();
