@@ -491,10 +491,16 @@ pub(super) async fn run_tool_package_fixtures(
     interface: &verlet_operations::tool_package::ToolInterfaceContract,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_operations::tool_package::ToolFixtureRun>>
 {
+    let capability_requests = interface.capability_requests();
     let mut config = verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::path(
         artifact_path.to_path_buf(),
     ))
-    .with_capability_grants(interface.capability_requests());
+    .with_capability_grants(capability_requests.clone())
+    .with_attachment_config(
+        crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+            &capability_requests,
+        ),
+    );
     config = config.with_vfs(package_fixture_vfs(package)?);
     if let Some(max_input_bytes) = package.manifest.runtime.max_input_bytes {
         config = config.with_max_input_bytes(size_limit("max_input_bytes", max_input_bytes)?);
@@ -744,6 +750,11 @@ pub(super) async fn tool_run(
                 std::collections::BTreeMap::new()
             };
             let mut config = registry.load_runtime_config_for_record(&record).await?;
+            config = config.with_attachment_config(
+                crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                    &record.capability_grants,
+                ),
+            );
             if !resolved_secrets.is_empty() {
                 config = config.with_secrets(resolved_secrets);
             }

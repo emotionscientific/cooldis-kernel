@@ -52,6 +52,24 @@ pub enum WasmHostImportPolicy {
     PureCompute,
 }
 
+#[derive(
+    Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct WasmAttachmentConfig {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub allowed_secrets: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub allowed_private_network:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl WasmAttachmentConfig {
+    pub fn is_empty(&self) -> bool {
+        self.allowed_secrets.is_empty() && self.allowed_private_network.is_empty()
+    }
+}
+
 #[derive(Clone)]
 pub struct WasmRuntimeConfig {
     pub artifact: WasmRuntimeArtifact,
@@ -63,6 +81,7 @@ pub struct WasmRuntimeConfig {
     pub fuel: Option<u64>,
     pub fuel_yield_interval: Option<u64>,
     pub capability_grants: std::collections::BTreeSet<String>,
+    pub attachment_config: WasmAttachmentConfig,
     pub invocation_context: verlet_abi::InvocationContext,
     pub secrets: std::collections::BTreeMap<String, String>,
     pub vfs: Option<std::sync::Arc<verlet_vfs::VerletVfs>>,
@@ -81,6 +100,7 @@ impl WasmRuntimeConfig {
             fuel: Some(DEFAULT_FUEL),
             fuel_yield_interval: Some(DEFAULT_FUEL_YIELD_INTERVAL),
             capability_grants: std::collections::BTreeSet::new(),
+            attachment_config: WasmAttachmentConfig::default(),
             invocation_context: verlet_abi::InvocationContext::anonymous(),
             secrets: std::collections::BTreeMap::new(),
             vfs: None,
@@ -133,6 +153,11 @@ impl WasmRuntimeConfig {
         self
     }
 
+    pub fn with_attachment_config(mut self, attachment_config: WasmAttachmentConfig) -> Self {
+        self.attachment_config = attachment_config;
+        self
+    }
+
     pub fn with_invocation_context(mut self, context: verlet_abi::InvocationContext) -> Self {
         self.invocation_context = context;
         self
@@ -179,6 +204,7 @@ impl std::fmt::Debug for WasmRuntimeConfig {
             .field("fuel", &self.fuel)
             .field("fuel_yield_interval", &self.fuel_yield_interval)
             .field("capability_grants", &self.capability_grants)
+            .field("attachment_config", &self.attachment_config)
             .field("invocation_context", &self.invocation_context)
             .field("secrets", &"<redacted>")
             .field("vfs", &self.vfs.as_ref().map(|_| "<VerletVfs>"))

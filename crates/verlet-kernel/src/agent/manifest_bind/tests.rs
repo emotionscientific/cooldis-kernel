@@ -2935,6 +2935,7 @@ async fn operation_bind_requires_declared_grants() {
             artifact_hash: record.active_artifact_hash,
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
+            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
             grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
@@ -3097,6 +3098,7 @@ async fn two_segment_operation_ref_validates_only_named_operation() {
             artifact_hash: record.active_artifact_hash,
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: vec!["net:https://profile.example".to_string()],
+            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
             grant_expiries: Vec::new(),
             operations: vec!["profile".to_string()],
             direct_tools: Vec::new(),
@@ -3236,12 +3238,44 @@ async fn operation_bindings_merge_grants_for_shared_artifact() {
                 "fs.read:/workspace".to_string(),
                 "net:https://example.com".to_string(),
             ],
+            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
             grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_attachment_config_derivation_extracts_only_live_enforcement_grants() {
+    let config = crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+        &std::collections::BTreeSet::from([
+            "fs.read:/workspace".to_string(),
+            "net.http:GET:https://example.com".to_string(),
+            "net.http.private:GET:https://internal.example".to_string(),
+            "net.http.private:*:http://127.0.0.1:*".to_string(),
+            "secret:API_TOKEN".to_string(),
+        ]),
+    );
+
+    assert_eq!(
+        config.allowed_secrets,
+        std::collections::BTreeSet::from(["API_TOKEN".to_string()])
+    );
+    assert_eq!(
+        config.allowed_private_network,
+        std::collections::BTreeMap::from([
+            (
+                "http://127.0.0.1:*".to_string(),
+                std::collections::BTreeSet::from(["*".to_string()]),
+            ),
+            (
+                "https://internal.example".to_string(),
+                std::collections::BTreeSet::from(["GET".to_string()]),
+            ),
+        ])
+    );
 }
 
 #[tokio::test]
@@ -3298,6 +3332,7 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
                 "net:https://profile.example".to_string(),
                 "net:https://summary.example".to_string(),
             ],
+            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
             grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
@@ -3375,6 +3410,7 @@ fn operation_binding_accepts_legacy_metadata_without_grants_or_operations() {
                 .to_string(),
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: Vec::new(),
+            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
             grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),

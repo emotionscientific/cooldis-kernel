@@ -2538,11 +2538,16 @@ fn operation_bindings_from_map(
         .into_iter()
         .map(|((name, artifact_hash), binding)| {
             let operations = binding.operation_names();
+            let attachment_config =
+                crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                    &binding.grants,
+                );
             AgentManifestOperationBinding {
                 name,
                 artifact_hash,
                 effect_class: binding.effect_class.unwrap_or_default(),
                 grants: binding.grants.into_iter().collect(),
+                attachment_config,
                 grant_expiries: binding.grant_expiries.into_iter().collect(),
                 operations,
                 direct_tools: binding.direct_tools.into_iter().collect(),
@@ -3442,6 +3447,11 @@ pub struct AgentManifestOperationBinding {
     pub effect_class: verlet_agent::manifest_schema::EffectClass,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "verlet_wasm::WasmAttachmentConfig::is_empty"
+    )]
+    pub attachment_config: verlet_wasm::WasmAttachmentConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
     /// Empty means the binding exposes the whole record.

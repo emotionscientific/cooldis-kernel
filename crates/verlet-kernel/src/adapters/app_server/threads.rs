@@ -2459,6 +2459,7 @@ impl CapsuleBindingRuntimeFactory {
                 artifact_hash,
                 effect_class: _,
                 grants,
+                attachment_config,
                 grant_expiries,
                 operations,
                 direct_tools,
@@ -2487,7 +2488,8 @@ impl CapsuleBindingRuntimeFactory {
                 crate::operations::plugins::LocalPluginCatalogRecord::selected_operations(
                     record, operations,
                 )
-            };
+            }
+            .with_attachment_config(attachment_config);
             records.push(record);
         }
         let mounts = workspace
