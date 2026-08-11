@@ -31,6 +31,11 @@ Default flow:
   5. Push the current branch and tag.
   6. Print the GitHub Release workflow URL and exit without watching.
 
+Before tagging, refresh the checked-in models.dev catalog snapshot with
+scripts/update-model-catalog.sh and review the diff by hand: catalog base
+URLs decide where provider credentials are sent, so URL changes are
+trust-bearing (see docs/chat.md, Model Catalog).
+
 GitHub remains the publisher of record. This script is a local confidence pass
 for maintainers who do not want to block active development on the remote matrix.
 USAGE

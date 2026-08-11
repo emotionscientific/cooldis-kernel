@@ -108,6 +108,7 @@ private-network binds require an explicit config opt-in; see
 - [Permissions And Governance](concepts/permissions-and-governance.md)
 - [Runtime Primitives](developers/runtime-primitives.md)
 - [Chat Console](chat.md)
+- [Provider Setup](provider-setup.md)
 - [Daemon And Remote Placement](daemon.md)
 - [Protocol Surfaces](developers/protocol-surfaces.md)
 - [Threat Model](threat-model.md)

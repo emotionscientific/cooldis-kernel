@@ -31,6 +31,11 @@ verlet daemon --help
 
 For the canonical command list and command grouping, see [Verlet CLI](cli.md).
 
+`verlet chat` opens the local terminal console. On first run it has no model
+provider yet and opens an in-TUI setup window to connect one (an API key, a
+ChatGPT-plan login, or a custom endpoint); see
+[Provider Setup](provider-setup.md).
+
 `verlet agent plan`, `publish`, `list`, and `show` are the first manifest
 authoring slice. `verlet blob publish` stores static prompt and context files
 as immutable resources. `verlet tool build`, `publish`, and `run` are the
