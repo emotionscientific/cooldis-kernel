@@ -7330,6 +7330,9 @@ fn model_provider_catalog_auth_source(
         Some(verlet_metadata::provider_store::LlmProviderAuthSourceKind::Environment) => {
             serde_json::json!("env")
         }
+        Some(verlet_metadata::provider_store::LlmProviderAuthSourceKind::None) => {
+            serde_json::json!("none")
+        }
         Some(_) if oauth => serde_json::json!("oauth"),
         Some(_) => serde_json::json!("stored"),
     }

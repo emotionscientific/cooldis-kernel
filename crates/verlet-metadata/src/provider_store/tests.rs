@@ -893,6 +893,86 @@ async fn environment_and_catalog_auth_are_fallbacks_after_stored_auth() {
 }
 
 #[tokio::test]
+async fn auth_none_counts_as_configured_without_a_credential() {
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    let provider = crate::provider_store::LlmProviderRecord::new(
+        "local-keyless",
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        "http://127.0.0.1:11434/v1",
+    )
+    .with_auth(crate::provider_store::LlmProviderAuthConfig::None);
+    let context = crate::provider_store::LlmProviderAuthContext::new();
+
+    let status = crate::provider_store::llm_provider_auth_status(&store, &provider, &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        crate::provider_store::LlmProviderAuthStatus::configured(
+            crate::provider_store::LlmProviderAuthSourceKind::None,
+            "no auth required",
+        )
+    );
+    assert_eq!(
+        serde_json::to_value(&status).unwrap()["source"],
+        "none",
+        "the keyless source kind must serialize as \"none\" over RPC"
+    );
+
+    // Configured status does not fabricate a credential: resolution stays
+    // empty so no Authorization header is attached.
+    assert_eq!(
+        crate::provider_store::resolve_llm_provider_auth(&store, &provider, &context)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn auth_none_still_prefers_a_stored_credential() {
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    let provider = crate::provider_store::LlmProviderRecord::new(
+        "local-keyless",
+        verlet_history::ProviderApi::OpenAIChatCompletions,
+        "http://127.0.0.1:11434/v1",
+    )
+    .with_auth(crate::provider_store::LlmProviderAuthConfig::None);
+    store
+        .set_credential(
+            "local-keyless",
+            crate::provider_store::LlmProviderCredential::ApiKey {
+                key: "stored-keyless-key".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    let context = crate::provider_store::LlmProviderAuthContext::new();
+
+    let status = crate::provider_store::llm_provider_auth_status(&store, &provider, &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        status.source,
+        Some(crate::provider_store::LlmProviderAuthSourceKind::Stored)
+    );
+
+    let resolved = crate::provider_store::resolve_llm_provider_auth(&store, &provider, &context)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.api_key, "stored-keyless-key");
+    assert_eq!(
+        resolved.source,
+        crate::provider_store::LlmProviderAuthSourceKind::Stored
+    );
+}
+
+#[tokio::test]
 async fn auth_status_redacts_values() {
     let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
         .await

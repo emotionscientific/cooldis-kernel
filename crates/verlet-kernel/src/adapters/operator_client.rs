@@ -131,6 +131,79 @@ struct OperatorModelProviderAuthResult {
     auth: OperatorModelProviderAuth,
 }
 
+/// A provider `api` value on the RPC wire: a known family string
+/// (`open_ai_chat_completions`, ...) or `{ "other": ... }`.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum OperatorProviderApi {
+    Family(String),
+    Other { other: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorCatalogProvider {
+    pub provider_id: String,
+    pub display_name: String,
+    pub base_url: String,
+    pub api: OperatorProviderApi,
+    pub auth_kind: String,
+    #[serde(default)]
+    pub env_vars: Vec<String>,
+    #[serde(default)]
+    pub doc_url: Option<String>,
+    pub model_count: usize,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    pub configured: bool,
+    #[serde(default)]
+    pub auth_source: Option<String>,
+    #[serde(default)]
+    pub auth_label: Option<String>,
+    pub custom: bool,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorModelProviderCatalog {
+    pub providers: Vec<OperatorCatalogProvider>,
+}
+
+/// `modelProvider/upsert` params, mirroring the app-server's
+/// `ModelProviderUpsertParams` wire shape.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorModelProviderUpsertParams {
+    pub provider: OperatorModelProviderUpsertRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorModelProviderUpsertRecord {
+    pub provider_id: String,
+    pub api: OperatorProviderApi,
+    pub base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub auth: verlet_metadata::provider_store::LlmProviderAuthConfig,
+    pub headers:
+        std::collections::BTreeMap<String, verlet_metadata::provider_store::LlmProviderConfigValue>,
+    pub auth_header: bool,
+    pub models: Vec<OperatorModelProviderModelUpsertRecord>,
+    pub metadata: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorModelProviderModelUpsertRecord {
+    pub model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct OperatorCompletedTurn {
     pub thread_id: String,
@@ -323,6 +396,41 @@ where
         let value = self.model_provider_auth_status().await?;
         serde_json::from_value(value)
             .map_err(|err| tui_error(format!("invalid modelProvider/auth/status response: {err}")))
+    }
+
+    pub async fn model_provider_catalog(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("modelProvider/catalog", serde_json::json!({}))
+            .await
+    }
+
+    pub async fn model_provider_catalog_typed(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorModelProviderCatalog> {
+        let value = self.model_provider_catalog().await?;
+        serde_json::from_value(value)
+            .map_err(|err| tui_error(format!("invalid modelProvider/catalog response: {err}")))
+    }
+
+    pub async fn model_provider_upsert(
+        &mut self,
+        params: &OperatorModelProviderUpsertParams,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        let params = serde_json::to_value(params)
+            .map_err(|err| tui_error(format!("invalid modelProvider/upsert params: {err}")))?;
+        self.request("modelProvider/upsert", params).await
+    }
+
+    pub async fn model_provider_delete(
+        &mut self,
+        provider_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "modelProvider/delete",
+            serde_json::json!({ "providerId": provider_id }),
+        )
+        .await
     }
 
     pub async fn model_provider_auth_set(

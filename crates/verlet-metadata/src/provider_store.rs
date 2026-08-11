@@ -374,6 +374,9 @@ pub enum LlmProviderAuthSourceKind {
     Environment,
     CatalogInline,
     CatalogCommand,
+    /// The provider declares `auth: none` (a keyless local endpoint): it is
+    /// configured without any credential. Serializes as `"none"` over RPC.
+    None,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -986,9 +989,13 @@ pub async fn llm_provider_auth_status(
     }
 
     match &provider.auth {
-        LlmProviderAuthConfig::StoredOrEnvironment | LlmProviderAuthConfig::None => {
-            Ok(LlmProviderAuthStatus::missing())
-        }
+        LlmProviderAuthConfig::StoredOrEnvironment => Ok(LlmProviderAuthStatus::missing()),
+        // Keyless providers need no credential: they count as configured so
+        // model/list and the chat setup window do not demand a sign-in.
+        LlmProviderAuthConfig::None => Ok(LlmProviderAuthStatus::configured(
+            LlmProviderAuthSourceKind::None,
+            "no auth required",
+        )),
         LlmProviderAuthConfig::Env { name } => {
             if environment_value(context, name).is_some_and(|key| !key.is_empty()) {
                 Ok(LlmProviderAuthStatus::configured(

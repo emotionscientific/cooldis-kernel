@@ -629,7 +629,7 @@ fn model_rows_preserve_coordinates_auth_and_active_selection() {
 }
 
 #[test]
-fn catalog_provider_rows_map_the_rpc_response() {
+fn catalog_provider_rows_map_the_typed_rpc_response() {
     let catalog = serde_json::json!({
         "providers": [
             {
@@ -663,6 +663,10 @@ fn catalog_provider_rows_map_the_rpc_response() {
         ],
         "nextCursor": null
     });
+    let catalog = serde_json::from_value::<
+        crate::adapters::operator_client::OperatorModelProviderCatalog,
+    >(catalog)
+    .expect("catalog response must deserialize into the typed client struct");
     assert_eq!(
         super::catalog_provider_rows(&catalog),
         vec![
@@ -710,7 +714,7 @@ fn custom_provider_upsert_params_carry_no_key_and_mark_the_default_model() {
         keyless: false,
     });
     assert_eq!(
-        params,
+        serde_json::to_value(&params).unwrap(),
         serde_json::json!({
             "provider": {
                 "providerId": "my-llm",
@@ -723,6 +727,37 @@ fn custom_provider_upsert_params_carry_no_key_and_mark_the_default_model() {
                 "models": [
                     { "modelId": "model-one", "metadata": { "default": "true" } },
                     { "modelId": "model-two" }
+                ],
+                "metadata": { "origin": "custom" },
+            }
+        })
+    );
+}
+
+#[test]
+fn keyless_custom_provider_upsert_params_declare_auth_none_without_auth_header() {
+    let params = super::custom_provider_upsert_params(&verlet_chat::CustomProviderSpec {
+        provider_id: "local-llm".to_string(),
+        display_name: "Local LLM".to_string(),
+        api: "openai_chat_completions".to_string(),
+        base_url: "http://127.0.0.1:11434/v1".to_string(),
+        header: None,
+        models: vec!["llama-local".to_string()],
+        keyless: true,
+    });
+    assert_eq!(
+        serde_json::to_value(&params).unwrap(),
+        serde_json::json!({
+            "provider": {
+                "providerId": "local-llm",
+                "api": "open_ai_chat_completions",
+                "baseUrl": "http://127.0.0.1:11434/v1",
+                "displayName": "Local LLM",
+                "auth": { "type": "none" },
+                "authHeader": false,
+                "headers": {},
+                "models": [
+                    { "modelId": "llama-local", "metadata": { "default": "true" } }
                 ],
                 "metadata": { "origin": "custom" },
             }
@@ -782,6 +817,161 @@ async fn fetch_provider_catalog_action_maps_the_catalog_rpc() {
             .collect::<Vec<_>>(),
         ["modelProvider/catalog"]
     );
+}
+
+#[tokio::test]
+async fn upsert_custom_provider_sends_one_upsert_and_reports_success() {
+    let spec = verlet_chat::CustomProviderSpec {
+        provider_id: "local-llm".to_string(),
+        display_name: "Local LLM".to_string(),
+        api: "openai_chat_completions".to_string(),
+        base_url: "http://127.0.0.1:11434/v1".to_string(),
+        header: None,
+        models: vec!["llama-local".to_string()],
+        keyless: true,
+    };
+    let expected_params =
+        serde_json::to_value(super::custom_provider_upsert_params(&spec)).unwrap();
+    let (events, requests) = drive_actions(
+        vec![rpc_ok(
+            "modelProvider/upsert",
+            serde_json::json!({ "provider": { "providerId": "local-llm" } }),
+        )],
+        vec![verlet_chat::Action::UpsertCustomProvider { spec }],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CustomProviderResult {
+            provider_id: "local-llm".to_string(),
+            error: None,
+        }]
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "modelProvider/upsert");
+    assert_eq!(requests[0].params.as_ref().unwrap(), &expected_params);
+}
+
+#[tokio::test]
+async fn upsert_custom_provider_rpc_error_maps_into_the_result_event() {
+    let spec = verlet_chat::CustomProviderSpec {
+        provider_id: "my-llm".to_string(),
+        display_name: "My LLM".to_string(),
+        api: "openai_chat_completions".to_string(),
+        base_url: "https://llm.example/v1".to_string(),
+        header: None,
+        models: vec!["model-one".to_string()],
+        keyless: false,
+    };
+    let (events, requests) = drive_actions(
+        vec![rpc_err(
+            "modelProvider/upsert",
+            "cannot update active model provider \"my-llm\"; select a different provider first",
+        )],
+        vec![verlet_chat::Action::UpsertCustomProvider { spec }],
+    )
+    .await;
+
+    // The RPC refusal lands in the result event, never as a transport error.
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CustomProviderResult {
+            provider_id: "my-llm".to_string(),
+            error: Some(
+                "request `modelProvider/upsert` was refused: cannot update active model provider \"my-llm\"; select a different provider first"
+                    .to_string(),
+            ),
+        }]
+    );
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn upsert_rpc_error_text_passes_through_verbatim() {
+    // The driver only redacts values it submitted itself (SetProviderKey);
+    // upsert carries no secrets, so server text passes through untouched and
+    // the UI stays responsible for redacting anything the user typed.
+    let spec = verlet_chat::CustomProviderSpec {
+        provider_id: "my-llm".to_string(),
+        display_name: "My LLM".to_string(),
+        api: "openai_chat_completions".to_string(),
+        base_url: "https://llm.example/v1".to_string(),
+        header: None,
+        models: vec!["model-one".to_string()],
+        keyless: false,
+    };
+    let (events, _) = drive_actions(
+        vec![rpc_err(
+            "modelProvider/upsert",
+            "header value sk-fixture-lookalike-value was rejected",
+        )],
+        vec![verlet_chat::Action::UpsertCustomProvider { spec }],
+    )
+    .await;
+
+    let verlet_chat::ChatEvent::CustomProviderResult {
+        error: Some(error), ..
+    } = &events[0]
+    else {
+        panic!("expected an upsert error result, got {events:?}");
+    };
+    assert!(error.contains("sk-fixture-lookalike-value"), "{error}");
+    assert!(!error.contains("[redacted]"), "{error}");
+}
+
+#[tokio::test]
+async fn delete_custom_provider_sends_one_delete_and_reports_success() {
+    let (events, requests) = drive_actions(
+        vec![rpc_ok(
+            "modelProvider/delete",
+            serde_json::json!({ "deleted": true, "providerId": "my-llm" }),
+        )],
+        vec![verlet_chat::Action::DeleteCustomProvider {
+            provider_id: "my-llm".to_string(),
+        }],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CustomProviderResult {
+            provider_id: "my-llm".to_string(),
+            error: None,
+        }]
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "modelProvider/delete");
+    assert_eq!(
+        requests[0].params.as_ref().unwrap(),
+        &serde_json::json!({ "providerId": "my-llm" })
+    );
+}
+
+#[tokio::test]
+async fn delete_custom_provider_rpc_error_maps_into_the_result_event() {
+    let (events, requests) = drive_actions(
+        vec![rpc_err(
+            "modelProvider/delete",
+            "model provider \"my-llm\" was not found",
+        )],
+        vec![verlet_chat::Action::DeleteCustomProvider {
+            provider_id: "my-llm".to_string(),
+        }],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CustomProviderResult {
+            provider_id: "my-llm".to_string(),
+            error: Some(
+                "request `modelProvider/delete` was refused: model provider \"my-llm\" was not found"
+                    .to_string(),
+            ),
+        }]
+    );
+    assert_eq!(requests.len(), 1);
 }
 
 #[tokio::test]

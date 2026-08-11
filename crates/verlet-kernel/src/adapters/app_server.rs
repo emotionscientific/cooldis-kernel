@@ -2376,7 +2376,13 @@ async fn resolve_catalog_provider(
     )
     .await
     .map_err(provider_store_error)?;
-    if provider.auth_header && resolved_auth.is_none() {
+    // Keyless providers (`auth: none`, EMO-577) route without a credential;
+    // a stored/runtime/env credential, when present, still wins above.
+    let keyless = matches!(
+        provider.auth,
+        verlet_metadata::provider_store::LlmProviderAuthConfig::None
+    );
+    if provider.auth_header && resolved_auth.is_none() && !keyless {
         return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
             format!(
                 "catalog provider {provider_id:?} requires an API key but none was configured; set its environment credential or run `verlet auth set {provider_id} --api-key-stdin`"
@@ -2414,7 +2420,7 @@ async fn resolve_catalog_provider(
             ));
         }
     };
-    if !provider.auth_header {
+    if !provider.auth_header || (keyless && resolved_auth.is_none()) {
         endpoint.auth = verlet_provider::ProviderAuth::None;
     }
 

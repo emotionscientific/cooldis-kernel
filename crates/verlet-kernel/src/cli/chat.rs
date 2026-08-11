@@ -443,9 +443,7 @@ impl ChatDriver {
                 });
             }
             verlet_chat::Action::FetchProviderCatalog => {
-                let catalog = client
-                    .request("modelProvider/catalog", serde_json::json!({}))
-                    .await?;
+                let catalog = client.model_provider_catalog_typed().await?;
                 let _ = events.send(verlet_chat::ChatEvent::ProviderCatalog {
                     providers: catalog_provider_rows(&catalog),
                 });
@@ -453,7 +451,7 @@ impl ChatDriver {
             verlet_chat::Action::UpsertCustomProvider { spec } => {
                 let provider_id = spec.provider_id.clone();
                 let error = client
-                    .request("modelProvider/upsert", custom_provider_upsert_params(&spec))
+                    .model_provider_upsert(&custom_provider_upsert_params(&spec))
                     .await
                     .err()
                     .map(|err| err.to_string());
@@ -462,10 +460,7 @@ impl ChatDriver {
             }
             verlet_chat::Action::DeleteCustomProvider { provider_id } => {
                 let error = client
-                    .request(
-                        "modelProvider/delete",
-                        serde_json::json!({ "providerId": provider_id }),
-                    )
+                    .model_provider_delete(&provider_id)
                     .await
                     .err()
                     .map(|err| err.to_string());
@@ -1002,71 +997,47 @@ fn model_rows(
 
 /// The RPC `api` value for one row, translated to the chat contract's
 /// family strings (`openai_chat_completions`, ...).
-fn catalog_api_family(api: &serde_json::Value) -> String {
-    match api.as_str() {
-        Some("open_ai_chat_completions") => "openai_chat_completions".to_string(),
-        Some("open_ai_responses") => "openai_responses".to_string(),
-        Some("anthropic_messages") => "anthropic_messages".to_string(),
-        Some(other) => other.to_string(),
-        None => api
-            .get("other")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("other")
-            .to_string(),
+fn catalog_api_family(api: &crate::adapters::operator_client::OperatorProviderApi) -> String {
+    match api {
+        crate::adapters::operator_client::OperatorProviderApi::Family(family) => {
+            match family.as_str() {
+                "open_ai_chat_completions" => "openai_chat_completions".to_string(),
+                "open_ai_responses" => "openai_responses".to_string(),
+                other => other.to_string(),
+            }
+        }
+        crate::adapters::operator_client::OperatorProviderApi::Other { other } => other.clone(),
     }
 }
 
-fn catalog_provider_rows(catalog: &serde_json::Value) -> Vec<verlet_chat::CatalogProviderRow> {
+fn catalog_provider_rows(
+    catalog: &crate::adapters::operator_client::OperatorModelProviderCatalog,
+) -> Vec<verlet_chat::CatalogProviderRow> {
     catalog
-        .get("providers")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
+        .providers
         .iter()
-        .map(|row| {
-            let text = |key: &str| {
-                row.get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            let flag = |key: &str| row.get(key).and_then(serde_json::Value::as_bool) == Some(true);
-            verlet_chat::CatalogProviderRow {
-                provider_id: text("providerId"),
-                display_name: text("displayName"),
-                base_url: text("baseUrl"),
-                api: catalog_api_family(row.get("api").unwrap_or(&serde_json::Value::Null)),
-                auth_kind: text("authKind"),
-                env_vars: row
-                    .get("envVars")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|vars| {
-                        vars.iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(ToString::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                configured: flag("configured"),
-                auth_label: text("authLabel"),
-                custom: flag("custom"),
-                active: flag("active"),
-                model_count: row
-                    .get("modelCount")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0) as usize,
-                default_model: row
-                    .get("defaultModel")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string),
-            }
+        .map(|row| verlet_chat::CatalogProviderRow {
+            provider_id: row.provider_id.clone(),
+            display_name: row.display_name.clone(),
+            base_url: row.base_url.clone(),
+            api: catalog_api_family(&row.api),
+            auth_kind: row.auth_kind.clone(),
+            env_vars: row.env_vars.clone(),
+            configured: row.configured,
+            auth_label: row.auth_label.clone().unwrap_or_default(),
+            custom: row.custom,
+            active: row.active,
+            model_count: row.model_count,
+            default_model: row.default_model.clone(),
         })
         .collect()
 }
 
 /// `modelProvider/upsert` params for a custom provider from the setup form.
 /// The API key never rides here; it follows through `modelProvider/auth/set`.
-fn custom_provider_upsert_params(spec: &verlet_chat::CustomProviderSpec) -> serde_json::Value {
+fn custom_provider_upsert_params(
+    spec: &verlet_chat::CustomProviderSpec,
+) -> crate::adapters::operator_client::OperatorModelProviderUpsertParams {
     let api = match spec.api.as_str() {
         "openai_responses" => "open_ai_responses",
         "anthropic_messages" => "anthropic_messages",
@@ -1074,39 +1045,51 @@ fn custom_provider_upsert_params(spec: &verlet_chat::CustomProviderSpec) -> serd
     };
     let headers = spec
         .header
-        .as_ref()
-        .map(|(name, value)| serde_json::json!({ name: { "type": "literal", "value": value } }))
-        .unwrap_or_else(|| serde_json::json!({}));
-    let models: Vec<serde_json::Value> = spec
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                verlet_metadata::provider_store::LlmProviderConfigValue::literal(value),
+            )
+        })
+        .collect();
+    let models = spec
         .models
         .iter()
         .enumerate()
         .map(|(index, model_id)| {
-            let mut model = serde_json::json!({ "modelId": model_id });
-            if index == 0 {
-                model["metadata"] = serde_json::json!({ "default": "true" });
+            crate::adapters::operator_client::OperatorModelProviderModelUpsertRecord {
+                model_id: model_id.clone(),
+                display_name: None,
+                metadata: if index == 0 {
+                    std::collections::BTreeMap::from([("default".to_string(), "true".to_string())])
+                } else {
+                    std::collections::BTreeMap::new()
+                },
             }
-            model
         })
         .collect();
     let auth = if spec.keyless {
-        serde_json::json!({ "type": "none" })
+        verlet_metadata::provider_store::LlmProviderAuthConfig::None
     } else {
-        serde_json::json!({ "type": "stored_or_environment" })
+        verlet_metadata::provider_store::LlmProviderAuthConfig::StoredOrEnvironment
     };
-    serde_json::json!({
-        "provider": {
-            "providerId": spec.provider_id,
-            "api": api,
-            "baseUrl": spec.base_url,
-            "displayName": spec.display_name,
-            "auth": auth,
-            "authHeader": !spec.keyless,
-            "headers": headers,
-            "models": models,
-            "metadata": { "origin": "custom" },
-        }
-    })
+    crate::adapters::operator_client::OperatorModelProviderUpsertParams {
+        provider: crate::adapters::operator_client::OperatorModelProviderUpsertRecord {
+            provider_id: spec.provider_id.clone(),
+            api: crate::adapters::operator_client::OperatorProviderApi::Family(api.to_string()),
+            base_url: spec.base_url.clone(),
+            display_name: Some(spec.display_name.clone()),
+            auth,
+            headers,
+            auth_header: !spec.keyless,
+            models,
+            metadata: std::collections::BTreeMap::from([(
+                "origin".to_string(),
+                "custom".to_string(),
+            )]),
+        },
+    }
 }
 
 fn thread_name(thread: &serde_json::Value) -> Option<String> {

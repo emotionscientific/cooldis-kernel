@@ -4525,6 +4525,166 @@ async fn model_select_routes_auth_free_responses_without_authorization() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// EMO-577: a keyless custom provider (auth `none`, the chat setup window's
+/// "no API key" form path) counts as configured end to end: model/list,
+/// modelProvider/auth/status, modelProvider/catalog, model/select, and a
+/// routed turn that sends no Authorization header.
+#[tokio::test]
+async fn keyless_custom_provider_counts_configured_and_routes_without_authorization() {
+    let server = spawn_provider_sse_fixture(concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"KEYLESS_OK\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    let root = unique_test_root("app-server-keyless-custom-provider");
+    let config = local_model_select_test_config(&root, "keyless-custom");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    // The exact payload the chat driver builds for a keyless custom provider.
+    app.dispatch_request(
+        &connection,
+        "modelProvider/upsert",
+        Some(serde_json::json!({
+            "provider": {
+                "providerId": "local-keyless",
+                "api": "open_ai_chat_completions",
+                "baseUrl": format!("{}/v1", server.base_url),
+                "displayName": "Local Keyless",
+                "auth": { "type": "none" },
+                "authHeader": false,
+                "headers": {},
+                "models": [{ "modelId": "keyless-model", "metadata": { "default": "true" } }],
+                "metadata": { "origin": "custom" },
+            }
+        })),
+    )
+    .await
+    .unwrap();
+
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let row = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["providerId"] == "local-keyless")
+        .expect("keyless provider models must appear in model/list");
+    assert_eq!(row["model"], "keyless-model");
+    assert_eq!(row["authStatus"], "configured");
+
+    let auth = app
+        .dispatch_request(
+            &connection,
+            "modelProvider/auth/status",
+            Some(serde_json::json!({ "providerId": "local-keyless" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auth["auth"]["configured"], true);
+    assert_eq!(auth["auth"]["source"], "none");
+    assert_eq!(auth["auth"]["label"], "no auth required");
+
+    let catalog = app
+        .dispatch_request(&connection, "modelProvider/catalog", None)
+        .await
+        .unwrap();
+    let catalog_row = catalog["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["providerId"] == "local-keyless")
+        .expect("keyless provider must appear in modelProvider/catalog");
+    assert_eq!(catalog_row["configured"], true);
+    assert_eq!(catalog_row["custom"], true);
+    assert_eq!(catalog_row["authSource"], "none");
+
+    // Threads bind their manifest at start; keep the start-before-select
+    // order the other model/select routing tests use.
+    let thread_id = start_model_select_test_thread(&app, &connection).await;
+    let selected = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": "local-keyless",
+                "model": "keyless-model",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected["active"]["providerId"], "local-keyless");
+    assert_eq!(selected["active"]["model"], "keyless-model");
+
+    let completed = start_and_wait_for_model_select_turn(
+        &app,
+        &connection,
+        &mut outbound_rx,
+        &thread_id,
+        "route keyless",
+    )
+    .await;
+    assert_eq!(
+        completed_turn_agent_text(&completed).as_deref(),
+        Some("KEYLESS_OK")
+    );
+    let request = server.request.await.unwrap();
+    assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+    assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// EMO-577: `auth: none` with `authHeader: true` (a record shaped outside the
+/// chat form) must still select without a credential instead of erroring
+/// "requires an API key"; the endpoint is built with no Authorization header.
+#[tokio::test]
+async fn keyless_provider_with_auth_header_still_selects_without_credential() {
+    let root = unique_test_root("app-server-keyless-auth-header");
+    let config = local_model_select_test_config(&root, "keyless-auth-header");
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    app.dispatch_request(
+        &connection,
+        "modelProvider/upsert",
+        Some(serde_json::json!({
+            "provider": {
+                "providerId": "keyless-header-fixture",
+                "api": "open_ai_chat_completions",
+                "baseUrl": "http://127.0.0.1:1/v1",
+                "auth": { "type": "none" },
+                "authHeader": true,
+                "models": [{ "modelId": "keyless-header-model" }],
+            }
+        })),
+    )
+    .await
+    .unwrap();
+
+    let selected = app
+        .dispatch_request(
+            &connection,
+            "model/select",
+            Some(serde_json::json!({
+                "providerId": "keyless-header-fixture",
+                "model": "keyless-header-model",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected["active"]["providerId"], "keyless-header-fixture");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn model_select_rejects_missing_auth_without_changing_active_model() {
     let root = unique_test_root("app-server-model-select-missing-auth");
