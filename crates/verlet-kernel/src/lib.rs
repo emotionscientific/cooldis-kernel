@@ -59,6 +59,7 @@ pub mod daemon {
 
 pub mod kernel {
     pub(crate) mod admission;
+    pub mod binding_projector;
     pub mod compaction;
     pub mod context_compiler;
     pub mod control_decision;
