@@ -349,7 +349,8 @@ async fn metadata_store_persists_provider_auth_and_thread_topology_in_one_db() {
     let store = crate::provider_store::SqliteMetadataStore::open(&db_path)
         .await
         .unwrap();
-    crate::provider_store::seed_default_llm_providers(&store)
+    store
+        .upsert_provider(crate::provider_store::example_openai_compatible_record())
         .await
         .unwrap();
     store
@@ -443,8 +444,8 @@ async fn metadata_store_persists_provider_auth_and_thread_topology_in_one_db() {
 }
 
 #[test]
-fn default_openai_compatible_provider_record_matches_runtime_connection_shape() {
-    let provider = crate::provider_store::default_openai_compatible_llm_provider_record();
+fn example_openai_compatible_record_matches_runtime_connection_shape() {
+    let provider = crate::provider_store::example_openai_compatible_record();
 
     assert_eq!(
         provider.provider_id,
@@ -592,11 +593,12 @@ fn oauth_credential_without_account_fields_remains_deserializable() {
 }
 
 #[tokio::test]
-async fn seeding_openai_compatible_prepopulates_catalog_and_resolves_environment_auth() {
+async fn example_openai_compatible_record_resolves_environment_auth() {
     let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
         .await
         .unwrap();
-    crate::provider_store::seed_openai_compatible_llm_provider(&store)
+    store
+        .upsert_provider(crate::provider_store::example_openai_compatible_record())
         .await
         .unwrap();
 
@@ -640,8 +642,110 @@ async fn seeding_openai_compatible_prepopulates_catalog_and_resolves_environment
 }
 
 #[tokio::test]
-async fn seeding_default_providers_does_not_touch_stored_openai_compatible_credential() {
+async fn seeding_default_providers_creates_openai_codex_but_no_openai_compatible_placeholder() {
     let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+
+    crate::provider_store::seed_default_llm_providers(&store)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get_provider(crate::provider_store::OPENAI_CODEX_PROVIDER_ID)
+            .await
+            .unwrap()
+            .is_some(),
+        "openai-codex OAuth template must stay seeded"
+    );
+    assert!(
+        store
+            .get_provider(crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "the openai_compatible placeholder must no longer be seeded"
+    );
+}
+
+#[tokio::test]
+async fn seeding_removes_a_pristine_openai_compatible_placeholder_idempotently() {
+    let db_path = temp_db_path("verlet-placeholder-migration-pristine");
+    remove_sqlite_files(&db_path);
+
+    let store = crate::provider_store::SqliteMetadataStore::open(&db_path)
+        .await
+        .unwrap();
+    store
+        .upsert_provider(crate::provider_store::example_openai_compatible_record())
+        .await
+        .unwrap();
+    crate::provider_store::seed_default_llm_providers(&store)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_provider(crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "a pristine placeholder record must be deleted on seed"
+    );
+    drop(store);
+
+    let reopened = crate::provider_store::SqliteMetadataStore::open(&db_path)
+        .await
+        .unwrap();
+    crate::provider_store::seed_default_llm_providers(&reopened)
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .get_provider(crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "reopening and reseeding must stay a no-op"
+    );
+
+    remove_sqlite_files(&db_path);
+}
+
+#[tokio::test]
+async fn seeding_keeps_a_modified_openai_compatible_record() {
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    let mut modified = crate::provider_store::example_openai_compatible_record();
+    modified.base_url = "https://llm.internal.example/v1".to_string();
+    store.upsert_provider(modified).await.unwrap();
+
+    crate::provider_store::seed_default_llm_providers(&store)
+        .await
+        .unwrap();
+    crate::provider_store::seed_default_llm_providers(&store)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get_provider(crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
+            .await
+            .unwrap()
+            .expect("a modified openai_compatible record must survive seeding")
+            .base_url,
+        "https://llm.internal.example/v1"
+    );
+}
+
+#[tokio::test]
+async fn seeding_keeps_a_credentialed_openai_compatible_record_and_its_credential() {
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    store
+        .upsert_provider(crate::provider_store::example_openai_compatible_record())
         .await
         .unwrap();
     store
@@ -657,11 +761,15 @@ async fn seeding_default_providers_does_not_touch_stored_openai_compatible_crede
     crate::provider_store::seed_default_llm_providers(&store)
         .await
         .unwrap();
+    crate::provider_store::seed_default_llm_providers(&store)
+        .await
+        .unwrap();
+
     let provider = store
         .get_provider(crate::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID)
         .await
         .unwrap()
-        .unwrap();
+        .expect("a credentialed openai_compatible record must survive seeding");
     let resolved = crate::provider_store::resolve_llm_provider_auth(
         &store,
         &provider,

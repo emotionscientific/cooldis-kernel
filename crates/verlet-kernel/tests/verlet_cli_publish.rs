@@ -935,9 +935,24 @@ fn verlet_cli_tool_run_reports_missing_registered_operation_secret_refs() {
     assert!(!err.contains("fixture-secret"));
 }
 
-#[test]
-fn verlet_cli_auth_set_status_and_delete_redact_values() {
+#[tokio::test]
+async fn verlet_cli_auth_set_status_and_delete_redact_values() {
     let state_home = temp_dir("auth-state");
+
+    // The store no longer ships an api-key provider by default (EMO-575), so
+    // pre-create the record the CLI credential commands operate on.
+    {
+        use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
+
+        let store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+            state_home.join("metadata.sqlite3"),
+        )
+        .await
+        .unwrap();
+        let mut provider = verlet_metadata::provider_store::example_openai_compatible_record();
+        provider.base_url = "https://llm.internal.example/v1".to_string();
+        store.upsert_provider(provider).await.unwrap();
+    }
 
     let set = run_verlet_with_stdin(
         [

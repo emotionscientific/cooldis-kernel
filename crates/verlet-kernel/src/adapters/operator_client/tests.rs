@@ -120,11 +120,10 @@ async fn operator_client_driver_runs_prompt_against_app_server() {
             .any(|auth| auth.provider_id
                 == verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID)
     );
+    // "anthropic" has no store record at launch; auth/set templates it from
+    // the model catalog on demand (EMO-575).
     let api_key_auth = client
-        .model_provider_auth_set_typed(
-            verlet_metadata::provider_store::OPENAI_COMPATIBLE_PROVIDER_ID,
-            "operator-api-key",
-        )
+        .model_provider_auth_set_typed("anthropic", "operator-api-key")
         .await
         .unwrap();
     assert!(api_key_auth.configured);

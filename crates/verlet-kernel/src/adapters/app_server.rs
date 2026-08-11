@@ -136,6 +136,10 @@ pub struct VerletAppServerConfig {
     pub console_principal: Option<crate::daemon::identity::PrincipalId>,
     pub model: String,
     pub model_provider: String,
+    /// True only when a user-supplied model (CLI flag, config file, or host
+    /// request) was applied; the launch defaults leave it false so
+    /// `model/list` can hide the offline echo pair (EMO-575).
+    pub model_explicit: bool,
     pub provider: AppServerProviderConfig,
     pub capsule_bindings: CapsuleBindingsConfig,
     pub agent_registry_root: std::path::PathBuf,
@@ -188,6 +192,7 @@ impl VerletAppServerConfig {
             console_principal: None,
             model: APP_SERVER_LOCAL_MODEL.to_string(),
             model_provider: APP_SERVER_LOCAL_PROVIDER.to_string(),
+            model_explicit: false,
             provider: AppServerProviderConfig::LocalOffline,
             // lexicon-allow: capsule - existing app-server operation binding field.
             capsule_bindings: CapsuleBindingsConfig::default()
@@ -251,6 +256,7 @@ impl VerletAppServerConfig {
             console_principal: None,
             model: APP_SERVER_LOCAL_MODEL.to_string(),
             model_provider: APP_SERVER_LOCAL_PROVIDER.to_string(),
+            model_explicit: false,
             provider: AppServerProviderConfig::LocalOffline,
             capsule_bindings: CapsuleBindingsConfig::default()
                 .with_registry_root(runtime_home.join("operations")),
@@ -298,6 +304,7 @@ impl VerletAppServerConfig {
         let model = model.into();
         self.model = model.clone();
         self.model_provider = APP_SERVER_BIFROST_PROVIDER.to_string();
+        self.model_explicit = true;
         self.provider = AppServerProviderConfig::BifrostOpenAIResponses {
             base_url: base_url.into(),
             api_key: api_key.into(),
@@ -312,6 +319,7 @@ impl VerletAppServerConfig {
         let model = model.into();
         self.model = model.clone();
         self.model_provider = verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID.to_string();
+        self.model_explicit = true;
         self.provider = AppServerProviderConfig::OpenAICodex {
             model,
             max_tokens: 4096,
@@ -331,6 +339,7 @@ impl VerletAppServerConfig {
         let model = model.into();
         self.model = model.clone();
         self.model_provider = provider.clone();
+        self.model_explicit = true;
         self.provider = AppServerProviderConfig::OpenAIChatCompletions {
             provider,
             base_url: base_url.into(),
@@ -352,6 +361,7 @@ impl VerletAppServerConfig {
         let model = model.into();
         self.model = model.clone();
         self.model_provider = APP_SERVER_ANTHROPIC_PROVIDER.to_string();
+        self.model_explicit = true;
         self.provider = AppServerProviderConfig::AnthropicMessages {
             base_url: base_url.into(),
             api_key: api_key.into(),
@@ -373,6 +383,7 @@ impl VerletAppServerConfig {
         let model = model.into();
         self.model = model.clone();
         self.model_provider = APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER.to_string();
+        self.model_explicit = true;
         self.provider = AppServerProviderConfig::AnthropicBedrock {
             region: region.into(),
             base_url: None,
@@ -394,6 +405,7 @@ impl VerletAppServerConfig {
         let provider_id = provider_id.into();
         if let Some(model) = &model {
             self.model = model.clone();
+            self.model_explicit = true;
         }
         self.model_provider = provider_id.clone();
         self.provider = AppServerProviderConfig::CatalogOpenAIChatCompletions {
@@ -851,6 +863,9 @@ struct VerletAppServerInner {
     console_principal: Option<crate::daemon::identity::PrincipalId>,
     model: String,
     model_provider: String,
+    /// See [`VerletAppServerConfig::model_explicit`]: gates the `model/list`
+    /// launch row for pairs that exist nowhere in the store or catalog.
+    model_explicit: bool,
     provider: AppServerProviderConfig,
     /// EMO-558: the live selection. The `model`/`model_provider`/`provider`
     /// fields above stay as the launch defaults; every read that must follow
@@ -1328,6 +1343,7 @@ impl VerletAppServer {
                 console_principal: config.console_principal,
                 model: config.model.clone(),
                 model_provider: config.model_provider.clone(),
+                model_explicit: config.model_explicit,
                 provider: config.provider.clone(),
                 active_model: tokio::sync::RwLock::new(ActiveModelSelection {
                     model: config.model,

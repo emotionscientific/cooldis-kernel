@@ -513,6 +513,7 @@ pub(super) fn apply_chat_provider_config(
             config.model = model.clone();
             config.model_provider =
                 verlet_metadata::provider_store::OPENAI_CODEX_PROVIDER_ID.to_string();
+            config.model_explicit = true;
             config.provider = crate::adapters::app_server::AppServerProviderConfig::OpenAICodex {
                 model,
                 max_tokens,
@@ -529,6 +530,7 @@ pub(super) fn apply_chat_provider_config(
             config.model = model.clone();
             config.model_provider =
                 crate::adapters::app_server::APP_SERVER_BIFROST_PROVIDER.to_string();
+            config.model_explicit = true;
             config.provider =
                 crate::adapters::app_server::AppServerProviderConfig::BifrostOpenAIResponses {
                     base_url,
@@ -549,6 +551,7 @@ pub(super) fn apply_chat_provider_config(
         } => {
             config.model = model.clone();
             config.model_provider = provider.clone();
+            config.model_explicit = true;
             config.provider =
                 crate::adapters::app_server::AppServerProviderConfig::OpenAIChatCompletions {
                     provider,
@@ -570,6 +573,7 @@ pub(super) fn apply_chat_provider_config(
             config.model = model.clone();
             config.model_provider =
                 crate::adapters::app_server::APP_SERVER_ANTHROPIC_PROVIDER.to_string();
+            config.model_explicit = true;
             config.provider =
                 crate::adapters::app_server::AppServerProviderConfig::AnthropicMessages {
                     base_url,
@@ -592,6 +596,7 @@ pub(super) fn apply_chat_provider_config(
             config.model = model.clone();
             config.model_provider =
                 crate::adapters::app_server::APP_SERVER_ANTHROPIC_BEDROCK_PROVIDER.to_string();
+            config.model_explicit = true;
             config.provider =
                 crate::adapters::app_server::AppServerProviderConfig::AnthropicBedrock {
                     region,
@@ -612,6 +617,7 @@ pub(super) fn apply_chat_provider_config(
         } => {
             if let Some(model) = &model {
                 config.model = model.clone();
+                config.model_explicit = true;
             }
             config.model_provider = provider_id.clone();
             config.provider = crate::adapters::app_server::AppServerProviderConfig::CatalogOpenAIChatCompletions {

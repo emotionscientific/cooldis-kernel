@@ -1592,7 +1592,10 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = root.join("app.sock");
         let listen = crate::adapters::app_server::AppServerListenAddr::Unix(socket.clone());
-        let app_config = isolated_app_config(listen.clone(), &root);
+        let mut app_config = isolated_app_config(listen.clone(), &root);
+        // Explicitly launched echo keeps the launch row in model/list so the
+        // ACP model option can round-trip it (EMO-575 hides it otherwise).
+        app_config.model_explicit = true;
         let app = crate::adapters::app_server::VerletAppServer::new_local(app_config)
             .await
             .unwrap();
