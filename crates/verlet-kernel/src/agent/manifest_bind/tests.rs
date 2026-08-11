@@ -610,7 +610,6 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
         Some(&root),
         &std::collections::BTreeSet::from(["mcp://arcade".to_string()]),
         Some(&discoverer),
-        0,
     )
     .await
     .unwrap();
@@ -694,7 +693,6 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
         Some(&root),
         &std::collections::BTreeSet::new(),
         None,
-        0,
     )
     .await
     .unwrap();
@@ -852,7 +850,6 @@ async fn protocol_tool_import_direct_pins_must_not_duplicate_tool_rows() {
         None,
         &std::collections::BTreeSet::from(["mcp://arcade".to_string()]),
         Some(&discoverer),
-        0,
     )
     .await;
     let err = match result {
@@ -2604,7 +2601,6 @@ ref = "skill://registry-package"
             Some(&initial.skill_packages),
             Some(&forged_discovery),
             true,
-            verlet_history::now_ms(),
         )
         .await
         .unwrap_err()
@@ -3008,119 +3004,6 @@ async fn operation_bind_requires_declared_grants() {
             direct_tools: Vec::new(),
         }]
     );
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn bind_receipt_carries_future_expiry_and_excludes_expired_tool_rows() {
-    let root = temp_dir("manifest-bind-grant-expiry");
-    let operation_root = root.join("operations");
-    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&operation_root);
-    std::fs::create_dir_all(&operation_root).unwrap();
-    let wasm = wat::parse_str(operation_guest_with_required_capability()).unwrap();
-    let artifact = operation_root.join("search.wasm");
-    std::fs::write(&artifact, wasm).unwrap();
-    let operation = registry
-        .publish_artifact(
-            verlet_operations::operation_store::PublishOperationRequest {
-                name: "search".to_string(),
-                artifact_path: artifact.clone(),
-                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
-                    bin_path: artifact,
-                },
-                interface: None,
-                capability_grants: std::collections::BTreeSet::from([
-                    "net:https://example.com".to_string()
-                ]),
-                metadata: Default::default(),
-            },
-        )
-        .await
-        .unwrap();
-    let manifest = format!(
-        r#"{}
-
-[[tools]]
-type = "direct_tool"
-id = "search"
-tool_name = "search"
-operation_ref = "op://search/search@sha256:{}"
-grants = [
-  {{ capability = "net:https://example.com", expires_at = "2026-07-16T20:00:00Z" }},
-  {{ capability = "fs.read:/workspace", expires_at = "2026-07-16T21:00:00Z" }},
-]
-"#,
-        minimal_manifest("grant-expiry"),
-        operation.active_artifact_hash
-    );
-    let manifest_path = root.join("grant-expiry.verlet.agent.toml");
-    std::fs::write(&manifest_path, manifest).unwrap();
-    let record = crate::agent::manifest::LocalAgentRegistry::new(root.join("agents"))
-        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_root)
-        .unwrap();
-    let surface =
-        crate::agent::manifest_bind::AgentManifestProviderSurface::single("local_offline", "echo");
-
-    let future = crate::agent::manifest_bind::bind_published_agent_record_at(
-        &record,
-        None,
-        &surface,
-        Some(&operation_root),
-        None,
-        None,
-        &std::collections::BTreeSet::new(),
-        None,
-        &crate::agent::manifest_bind::AgentManifestModelProfileSelection::default(),
-        &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
-        1_784_231_999_000,
-    )
-    .await
-    .unwrap();
-    assert_eq!(future.bind_receipt.tool_ids, vec!["search"]);
-    assert_eq!(future.bind_receipt.operation_bindings.len(), 1);
-    assert_eq!(future.bind_receipt.grant_bindings.len(), 2);
-    assert_eq!(
-        future.bind_receipt.grant_bindings[0].expires_at.as_deref(),
-        Some("2026-07-16T20:00:00Z")
-    );
-    assert!(!future.bind_receipt.grant_bindings[0].lapsed_at_bind);
-    assert!(!future.bind_receipt.grant_bindings[0].surface_excluded);
-
-    let expired = crate::agent::manifest_bind::bind_published_agent_record_at(
-        &record,
-        None,
-        &surface,
-        Some(&operation_root),
-        None,
-        None,
-        &std::collections::BTreeSet::new(),
-        None,
-        &crate::agent::manifest_bind::AgentManifestModelProfileSelection::default(),
-        &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
-        1_784_232_001_000,
-    )
-    .await
-    .unwrap();
-    assert!(expired.bind_receipt.tool_ids.is_empty());
-    assert!(expired.bind_receipt.operation_bindings.is_empty());
-    assert!(expired.operation_names.is_empty());
-    assert_eq!(
-        expired
-            .bind_receipt
-            .grant_bindings
-            .iter()
-            .filter(|binding| binding.lapsed_at_bind)
-            .count(),
-        1
-    );
-    assert!(
-        expired
-            .bind_receipt
-            .grant_bindings
-            .iter()
-            .all(|binding| binding.surface_excluded)
-    );
-
     let _ = std::fs::remove_dir_all(root);
 }
 

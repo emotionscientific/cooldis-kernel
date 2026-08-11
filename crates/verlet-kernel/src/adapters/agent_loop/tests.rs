@@ -7997,15 +7997,13 @@ async fn kernel_thread_registry()
 
 async fn kernel_thread_router() -> crate::agent::agent_tool_router::AgentToolRouter {
     let registry = kernel_thread_registry().await;
-    let package = crate::operations::kernel_packages::verlet_threads_kernel_package();
-    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
-        .with_capability_grants(package.capability_grants)
-        .with_tool_aliases(vec![crate::agent::agent_tool_router::OperationToolAlias {
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry).with_tool_aliases(vec![
+        crate::agent::agent_tool_router::OperationToolAlias {
             tool_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
-            grant_expiries: Vec::new(),
-        }])
+        },
+    ])
 }
 
 async fn kernel_schedule_registry()

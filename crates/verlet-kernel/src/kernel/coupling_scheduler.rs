@@ -41,29 +41,6 @@ where
         coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
         appended: Vec<verlet_history::EventRecord>,
     ) -> crate::kernel::runtime_host::VerletResult<CouplingSchedulerCycleReceipt> {
-        self.run_batch_with_clock(coupling_set, appended, verlet_history::now_ms)
-            .await
-    }
-
-    pub async fn run_batch_at(
-        &self,
-        coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
-        appended: Vec<verlet_history::EventRecord>,
-        now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<CouplingSchedulerCycleReceipt> {
-        self.run_batch_with_clock(coupling_set, appended, || now_ms)
-            .await
-    }
-
-    async fn run_batch_with_clock<F>(
-        &self,
-        coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
-        appended: Vec<verlet_history::EventRecord>,
-        mut now_ms: F,
-    ) -> crate::kernel::runtime_host::VerletResult<CouplingSchedulerCycleReceipt>
-    where
-        F: FnMut() -> i64,
-    {
         let mut seen = std::collections::BTreeSet::new();
         let mut queue = std::collections::VecDeque::new();
         self.enqueue_matches(
@@ -90,29 +67,6 @@ where
                         CouplingSourceCut::default(),
                         Vec::new(),
                         Vec::new(),
-                    )
-                    .await?;
-                appended_events.extend(receipt);
-                runs.push(run);
-                continue;
-            }
-            if let Err(err) = crate::agent::manifest_bind::ensure_grant_expiries_live(
-                coupling_set
-                    .grant_expiries
-                    .get(&queued.coupling.id)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                now_ms(),
-            ) {
-                let (run, receipt) = self
-                    .append_lapsed_run(
-                        coupling_set,
-                        &queued,
-                        err.to_string(),
-                        CouplingSourceCut::default(),
-                        Vec::new(),
-                        &mut seen,
-                        &mut queue,
                     )
                     .await?;
                 appended_events.extend(receipt);
@@ -199,30 +153,6 @@ where
                 }
             };
 
-            if let Err(err) = crate::agent::manifest_bind::ensure_grant_expiries_live(
-                coupling_set
-                    .grant_expiries
-                    .get(&queued.coupling.id)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                now_ms(),
-            ) {
-                let (run, receipt) = self
-                    .append_lapsed_run(
-                        coupling_set,
-                        &queued,
-                        err.to_string(),
-                        source_cut,
-                        source_events,
-                        &mut seen,
-                        &mut queue,
-                    )
-                    .await?;
-                appended_events.extend(receipt);
-                runs.push(run);
-                continue;
-            }
-
             let request = CouplingInvocation {
                 activation: queued.activation.clone(),
                 coupling: queued.coupling.clone(),
@@ -285,30 +215,6 @@ where
                         depth: queued.activation.depth + 1,
                     },
                 );
-                appended_events.extend(receipt);
-                runs.push(run);
-                continue;
-            }
-
-            if let Err(err) = crate::agent::manifest_bind::ensure_grant_expiries_live(
-                coupling_set
-                    .grant_expiries
-                    .get(&queued.coupling.id)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                now_ms(),
-            ) {
-                let (run, receipt) = self
-                    .append_lapsed_run(
-                        coupling_set,
-                        &queued,
-                        err.to_string(),
-                        source_cut,
-                        source_events,
-                        &mut seen,
-                        &mut queue,
-                    )
-                    .await?;
                 appended_events.extend(receipt);
                 runs.push(run);
                 continue;
@@ -522,42 +428,6 @@ where
         }
         let count = per_thread_run_counts.get(&key).copied().unwrap_or_default();
         Ok((key, count))
-    }
-
-    async fn append_lapsed_run(
-        &self,
-        coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
-        queued: &QueuedActivation,
-        reason: String,
-        source_cut: CouplingSourceCut,
-        source_events: Vec<verlet_history::EventRecord>,
-        seen: &mut std::collections::BTreeSet<ActivationKey>,
-        queue: &mut std::collections::VecDeque<QueuedActivation>,
-    ) -> crate::kernel::runtime_host::VerletResult<(
-        CouplingRunReceipt,
-        Vec<verlet_history::EventRecord>,
-    )> {
-        let (run, receipt) = self
-            .append_run_receipt(
-                queued,
-                CouplingRunStatus::Failed,
-                Some(reason),
-                source_cut,
-                source_events,
-                Vec::new(),
-            )
-            .await?;
-        self.enqueue_matches(
-            coupling_set,
-            receipt.clone(),
-            seen,
-            queue,
-            RootDepth::Inherited {
-                root_event_id: queued.activation.root_event_id,
-                depth: queued.activation.depth + 1,
-            },
-        );
-        Ok((run, receipt))
     }
 
     async fn append_sink_events(
@@ -1089,210 +959,6 @@ mod tests {
                 stream_id: thread_stream.to_string(),
                 max_sequence: 1,
             }]
-        );
-    }
-
-    #[tokio::test]
-    async fn coupling_grant_lapse_fails_before_source_read_or_executor_invocation() {
-        let coordinates =
-            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
-        let store = verlet_history::InMemorySessionStore::default();
-        let appended = store
-            .append_events(
-                &verlet_history::EventStreamId::for_thread(&coordinates),
-                vec![verlet_history::NewEventRecord::witnessed(
-                    coordinates,
-                    verlet_history::EventKind::TurnCompleted,
-                    serde_json::json!({"turn_id": "t1"}),
-                )],
-            )
-            .await
-            .unwrap();
-        let executor = RecordingExecutor::default();
-        let scheduler =
-            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
-        let coupling = test_coupling(
-            "expiring_gate",
-            verlet_history::EventKind::TurnCompleted,
-            "control",
-        );
-        let coupling_set = crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
-            "snapshot-a",
-            vec![coupling],
-            std::collections::BTreeMap::from([(
-                "expiring_gate".to_string(),
-                vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                    capability: "stream.read:thread".to_string(),
-                    expires_at: "1970-01-01T00:00:01Z".to_string(),
-                }],
-            )]),
-        );
-
-        let receipt = scheduler
-            .run_batch_at(&coupling_set, appended, 1_001)
-            .await
-            .unwrap();
-
-        assert!(executor.calls.lock().unwrap().is_empty());
-        assert_eq!(
-            receipt.runs[0].status,
-            crate::kernel::coupling_scheduler::CouplingRunStatus::Failed
-        );
-        let reason = receipt.runs[0].reason.as_deref().unwrap();
-        assert!(reason.contains("missing capability grants: stream.read:thread"));
-        assert!(reason.contains("1970-01-01T00:00:01Z"));
-        assert!(receipt.appended_events.iter().any(|event| {
-            event.kind == verlet_history::EventKind::CouplingRunFailed
-                && event.payload["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("1970-01-01T00:00:01Z"))
-        }));
-    }
-
-    #[tokio::test]
-    async fn coupling_batch_rechecks_expiry_at_each_consumption_boundary() {
-        let coordinates =
-            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
-        let store = verlet_history::InMemorySessionStore::default();
-        let appended = store
-            .append_events(
-                &verlet_history::EventStreamId::for_thread(&coordinates),
-                vec![
-                    verlet_history::NewEventRecord::witnessed(
-                        coordinates.clone(),
-                        verlet_history::EventKind::TurnCompleted,
-                        serde_json::json!({"turn_id": "t1"}),
-                    ),
-                    verlet_history::NewEventRecord::witnessed(
-                        coordinates.clone(),
-                        verlet_history::EventKind::TurnCompleted,
-                        serde_json::json!({"turn_id": "t2"}),
-                    ),
-                ],
-            )
-            .await
-            .unwrap();
-        let executor = RecordingExecutor {
-            discharges: vec![crate::kernel::coupling_scheduler::CouplingDischarge {
-                event_id: None,
-                stream: "control".to_string(),
-                kind: verlet_history::EventKind::PlacementDecision,
-                payload: serde_json::json!({"placement": "local"}),
-            }],
-            ..RecordingExecutor::default()
-        };
-        let scheduler =
-            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
-        let coupling_set = crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
-            "snapshot-a",
-            vec![test_coupling(
-                "expiring_gate",
-                verlet_history::EventKind::TurnCompleted,
-                "control",
-            )],
-            std::collections::BTreeMap::from([(
-                "expiring_gate".to_string(),
-                vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                    capability: "stream.write:control".to_string(),
-                    expires_at: "1970-01-01T00:00:01Z".to_string(),
-                }],
-            )]),
-        );
-        let reads = std::sync::atomic::AtomicUsize::new(0);
-
-        let receipt = scheduler
-            .run_batch_with_clock(&coupling_set, appended, || {
-                if reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3 {
-                    1_000
-                } else {
-                    1_001
-                }
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(executor.calls.lock().unwrap().len(), 1);
-        assert_eq!(
-            receipt
-                .runs
-                .iter()
-                .map(|run| run.status)
-                .collect::<Vec<_>>(),
-            vec![
-                crate::kernel::coupling_scheduler::CouplingRunStatus::Completed,
-                crate::kernel::coupling_scheduler::CouplingRunStatus::Failed
-            ]
-        );
-        assert!(
-            receipt.runs[1]
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("expired at 1970-01-01T00:00:01Z"))
-        );
-    }
-
-    #[tokio::test]
-    async fn expired_failure_triggering_coupling_stops_at_the_depth_limit() {
-        let coordinates =
-            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
-        let store = verlet_history::InMemorySessionStore::default();
-        let appended = store
-            .append_events(
-                &verlet_history::EventStreamId::for_thread(&coordinates),
-                vec![verlet_history::NewEventRecord::witnessed(
-                    coordinates,
-                    verlet_history::EventKind::CouplingRunFailed,
-                    serde_json::json!({"reason": "initial failure"}),
-                )],
-            )
-            .await
-            .unwrap();
-        let executor = RecordingExecutor::default();
-        let scheduler = crate::kernel::coupling_scheduler::CouplingScheduler::with_config(
-            &store,
-            &executor,
-            crate::kernel::coupling_scheduler::CouplingSchedulerConfig {
-                max_depth: 1,
-                ..crate::kernel::coupling_scheduler::CouplingSchedulerConfig::default()
-            },
-        );
-        let coupling_set = crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
-            "snapshot-a",
-            vec![test_coupling(
-                "expired_failure_observer",
-                verlet_history::EventKind::CouplingRunFailed,
-                "control",
-            )],
-            std::collections::BTreeMap::from([(
-                "expired_failure_observer".to_string(),
-                vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                    capability: "stream.read:control".to_string(),
-                    expires_at: "1970-01-01T00:00:01Z".to_string(),
-                }],
-            )]),
-        );
-
-        let receipt = scheduler
-            .run_batch_at(&coupling_set, appended, 1_001)
-            .await
-            .unwrap();
-
-        assert!(executor.calls.lock().unwrap().is_empty());
-        assert_eq!(
-            receipt
-                .runs
-                .iter()
-                .map(|run| run.status)
-                .collect::<Vec<_>>(),
-            vec![
-                crate::kernel::coupling_scheduler::CouplingRunStatus::Failed,
-                crate::kernel::coupling_scheduler::CouplingRunStatus::Failed,
-                crate::kernel::coupling_scheduler::CouplingRunStatus::Skipped,
-            ]
-        );
-        assert_eq!(
-            receipt.runs[2].reason.as_deref(),
-            Some("depth_limit_exhausted")
         );
     }
 

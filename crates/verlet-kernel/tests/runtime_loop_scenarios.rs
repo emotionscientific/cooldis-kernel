@@ -1447,15 +1447,14 @@ async fn kernel_thread_router() -> verlet::agent::agent_tool_router::AgentToolRo
         ),
     );
     registry.register_kernel(registration).await.unwrap();
-    verlet::agent::agent_tool_router::AgentToolRouter::new(registry)
-        .with_capability_grants(package.capability_grants)
-        .with_tool_aliases(vec![verlet::agent::agent_tool_router::OperationToolAlias {
+    verlet::agent::agent_tool_router::AgentToolRouter::new(registry).with_tool_aliases(vec![
+        verlet::agent::agent_tool_router::OperationToolAlias {
             tool_name: verlet::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             registered_name: verlet::operations::kernel_packages::VERLET_THREADS_PACKAGE
                 .to_string(),
             operation_name: verlet::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
-            grant_expiries: Vec::new(),
-        }])
+        },
+    ])
 }
 
 #[tokio::test]

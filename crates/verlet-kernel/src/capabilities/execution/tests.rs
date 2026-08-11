@@ -1454,38 +1454,6 @@ async fn bash_tool_spills_complete_stdout_and_cat_round_trips_it() {
 }
 
 #[tokio::test]
-async fn bash_tool_checks_manifest_grant_expiry_before_execution() {
-    let provider = crate::capabilities::execution::BashToolProvider::new(
-        crate::capabilities::execution::VirtualBashRuntimeConfig::default()
-            .with_capability_grant_expiries([
-                verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                    capability: "fs.read:/workspace".to_string(),
-                    expires_at: "1970-01-01T00:00:01Z".to_string(),
-                },
-            ]),
-    );
-
-    let err = provider
-        .invoke_tool_call_at(
-            crate::agent::agent_tool_router::AgentKernelToolCall {
-                call_id: "call_expired".to_string(),
-                tool_name: verlet_vbash::BASH_TOOL.to_string(),
-                arguments: serde_json::json!({"command": "echo should-not-run"}),
-                turn_context: None,
-            },
-            1_001,
-        )
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("missing capability grants: fs.read:/workspace")
-    );
-    assert!(err.to_string().contains("1970-01-01T00:00:01Z"));
-}
-
-#[tokio::test]
 async fn bash_tool_spills_stderr_independently() {
     let provider = crate::capabilities::execution::BashToolProvider::new(
         crate::capabilities::execution::VirtualBashRuntimeConfig {

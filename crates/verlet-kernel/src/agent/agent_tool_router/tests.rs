@@ -259,7 +259,7 @@ async fn router_rejects_non_object_json_tool_arguments() {
 }
 
 #[tokio::test]
-async fn router_rejects_operation_when_tool_invocation_lacks_required_capability() {
+async fn router_invokes_attached_operation_without_manifest_capability_check() {
     let router = router_with_operation(
         "secret-echo",
         "echo",
@@ -279,99 +279,10 @@ async fn router_rejects_operation_when_tool_invocation_lacks_required_capability
     assert!(matches!(
         result,
         verlet_history::CanonicalMessage::ToolResult {
-            is_error: true,
-            content,
-            ..
-        } if tool_result_text(&content).contains("missing capability grants: secret:EXAMPLE_API_KEY")
-    ));
-}
-
-#[tokio::test]
-async fn router_invokes_capability_protected_operation_when_granted() {
-    let router = router_with_operation(
-        "secret-echo",
-        "echo",
-        "bytes",
-        vec!["secret:EXAMPLE_API_KEY"],
-    )
-    .await
-    .with_capability_grant("secret:EXAMPLE_API_KEY");
-
-    let result = router
-        .invoke_tool_call(
-            "call_1",
-            "secret_echo_search",
-            serde_json::json!({"input": "verlet"}),
-        )
-        .await;
-
-    assert!(matches!(
-        result,
-        verlet_history::CanonicalMessage::ToolResult {
             is_error: false,
             content,
             ..
         } if tool_result_text(&content) == "echo:verlet"
-    ));
-}
-
-#[tokio::test]
-async fn router_checks_grant_expiry_live_at_each_tool_invocation() {
-    let router = router_with_operation(
-        "secret-echo",
-        "echo",
-        "bytes",
-        vec!["secret:EXAMPLE_API_KEY"],
-    )
-    .await
-    .with_capability_grant("secret:EXAMPLE_API_KEY")
-    .with_capability_grant("fs.read:/workspace")
-    .with_capability_grant_expiries([
-        verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-            capability: "secret:EXAMPLE_API_KEY".to_string(),
-            expires_at: "1970-01-01T00:00:01Z".to_string(),
-        },
-        verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-            capability: "fs.read:/workspace".to_string(),
-            expires_at: "1970-01-01T00:00:02Z".to_string(),
-        },
-    ]);
-
-    let at_expiry = router
-        .invoke_tool_call_at(
-            "call_before",
-            "secret_echo_search",
-            serde_json::json!({"input": "before"}),
-            1_000,
-        )
-        .await;
-    let after_expiry = router
-        .invoke_tool_call_at(
-            "call_after",
-            "secret_echo_search",
-            serde_json::json!({"input": "after"}),
-            1_001,
-        )
-        .await;
-
-    assert!(matches!(
-        at_expiry,
-        verlet_history::CanonicalMessage::ToolResult {
-            is_error: false,
-            ..
-        }
-    ));
-    assert!(matches!(
-        after_expiry,
-        verlet_history::CanonicalMessage::ToolResult {
-            is_error: true,
-            content,
-            ..
-        } if {
-            let text = tool_result_text(&content);
-            text.contains("missing capability grants: secret:EXAMPLE_API_KEY")
-                && text.contains("1970-01-01T00:00:01Z")
-        }
     ));
 }
 
@@ -716,14 +627,13 @@ async fn router_with_kernel_process_operation(
         serde_json::json!(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
-    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
-        .with_capability_grants(package.capability_grants)
-        .with_tool_aliases(vec![crate::agent::agent_tool_router::OperationToolAlias {
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry).with_tool_aliases(vec![
+        crate::agent::agent_tool_router::OperationToolAlias {
             tool_name: crate::operations::kernel_packages::PROCESS_EXEC_OPERATION.to_string(),
             registered_name: crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::PROCESS_EXEC_OPERATION.to_string(),
-            grant_expiries: Vec::new(),
-        }])
+        },
+    ])
 }
 
 async fn router_with_kernel_notify_operation() -> crate::agent::agent_tool_router::AgentToolRouter {
@@ -744,26 +654,19 @@ async fn router_with_kernel_notify_operation() -> crate::agent::agent_tool_route
         serde_json::json!(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
-    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
-        .with_capability_grant(crate::operations::kernel_packages::CHANNEL_EMIT_CAPABILITY)
-        .with_tool_aliases(vec![
-            crate::agent::agent_tool_router::OperationToolAlias {
-                tool_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION.to_string(),
-                registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE
-                    .to_string(),
-                operation_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION
-                    .to_string(),
-                grant_expiries: Vec::new(),
-            },
-            crate::agent::agent_tool_router::OperationToolAlias {
-                tool_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
-                registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE
-                    .to_string(),
-                operation_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION
-                    .to_string(),
-                grant_expiries: Vec::new(),
-            },
-        ])
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry).with_tool_aliases(vec![
+        crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION.to_string(),
+            registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE.to_string(),
+            operation_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION
+                .to_string(),
+        },
+        crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
+            registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE.to_string(),
+            operation_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
+        },
+    ])
 }
 
 async fn router_with_kernel_thread_operations(
@@ -792,27 +695,24 @@ async fn router_with_kernel_thread_operations(
         serde_json::json!(crate::operations::kernel_packages::KERNEL_RUNTIME_KIND),
     );
     registry.register_kernel(registration).await.unwrap();
-    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
-        .with_capability_grants(package.capability_grants)
-        .with_tool_aliases(
-            [
-                crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
-                crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
-                crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
-                crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
-                crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
-            ]
-            .into_iter()
-            .map(
-                |operation| crate::agent::agent_tool_router::OperationToolAlias {
-                    tool_name: operation.to_string(),
-                    registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE
-                        .to_string(),
-                    operation_name: operation.to_string(),
-                    grant_expiries: Vec::new(),
-                },
-            ),
-        )
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry).with_tool_aliases(
+        [
+            crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
+            crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
+            crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
+            crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
+        ]
+        .into_iter()
+        .map(
+            |operation| crate::agent::agent_tool_router::OperationToolAlias {
+                tool_name: operation.to_string(),
+                registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE
+                    .to_string(),
+                operation_name: operation.to_string(),
+            },
+        ),
+    )
 }
 
 fn temp_cwd(name: &str) -> std::path::PathBuf {
@@ -948,7 +848,6 @@ fn kernel_identity_router(
             tool_name: "identify-thread".to_string(),
             registered_name: "thread-identity".to_string(),
             operation_name: "identify-thread".to_string(),
-            grant_expiries: Vec::new(),
         }])
 }
 

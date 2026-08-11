@@ -214,38 +214,7 @@ pub async fn bind_published_agent_record(
     model_selection: &AgentManifestModelProfileSelection,
     overrides: &AgentManifestBindOverrides,
 ) -> crate::kernel::runtime_host::VerletResult<AgentManifestBoundThread> {
-    bind_published_agent_record_at(
-        record,
-        alias,
-        provider_surface,
-        operation_registry_root,
-        blob_registry_root,
-        skill_registry_root,
-        configured_mcp_server_refs,
-        tool_universe_discoverer,
-        model_selection,
-        overrides,
-        verlet_history::now_ms(),
-    )
-    .await
-}
-
-/// Compile and bind with caller-supplied time for deterministic authority
-/// checks. Production callers normally use [`bind_published_agent_record`].
-pub async fn bind_published_agent_record_at(
-    record: &crate::agent::manifest::PublishedAgentRecord,
-    alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
-    provider_surface: &AgentManifestProviderSurface,
-    operation_registry_root: Option<&std::path::Path>,
-    blob_registry_root: Option<&std::path::Path>,
-    skill_registry_root: Option<&std::path::Path>,
-    configured_mcp_server_refs: &std::collections::BTreeSet<String>,
-    tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
-    model_selection: &AgentManifestModelProfileSelection,
-    overrides: &AgentManifestBindOverrides,
-    now_ms: i64,
-) -> crate::kernel::runtime_host::VerletResult<AgentManifestBoundThread> {
-    bind_published_agent_record_with_placement_at(
+    bind_published_agent_record_with_placement(
         record,
         alias,
         provider_surface,
@@ -261,7 +230,6 @@ pub async fn bind_published_agent_record_at(
         None,
         None,
         false,
-        now_ms,
     )
     .await
 }
@@ -289,46 +257,6 @@ pub async fn bind_published_agent_record_with_placement(
     workspace_override: Option<&AgentManifestWorkspaceBinding>,
     remote_event_store_served: bool,
 ) -> crate::kernel::runtime_host::VerletResult<AgentManifestBoundThread> {
-    bind_published_agent_record_with_placement_at(
-        record,
-        alias,
-        provider_surface,
-        operation_registry_root,
-        blob_registry_root,
-        skill_registry_root,
-        configured_mcp_server_refs,
-        tool_universe_discoverer,
-        model_selection,
-        overrides,
-        default_placement,
-        placement_override,
-        default_workspace,
-        workspace_override,
-        remote_event_store_served,
-        verlet_history::now_ms(),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn bind_published_agent_record_with_placement_at(
-    record: &crate::agent::manifest::PublishedAgentRecord,
-    alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
-    provider_surface: &AgentManifestProviderSurface,
-    operation_registry_root: Option<&std::path::Path>,
-    blob_registry_root: Option<&std::path::Path>,
-    skill_registry_root: Option<&std::path::Path>,
-    configured_mcp_server_refs: &std::collections::BTreeSet<String>,
-    tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
-    model_selection: &AgentManifestModelProfileSelection,
-    overrides: &AgentManifestBindOverrides,
-    default_placement: Option<&AgentManifestPlacementBinding>,
-    placement_override: Option<&AgentManifestPlacementBinding>,
-    default_workspace: Option<&AgentManifestWorkspaceBinding>,
-    workspace_override: Option<&AgentManifestWorkspaceBinding>,
-    remote_event_store_served: bool,
-    now_ms: i64,
-) -> crate::kernel::runtime_host::VerletResult<AgentManifestBoundThread> {
     bind_published_agent_record_with_placement_and_skill_witness(
         record,
         alias,
@@ -348,7 +276,6 @@ pub async fn bind_published_agent_record_with_placement_at(
         None,
         None,
         false,
-        now_ms,
     )
     .await
 }
@@ -372,7 +299,6 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     skill_package_witness: Option<&[AgentManifestSkillPackageBinding]>,
     skill_discovery_witness: Option<&AgentManifestSkillDiscovery>,
     rehydrating_from_witness: bool,
-    now_ms: i64,
 ) -> crate::kernel::runtime_host::VerletResult<AgentManifestBoundThread> {
     let (manifest, compile_receipt) = compile_published_agent_record(record, alias)?;
     let placement = resolve_manifest_placement_with_origin(
@@ -435,7 +361,6 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
         operation_registry_root,
         configured_mcp_server_refs,
         tool_universe_discoverer,
-        now_ms,
     )
     .await?;
     let static_context_segments = bind_static_context_sources(&manifest, blob_registry_root)?;
@@ -456,7 +381,7 @@ pub(crate) async fn bind_published_agent_record_with_placement_and_skill_witness
     if let Some(segment) = discovery_context_segment {
         skill_context_segments.push(segment);
     }
-    let bound_couplings = bind_couplings(&manifest.couplings, operation_registry_root, now_ms)?;
+    let bound_couplings = bind_couplings(&manifest.couplings, operation_registry_root)?;
     let couplings = bound_couplings.couplings;
     enforce_child_agent_policy(&manifest, &bound_tools.operation_bindings, &couplings)?;
     let operation_names = bound_tools
@@ -1870,21 +1795,12 @@ struct BoundCouplings {
 fn bind_couplings(
     couplings: &[verlet_agent::manifest_schema::AgentManifestCoupling],
     operation_registry_root: Option<&std::path::Path>,
-    now_ms: i64,
 ) -> crate::kernel::runtime_host::VerletResult<BoundCouplings> {
     let mut bound = Vec::new();
     let mut expiries = std::collections::BTreeMap::new();
     let mut grant_bindings = Vec::new();
     for coupling in couplings {
-        let mut receipts =
-            grant_binding_receipts("coupling", &coupling.id, &coupling.grants, now_ms)?;
-        if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
-            receipts
-                .iter_mut()
-                .for_each(|receipt| receipt.surface_excluded = true);
-            grant_bindings.extend(receipts);
-            continue;
-        }
+        let receipts = grant_binding_receipts("coupling", &coupling.id, &coupling.grants);
         let coupling_expiries = grant_expiries(&coupling.grants);
         if !coupling_expiries.is_empty() {
             expiries.insert(coupling.id.clone(), coupling_expiries);
@@ -2232,64 +2148,21 @@ fn grant_binding_receipts(
     subject_kind: &str,
     subject_id: &str,
     grants: &[verlet_agent::manifest_schema::AgentManifestGrant],
-    now_ms: i64,
-) -> crate::kernel::runtime_host::VerletResult<Vec<AgentManifestGrantBindingReceipt>> {
+) -> Vec<AgentManifestGrantBindingReceipt> {
     grants
         .iter()
         .map(|grant| {
             let expires_at = grant.expiry().map(|expiry| expiry.expires_at.clone());
-            let lapsed_at_bind = match grant.expiry() {
-                Some(expiry) => now_ms > grant_expiry_timestamp_ms(expiry)?,
-                None => false,
-            };
-            Ok(AgentManifestGrantBindingReceipt {
+            AgentManifestGrantBindingReceipt {
                 subject_kind: subject_kind.to_string(),
                 subject_id: subject_id.to_string(),
                 capability: grant.capability().to_string(),
                 expires_at,
-                lapsed_at_bind,
+                lapsed_at_bind: false,
                 surface_excluded: false,
-            })
+            }
         })
         .collect()
-}
-
-pub(crate) fn grant_expiry_timestamp_ms(
-    expiry: &verlet_agent::manifest_schema::AgentManifestGrantExpiry,
-) -> crate::kernel::runtime_host::VerletResult<i64> {
-    chrono::DateTime::parse_from_rfc3339(&expiry.expires_at)
-        .map(|instant| instant.timestamp_millis())
-        .map_err(|err| {
-            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "grant {:?} has invalid RFC3339 expiry {:?}: {err}",
-                expiry.capability, expiry.expires_at
-            ))
-        })
-}
-
-/// Enforce manifest authority at the consumption point. A running turn keeps
-/// its bound form snapshot, but authority is live: once `now_ms` passes a
-/// grant expiry, the next tool or coupling invocation fails closed.
-pub(crate) fn ensure_grant_expiries_live(
-    expiries: &[verlet_agent::manifest_schema::AgentManifestGrantExpiry],
-    now_ms: i64,
-) -> crate::kernel::runtime_host::VerletResult<()> {
-    let mut lapsed = Vec::new();
-    for expiry in expiries {
-        if now_ms > grant_expiry_timestamp_ms(expiry)? {
-            lapsed.push(format!(
-                "{} (expired at {})",
-                expiry.capability, expiry.expires_at
-            ));
-        }
-    }
-    if lapsed.is_empty() {
-        Ok(())
-    } else {
-        Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
-            format!("missing capability grants: {}", lapsed.join(", ")),
-        ))
-    }
 }
 
 async fn bind_tools(
@@ -2297,7 +2170,6 @@ async fn bind_tools(
     operation_registry_root: Option<&std::path::Path>,
     configured_mcp_server_refs: &std::collections::BTreeSet<String>,
     tool_universe_discoverer: Option<&dyn crate::agent::tool_universe::ToolUniverseDiscoverer>,
-    now_ms: i64,
 ) -> crate::kernel::runtime_host::VerletResult<BoundTools> {
     let mut tool_ids = Vec::new();
     let mut granted = std::collections::BTreeSet::new();
@@ -2308,14 +2180,7 @@ async fn bind_tools(
     for tool in tools {
         match tool {
             verlet_agent::manifest_schema::AgentManifestTool::Bash(tool) => {
-                let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
-                if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
-                    receipts
-                        .iter_mut()
-                        .for_each(|receipt| receipt.surface_excluded = true);
-                    grant_bindings.extend(receipts);
-                    continue;
-                }
+                let receipts = grant_binding_receipts("tool", &tool.id, &tool.grants);
                 let grants = grant_capabilities(&tool.grants);
                 let grant_expiries = grant_expiries(&tool.grants);
                 bind_operation_ref_with_expiries(
@@ -2335,14 +2200,7 @@ async fn bind_tools(
                 grant_bindings.extend(receipts);
             }
             verlet_agent::manifest_schema::AgentManifestTool::Direct(tool) => {
-                let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
-                if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
-                    receipts
-                        .iter_mut()
-                        .for_each(|receipt| receipt.surface_excluded = true);
-                    grant_bindings.extend(receipts);
-                    continue;
-                }
+                let receipts = grant_binding_receipts("tool", &tool.id, &tool.grants);
                 if !direct_tool_names.insert(tool.tool_name.clone()) {
                     return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                         format!("duplicate direct tool_name surface {:?}", tool.tool_name),
@@ -2367,14 +2225,7 @@ async fn bind_tools(
                 grant_bindings.extend(receipts);
             }
             verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(tool) => {
-                let mut receipts = grant_binding_receipts("tool", &tool.id, &tool.grants, now_ms)?;
-                if receipts.iter().any(|receipt| receipt.lapsed_at_bind) {
-                    receipts
-                        .iter_mut()
-                        .for_each(|receipt| receipt.surface_excluded = true);
-                    grant_bindings.extend(receipts);
-                    continue;
-                }
+                let receipts = grant_binding_receipts("tool", &tool.id, &tool.grants);
                 if !configured_mcp_server_refs.contains(&tool.server_ref) {
                     return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                         format!(

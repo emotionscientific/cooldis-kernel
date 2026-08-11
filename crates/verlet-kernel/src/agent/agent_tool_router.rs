@@ -3,8 +3,6 @@ pub struct AgentToolRouter {
     operation_registry: std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>,
     kernel_dispatch_overlay: verlet_operations::operation_registry::KernelDispatchOverlay,
     kernel_tool_providers: Vec<std::sync::Arc<dyn AgentKernelToolProvider>>,
-    capability_grants: std::collections::BTreeSet<String>,
-    capability_grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
     tool_aliases: std::collections::BTreeMap<String, OperationToolAlias>,
 }
 
@@ -93,7 +91,6 @@ pub struct OperationToolAlias {
     pub tool_name: String,
     pub registered_name: String,
     pub operation_name: String,
-    pub grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
 }
 
 #[async_trait::async_trait]
@@ -105,29 +102,11 @@ pub trait AgentKernelToolProvider: Send + Sync + 'static {
         call: AgentKernelToolCall,
     ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>>;
 
-    async fn invoke_tool_call_at(
-        &self,
-        call: AgentKernelToolCall,
-        _now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
-        self.invoke_tool_call(call).await
-    }
-
     async fn invoke_tool_call_outcome(
         &self,
         call: AgentKernelToolCall,
     ) -> crate::kernel::runtime_host::VerletResult<AgentKernelToolOutcome> {
         self.invoke_tool_call(call)
-            .await
-            .map(AgentKernelToolOutcome::Completed)
-    }
-
-    async fn invoke_tool_call_outcome_at(
-        &self,
-        call: AgentKernelToolCall,
-        now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<AgentKernelToolOutcome> {
-        self.invoke_tool_call_at(call, now_ms)
             .await
             .map(AgentKernelToolOutcome::Completed)
     }
@@ -147,15 +126,6 @@ pub trait AgentKernelToolProvider: Send + Sync + 'static {
         let _ = cancellation;
         self.invoke_tool_call_outcome(call).await
     }
-
-    async fn invoke_tool_call_cancellable_at(
-        &self,
-        call: AgentKernelToolCall,
-        cancellation: ToolInvocationCancellation,
-        _now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<AgentKernelToolOutcome> {
-        self.invoke_tool_call_cancellable(call, cancellation).await
-    }
 }
 
 impl AgentToolRouter {
@@ -169,8 +139,6 @@ impl AgentToolRouter {
             kernel_dispatch_overlay:
                 verlet_operations::operation_registry::KernelDispatchOverlay::new(),
             kernel_tool_providers: Vec::new(),
-            capability_grants: std::collections::BTreeSet::new(),
-            capability_grant_expiries: Vec::new(),
             tool_aliases: std::collections::BTreeMap::new(),
         }
     }
@@ -188,32 +156,6 @@ impl AgentToolRouter {
         overlay: verlet_operations::operation_registry::KernelDispatchOverlay,
     ) -> Self {
         self.kernel_dispatch_overlay = overlay;
-        self
-    }
-
-    pub fn with_capability_grant(mut self, grant: impl Into<String>) -> Self {
-        self.capability_grants.insert(grant.into());
-        self
-    }
-
-    pub fn with_capability_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
-        self.capability_grants.extend(grants);
-        self
-    }
-
-    pub fn with_capability_grant_expiry(
-        mut self,
-        expiry: verlet_agent::manifest_schema::AgentManifestGrantExpiry,
-    ) -> Self {
-        self.capability_grant_expiries.push(expiry);
-        self
-    }
-
-    pub fn with_capability_grant_expiries(
-        mut self,
-        expiries: impl IntoIterator<Item = verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
-    ) -> Self {
-        self.capability_grant_expiries.extend(expiries);
         self
     }
 
@@ -288,21 +230,10 @@ impl AgentToolRouter {
         tool_name: impl Into<String>,
         arguments: serde_json::Value,
     ) -> verlet_history::CanonicalMessage {
-        self.invoke_tool_call_at(call_id, tool_name, arguments, verlet_history::now_ms())
-            .await
-    }
-
-    pub async fn invoke_tool_call_at(
-        &self,
-        call_id: impl Into<String>,
-        tool_name: impl Into<String>,
-        arguments: serde_json::Value,
-        now_ms: i64,
-    ) -> verlet_history::CanonicalMessage {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
         match self
-            .invoke_tool_call_message(None, &call_id, &tool_name, arguments, now_ms)
+            .invoke_tool_call_message(None, &call_id, &tool_name, arguments)
             .await
         {
             Ok(message) => message,
@@ -325,13 +256,7 @@ impl AgentToolRouter {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
         match self
-            .invoke_tool_call_message(
-                Some(turn_context),
-                &call_id,
-                &tool_name,
-                arguments,
-                verlet_history::now_ms(),
-            )
+            .invoke_tool_call_message(Some(turn_context), &call_id, &tool_name, arguments)
             .await
         {
             Ok(message) => message,
@@ -361,7 +286,6 @@ impl AgentToolRouter {
                 &tool_name,
                 arguments,
                 Some(cancellation),
-                verlet_history::now_ms(),
             )
             .await
         {
@@ -402,15 +326,8 @@ impl AgentToolRouter {
     ) -> crate::kernel::runtime_host::VerletResult<AgentKernelToolOutcome> {
         let call_id = call_id.into();
         let tool_name = tool_name.into();
-        self.invoke_tool_call_outcome_message(
-            None,
-            &call_id,
-            &tool_name,
-            arguments,
-            None,
-            verlet_history::now_ms(),
-        )
-        .await
+        self.invoke_tool_call_outcome_message(None, &call_id, &tool_name, arguments, None)
+            .await
     }
 
     pub async fn invoke_tool_call_outcome_for_turn(
@@ -428,7 +345,6 @@ impl AgentToolRouter {
             &tool_name,
             arguments,
             None,
-            verlet_history::now_ms(),
         )
         .await
     }
@@ -462,17 +378,9 @@ impl AgentToolRouter {
         call_id: &str,
         tool_name: &str,
         arguments: serde_json::Value,
-        now_ms: i64,
     ) -> crate::kernel::runtime_host::VerletResult<verlet_history::CanonicalMessage> {
         match self
-            .invoke_tool_call_outcome_message(
-                turn_context,
-                call_id,
-                tool_name,
-                arguments,
-                None,
-                now_ms,
-            )
+            .invoke_tool_call_outcome_message(turn_context, call_id, tool_name, arguments, None)
             .await?
         {
             AgentKernelToolOutcome::Completed(Some(message)) => Ok(message),
@@ -497,7 +405,6 @@ impl AgentToolRouter {
         tool_name: &str,
         arguments: serde_json::Value,
         cancellation: Option<ToolInvocationCancellation>,
-        now_ms: i64,
     ) -> crate::kernel::runtime_host::VerletResult<AgentKernelToolOutcome> {
         if let Some(projection) = self.projection_for_tool_name(tool_name).await? {
             if projection.abi.has_hidden_durable_sink() {
@@ -505,14 +412,6 @@ impl AgentToolRouter {
                     format!("tool {tool_name:?} has a hidden durable sink"),
                 ));
             }
-            self.validate_capability_grants(tool_name, &projection)?;
-            crate::agent::manifest_bind::ensure_grant_expiries_live(
-                self.tool_aliases
-                    .get(tool_name)
-                    .map(|alias| alias.grant_expiries.as_slice())
-                    .unwrap_or(&self.capability_grant_expiries),
-                now_ms,
-            )?;
             let input = encode_tool_input(call_id, tool_name, &projection, arguments)?;
             let operation_registry =
                 verlet_operations::operation_registry::ScopedOperationRegistry::new(
@@ -558,14 +457,10 @@ impl AgentToolRouter {
             let outcome = match cancellation {
                 Some(cancellation) => {
                     kernel_tool_provider
-                        .invoke_tool_call_cancellable_at(call, cancellation, now_ms)
+                        .invoke_tool_call_cancellable(call, cancellation)
                         .await?
                 }
-                None => {
-                    kernel_tool_provider
-                        .invoke_tool_call_outcome_at(call, now_ms)
-                        .await?
-                }
+                None => kernel_tool_provider.invoke_tool_call_outcome(call).await?,
             };
             match outcome {
                 AgentKernelToolOutcome::Completed(Some(_)) | AgentKernelToolOutcome::Pending(_) => {
@@ -578,30 +473,6 @@ impl AgentToolRouter {
         Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
             format!("unknown tool {tool_name:?}"),
         ))
-    }
-
-    fn validate_capability_grants(
-        &self,
-        tool_name: &str,
-        projection: &verlet_operations::OperationProjection,
-    ) -> crate::kernel::runtime_host::VerletResult<()> {
-        let missing = projection
-            .abi
-            .required_capabilities
-            .iter()
-            .filter(|capability| !self.capability_grants.contains(capability.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
-                format!(
-                    "tool {tool_name:?} missing capability grants: {}",
-                    missing.join(", ")
-                ),
-            ))
-        }
     }
 
     async fn kernel_tool_provider_for_name(

@@ -171,8 +171,7 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
         .await
         .unwrap();
     let router =
-        verlet::agent::agent_tool_router::AgentToolRouter::new(catalog.operation_registry())
-            .with_capability_grants([http_grant, "secret:EXAMPLE_API_KEY".to_string()]);
+        verlet::agent::agent_tool_router::AgentToolRouter::new(catalog.operation_registry());
     let definitions = router.tool_definitions().await;
     assert!(
         definitions

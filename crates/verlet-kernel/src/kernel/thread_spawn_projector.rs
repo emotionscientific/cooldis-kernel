@@ -1289,13 +1289,6 @@ pub(crate) fn fold_thread_handle_bindings(
 fn parent_allows_supervisor_spawn(
     metadata: &std::collections::BTreeMap<String, String>,
 ) -> crate::kernel::runtime_host::VerletResult<bool> {
-    parent_allows_supervisor_spawn_at(metadata, verlet_history::now_ms())
-}
-
-fn parent_allows_supervisor_spawn_at(
-    metadata: &std::collections::BTreeMap<String, String>,
-    now_ms: i64,
-) -> crate::kernel::runtime_host::VerletResult<bool> {
     let Some(raw) = metadata.get(crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA)
     else {
         return Ok(false);
@@ -1306,23 +1299,16 @@ fn parent_allows_supervisor_spawn_at(
             "thread bound coupling set is invalid: {err}"
         ))
     })?;
-    let Some(coupling) = coupling_set.couplings.iter().find(|coupling| {
+    let allows_spawn = coupling_set.couplings.iter().any(|coupling| {
         coupling.id == crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
             && coupling
                 .grants
                 .iter()
                 .any(|grant| grant == crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY)
-    }) else {
+    });
+    if !allows_spawn {
         return Ok(false);
-    };
-    crate::agent::manifest_bind::ensure_grant_expiries_live(
-        coupling_set
-            .grant_expiries
-            .get(&coupling.id)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        now_ms,
-    )?;
+    }
     Ok(true)
 }
 
@@ -1442,49 +1428,6 @@ mod tests {
         assert_eq!(spawned.provenance.source_event_ids, vec![request.id]);
 
         host.shutdown_all().await.unwrap();
-    }
-
-    #[test]
-    fn supervisor_spawn_projector_checks_cached_coupling_authority_live() {
-        let coupling = std_supervisor_spawn_coupling(serde_json::json!({
-            "initial_submission": "echo projected child",
-        }));
-        let metadata = std::collections::BTreeMap::from([(
-            crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
-            serde_json::to_string(
-                &crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
-                    "snapshot-a",
-                    vec![coupling],
-                    std::collections::BTreeMap::from([(
-                        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
-                            .to_string(),
-                        vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                            capability:
-                                crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
-                                    .to_string(),
-                            expires_at: "1970-01-01T00:00:01Z".to_string(),
-                        }],
-                    )]),
-                ),
-            )
-            .unwrap(),
-        )]);
-
-        assert!(
-            crate::kernel::thread_spawn_projector::parent_allows_supervisor_spawn_at(
-                &metadata, 1_000
-            )
-            .unwrap()
-        );
-        let err = crate::kernel::thread_spawn_projector::parent_allows_supervisor_spawn_at(
-            &metadata, 1_001,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("missing capability grants: threads.spawn")
-        );
-        assert!(err.to_string().contains("1970-01-01T00:00:01Z"));
     }
 
     struct ForgedRemoteWorkspaceResolver;
