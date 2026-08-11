@@ -756,6 +756,7 @@ pub struct BoundCouplingFunction {
 #[derive(Clone, Debug, Default)]
 struct OperationBindingAccumulator {
     grants: std::collections::BTreeSet<String>,
+    attachment_config: verlet_wasm::WasmAttachmentConfig,
     grant_expiries:
         std::collections::BTreeSet<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
     operations: std::collections::BTreeSet<String>,
@@ -774,6 +775,7 @@ impl OperationBindingAccumulator {
     ) {
         self.merge_with_expiries(
             grants,
+            verlet_wasm::WasmAttachmentConfig::default(),
             std::collections::BTreeSet::new(),
             operation,
             direct_tool,
@@ -784,6 +786,7 @@ impl OperationBindingAccumulator {
     fn merge_with_expiries(
         &mut self,
         grants: std::collections::BTreeSet<String>,
+        attachment_config: verlet_wasm::WasmAttachmentConfig,
         grant_expiries: std::collections::BTreeSet<
             verlet_agent::manifest_schema::AgentManifestGrantExpiry,
         >,
@@ -792,6 +795,16 @@ impl OperationBindingAccumulator {
         effect_class: verlet_agent::manifest_schema::EffectClass,
     ) {
         self.grants.extend(grants);
+        self.attachment_config
+            .allowed_secrets
+            .extend(attachment_config.allowed_secrets);
+        for (origin, methods) in attachment_config.allowed_private_network {
+            self.attachment_config
+                .allowed_private_network
+                .entry(origin)
+                .or_default()
+                .extend(methods);
+        }
         self.grant_expiries.extend(grant_expiries);
         if let Some(direct_tool) = direct_tool {
             self.direct_tools.insert(direct_tool);
@@ -2197,6 +2210,15 @@ fn grant_capabilities(grants: &[verlet_agent::manifest_schema::AgentManifestGran
         .collect()
 }
 
+fn wasm_attachment_config(
+    attachment: &verlet_agent::manifest_schema::AgentManifestAttachment,
+) -> verlet_wasm::WasmAttachmentConfig {
+    verlet_wasm::WasmAttachmentConfig {
+        allowed_secrets: attachment.allowed_secrets.clone(),
+        allowed_private_network: attachment.allowed_private_network.clone(),
+    }
+}
+
 fn grant_expiries(
     grants: &[verlet_agent::manifest_schema::AgentManifestGrant],
 ) -> Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry> {
@@ -2300,6 +2322,7 @@ async fn bind_tools(
                     &tool.id,
                     &tool.operation_ref,
                     &grants,
+                    wasm_attachment_config(&tool.attachment),
                     &grant_expiries,
                     tool.effect_class,
                     None,
@@ -2331,6 +2354,7 @@ async fn bind_tools(
                     &tool.id,
                     &tool.operation_ref,
                     &grants,
+                    wasm_attachment_config(&tool.attachment),
                     &grant_expiries,
                     tool.effect_class,
                     Some(&tool.tool_name),
@@ -2538,16 +2562,12 @@ fn operation_bindings_from_map(
         .into_iter()
         .map(|((name, artifact_hash), binding)| {
             let operations = binding.operation_names();
-            let attachment_config =
-                crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
-                    &binding.grants,
-                );
             AgentManifestOperationBinding {
                 name,
                 artifact_hash,
                 effect_class: binding.effect_class.unwrap_or_default(),
                 grants: binding.grants.into_iter().collect(),
-                attachment_config,
+                attachment_config: binding.attachment_config,
                 grant_expiries: binding.grant_expiries.into_iter().collect(),
                 operations,
                 direct_tools: binding.direct_tools.into_iter().collect(),
@@ -2659,6 +2679,7 @@ async fn bind_operation_ref(
         tool_id,
         operation_ref,
         grants,
+        verlet_wasm::WasmAttachmentConfig::default(),
         &[],
         verlet_agent::manifest_schema::EffectClass::AtMostOnce,
         direct_tool_name,
@@ -2673,6 +2694,7 @@ async fn bind_operation_ref_with_expiries(
     tool_id: &str,
     operation_ref: &str,
     grants: &[String],
+    attachment_config: verlet_wasm::WasmAttachmentConfig,
     grant_expiries: &[verlet_agent::manifest_schema::AgentManifestGrantExpiry],
     effect_class: verlet_agent::manifest_schema::EffectClass,
     direct_tool_name: Option<&str>,
@@ -2710,6 +2732,7 @@ async fn bind_operation_ref_with_expiries(
         .or_default()
         .merge_with_expiries(
             verification.grants,
+            attachment_config,
             grant_expiries.iter().cloned().collect(),
             verification.operation,
             direct_tool_binding,

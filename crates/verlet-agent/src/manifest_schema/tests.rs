@@ -173,6 +173,30 @@ fn full_fixture_manifest_parses_and_validates() {
 }
 
 #[test]
+fn operation_attachment_config_parses_with_the_wasm_attachment_shape() {
+    let source = valid_manifest().replace(
+        "grants = [\"fs.read:/workspace\"]",
+        r#"[tools.attachment]
+allowed_secrets = ["WORKSPACE_TOKEN"]
+
+[tools.attachment.allowed_private_network]
+"https://internal.example.test" = ["GET"]"#,
+    );
+
+    let manifest = parse(&source).unwrap();
+    let encoded = serde_json::to_value(&manifest).unwrap();
+    assert_eq!(
+        encoded["tools"][0]["attachment"],
+        serde_json::json!({
+            "allowed_secrets": ["WORKSPACE_TOKEN"],
+            "allowed_private_network": {
+                "https://internal.example.test": ["GET"]
+            }
+        })
+    );
+}
+
+#[test]
 fn agent_manifest_kind_accepts_verlet_and_legacy_forms() {
     let canonical = valid_manifest();
     assert_eq!(

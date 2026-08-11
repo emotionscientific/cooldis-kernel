@@ -285,6 +285,7 @@ fn default_manifest_tools(
                         ),
                         effect_class: Default::default(),
                         grants,
+                        attachment: Default::default(),
                     },
                 ));
             }
@@ -341,6 +342,7 @@ fn default_manifest_tools(
                     ),
                     effect_class: Default::default(),
                     grants: grants.clone(),
+                    attachment: Default::default(),
                 },
             ));
         }

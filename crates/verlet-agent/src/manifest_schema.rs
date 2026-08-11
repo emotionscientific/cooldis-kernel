@@ -592,6 +592,10 @@ pub struct AgentManifestBashTool {
     /// there is no manifest-global grant pool.
     #[serde(default)]
     pub grants: Vec<AgentManifestGrant>,
+    /// Host attachment configuration for authority that is enforced when the
+    /// operation is attached to a thread.
+    #[serde(default, skip_serializing_if = "AgentManifestAttachment::is_empty")]
+    pub attachment: AgentManifestAttachment,
 }
 
 /// A structured model/tool-router call exposed outside bash.
@@ -606,6 +610,32 @@ pub struct AgentManifestDirectTool {
     pub effect_class: EffectClass,
     #[serde(default)]
     pub grants: Vec<AgentManifestGrant>,
+    /// Host attachment configuration for authority that is enforced when the
+    /// operation is attached to a thread.
+    #[serde(default, skip_serializing_if = "AgentManifestAttachment::is_empty")]
+    pub attachment: AgentManifestAttachment,
+}
+
+/// Host-enforced configuration carried by one manifest operation attachment.
+/// This intentionally matches `verlet_wasm::WasmAttachmentConfig` at the
+/// schema boundary without making the agent schema depend on a runtime
+/// implementation crate.
+#[derive(
+    Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct AgentManifestAttachment {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub allowed_secrets: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub allowed_private_network:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl AgentManifestAttachment {
+    pub fn is_empty(&self) -> bool {
+        self.allowed_secrets.is_empty() && self.allowed_private_network.is_empty()
+    }
 }
 
 /// A protocol-shaped tool universe mounted through the search surface. The

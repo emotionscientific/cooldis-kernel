@@ -581,6 +581,7 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
                 ),
                 effect_class: verlet_agent::manifest_schema::EffectClass::Pure,
                 grants: Vec::new(),
+                attachment: Default::default(),
             },
         ),
         verlet_agent::manifest_schema::AgentManifestTool::Direct(
@@ -593,6 +594,7 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
                 ),
                 effect_class: verlet_agent::manifest_schema::EffectClass::Idempotent,
                 grants: Vec::new(),
+                attachment: Default::default(),
             },
         ),
         verlet_agent::manifest_schema::AgentManifestTool::ProtocolImport(
@@ -643,6 +645,71 @@ async fn effect_classes_land_in_operation_direct_and_pinned_universe_receipts() 
         verlet_agent::manifest_schema::EffectClass::Pure
     );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
+    let root = temp_dir("manifest-bind-attachments");
+    let record =
+        publish_multi_operation_record(&root, "lookup", &[("search", vec![]), ("details", vec![])])
+            .await;
+    let tools = vec![
+        verlet_agent::manifest_schema::AgentManifestTool::Bash(
+            verlet_agent::manifest_schema::AgentManifestBashTool {
+                id: "search".to_string(),
+                command: "search".to_string(),
+                operation_ref: format!("op://lookup/search@sha256:{}", record.active_artifact_hash),
+                effect_class: Default::default(),
+                grants: Vec::new(),
+                attachment: verlet_agent::manifest_schema::AgentManifestAttachment {
+                    allowed_secrets: std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]),
+                    allowed_private_network: Default::default(),
+                },
+            },
+        ),
+        verlet_agent::manifest_schema::AgentManifestTool::Bash(
+            verlet_agent::manifest_schema::AgentManifestBashTool {
+                id: "details".to_string(),
+                command: "details".to_string(),
+                operation_ref: format!(
+                    "op://lookup/details@sha256:{}",
+                    record.active_artifact_hash
+                ),
+                effect_class: Default::default(),
+                grants: Vec::new(),
+                attachment: verlet_agent::manifest_schema::AgentManifestAttachment {
+                    allowed_secrets: Default::default(),
+                    allowed_private_network: std::collections::BTreeMap::from([(
+                        "http://127.0.0.1:*".to_string(),
+                        std::collections::BTreeSet::from(["GET".to_string()]),
+                    )]),
+                },
+            },
+        ),
+    ];
+
+    let bound = crate::agent::manifest_bind::bind_tools(
+        &tools,
+        Some(&root),
+        &std::collections::BTreeSet::new(),
+        None,
+        0,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(bound.operation_bindings.len(), 1);
+    assert_eq!(
+        bound.operation_bindings[0].attachment_config,
+        verlet_wasm::WasmAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]),
+            allowed_private_network: std::collections::BTreeMap::from([(
+                "http://127.0.0.1:*".to_string(),
+                std::collections::BTreeSet::from(["GET".to_string()]),
+            )]),
+        }
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

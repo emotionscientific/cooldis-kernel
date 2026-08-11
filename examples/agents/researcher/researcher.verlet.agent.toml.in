@@ -30,14 +30,12 @@ type = "bash_tool"
 id = "http_fetch"
 command = "http_fetch"
 operation_ref = "op://http-fetch@sha256:{HTTP_FETCH_SHA256}"
-grants = ["net.http:GET:https://*", "net.http:GET:http://*"]
 
 [[tools]]
 type = "bash_tool"
 id = "file_read"
 command = "file_read"
 operation_ref = "op://file-read@sha256:{FILE_READ_SHA256}"
-grants = ["fs.read:/workspace"]
 
 [[tools]]
 type = "bash_tool"
@@ -57,7 +55,6 @@ operation_ref = "op://json-query@sha256:{JSON_QUERY_SHA256}"
 # protocol = "mcp"
 # server_ref = "mcp://search"
 # include_tools = ["search"]
-# grants = []
 
 [runtime]
 default_cwd = "."
