@@ -13,6 +13,7 @@ use sha2::Digest as _;
 /// `openai_compatible` id is a fixture-only example for this public checkout.
 const ZHIPU_CONVENTION_CHAT_PROVIDERS: &[&str] = &["openai_compatible", "zhipu", "glm"];
 const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
+pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const AWS_SIGV4_ALGORITHM: &str = "AWS4-HMAC-SHA256";
 type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
@@ -830,7 +831,10 @@ impl ProviderEndpoint {
         Self {
             url: provider_endpoint_url(base_url.as_ref(), "messages"),
             auth: ProviderAuth::AnthropicApiKey { key: key.into() },
-            headers: vec![("anthropic-version".to_string(), "2023-06-01".to_string())],
+            headers: vec![(
+                "anthropic-version".to_string(),
+                ANTHROPIC_API_VERSION.to_string(),
+            )],
         }
     }
 

@@ -748,6 +748,14 @@ selection, absent from the composed list, and either explicitly requested at
 launch or backed by a store record; the default offline echo pair therefore
 stays hidden on a fresh install, though submitting turns against it still
 works.
+For configured providers with a stored API key, an environment API key, or
+`auth: none`, the list is also enriched from the provider's own models API.
+Results are cached in memory per provider for one hour. A missing or stale
+entry starts a background refresh while `model/list` immediately serves cached
+or catalog data. Models contributed only by this live source carry
+`"origin": "live"`; catalog and store rows keep their existing shape. Live
+enrichment uses only the provider record's stored base URL and does not change
+the endpoint trust rules. OAuth providers are not queried by this path.
 Each entry includes `providerId`, `model`, `displayName`, `authStatus`
 (`configured`, `env`, or `missing`), and `active`. Compatibility fields such
 as `id` and `isDefault` remain present; `isDefault` follows the session's active
