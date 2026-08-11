@@ -1100,6 +1100,7 @@ impl VerletAppServer {
         let metadata_store = open_and_seed_metadata_store(config.metadata_store_path()).await?;
         let user_metadata_store =
             open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
+        reconcile_catalog_provider_records(&config, &metadata_store).await?;
         sync_catalog_provider_identity(&mut config, &metadata_store).await?;
         crate::adapters::app_server::threads::normalize_registry_roots(&mut config);
         let initial_endpoint = resolved_turn_endpoint_from_provider_config(
@@ -2736,6 +2737,55 @@ async fn sync_catalog_provider_identity(
             })?;
         config.model_provider = provider.provider_id.clone();
         config.model = selected_catalog_model_id(&provider, model.as_deref())?;
+    }
+    Ok(())
+}
+
+/// Records templated by older catalog refreshes may persist endpoint fields
+/// that came from the network. Re-pin reviewed providers before any runtime
+/// endpoint is built, and retire refresh-only provider records while leaving
+/// their separately stored credentials recoverable for an explicit custom
+/// provider configuration.
+async fn reconcile_catalog_provider_records(
+    config: &VerletAppServerConfig,
+    provider_store: &verlet_metadata::provider_store::SqliteMetadataStore,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let reviewed = model_catalog::MergedModelCatalog::new(&config.user_state_home)
+        .providers()
+        .into_iter()
+        .map(|provider| (provider.provider_id.clone(), provider))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for mut record in provider_store
+        .list_providers()
+        .await
+        .map_err(provider_store_error)?
+        .into_iter()
+        .filter(|record| record.metadata.get("origin").map(String::as_str) == Some("catalog"))
+    {
+        let Some(provider) = reviewed.get(&record.provider_id) else {
+            provider_store
+                .delete_provider(&record.provider_id)
+                .await
+                .map_err(provider_store_error)?;
+            continue;
+        };
+        let Some(api) = model_catalog::catalog_api_to_provider_api(&provider.api) else {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "reviewed catalog provider {:?} has unsupported API family {:?}",
+                    provider.provider_id, provider.api
+                ),
+            ));
+        };
+        if record.base_url == provider.base_url && record.api == api {
+            continue;
+        }
+        record.base_url.clone_from(&provider.base_url);
+        record.api = api;
+        provider_store
+            .upsert_provider(record)
+            .await
+            .map_err(provider_store_error)?;
     }
     Ok(())
 }

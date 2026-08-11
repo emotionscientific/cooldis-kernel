@@ -2919,7 +2919,8 @@ impl crate::adapters::app_server::VerletAppServer {
         provider_id: &str,
     ) -> Option<verlet_metadata::provider_store::LlmProviderRecord> {
         let provider = self.catalog_provider(provider_id)?;
-        let api = catalog_api_to_provider_api(&provider.api)?;
+        let api =
+            crate::adapters::app_server::model_catalog::catalog_api_to_provider_api(&provider.api)?;
         let mut record = verlet_metadata::provider_store::LlmProviderRecord::new(
             provider.provider_id.clone(),
             api,
@@ -7271,21 +7272,6 @@ fn model_provider_not_found(provider_id: &str) -> JsonRpcErrorError {
         -32602,
         format!("model provider {provider_id:?} was not found"),
     )
-}
-
-fn catalog_api_to_provider_api(api: &str) -> Option<verlet_history::ProviderApi> {
-    match api {
-        crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_CHAT_COMPLETIONS => {
-            Some(verlet_history::ProviderApi::OpenAIChatCompletions)
-        }
-        crate::adapters::app_server::model_catalog::CATALOG_API_ANTHROPIC_MESSAGES => {
-            Some(verlet_history::ProviderApi::AnthropicMessages)
-        }
-        crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_RESPONSES => {
-            Some(verlet_history::ProviderApi::OpenAIResponses)
-        }
-        _ => None,
-    }
 }
 
 /// A record still equals its catalog template when every field except the
