@@ -97,7 +97,7 @@ impl LocalPluginCatalogRecord {
         record: verlet_operations::operation_store::PublishedOperationRecord,
     ) -> Self {
         let attachment_config =
-            crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+            crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
                 &record.capability_grants,
             );
         Self {
@@ -116,7 +116,7 @@ impl LocalPluginCatalogRecord {
         S: Into<String>,
     {
         let attachment_config =
-            crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+            crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
                 &record.capability_grants,
             );
         Self {

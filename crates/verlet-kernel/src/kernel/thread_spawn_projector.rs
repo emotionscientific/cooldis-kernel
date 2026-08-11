@@ -1289,13 +1289,9 @@ fn parent_has_supervisor_spawn_attachment(
             "thread bound coupling set is invalid: {err}"
         ))
     })?;
-    let allows_spawn = coupling_set.couplings.iter().any(|coupling| {
+    Ok(coupling_set.couplings.iter().any(|coupling| {
         coupling.id == crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
-    });
-    if !allows_spawn {
-        return Ok(false);
-    }
-    Ok(true)
+    }))
 }
 
 fn spawn_request_already_projected(
@@ -1352,6 +1348,68 @@ fn spawn_request_belongs_to_parent(
 #[cfg(test)]
 mod tests {
     use verlet_history::EventStore as _;
+
+    #[test]
+    fn thread_handle_replay_ignores_frozen_spawned_grants() {
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let stream_id =
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let request = verlet_history::EventRecord::from_new(
+            stream_id.clone(),
+            verlet_history::EventSequence::new(1),
+            verlet_history::NewEventRecord::witnessed(
+                coordinates.clone(),
+                verlet_history::EventKind::ThreadSpawnRequested,
+                serde_json::to_value(verlet_history::ThreadSpawnRequestedPayload {
+                    parent_thread_id: coordinates.thread_id,
+                    parent_turn_id: Some("turn-1".to_string()),
+                    task_name: Some("worker".to_string()),
+                    submitted_turn_id: Some("child-turn-1".to_string()),
+                    child_agent_ref: "agent://worker@1.0.0".to_string(),
+                    initial_submission: "work".to_string(),
+                    correlation_id: "dispatch-1".to_string(),
+                    block_parent: false,
+                })
+                .unwrap(),
+            ),
+        );
+        let mut spawned = verlet_history::NewEventRecord::witnessed(
+            coordinates.clone(),
+            verlet_history::EventKind::ThreadSpawned,
+            serde_json::json!({
+                "parent_thread_id": coordinates.thread_id,
+                "parent_turn_id": "turn-1",
+                "child_thread_id": verlet_runtime_contracts::ThreadId::new(),
+                "child_manifest_hash": "sha256:child",
+                "granted": ["threads.spawn", "secret:OLD_TOKEN"],
+                "inputs_hash": "sha256:inputs",
+                "correlation_id": "dispatch-1",
+            }),
+        );
+        spawned.provenance.source_event_ids = vec![request.id];
+        spawned.provenance.source_streams = vec![stream_id.clone()];
+        let historical_spawned = verlet_history::EventRecord::from_new(
+            stream_id,
+            verlet_history::EventSequence::new(2),
+            spawned,
+        );
+        let mut current_spawned = historical_spawned.clone();
+        current_spawned.payload["granted"] = serde_json::json!([]);
+
+        let historical = crate::kernel::thread_spawn_projector::fold_thread_handle_bindings(&[
+            request.clone(),
+            historical_spawned,
+        ])
+        .unwrap();
+        let current = crate::kernel::thread_spawn_projector::fold_thread_handle_bindings(&[
+            request,
+            current_spawned,
+        ])
+        .unwrap();
+
+        assert_eq!(historical, current);
+    }
 
     #[tokio::test]
     async fn thread_spawn_projector_spawns_child_and_witnesses_thread_spawned() {

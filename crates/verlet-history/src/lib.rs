@@ -487,7 +487,8 @@ pub struct ThreadSpawnedPayload {
     pub child_manifest_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_policy_hash: Option<String>,
-    /// Serialized grant set as recorded at spawn.
+    /// Frozen compatibility vocabulary. New emitters write `[]`; replay must
+    /// accept historical non-empty values without deriving authority from it.
     pub granted: Vec<String>,
     pub inputs_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

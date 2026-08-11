@@ -219,6 +219,88 @@ allowed_secrets = ["WORKSPACE_TOKEN"]
 }
 
 #[test]
+fn operation_attachment_config_rejects_unknown_fields() {
+    let source = valid_manifest().replace(
+        "operation_ref = \"op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+        r#"operation_ref = "op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[tools.attachment]
+allowed_secrets = ["WORKSPACE_TOKEN"]
+allow_all_secrets = true"#,
+    );
+
+    let err = parse(&source).unwrap_err().to_string();
+    assert!(err.contains("unknown field"), "{err}");
+    assert!(err.contains("allow_all_secrets"), "{err}");
+}
+
+#[test]
+fn operation_attachment_config_rejects_duplicate_keys() {
+    let source = valid_manifest().replace(
+        "operation_ref = \"op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+        r#"operation_ref = "op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[tools.attachment]
+allowed_secrets = ["WORKSPACE_TOKEN"]
+allowed_secrets = ["SECOND_TOKEN"]"#,
+    );
+
+    let err = toml::from_str::<toml::Value>(&source)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("duplicate key"), "{err}");
+    assert!(err.contains("allowed_secrets"), "{err}");
+}
+
+#[test]
+fn operation_attachment_config_distinguishes_absent_and_explicit_empty() {
+    let absent = parse(&valid_manifest()).unwrap();
+    let source = valid_manifest().replace(
+        "operation_ref = \"op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+        r#"operation_ref = "op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[tools.attachment]"#,
+    );
+    let explicit_empty = parse(&source).unwrap();
+
+    let crate::manifest_schema::AgentManifestTool::Bash(absent_tool) = &absent.tools[0] else {
+        panic!("expected bash tool");
+    };
+    let crate::manifest_schema::AgentManifestTool::Bash(explicit_tool) = &explicit_empty.tools[0]
+    else {
+        panic!("expected bash tool");
+    };
+    assert!(absent_tool.attachment.is_empty());
+    assert!(explicit_tool.attachment.is_empty());
+    assert!(
+        !toml::to_string(&explicit_empty)
+            .unwrap()
+            .contains("attachment"),
+        "an explicit empty attachment remains default-deny and canonicalizes away"
+    );
+}
+
+#[test]
+fn operation_attachment_config_round_trips_exactly() {
+    let source = valid_manifest().replace(
+        "operation_ref = \"op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+        r#"operation_ref = "op://tailcat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[tools.attachment]
+allowed_secrets = ["WORKSPACE_TOKEN"]
+
+[tools.attachment.allowed_private_network]
+"https://internal.example.test" = ["GET", "POST"]"#,
+    );
+
+    let manifest = parse(&source).unwrap();
+    let encoded = serde_json::to_value(&manifest).unwrap();
+    let reparsed: crate::manifest_schema::AgentManifestSchema =
+        serde_json::from_value(encoded).unwrap();
+    assert_eq!(reparsed, manifest);
+}
+
+#[test]
 fn agent_manifest_kind_accepts_verlet_and_legacy_forms() {
     let canonical = valid_manifest();
     assert_eq!(

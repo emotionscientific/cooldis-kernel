@@ -8199,6 +8199,224 @@ async fn app_server_startup_skips_stale_manifest_threads() {
 }
 
 #[tokio::test]
+async fn app_server_resume_migrates_legacy_manifest_and_binding_authority() {
+    let root = unique_test_root("app-server-legacy-manifest-resume");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation =
+        publish_echo_operation(&operation_registry_root, "search", "search", "search").await;
+    let agent_registry_root = root.join("agents");
+    let manifest_path = root.join("legacy-resume.verlet.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"[agent]
+name = "legacy-resume"
+version = "0.1.0"
+kind = "verlet.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "direct_tool"
+id = "search"
+tool_name = "search"
+operation_ref = "op://search@sha256:{}"
+
+[tools.attachment]
+allowed_secrets = ["API_TOKEN"]
+
+[tools.attachment.allowed_private_network]
+"http://127.0.0.1:9000" = ["POST"]
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            operation.active_artifact_hash
+        ),
+    )
+    .unwrap();
+    let record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
+        .unwrap();
+    let thread_id = {
+        let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
+        let app = test_app_with_provider_root(
+            &root,
+            &workspace,
+            provider_client,
+            crate::adapters::app_server::CapsuleBindingsConfig::default()
+                .with_registry_root(&operation_registry_root),
+        )
+        .await;
+        let (connection, _outbound_rx) = test_connection(app.clone()).await;
+        initialize_for_test(&connection).await;
+        let started = app
+            .dispatch_request(
+                &connection,
+                "thread/start",
+                Some(serde_json::json!({
+                    "agentRef": "agent://legacy-resume@latest"
+                })),
+            )
+            .await
+            .unwrap();
+        let thread_id = started["thread"]["id"].as_str().unwrap().to_string();
+        let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
+        let mut lifecycle = app
+            .inner
+            .metadata_store
+            .get_thread_lifecycle(parsed)
+            .await
+            .unwrap()
+            .unwrap();
+        lifecycle.metadata.insert(
+            crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+            format!(
+                r#"[{{"name":"search","artifact_hash":"{}","grants":["net.http.private:POST:http://127.0.0.1:9000","secret:API_TOKEN"],"direct_tools":[{{"tool_name":"search","operation":"search","grant_expiries":[{{"capability":"secret:API_TOKEN","expires_at":"2025-01-01T00:00:00Z"}}]}}]}}]"#,
+                operation.active_artifact_hash
+            ),
+        );
+        app.inner
+            .metadata_store
+            .upsert_thread_lifecycle(lifecycle)
+            .await
+            .unwrap();
+        thread_id
+    };
+
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
+    let mut legacy_record = record.clone();
+    legacy_record.resolved_manifest["policies"]["network"] = serde_json::json!("declared-origins");
+    let tool = legacy_record.resolved_manifest["tools"][0]
+        .as_object_mut()
+        .unwrap();
+    tool.remove("attachment");
+    tool.insert(
+        "grants".to_string(),
+        serde_json::json!([
+            "net.http.private:POST:http://127.0.0.1:9000",
+            "secret:API_TOKEN"
+        ]),
+    );
+    let mut legacy_record_wire = serde_json::to_value(&legacy_record).unwrap();
+    legacy_record_wire["tool_refs"][0]["grants"] = serde_json::json!([
+        "net.http.private:POST:http://127.0.0.1:9000",
+        "secret:API_TOKEN"
+    ]);
+    legacy_record_wire["tool_refs"][0]["grant_expiries"] = serde_json::json!([{
+        "capability": "secret:API_TOKEN",
+        "expires_at": "2025-01-01T00:00:00Z"
+    }]);
+    let encoded = serde_json::to_vec_pretty(&legacy_record_wire).unwrap();
+    for path in [
+        registry.record_path(&record.name).unwrap(),
+        registry
+            .version_record_path(&record.name, &record.version)
+            .unwrap(),
+    ] {
+        std::fs::write(path, &encoded).unwrap();
+    }
+
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
+    let restarted = test_app_with_provider_root(
+        &root,
+        &workspace,
+        provider_client,
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&operation_registry_root),
+    )
+    .await;
+    let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let resumed = restarted
+        .dispatch_request(
+            &connection,
+            "thread/resume",
+            Some(serde_json::json!({
+                "threadId": thread_id,
+                "excludeTurns": true,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed["thread"]["id"].as_str(), Some(thread_id.as_str()));
+
+    let lifecycle = restarted
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        lifecycle.coordinates.clone(),
+        lifecycle.topology.clone(),
+        lifecycle.metadata.clone(),
+    );
+    let bindings =
+        crate::adapters::app_server::threads::thread_manifest_operation_bindings(&context).unwrap();
+    assert_eq!(
+        bindings[0].attachment_config,
+        verlet_wasm::WasmAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::from(["API_TOKEN".to_string()]),
+            allowed_private_network: std::collections::BTreeMap::from([(
+                "http://127.0.0.1:9000".to_string(),
+                std::collections::BTreeSet::from(["POST".to_string()]),
+            )]),
+        }
+    );
+
+    let normalized_bindings = serde_json::to_string(&bindings).unwrap();
+    assert!(!normalized_bindings.contains("grants"));
+    assert!(normalized_bindings.contains("attachment_config"));
+    let mut normalized_lifecycle = lifecycle.clone();
+    normalized_lifecycle.metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        normalized_bindings,
+    );
+    restarted
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(normalized_lifecycle)
+        .await
+        .unwrap();
+
+    let reopened = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        &restarted.inner.metadata_store_path,
+    )
+    .await
+    .unwrap();
+    let reloaded = reopened
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let reloaded_context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        reloaded.coordinates,
+        reloaded.topology,
+        reloaded.metadata,
+    );
+    let reloaded_bindings =
+        crate::adapters::app_server::threads::thread_manifest_operation_bindings(&reloaded_context)
+            .unwrap();
+    assert_eq!(
+        reloaded_bindings[0].attachment_config,
+        bindings[0].attachment_config
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn thread_start_with_agent_ref_records_manifest_receipts_before_turns() {
     let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
         format!("verlet-manifest-start-{}.sock", uuid::Uuid::now_v7()),
@@ -10004,6 +10222,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
             "parent_thread_id": lifecycle.coordinates.thread_id.to_string(),
             "child_thread_id": child_thread_id.to_string(),
             "child_manifest_hash": "sha256:debug-child",
+            "granted": [],
             "inputs_hash": "sha256:debug-inputs",
         }),
     );
