@@ -677,6 +677,115 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
 }
 
 #[test]
+fn binding_attached_payload_wire_shape_is_frozen() {
+    let payload = crate::BindingAttachedPayload {
+        name: "search-tools".to_string(),
+        artifact_hash: "sha256:search-tools".to_string(),
+        operations: vec!["search".to_string(), "answer".to_string()],
+        direct_tools: vec![crate::BindingAttachedDirectToolBinding {
+            tool_name: "search_web".to_string(),
+            operation: "search".to_string(),
+            effect_class: crate::BindingEffectClass::Pure,
+        }],
+        attachment_config: crate::BindingAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]),
+            allowed_private_network: std::collections::BTreeMap::from([(
+                "http://127.0.0.1:*".to_string(),
+                std::collections::BTreeSet::from(["GET".to_string(), "POST".to_string()]),
+            )]),
+        },
+        effect_class: crate::BindingEffectClass::Idempotent,
+        requested_by: "principal:operator".to_string(),
+        decided_by: "principal:operator".to_string(),
+        decision_event_id: None,
+    };
+
+    let expected = serde_json::json!({
+        "name": "search-tools",
+        "artifact_hash": "sha256:search-tools",
+        "operations": ["search", "answer"],
+        "direct_tools": [{
+            "tool_name": "search_web",
+            "operation": "search",
+            "effect_class": "pure"
+        }],
+        "attachment_config": {
+            "allowed_secrets": ["SEARCH_TOKEN"],
+            "allowed_private_network": {
+                "http://127.0.0.1:*": ["GET", "POST"]
+            }
+        },
+        "effect_class": "idempotent",
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator"
+    });
+    let actual = serde_json::to_value(&payload).unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        serde_json::from_value::<crate::BindingAttachedPayload>(actual).unwrap(),
+        payload
+    );
+    crate::stream_schema_registry_v1()
+        .validate(
+            &crate::EventKind::BindingAttached.payload_schema_id(),
+            &expected,
+        )
+        .unwrap();
+}
+
+#[test]
+fn binding_detached_payload_wire_shape_is_frozen() {
+    let attach_event_id = crate::EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000041").unwrap(),
+    );
+    let payload = crate::BindingDetachedPayload {
+        attach_event_id,
+        requested_by: "principal:operator".to_string(),
+        decided_by: "principal:operator".to_string(),
+        decision_event_id: None,
+    };
+    let expected = serde_json::json!({
+        "attach_event_id": "018f0000-0000-7000-8000-000000000041",
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator"
+    });
+    let actual = serde_json::to_value(&payload).unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        serde_json::from_value::<crate::BindingDetachedPayload>(actual).unwrap(),
+        payload
+    );
+    crate::stream_schema_registry_v1()
+        .validate(
+            &crate::EventKind::BindingDetached.payload_schema_id(),
+            &expected,
+        )
+        .unwrap();
+}
+
+#[test]
+fn binding_payloads_reject_unknown_fields() {
+    let attached = serde_json::json!({
+        "name": "search-tools",
+        "artifact_hash": "sha256:search-tools",
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator",
+        "scheduled_detach": true
+    });
+    assert!(serde_json::from_value::<crate::BindingAttachedPayload>(attached).is_err());
+
+    let detached = serde_json::json!({
+        "attach_event_id": "018f0000-0000-7000-8000-000000000041",
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator",
+        "scheduled_detach": true
+    });
+    assert!(serde_json::from_value::<crate::BindingDetachedPayload>(detached).is_err());
+}
+
+#[test]
 fn client_record_carrier_payload_schema_is_registered_and_strict() {
     let registry = crate::stream_schema_registry_v1();
     let schema = crate::EventKind::ClientRecordAppended.payload_schema_id();

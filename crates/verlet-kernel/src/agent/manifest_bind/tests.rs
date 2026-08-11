@@ -707,6 +707,28 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn binding_attachment_config_matches_wasm_attachment_wire_shape() {
+    let allowed_secrets = std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]);
+    let allowed_private_network = std::collections::BTreeMap::from([(
+        "http://127.0.0.1:*".to_string(),
+        std::collections::BTreeSet::from(["GET".to_string(), "POST".to_string()]),
+    )]);
+    let history = verlet_history::BindingAttachmentConfig {
+        allowed_secrets: allowed_secrets.clone(),
+        allowed_private_network: allowed_private_network.clone(),
+    };
+    let wasm = verlet_wasm::WasmAttachmentConfig {
+        allowed_secrets,
+        allowed_private_network,
+    };
+
+    assert_eq!(
+        serde_json::to_value(history).unwrap(),
+        serde_json::to_value(wasm).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn protocol_tool_import_pin_drift_fails_bind_with_both_hashes() {
     let witnessed = witnessed_tool("verlet_mcp_echo", "string");
