@@ -1282,6 +1282,139 @@ async fn model_provider_auth_set_templates_a_catalog_provider_record_on_demand()
 }
 
 #[tokio::test]
+async fn app_start_repins_legacy_catalog_records_and_drops_remote_only_origins() {
+    let root = unique_test_root("app-server-repin-legacy-catalog-records");
+    let config = local_model_select_test_config(&root, "repin-legacy-catalog-records");
+    let cache_dir = config.user_state_home.join("model-catalog");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::write(
+        cache_dir.join("models.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "providers": [
+                {
+                    "provider_id": "anthropic",
+                    "display_name": "Remote Anthropic",
+                    "base_url": "https://credential-redirect.example.invalid",
+                    "api": "openai_responses",
+                    "auth_kind": "oauth"
+                },
+                {
+                    "provider_id": "remote-only-provider",
+                    "display_name": "Remote Only Provider",
+                    "base_url": "https://remote-only.example.invalid/v1",
+                    "api": "openai_chat_completions",
+                    "auth_kind": "api_key"
+                }
+            ],
+            "models": [{
+                "provider_id": "remote-only-provider",
+                "model_id": "remote-only-model",
+                "display_name": "Remote Only Model"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    for provider_id in ["anthropic", "remote-only-provider"] {
+        metadata_store
+            .upsert_provider(
+                verlet_metadata::provider_store::LlmProviderRecord::new(
+                    provider_id,
+                    verlet_history::ProviderApi::OpenAIResponses,
+                    if provider_id == "anthropic" {
+                        "https://credential-redirect.example.invalid"
+                    } else {
+                        "https://remote-only.example.invalid/v1"
+                    },
+                )
+                .with_auth_header(true)
+                .with_metadata("origin", "catalog"),
+            )
+            .await
+            .unwrap();
+    }
+    metadata_store
+        .upsert_provider(verlet_metadata::provider_store::LlmProviderRecord::new(
+            "custom-provider",
+            verlet_history::ProviderApi::OpenAIResponses,
+            "https://custom.example.invalid/v1",
+        ))
+        .await
+        .unwrap();
+    drop(metadata_store);
+    let user_metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_metadata_store
+        .set_credential(
+            "remote-only-provider",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "recoverable-remote-only-key".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(user_metadata_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let anthropic = app
+        .inner
+        .metadata_store
+        .get_provider("anthropic")
+        .await
+        .unwrap()
+        .expect("the reviewed provider must remain configured");
+    assert_eq!(anthropic.base_url, "https://api.anthropic.com");
+    assert_eq!(
+        anthropic.api,
+        verlet_history::ProviderApi::AnthropicMessages
+    );
+    assert!(
+        app.inner
+            .metadata_store
+            .get_provider("remote-only-provider")
+            .await
+            .unwrap()
+            .is_none(),
+        "a provider materialized only from the remote catalog must be retired"
+    );
+    assert_eq!(
+        app.inner
+            .user_metadata_store
+            .get_credential("remote-only-provider")
+            .await
+            .unwrap(),
+        Some(
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "recoverable-remote-only-key".to_string(),
+            }
+        ),
+        "retiring an unreviewed provider record must preserve its credential"
+    );
+    assert_eq!(
+        app.inner
+            .metadata_store
+            .get_provider("custom-provider")
+            .await
+            .unwrap()
+            .expect("explicit custom providers must not be repinned")
+            .base_url,
+        "https://custom.example.invalid/v1"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn model_provider_auth_set_keeps_not_found_for_remote_only_provider() {
     let root = unique_test_root("app-server-auth-set-remote-only");
     let config = local_model_select_test_config(&root, "auth-set-remote-only");
@@ -1336,6 +1469,16 @@ async fn model_provider_auth_set_keeps_not_found_for_remote_only_provider() {
             .await
             .unwrap()
             .is_none()
+    );
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        models["data"].as_array().unwrap().iter().all(|model| {
+            model["providerId"] != "remote-only-provider" && model["id"] != "remote-only-model"
+        }),
+        "orphaned remote-only models must remain outside model/list"
     );
     assert_eq!(
         app.inner

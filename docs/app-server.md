@@ -893,6 +893,11 @@ Provider base URLs, API families, and auth kinds ship only in the reviewed
 checked-in snapshot. The background refresh updates model metadata and
 non-endpoint provider display metadata for providers already in that snapshot.
 Providers found only by the refresh do not enter the catalog provider view.
+At startup, records materialized by older catalog versions are reconciled
+before endpoint construction: reviewed provider endpoints are re-pinned, and
+refresh-only provider records are retired. Their separately stored credentials
+are preserved so an operator can recover them through an explicit custom
+provider configuration.
 
 ### `mcpSource/list`
 

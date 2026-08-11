@@ -19,6 +19,17 @@ pub(crate) const CATALOG_API_OPENAI_RESPONSES: &str = "openai_responses";
 pub(crate) const CATALOG_AUTH_KIND_API_KEY: &str = "api_key";
 pub(crate) const CATALOG_AUTH_KIND_OAUTH: &str = "oauth";
 
+pub(crate) fn catalog_api_to_provider_api(api: &str) -> Option<verlet_history::ProviderApi> {
+    match api {
+        CATALOG_API_OPENAI_CHAT_COMPLETIONS => {
+            Some(verlet_history::ProviderApi::OpenAIChatCompletions)
+        }
+        CATALOG_API_ANTHROPIC_MESSAGES => Some(verlet_history::ProviderApi::AnthropicMessages),
+        CATALOG_API_OPENAI_RESPONSES => Some(verlet_history::ProviderApi::OpenAIResponses),
+        _ => None,
+    }
+}
+
 /// Trust-bearing base-URL/family pins for majors whose models.dev entry has no
 /// `api` URL (or a non-derivable SDK); each URL is verified against the
 /// provider's public API docs. Overrides win over derivation.
@@ -1226,6 +1237,22 @@ mod tests {
         assert!(!super::valid_catalog_base_url("ftp://example.com"));
         assert!(!super::valid_catalog_base_url("https://"));
         assert!(!super::valid_catalog_base_url("api.example.com/v1"));
+    }
+
+    #[test]
+    fn built_in_snapshot_keeps_every_provider_override_pinned() {
+        let providers = super::built_in_snapshot()
+            .providers
+            .iter()
+            .map(|provider| (provider.provider_id.as_str(), provider))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (provider_id, base_url, api) in super::PROVIDER_OVERRIDES {
+            let provider = providers
+                .get(provider_id)
+                .unwrap_or_else(|| panic!("built-in snapshot omitted override {provider_id}"));
+            assert_eq!(provider.base_url, *base_url, "base URL for {provider_id}");
+            assert_eq!(provider.api, *api, "API family for {provider_id}");
+        }
     }
 
     #[test]
