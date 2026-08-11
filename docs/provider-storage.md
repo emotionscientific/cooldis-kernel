@@ -1,8 +1,8 @@
 # Metadata And Provider Auth Storage
 
 Verlet needs durable metadata/config storage for state that is not conversation
-context: provider catalogs, provider credentials, thread metadata, grants,
-bindings, routing config, and similar control-plane records.
+context: provider catalogs, provider credentials, thread metadata, attachment
+config, bindings, routing config, and similar control-plane records.
 
 The local default should be an internal SQLite metadata store. Remote or larger
 deployments can implement the same store traits with Postgres, Turso/libSQL, or
@@ -146,7 +146,7 @@ Local:
 <project_root>/.verlet/state/metadata.sqlite3
   llm_provider_records
   thread_lifecycle_records
-  future config/grant/capsule binding tables
+  future config/capsule binding tables
 
 ~/.verlet/state/metadata.sqlite3
   llm_provider_credentials

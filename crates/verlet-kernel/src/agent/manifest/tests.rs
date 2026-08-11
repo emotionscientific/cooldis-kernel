@@ -17,7 +17,6 @@ fn manifest_source(name: &str, version: &str, mutable_resource: bool) -> String 
         name,
         version,
         &format!("op://tailcat@sha256:{}", hash()),
-        &[],
         mutable_resource,
     )
 }
@@ -26,25 +25,12 @@ fn manifest_source_with_tool(
     name: &str,
     version: &str,
     operation_ref: &str,
-    grants: &[&str],
     mutable_resource: bool,
 ) -> String {
     let resource_ref = if mutable_resource {
         "resource://guide"
     } else {
         "resource://guide@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    };
-    let grants = if grants.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "grants = [{}]\n",
-            grants
-                .iter()
-                .map(|grant| format!("{grant:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
     };
     format!(
         r#"
@@ -65,7 +51,6 @@ type = "bash_tool"
 id = "tailcat"
 command = "tailcat"
 operation_ref = "{operation_ref}"
-{grants}
 
 [[resources]]
 name = "guide"
@@ -73,28 +58,6 @@ kind = "blob"
 ref = "{resource_ref}"
 "#
     )
-}
-
-#[test]
-fn legacy_string_grants_keep_the_resolved_manifest_hash_and_wire_shape() {
-    let source = manifest_source_with_tool(
-        "legacy-grants",
-        "1.0.0",
-        &format!("op://tailcat@sha256:{}", hash()),
-        &["fs.read:/workspace"],
-        false,
-    );
-
-    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
-
-    assert_eq!(
-        plan.resolved_manifest["tools"][0]["grants"],
-        serde_json::json!(["fs.read:/workspace"])
-    );
-    assert_eq!(
-        plan.manifest_hash,
-        "sha256:fa815a6a1fced2b03eb645bb9092c82d2fb51143f1896ecb110b3efe96bf13d0"
-    );
 }
 
 #[test]
@@ -121,127 +84,6 @@ fn persisted_legacy_agent_record_kind_remains_valid() {
     record.kind = concat!("cool", "dis.agent-manifest").to_string();
 
     record.validate().unwrap();
-}
-
-fn manifest_source_with_all_grant_positions(name: &str, grant: &str) -> String {
-    format!(
-        r#"
-[agent]
-name = "{name}"
-version = "1.0.0"
-description = "Pins every manifest grant position."
-kind = "verlet.agent-manifest"
-schema_version = 1
-
-[[model_profiles]]
-id = "default"
-provider_ref = "provider://openai_compatible"
-model_ref = "model://example-chat-model"
-
-[[tools]]
-type = "bash_tool"
-id = "tailcat"
-command = "tailcat"
-operation_ref = "op://tailcat@sha256:{hash}"
-grants = [{grant}]
-
-[[tools]]
-type = "direct_tool"
-id = "lookup"
-tool_name = "lookup"
-operation_ref = "op://lookup@sha256:{hash}"
-grants = [{grant}]
-
-[[tools]]
-type = "protocol_tool_import"
-id = "docs"
-protocol = "mcp"
-server_ref = "mcp://docs"
-grants = [{grant}]
-
-[[couplings]]
-id = "audit"
-function_ref = "op://audit/run@sha256:{hash}"
-grants = [{grant}]
-
-[couplings.trigger]
-kind = "turn.completed"
-
-[[couplings.source.selectors]]
-stream = "thread"
-kind = "turn.completed"
-
-[couplings.sink]
-stream = "control"
-kind = ["observation"]
-"#,
-        hash = hash(),
-    )
-}
-
-#[test]
-fn legacy_string_grants_pin_all_four_positions_in_one_manifest_hash() {
-    let source =
-        manifest_source_with_all_grant_positions("legacy-all-grants", "\"stream.read:thread\"");
-
-    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
-
-    let grants = plan.resolved_manifest["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|tool| tool["grants"].clone())
-        .chain(std::iter::once(
-            plan.resolved_manifest["couplings"][0]["grants"].clone(),
-        ))
-        .collect::<Vec<_>>();
-    assert_eq!(grants, vec![serde_json::json!(["stream.read:thread"]); 4]);
-    assert_eq!(
-        plan.manifest_hash,
-        "sha256:91a428458b19f8fc6de326c47b70091adca00738196158b8991c00af985cd67d"
-    );
-}
-
-#[test]
-fn object_grant_manifest_hash_is_stable_across_toml_round_trip() {
-    #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-    struct GrantEnvelope {
-        grants: Vec<verlet_agent::manifest_schema::AgentManifestGrant>,
-    }
-
-    let source = manifest_source_with_all_grant_positions(
-        "object-all-grants",
-        r#"{ capability = "stream.read:thread", expires_at = "2026-07-16T20:00:00Z" }"#,
-    );
-    let first = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
-    let value: toml::Value = toml::from_str(&source).unwrap();
-    verlet_agent::manifest_schema::AgentManifestSchema::from_toml_value(&value).unwrap();
-    let encoded = toml::to_string(&value).unwrap();
-    let second = crate::agent::manifest::AgentPublishPlan::from_source(&encoded).unwrap();
-
-    let grant_wire = GrantEnvelope {
-        grants: vec![verlet_agent::manifest_schema::AgentManifestGrant::Expiring(
-            verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                capability: "stream.read:thread".to_string(),
-                expires_at: "2026-07-16T20:00:00Z".to_string(),
-            },
-        )],
-    };
-    let first_encoding = toml::to_string(&grant_wire).unwrap();
-    let decoded: GrantEnvelope = toml::from_str(&first_encoding).unwrap();
-    let second_encoding = toml::to_string(&decoded).unwrap();
-
-    assert_eq!(second.resolved_manifest, first.resolved_manifest);
-    assert_eq!(second.manifest_hash, first.manifest_hash);
-    assert_eq!(decoded, grant_wire);
-    assert_eq!(second_encoding, first_encoding);
-    assert_eq!(
-        second.resolved_manifest["couplings"][0]["grants"][0],
-        serde_json::json!({
-            "capability": "stream.read:thread",
-            "expires_at": "2026-07-16T20:00:00Z",
-        })
-    );
 }
 
 fn folder_first_manifest_source(name: &str, context: &str) -> String {
@@ -697,7 +539,6 @@ fn publish_rejects_two_segment_ref_for_undeclared_operation() {
         "release-verifier",
         "1.0.0",
         &format!("op://tailcat/export@sha256:{}", hash()),
-        &[],
         false,
     );
 
@@ -711,66 +552,6 @@ fn publish_rejects_two_segment_ref_for_undeclared_operation() {
     let text = err.to_string();
     assert!(text.contains("op://<record>/<operation>@sha256:<hash>"));
     assert!(text.contains("available operations: cat"));
-}
-
-#[test]
-fn publish_rejects_single_segment_ref_when_any_operation_grant_is_missing() {
-    let operation_root = temp_root("single-grant-shortfall");
-    seed_operation_record(
-        &operation_root,
-        "tailcat",
-        hash(),
-        &[
-            ("cat", &["fs.read:/workspace"]),
-            ("tail", &["net:https://example.com"]),
-        ],
-    );
-    let source = manifest_source_with_tool(
-        "release-verifier",
-        "1.0.0",
-        &format!("op://tailcat@sha256:{}", hash()),
-        &["fs.read:/workspace"],
-        false,
-    );
-
-    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("single-grant-agent"))
-        .publish_plan_with_operation_registry(
-            crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap(),
-            &operation_root,
-        )
-        .unwrap_err();
-
-    assert!(err.to_string().contains("tail:net:https://example.com"));
-}
-
-#[test]
-fn publish_rejects_two_segment_ref_when_selected_operation_grant_is_missing() {
-    let operation_root = temp_root("selected-grant-shortfall");
-    seed_operation_record(
-        &operation_root,
-        "tailcat",
-        hash(),
-        &[
-            ("cat", &["fs.read:/workspace"]),
-            ("tail", &["net:https://example.com"]),
-        ],
-    );
-    let source = manifest_source_with_tool(
-        "release-verifier",
-        "1.0.0",
-        &format!("op://tailcat/tail@sha256:{}", hash()),
-        &[],
-        false,
-    );
-
-    let err = crate::agent::manifest::LocalAgentRegistry::new(temp_root("selected-grant-agent"))
-        .publish_plan_with_operation_registry(
-            crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap(),
-            &operation_root,
-        )
-        .unwrap_err();
-
-    assert!(err.to_string().contains("tail:net:https://example.com"));
 }
 
 #[test]

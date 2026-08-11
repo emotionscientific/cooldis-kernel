@@ -511,14 +511,14 @@ the thread stream.
 
 `io.egress.requested` currently has no in-kernel producer. Producers are
 boundary clients that append the event through the control plane and future
-published operations that can be granted the relevant stream access.
+published operations attached to an explicit coupling or controller path.
 
 Supervisor spawn uses the same requested/projector grammar for a kernel-local
 effect. `std::supervisor.spawn` does not start a child thread during the
 coupling fold; it emits `thread.spawn.requested` on the parent control stream
 and, when configured to block, a parent `turn.waiting` fact. The thread-spawn
-projector consumes that request, re-checks the parent thread's bound
-`threads.spawn` grant, starts the child through the same thread/turn kernel
+projector consumes that request, verifies the parent thread's child-agent policy
+and attached spawn operation or supervisor coupling, starts the child through the same thread/turn kernel
 path as `verlet-threads` `thread_spawn`, and witnesses `thread.spawned`.
 `std::supervisor.child_completion` remains the paired fold for routed child
 completion facts back into the parent continuation.

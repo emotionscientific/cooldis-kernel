@@ -450,7 +450,6 @@ id = "search"
 protocol = "mcp"
 server_ref = "mcp://search"
 include_tools = ["search"]
-grants = []
 "#;
     std::fs::write(&manifest_path, rendered)?;
     Ok(
@@ -699,62 +698,6 @@ async fn inspect_researcher_bind_receipt(
             )
             .into());
         }
-    }
-    assert_operation_binding_grants(
-        operation_bindings,
-        "http-fetch",
-        &["net.http:GET:http://*", "net.http:GET:https://*"],
-    )?;
-    assert_operation_binding_grants(operation_bindings, "file-read", &["fs.read:/workspace"])?;
-    assert_operation_binding_grants(operation_bindings, "json-query", &[])?;
-    let granted = bind.payload["granted"]
-        .as_array()
-        .ok_or("researcher bind receipt granted was not an array")?
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    for expected in [
-        "fs.read:/workspace",
-        "net.http:GET:http://*",
-        "net.http:GET:https://*",
-    ] {
-        if !granted.contains(expected) {
-            return Err(
-                format!("researcher bind receipt missing grant {expected:?}: {granted:?}").into(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn assert_operation_binding_grants(
-    operation_bindings: &[serde_json::Value],
-    operation_name: &str,
-    expected_grants: &[&str],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let binding = operation_bindings
-        .iter()
-        .find(|binding| binding["name"].as_str() == Some(operation_name))
-        .ok_or_else(|| format!("missing operation binding {operation_name:?}"))?;
-    let expected = expected_grants
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let grants = match binding.get("grants").and_then(serde_json::Value::as_array) {
-        Some(values) => values
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<std::collections::BTreeSet<_>>(),
-        None if expected.is_empty() => std::collections::BTreeSet::new(),
-        None => {
-            return Err(format!("operation binding {operation_name:?} grants was missing").into());
-        }
-    };
-    if grants != expected {
-        return Err(format!(
-            "operation binding {operation_name:?} grants mismatch: got {grants:?}, expected {expected:?}"
-        )
-        .into());
     }
     Ok(())
 }

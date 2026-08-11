@@ -264,10 +264,6 @@ fn counter_coupling(
             artifact_hash: hash.to_string(),
             operation_name: Some("fold_counter".to_string()),
         },
-        grants: vec![
-            "stream.read:thread".to_string(),
-            "stream.write:derived:counter".to_string(),
-        ],
         budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
             max_ms: None,
             max_discharge_events: Some(1),

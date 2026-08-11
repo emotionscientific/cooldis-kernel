@@ -9,7 +9,7 @@ Verlet exposes one native control plane and two compatibility adapters.
   sources for agents.
 
 These surfaces share the same runtime. They do not create separate schedulers.
-Manifest binding, provider configuration, operation registries, grants,
+Manifest binding, provider configuration, operation registries, attachments,
 durable thread state, and receipts stay in Verlet.
 
 The examples below assume installed binaries. From a source checkout, replace
@@ -253,7 +253,7 @@ An MCP client can then call the `verlet_prompt` tool with a real model prompt:
 Use MCP source registration when Verlet should use someone else's MCP server.
 This is the opposite direction from `verlet-mcp-server`.
 
-Registering a source does not grant it to every agent. Agent manifests still
+Registering a source does not attach it to every agent. Agent manifests still
 opt into remote MCP sources with `protocol_tool_import`.
 
 ### Dry Path

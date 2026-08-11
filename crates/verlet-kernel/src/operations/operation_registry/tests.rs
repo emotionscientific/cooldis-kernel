@@ -299,7 +299,7 @@ async fn registry_invokes_operation_as_process_handle() {
 }
 
 #[tokio::test]
-async fn registry_rejects_publish_when_manifest_grants_are_missing() {
+async fn registry_rejects_publish_when_required_capabilities_are_missing() {
     let registry = verlet_operations::operation_registry::OperationRegistry::new();
     let registration = verlet_operations::operation_registry::OperationRegistration::new(
         "search",

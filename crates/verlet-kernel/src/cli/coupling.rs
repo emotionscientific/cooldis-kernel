@@ -186,57 +186,26 @@ pub(super) fn select_replay_coupling(
             "bound coupling id {coupling_id:?} was not found in replay coupling set"
         )));
     }
-    let grant_expiries = coupling_set
-        .grant_expiries
-        .get(coupling_id)
-        .cloned()
-        .map(|expiries| std::collections::BTreeMap::from([(coupling_id.to_string(), expiries)]))
-        .unwrap_or_default();
-    Ok(
-        crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
-            coupling_set.snapshot_id.clone(),
-            couplings,
-            grant_expiries,
-        ),
-    )
+    Ok(crate::agent::manifest_bind::BoundCouplingSet::new(
+        coupling_set.snapshot_id.clone(),
+        couplings,
+    ))
 }
 
 #[cfg(test)]
-mod expiry_selection_tests {
+mod selection_tests {
 
     #[test]
-    fn selecting_one_replay_coupling_preserves_its_grant_expiries() {
+    fn selecting_one_replay_coupling_preserves_only_the_selected_binding() {
         let selected = replay_coupling("selected");
         let other = replay_coupling("other");
-        let set = crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
-            "snapshot-a",
-            vec![selected, other],
-            std::collections::BTreeMap::from([
-                (
-                    "selected".to_string(),
-                    vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                        capability: "stream.read:thread".to_string(),
-                        expires_at: "2050-01-01T00:00:00Z".to_string(),
-                    }],
-                ),
-                (
-                    "other".to_string(),
-                    vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                        capability: "stream.write:control".to_string(),
-                        expires_at: "2060-01-01T00:00:00Z".to_string(),
-                    }],
-                ),
-            ]),
-        );
+        let set =
+            crate::agent::manifest_bind::BoundCouplingSet::new("snapshot-a", vec![selected, other]);
 
         let selected = crate::cli::coupling::select_replay_coupling(&set, "selected").unwrap();
 
         assert_eq!(selected.couplings.len(), 1);
         assert_eq!(selected.couplings[0].id, "selected");
-        assert_eq!(
-            selected.grant_expiries.keys().cloned().collect::<Vec<_>>(),
-            vec!["selected"]
-        );
     }
 
     fn replay_coupling(id: &str) -> crate::agent::manifest_bind::BoundCoupling {
@@ -262,10 +231,6 @@ mod expiry_selection_tests {
                 artifact_hash: "a".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: Default::default(),
             config: serde_json::json!({}),
             config_hash: "sha256:test".to_string(),

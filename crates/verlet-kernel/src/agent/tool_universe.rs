@@ -170,7 +170,6 @@ impl ToolUniverseDiscovery {
 /// (`cooldis.agent.tool_universes`) so the runtime factory can remount the
 /// search surface on restore, exactly like operation bindings.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ToolUniverseBinding {
     /// Manifest tool id of the `protocol_tool_import`.
     pub import_id: String,
@@ -185,8 +184,6 @@ pub struct ToolUniverseBinding {
     pub include_tools: Option<std::collections::BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<verlet_agent::tool_ref::PinnedToolRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
     pub discovery: ToolUniverseDiscovery,
 }
 
@@ -222,7 +219,6 @@ impl ToolUniverseBinding {
 /// "which mutable surface could this thread reach, under which witnessed
 /// contracts, and which contracts were pinned to rows".
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ToolUniverseBindReceipt {
     pub import_id: String,
     pub server_ref: String,
@@ -232,8 +228,6 @@ pub struct ToolUniverseBindReceipt {
     /// Pin references resolved to rows, empty when the import is
     /// search-surface only.
     pub pinned: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -279,7 +273,6 @@ impl ToolUniverseBindReceipt {
                     )
                 })
                 .collect(),
-            grant_expiries: binding.grant_expiries.clone(),
         }
     }
 }
@@ -418,17 +411,6 @@ impl ToolUniverseSearchSurface {
 
     pub fn universes(&self) -> &[MountedToolUniverse] {
         &self.universes
-    }
-
-    fn ensure_mounted_grants_live(
-        &self,
-        mounted: &MountedToolUniverse,
-        now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<()> {
-        crate::agent::manifest_bind::ensure_grant_expiries_live(
-            &mounted.binding.grant_expiries,
-            now_ms,
-        )
     }
 
     fn resolve_contract<'a>(
@@ -684,13 +666,11 @@ impl ToolUniverseSearchSurface {
     async fn invoke_pinned_direct_call(
         &self,
         call: crate::agent::agent_tool_router::AgentKernelToolCall,
-        now_ms: i64,
     ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
         let resolved = match self.resolve_pinned_contract(&call.tool_name)? {
             Some(resolved) => resolved,
             None => return Ok(None),
         };
-        self.ensure_mounted_grants_live(resolved.mounted, now_ms)?;
         let pin = resolved.mounted.binding.pin.as_ref().ok_or_else(|| {
             crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
                 "pinned tool row {:?} is missing its pin",
@@ -842,28 +822,11 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for ToolUniverseSe
         &self,
         call: crate::agent::agent_tool_router::AgentKernelToolCall,
     ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
-        self.invoke_tool_call_at(call, verlet_history::now_ms())
-            .await
-    }
-
-    async fn invoke_tool_call_at(
-        &self,
-        call: crate::agent::agent_tool_router::AgentKernelToolCall,
-        now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
         match call.tool_name.as_str() {
             TOOL_SEARCH_TOOL => {
                 let query = optional_string_arg(&call.arguments, "query")?;
                 let universe = optional_string_arg(&call.arguments, "universe")?;
                 let query = query.map(|value| value.to_lowercase());
-                for mounted in self.universes.iter().filter(|mounted| {
-                    universe
-                        .as_deref()
-                        .map(|expected| mounted.binding.server_ref == expected)
-                        .unwrap_or(true)
-                }) {
-                    self.ensure_mounted_grants_live(mounted, now_ms)?;
-                }
                 let tools = self
                     .universes
                     .iter()
@@ -916,7 +879,6 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for ToolUniverseSe
                 let tool_name = required_string_arg(&call.arguments, "tool")?;
                 let universe = optional_string_arg(&call.arguments, "universe")?;
                 let resolved = self.resolve_contract(&tool_name, universe.as_deref())?;
-                self.ensure_mounted_grants_live(resolved.mounted, now_ms)?;
                 let schema = serde_json::to_string_pretty(&resolved.contract.input_schema)
                     .map_err(|err| {
                         crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
@@ -946,26 +908,12 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for ToolUniverseSe
                     )
                 })?;
                 let resolved = self.resolve_contract(&tool_name, universe.as_deref())?;
-                self.ensure_mounted_grants_live(resolved.mounted, now_ms)?;
                 self.invoke_universe_call(call, resolved, arguments)
                     .await
                     .map(Some)
             }
-            _ => self.invoke_pinned_direct_call(call, now_ms).await,
+            _ => self.invoke_pinned_direct_call(call).await,
         }
-    }
-
-    async fn invoke_tool_call_cancellable_at(
-        &self,
-        call: crate::agent::agent_tool_router::AgentKernelToolCall,
-        _cancellation: crate::agent::agent_tool_router::ToolInvocationCancellation,
-        now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<
-        crate::agent::agent_tool_router::AgentKernelToolOutcome,
-    > {
-        self.invoke_tool_call_at(call, now_ms)
-            .await
-            .map(crate::agent::agent_tool_router::AgentKernelToolOutcome::Completed)
     }
 }
 

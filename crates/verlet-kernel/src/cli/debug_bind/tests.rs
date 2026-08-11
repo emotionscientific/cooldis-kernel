@@ -59,7 +59,6 @@ fn legacy_receipts_assemble_with_unrecorded_origins() {
             "model_id": "echo",
             "tool_ids": [],
             "operation_bindings": [],
-            "granted": [],
             "effective_runtime": {},
             "overridden_keys": [],
         }))
@@ -80,63 +79,6 @@ fn legacy_receipts_assemble_with_unrecorded_origins() {
     assert_eq!(placement.target, "local");
     assert_eq!(placement.origin, None);
     assert!(rendered.contains("[unrecorded]"));
-}
-
-#[test]
-fn grant_explanations_preserve_subject_expiry_and_lapse_witnesses() {
-    let compile: crate::agent::manifest_bind::AgentManifestCompileReceipt =
-        serde_json::from_value(serde_json::json!({
-            "ref_uri": "agent://grants@1.0.0",
-            "manifest_hash": "sha256:manifest",
-            "source_hash": "sha256:source",
-        }))
-        .unwrap();
-    let bind: crate::agent::manifest_bind::AgentManifestBindReceipt =
-        serde_json::from_value(serde_json::json!({
-            "ref_uri": "agent://grants@1.0.0",
-            "manifest_hash": "sha256:manifest",
-            "model_profile_id": "default",
-            "provider_id": "local_offline",
-            "model_id": "echo",
-            "tool_ids": [],
-            "operation_bindings": [],
-            "granted": [],
-            "grant_bindings": [{
-                "subject_kind": "tool",
-                "subject_id": "search",
-                "capability": "net:https://example.test",
-                "expires_at": "2026-07-16T20:00:00Z",
-                "lapsed_at_bind": true,
-                "surface_excluded": true
-            }],
-            "effective_runtime": {},
-            "overridden_keys": [],
-        }))
-        .unwrap();
-
-    let explanation = crate::cli::debug_bind::assemble_bind_explanation(
-        "thread-1",
-        "compile-1",
-        "bind-1",
-        &compile,
-        &bind,
-    )
-    .unwrap();
-
-    assert_eq!(
-        explanation.grants,
-        vec![crate::cli::debug_bind::BindGrantExplanation {
-            capability: "net:https://example.test".to_string(),
-            subject_kind: "tool".to_string(),
-            subject_id: "search".to_string(),
-            expires_at: Some("2026-07-16T20:00:00Z".to_string()),
-            lapsed_at_bind: true,
-            excluded: true,
-        }]
-    );
-    assert!(crate::cli::debug_bind::render_bind_explanation(&explanation).contains(
-        "net:https://example.test  <- tool search  [expires 2026-07-16T20:00:00Z]  [lapsed-at-bind]"
-    ));
 }
 
 #[test]
@@ -193,7 +135,6 @@ fn operation_tool_origins_are_not_guessed_from_receipt_order() {
                 "artifact_hash": "a".repeat(64),
                 "operations": ["operation-name"]
             }],
-            "granted": [],
             "effective_runtime": {},
             "overridden_keys": []
         }))
@@ -234,7 +175,6 @@ fn operation_tool_origins_are_not_guessed_from_receipt_order() {
         tools,
         universes: Vec::new(),
         couplings: Vec::new(),
-        grants: Vec::new(),
         skills: Vec::new(),
         context: Vec::new(),
     };
@@ -269,7 +209,6 @@ fn alias_timestamp_overflow_is_rejected() {
             "model_id": "echo",
             "tool_ids": [],
             "operation_bindings": [],
-            "granted": [],
             "effective_runtime": {},
             "overridden_keys": []
         }))
@@ -376,14 +315,6 @@ fn render_bind_explanation_matches_pinned_format() {
             artifact_hash: hash_c.clone(),
             config_hash: hash_a.clone(),
         }],
-        grants: vec![crate::cli::debug_bind::BindGrantExplanation {
-            capability: "fs.read:/workspace".to_string(),
-            subject_kind: "tool".to_string(),
-            subject_id: "search".to_string(),
-            expires_at: None,
-            lapsed_at_bind: false,
-            excluded: false,
-        }],
         skills: vec![crate::cli::debug_bind::BindSkillExplanation {
             package: "release-checks".to_string(),
             artifact_hash: hash_b.clone(),
@@ -423,9 +354,6 @@ fn render_bind_explanation_matches_pinned_format() {
             "\n",
             "couplings\n",
             "  audit (projection)  fn op://audit/project@sha256:cccccccccccc…  config sha256:aaaaaaaaaaaa…\n",
-            "\n",
-            "grants\n",
-            "  fs.read:/workspace  <- tool search  [no expiry]\n",
             "\n",
             "skills\n",
             "  release-checks  sha256:bbbbbbbbbbbb…\n",

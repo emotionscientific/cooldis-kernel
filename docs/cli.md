@@ -68,7 +68,7 @@ home. TCP WebSocket clients supply a token through
 `VERLET_APP_SERVER_TOKEN`; see the standalone quick start and Authentication
 section in [Verlet RPC Control Plane](app-server.md). `verlet debug bind`
 explains the effective model,
-placement, workspace, runtime, tool, coupling, grant, skill, and context
+placement, workspace, runtime, tool attachment, coupling, skill, and context
 envelope strictly from recorded compile and bind receipts. It reads a running
 daemon through `thread/events/list`, or a stopped daemon's SQLite journal with
 `--journal`; `--json` emits the full receipt projection. `verlet debug rpc` is

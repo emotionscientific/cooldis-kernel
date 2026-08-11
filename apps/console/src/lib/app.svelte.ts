@@ -1846,7 +1846,6 @@ function envelopeFromBindReceipt(payload: unknown): ThreadEnvelope | null {
     modelId: stringField(payload, "model_id") ?? "",
     toolIds: stringArrayField(payload, "tool_ids"),
     operationBindings: arrayField(payload, "operation_bindings").map(envelopeBinding),
-    granted: stringArrayField(payload, "granted"),
     effectiveCwd: stringField(runtime, "default_cwd") ?? "",
     streaming: booleanField(runtime, "streaming"),
     turnTimeoutMs: numberRecordField(runtime, "turn_timeout_ms"),
@@ -1858,7 +1857,7 @@ function envelopeBinding(value: unknown): ThreadEnvelopeBinding {
   return {
     name: stringField(value, "name") ?? "",
     artifactHash: stringField(value, "artifact_hash") ?? "",
-    grants: stringArrayField(value, "grants"),
+    attachmentConfig: objectField(value, "attachment_config"),
     operations: stringArrayField(value, "operations"),
     directTools: arrayField(value, "direct_tools").map((tool) => ({
       toolName: stringField(tool, "tool_name") ?? "",
@@ -1931,6 +1930,13 @@ function isWebSocketEndpoint(value: string) {
 function recordField(value: unknown, key: string) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   return (value as Record<string, unknown>)[key];
+}
+
+function objectField(value: unknown, key: string): Record<string, unknown> | null {
+  const child = recordField(value, key);
+  return child && typeof child === "object" && !Array.isArray(child)
+    ? child as Record<string, unknown>
+    : null;
 }
 
 function stringField(value: unknown, key: string) {

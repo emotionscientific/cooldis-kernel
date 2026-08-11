@@ -12,7 +12,6 @@ pub type VerletResult<T> = Result<T, VerletError>;
 
 pub const THREAD_BOUND_COUPLING_SET_METADATA: &str = "cooldis.agent.bound_coupling_set";
 pub const THREAD_AGENT_MANIFEST_HASH_METADATA: &str = "cooldis.agent.manifest_hash";
-pub const THREAD_SPAWN_GRANTED_METADATA: &str = "cooldis.thread_spawn.granted";
 pub const THREAD_SPAWN_INPUTS_HASH_METADATA: &str = "cooldis.thread_spawn.inputs_hash";
 pub const THREAD_OPERATION_REGISTRY_ROOT_METADATA: &str = "cooldis.agent.operation_registry_root";
 

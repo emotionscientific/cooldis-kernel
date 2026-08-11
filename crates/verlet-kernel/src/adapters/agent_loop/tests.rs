@@ -222,16 +222,13 @@ fn recovery_bind_receipt(
             name: "recovery".to_string(),
             artifact_hash: "test".to_string(),
             effect_class,
-            grants: Vec::new(),
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            grant_expiries: Vec::new(),
             operations: vec!["recovery_tool".to_string()],
             direct_tools: vec![
                 crate::agent::manifest_bind::AgentManifestDirectToolBinding {
                     tool_name: "recovery_tool".to_string(),
                     operation: "recovery_tool".to_string(),
                     effect_class,
-                    grant_expiries: Vec::new(),
                 },
             ],
         }],
@@ -240,8 +237,6 @@ fn recovery_bind_receipt(
         static_context_segments: Vec::new(),
         tool_universes: Vec::new(),
         couplings: Vec::new(),
-        granted: Vec::new(),
-        grant_bindings: Vec::new(),
         effective_runtime: verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: None,
@@ -1336,8 +1331,6 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
                     skill_packages: Vec::new(),
                     skill_discovery: None,
                     static_context_segments: Vec::new(),
-                    granted: vec!["threads.read".to_string()],
-                    grant_bindings: Vec::new(),
                     effective_runtime:
                         verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(),
                     overridden_keys: Vec::new(),
@@ -7854,7 +7847,7 @@ async fn runtime_routes_thread_spawn_operation_through_kernel_dispatch() {
         children[0].context().coordinates.thread_id
     );
     assert_eq!(spawned_payload.child_manifest_hash, CHILD_MANIFEST_HASH);
-    assert_eq!(spawned_payload.granted, vec!["threads.read".to_string()]);
+    assert!(spawned_payload.granted.is_empty());
     assert!(spawned_payload.inputs_hash.starts_with("sha256:"));
 
     let joined = wait_for_control_event(
@@ -7997,15 +7990,13 @@ async fn kernel_thread_registry()
 
 async fn kernel_thread_router() -> crate::agent::agent_tool_router::AgentToolRouter {
     let registry = kernel_thread_registry().await;
-    let package = crate::operations::kernel_packages::verlet_threads_kernel_package();
-    crate::agent::agent_tool_router::AgentToolRouter::new(registry)
-        .with_capability_grants(package.capability_grants)
-        .with_tool_aliases(vec![crate::agent::agent_tool_router::OperationToolAlias {
+    crate::agent::agent_tool_router::AgentToolRouter::new(registry).with_tool_aliases(vec![
+        crate::agent::agent_tool_router::OperationToolAlias {
             tool_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
-            grant_expiries: Vec::new(),
-        }])
+        },
+    ])
 }
 
 async fn kernel_schedule_registry()
@@ -8061,13 +8052,9 @@ async fn append_tool_controller_bind_receipt(
             function_ref: "op://policy/tool-gate@sha256:test".to_string(),
             artifact_hash: "test".to_string(),
             operation_name: Some("tool_gate".to_string()),
-            grants: Vec::new(),
-            grant_expiries: Vec::new(),
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget::default(),
             config_hash: "config".to_string(),
         }],
-        granted: Vec::new(),
-        grant_bindings: Vec::new(),
         effective_runtime: verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(),
         overridden_keys: Vec::new(),
         placement: None,
@@ -8113,8 +8100,6 @@ async fn append_manifest_runtime_grace(
         static_context_segments: Vec::new(),
         tool_universes: Vec::new(),
         couplings: Vec::new(),
-        granted: Vec::new(),
-        grant_bindings: Vec::new(),
         effective_runtime: verlet_agent::manifest_schema::AgentManifestRuntimeDefaults {
             cancellation_grace_ms: Some(cancellation_grace_ms),
             ..verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default()

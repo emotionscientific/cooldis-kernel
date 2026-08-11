@@ -29,6 +29,7 @@
 
   type EditorTab = "fields" | "tools" | "runtime" | "source";
   type PlanMode = "manifest" | "source";
+  const PRIVATE_NETWORK_EXAMPLE = '{"http://127.0.0.1:*": ["GET"]}';
 
   let {
     agentRef,
@@ -63,7 +64,8 @@
   let addToolOperation = $state("");
   let addToolId = $state("");
   let addToolSurface = $state("");
-  let addToolGrants = $state("");
+  let addToolSecrets = $state("");
+  let addToolPrivateNetwork = $state("");
 
   let loadSeq = 0;
   let planSeq = 0;
@@ -295,6 +297,48 @@
     });
   }
 
+  function updateToolAttachment(index: number, key: string, value: unknown) {
+    updateManifest((draft) => {
+      const rows = ensureArray(draft, "tools");
+      const row = ensureArrayObject(rows, index);
+      const attachment = ensureObject(row, "attachment");
+      const emptyArray = Array.isArray(value) && value.length === 0;
+      const emptyObject = value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0;
+      if (value === undefined || emptyArray || emptyObject) delete attachment[key];
+      else attachment[key] = value;
+      if (!Object.keys(attachment).length) delete row.attachment;
+    });
+  }
+
+  function parsePrivateNetwork(value: string): ManifestRecord {
+    if (!value.trim()) return {};
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Private network attachment must be a JSON object mapping origins to method arrays.");
+    }
+    for (const [origin, methods] of Object.entries(parsed)) {
+      if (!origin.trim() || !Array.isArray(methods) || methods.some((method) => typeof method !== "string")) {
+        throw new Error("Private network attachment must map each non-empty origin to an array of methods.");
+      }
+    }
+    return parsed as ManifestRecord;
+  }
+
+  function updateToolPrivateNetwork(index: number, value: string) {
+    try {
+      updateToolAttachment(index, "allowed_private_network", parsePrivateNetwork(value));
+      note = "";
+    } catch (cause) {
+      note = errorMessage(cause);
+    }
+  }
+
+  function privateNetworkText(tool: ManifestRecord): string {
+    const attachment = recordObject(tool, "attachment");
+    const network = recordObject(attachment, "allowed_private_network");
+    return Object.keys(network).length ? JSON.stringify(network) : "";
+  }
+
   function removeTool(index: number) {
     updateManifest((draft) => {
       const rows = ensureArray(draft, "tools");
@@ -307,7 +351,17 @@
     if (!operation) return;
     const id = sanitizeRecordName(addToolId || operation.id);
     const surface = sanitizeRecordName(addToolSurface || (addToolType === "bash_tool" ? operation.id : operation.inputs[0] || operation.id));
-    const grants = splitList(addToolGrants);
+    let privateNetwork: ManifestRecord;
+    try {
+      privateNetwork = parsePrivateNetwork(addToolPrivateNetwork);
+    } catch (cause) {
+      note = errorMessage(cause);
+      return;
+    }
+    const allowedSecrets = splitList(addToolSecrets);
+    const attachment = allowedSecrets.length || Object.keys(privateNetwork).length
+      ? { allowed_secrets: allowedSecrets, allowed_private_network: privateNetwork }
+      : undefined;
     updateManifest((draft) => {
       const rows = ensureArray(draft, "tools");
       rows.push(
@@ -317,20 +371,21 @@
               id,
               command: surface,
               operation_ref: operationRef(operation),
-              grants,
+              ...(attachment ? { attachment } : {}),
             }
           : {
               type: "direct_tool",
               id,
               tool_name: surface,
               operation_ref: operationRef(operation),
-              grants,
+              ...(attachment ? { attachment } : {}),
             },
       );
     });
     addToolId = "";
     addToolSurface = "";
-    addToolGrants = "";
+    addToolSecrets = "";
+    addToolPrivateNetwork = "";
   }
 
   function onSourceInput(event: Event) {
@@ -443,13 +498,6 @@
         </label>
         <div class="agent-grid-two">
           <label>
-            <span>Network</span>
-            <select class="input" value={stringValue(policies.network) || "deny"} onchange={(event) => updatePolicy("network", inputValue(event))}>
-              <option value="deny">deny</option>
-              <option value="declared-origins">declared-origins</option>
-            </select>
-          </label>
-          <label>
             <span>Filesystem</span>
             <select class="input" value={stringValue(policies.filesystem) || "vfs"} onchange={(event) => updatePolicy("filesystem", inputValue(event))}>
               <option value="vfs">vfs</option>
@@ -495,7 +543,10 @@
               <p class="env-note">Protocol import is preserved here. Use Source for advanced edits.</p>
               <label><span>Server ref</span><input class="input mono" value={stringValue(tool.server_ref)} disabled /></label>
             {/if}
-            <label><span>Grants</span><input class="input mono" value={stringArray(tool.grants).join(", ")} oninput={(event) => updateTool(index, "grants", splitList(inputValue(event)))} /></label>
+            {#if isOperationBacked(tool)}
+              <label><span>Allowed secrets</span><input class="input mono" value={stringArray(recordObject(tool, "attachment").allowed_secrets).join(", ")} oninput={(event) => updateToolAttachment(index, "allowed_secrets", splitList(inputValue(event)))} /></label>
+              <label><span>Allowed private network (JSON)</span><input class="input mono" placeholder={PRIVATE_NETWORK_EXAMPLE} value={privateNetworkText(tool)} onchange={(event) => updateToolPrivateNetwork(index, inputValue(event))} /></label>
+            {/if}
           </div>
         {:else}
           <p class="env-note">No tools declared.</p>
@@ -517,7 +568,8 @@
           <input class="input mono" placeholder="id" bind:value={addToolId} />
         </div>
         <input class="input mono" placeholder={addToolType === "bash_tool" ? "command" : "tool_name"} bind:value={addToolSurface} />
-        <input class="input mono" placeholder="grants, comma separated" bind:value={addToolGrants} />
+        <input class="input mono" placeholder="allowed secrets, comma separated" bind:value={addToolSecrets} />
+        <input class="input mono" placeholder={`private network JSON, e.g. ${PRIVATE_NETWORK_EXAMPLE}`} bind:value={addToolPrivateNetwork} />
         <button class="btn" disabled={!app.tools.length} onclick={addOperationTool}>
           <Icon name="Plus" size={13} /> Add tool
         </button>

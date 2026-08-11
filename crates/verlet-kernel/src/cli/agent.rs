@@ -187,7 +187,6 @@ pub(super) async fn agent_publish(
 pub(super) struct ManifestOperationRef {
     tool_id: String,
     reference: String,
-    grants: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,7 +242,6 @@ pub(super) fn resolve_manifest_operation_refs(
         crate::agent::manifest_bind::verify_operation_ref(
             &operation_ref.tool_id,
             &resolved,
-            &operation_ref.grants,
             operation_registry_root,
         )?;
         match replacements.get(&operation_ref.reference) {
@@ -301,21 +299,9 @@ pub(super) fn manifest_operation_refs_from_source(
             .and_then(toml::Value::as_str)
             .unwrap_or("<unknown>")
             .to_string();
-        let grants = table
-            .get("grants")
-            .and_then(toml::Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(toml::Value::as_str)
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         refs.push(ManifestOperationRef {
             tool_id,
             reference: reference.to_string(),
-            grants,
         });
     }
     Ok(refs)
@@ -1476,8 +1462,8 @@ Usage:\n\
   verlet agent publish <manifest> [--resolve-ops] [--registry-root .verlet/agents] [--operations-registry-root .verlet/operations]\n\
 \n\
 Reruns the agent plan and writes an immutable published agent record. Every\n\
-op:// tool ref must exist in the operations registry and its row grants must\n\
-cover the selected operation requirements. --resolve-ops rewrites op://name\n\
+op:// tool ref must exist in the operations registry. --resolve-ops rewrites\n\
+op://name\n\
 or op://name@latest authoring refs in the manifest file to pinned\n\
 op://name@sha256:<hash> refs before publish verification runs.\n"
     );

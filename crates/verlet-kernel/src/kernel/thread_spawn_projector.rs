@@ -109,7 +109,7 @@ impl ThreadSpawnProjector {
         &self,
         coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         payload: verlet_history::ThreadSpawnRequestedPayload,
-        require_supervisor_grant: bool,
+        require_supervisor_attachment: bool,
     ) -> crate::kernel::runtime_host::VerletResult<ThreadSpawnDispatchReceipt> {
         if payload.parent_thread_id != coordinates.thread_id {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
@@ -226,7 +226,7 @@ impl ThreadSpawnProjector {
                                 parent,
                                 request_event,
                                 request_payload,
-                                require_supervisor_grant,
+                                require_supervisor_attachment,
                             )
                             .await
                         {
@@ -577,17 +577,16 @@ impl ThreadSpawnProjector {
         parent: crate::kernel::runtime_host::RuntimeThreadHandle,
         request_event: &verlet_history::EventRecord,
         payload: verlet_history::ThreadSpawnRequestedPayload,
-        require_supervisor_grant: bool,
+        require_supervisor_attachment: bool,
     ) -> crate::kernel::runtime_host::VerletResult<ThreadSpawnProjected> {
-        if require_supervisor_grant && !parent_allows_supervisor_spawn(&parent.context().metadata)?
+        if require_supervisor_attachment
+            && !parent_has_supervisor_spawn_attachment(&parent.context().metadata)?
         {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                 format!(
-                    "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} projector requires parent thread bound coupling grant {THREADS_SPAWN_CAPABILITY}",
+                    "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} projector requires the parent thread to attach that supervisor coupling",
                     STD_SUPERVISOR_SPAWN_TEMPLATE_ID =
-                        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
-                    THREADS_SPAWN_CAPABILITY =
-                        crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
+                        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
                 ),
             ));
         }
@@ -884,15 +883,6 @@ impl ThreadSpawnProjector {
             metadata
                 .entry(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA.to_string())
                 .or_insert_with(|| bind_receipt.manifest_hash.clone());
-            let granted = serde_json::to_string(&bind_receipt.granted).map_err(|err| {
-                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "failed to encode thread spawn projector grants: {err}"
-                ))
-            })?;
-            metadata.insert(
-                crate::kernel::runtime_host::THREAD_SPAWN_GRANTED_METADATA.to_string(),
-                granted,
-            );
         }
         Ok((agent_binding, metadata))
     }
@@ -1286,15 +1276,8 @@ pub(crate) fn fold_thread_handle_bindings(
     Ok(bindings.into_values().collect())
 }
 
-fn parent_allows_supervisor_spawn(
+fn parent_has_supervisor_spawn_attachment(
     metadata: &std::collections::BTreeMap<String, String>,
-) -> crate::kernel::runtime_host::VerletResult<bool> {
-    parent_allows_supervisor_spawn_at(metadata, verlet_history::now_ms())
-}
-
-fn parent_allows_supervisor_spawn_at(
-    metadata: &std::collections::BTreeMap<String, String>,
-    now_ms: i64,
 ) -> crate::kernel::runtime_host::VerletResult<bool> {
     let Some(raw) = metadata.get(crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA)
     else {
@@ -1306,24 +1289,9 @@ fn parent_allows_supervisor_spawn_at(
             "thread bound coupling set is invalid: {err}"
         ))
     })?;
-    let Some(coupling) = coupling_set.couplings.iter().find(|coupling| {
+    Ok(coupling_set.couplings.iter().any(|coupling| {
         coupling.id == crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
-            && coupling
-                .grants
-                .iter()
-                .any(|grant| grant == crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY)
-    }) else {
-        return Ok(false);
-    };
-    crate::agent::manifest_bind::ensure_grant_expiries_live(
-        coupling_set
-            .grant_expiries
-            .get(&coupling.id)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        now_ms,
-    )?;
-    Ok(true)
+    }))
 }
 
 fn spawn_request_already_projected(
@@ -1380,6 +1348,68 @@ fn spawn_request_belongs_to_parent(
 #[cfg(test)]
 mod tests {
     use verlet_history::EventStore as _;
+
+    #[test]
+    fn thread_handle_replay_ignores_frozen_spawned_grants() {
+        let coordinates =
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+        let stream_id =
+            verlet_history::EventStreamId::new(format!("control:{}", coordinates.thread_id));
+        let request = verlet_history::EventRecord::from_new(
+            stream_id.clone(),
+            verlet_history::EventSequence::new(1),
+            verlet_history::NewEventRecord::witnessed(
+                coordinates.clone(),
+                verlet_history::EventKind::ThreadSpawnRequested,
+                serde_json::to_value(verlet_history::ThreadSpawnRequestedPayload {
+                    parent_thread_id: coordinates.thread_id,
+                    parent_turn_id: Some("turn-1".to_string()),
+                    task_name: Some("worker".to_string()),
+                    submitted_turn_id: Some("child-turn-1".to_string()),
+                    child_agent_ref: "agent://worker@1.0.0".to_string(),
+                    initial_submission: "work".to_string(),
+                    correlation_id: "dispatch-1".to_string(),
+                    block_parent: false,
+                })
+                .unwrap(),
+            ),
+        );
+        let mut spawned = verlet_history::NewEventRecord::witnessed(
+            coordinates.clone(),
+            verlet_history::EventKind::ThreadSpawned,
+            serde_json::json!({
+                "parent_thread_id": coordinates.thread_id,
+                "parent_turn_id": "turn-1",
+                "child_thread_id": verlet_runtime_contracts::ThreadId::new(),
+                "child_manifest_hash": "sha256:child",
+                "granted": ["threads.spawn", "secret:OLD_TOKEN"],
+                "inputs_hash": "sha256:inputs",
+                "correlation_id": "dispatch-1",
+            }),
+        );
+        spawned.provenance.source_event_ids = vec![request.id];
+        spawned.provenance.source_streams = vec![stream_id.clone()];
+        let historical_spawned = verlet_history::EventRecord::from_new(
+            stream_id,
+            verlet_history::EventSequence::new(2),
+            spawned,
+        );
+        let mut current_spawned = historical_spawned.clone();
+        current_spawned.payload["granted"] = serde_json::json!([]);
+
+        let historical = crate::kernel::thread_spawn_projector::fold_thread_handle_bindings(&[
+            request.clone(),
+            historical_spawned,
+        ])
+        .unwrap();
+        let current = crate::kernel::thread_spawn_projector::fold_thread_handle_bindings(&[
+            request,
+            current_spawned,
+        ])
+        .unwrap();
+
+        assert_eq!(historical, current);
+    }
 
     #[tokio::test]
     async fn thread_spawn_projector_spawns_child_and_witnesses_thread_spawned() {
@@ -1444,49 +1474,6 @@ mod tests {
         host.shutdown_all().await.unwrap();
     }
 
-    #[test]
-    fn supervisor_spawn_projector_checks_cached_coupling_authority_live() {
-        let coupling = std_supervisor_spawn_coupling(serde_json::json!({
-            "initial_submission": "echo projected child",
-        }));
-        let metadata = std::collections::BTreeMap::from([(
-            crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA.to_string(),
-            serde_json::to_string(
-                &crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
-                    "snapshot-a",
-                    vec![coupling],
-                    std::collections::BTreeMap::from([(
-                        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
-                            .to_string(),
-                        vec![verlet_agent::manifest_schema::AgentManifestGrantExpiry {
-                            capability:
-                                crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
-                                    .to_string(),
-                            expires_at: "1970-01-01T00:00:01Z".to_string(),
-                        }],
-                    )]),
-                ),
-            )
-            .unwrap(),
-        )]);
-
-        assert!(
-            crate::kernel::thread_spawn_projector::parent_allows_supervisor_spawn_at(
-                &metadata, 1_000
-            )
-            .unwrap()
-        );
-        let err = crate::kernel::thread_spawn_projector::parent_allows_supervisor_spawn_at(
-            &metadata, 1_001,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("missing capability grants: threads.spawn")
-        );
-        assert!(err.to_string().contains("1970-01-01T00:00:01Z"));
-    }
-
     struct ForgedRemoteWorkspaceResolver;
 
     #[async_trait::async_trait]
@@ -1519,8 +1506,6 @@ mod tests {
                     static_context_segments: Vec::new(),
                     tool_universes: Vec::new(),
                     couplings: Vec::new(),
-                    granted: Vec::new(),
-                    grant_bindings: Vec::new(),
                     effective_runtime: verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(),
                     overridden_keys: Vec::new(),
                     placement: Some(crate::agent::manifest_bind::AgentManifestPlacementBinding {
@@ -2955,11 +2940,6 @@ mod tests {
                 artifact_hash: "i".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-                crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY.to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
@@ -3001,10 +2981,6 @@ mod tests {
                 artifact_hash: "j".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,

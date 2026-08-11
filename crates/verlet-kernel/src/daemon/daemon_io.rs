@@ -4006,17 +4006,6 @@ impl VerletDaemonIoBridge {
             .get(crate::kernel::runtime_host::THREAD_AGENT_MANIFEST_HASH_METADATA)
             .cloned()
             .unwrap_or_else(|| "unbound".to_string());
-        let granted = metadata
-            .get(crate::kernel::runtime_host::THREAD_SPAWN_GRANTED_METADATA)
-            .map(|raw| {
-                serde_json::from_str::<Vec<String>>(raw).map_err(|err| {
-                    verlet_io_core::IoError::Bridge(format!(
-                        "thread.spawned granted metadata is invalid: {err}"
-                    ))
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
         let fork = verlet_history::ThreadSpawnedForkPayload {
             mode: "clone".to_string(),
             claim_event_id,
@@ -4033,8 +4022,8 @@ impl VerletDaemonIoBridge {
             parent_turn_id: None,
             child_thread_id: child_context.coordinates.thread_id,
             child_manifest_hash,
+            granted: Vec::new(),
             child_policy_hash: None,
-            granted,
             inputs_hash,
             fork: Some(fork),
         };

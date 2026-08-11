@@ -2,7 +2,10 @@ pub struct WasmRuntimeFactory {
     core: std::sync::Arc<verlet_wasm::runner::WasmRuntimeFactory>,
 }
 
-pub(crate) fn attachment_config_from_legacy_grants(
+/// Projects the two host-enforced attachment authorities out of operation ABI
+/// capability grants. Callers at legacy decode boundaries use the same
+/// projection so old persisted authority is preserved exactly once.
+pub(crate) fn attachment_config_from_capability_grants(
     grants: &std::collections::BTreeSet<String>,
 ) -> verlet_wasm::WasmAttachmentConfig {
     let mut config = verlet_wasm::WasmAttachmentConfig::default();

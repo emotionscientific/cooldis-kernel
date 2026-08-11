@@ -1522,7 +1522,7 @@ a {
   font-size: 11.5px;
 }
 
-/* Inspector envelope: tool rows + grants off the bind receipt */
+/* Inspector envelope: operation rows from the bind receipt */
 .env-binding {
   padding: 7px 0;
   border-bottom: 1px solid var(--line);
@@ -1568,10 +1568,6 @@ a {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.pill.grant {
-  border-color: var(--accent-line);
-  color: var(--tx-2);
 }
 .env-note {
   margin: 0;

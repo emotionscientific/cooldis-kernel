@@ -449,7 +449,6 @@ impl crate::adapters::app_server::VerletAppServer {
             witnessed_skill_packages.as_deref(),
             witnessed_skill_discovery.as_ref(),
             true,
-            verlet_history::now_ms(),
         )
         .await?;
         if bound.bind_receipt.workspace != stored_workspace {
@@ -2111,7 +2110,6 @@ pub(super) struct CapsuleBindingRuntimeFactory {
 struct ThreadOperationCatalog {
     registry: std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>,
     tool_aliases: Vec<crate::agent::agent_tool_router::OperationToolAlias>,
-    capability_grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
     /// The per-thread workspace VFS installed into catalog-loaded operations and
     /// virtual bash so filesystem surfaces do not drift into separate trees.
     workspace_vfs: std::sync::Arc<verlet_vfs::VerletVfs>,
@@ -2150,7 +2148,6 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
             let ThreadOperationCatalog {
                 registry,
                 tool_aliases,
-                capability_grant_expiries,
                 workspace_vfs,
             } = catalog;
             let capability_grants = operation_registry_capability_grants(&registry).await;
@@ -2158,16 +2155,13 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
                 crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::clone(
                     &registry,
                 ))
-                .with_tool_aliases(tool_aliases)
-                .with_capability_grants(capability_grants.clone())
-                .with_capability_grant_expiries(capability_grant_expiries.clone()),
+                .with_tool_aliases(tool_aliases),
             );
             factory = factory.with_bash_tool(bash_config_with_skill_files(
                 crate::capabilities::execution::VirtualBashRuntimeConfig::default()
                     .with_operation_registry(registry)
                     .with_workspace_vfs(workspace_vfs)
-                    .with_capability_grants(capability_grants)
-                    .with_capability_grant_expiries(capability_grant_expiries),
+                    .with_capability_grants(capability_grants),
                 &skill_files,
             ));
         } else if !skill_files.is_empty() {
@@ -2452,28 +2446,23 @@ impl CapsuleBindingRuntimeFactory {
             verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root);
         let mut records = Vec::new();
         let mut tool_aliases = Vec::new();
-        let mut capability_grant_expiries = Vec::new();
         for binding in manifest_operation_bindings {
             let crate::agent::manifest_bind::AgentManifestOperationBinding {
                 name,
                 artifact_hash,
                 effect_class: _,
-                grants,
                 attachment_config,
-                grant_expiries,
                 operations,
                 direct_tools,
             } = binding;
-            capability_grant_expiries.extend(grant_expiries);
             tool_aliases.extend(direct_tools.into_iter().map(|direct_tool| {
                 crate::agent::agent_tool_router::OperationToolAlias {
                     tool_name: direct_tool.tool_name,
                     registered_name: name.clone(),
                     operation_name: direct_tool.operation,
-                    grant_expiries: direct_tool.grant_expiries,
                 }
             }));
-            let mut record = registry
+            let record = registry
                 .load_version_record(&name, &artifact_hash)
                 .map_err(|err| {
                     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
@@ -2481,7 +2470,6 @@ impl CapsuleBindingRuntimeFactory {
                         name, artifact_hash
                     ))
                 })?;
-            apply_manifest_operation_grants(&mut record, grants);
             let record = if operations.is_empty() {
                 crate::operations::plugins::LocalPluginCatalogRecord::whole_record(record)
             } else {
@@ -2528,7 +2516,6 @@ impl CapsuleBindingRuntimeFactory {
         Ok(Some(ThreadOperationCatalog {
             registry: catalog.operation_registry(),
             tool_aliases,
-            capability_grant_expiries,
             workspace_vfs: catalog.vfs(),
         }))
     }
@@ -2668,13 +2655,6 @@ pub(super) fn manifest_compaction_policy(
             Ok(crate::kernel::compaction::CompactionPolicy::auto_at_text_bytes(bytes))
         })
         .transpose()
-}
-
-pub(super) fn apply_manifest_operation_grants(
-    record: &mut verlet_operations::operation_store::PublishedOperationRecord,
-    grants: impl IntoIterator<Item = String>,
-) {
-    record.capability_grants.extend(grants);
 }
 
 pub(super) async fn operation_registry_capability_grants(

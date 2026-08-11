@@ -760,8 +760,8 @@ mod tests {
             parent_turn_id: None,
             child_thread_id: child.thread_id,
             child_manifest_hash: "sha256:child".to_string(),
-            child_policy_hash: None,
             granted: Vec::new(),
+            child_policy_hash: None,
             inputs_hash: "sha256:input".to_string(),
             fork: None,
         })

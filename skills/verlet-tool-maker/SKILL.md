@@ -33,7 +33,7 @@ the tool.
 When a cookbook exists, start there before inventing a new shape. The first
 serious recipe is `docs/cookbook-pdf-document-tool.md`: it shows how to turn a
 real document-extraction problem into operations, command contracts, fixtures,
-resources, grants, and benchmark receipts.
+resources, capabilities, and benchmark receipts.
 
 For command surfaces, follow `docs/command-contracts.md`: stdout is
 compositional data, stderr is diagnostics/events, exit status must support bash
@@ -165,9 +165,9 @@ Declare capabilities as requests. At build/publish Verlet reconciles them
 against the Wasm manifest — every capability the module declares must appear in
 the package's `required_capabilities`, and a capability an operation requires but
 never declares is rejected with a teaching error. The accepted contract is what
-agent rows later grant against. Note the current bound: capability *names* are
+the runtime later attaches and enforces. Note the current bound: capability *names* are
 not checked against a closed family allowlist, so a typo (`net.htttp`) publishes
-and only surfaces as a missing-grant or no-op at run — spell them exactly.
+and only surfaces as a missing-capability or no-op at run — spell them exactly.
 
 Examples:
 
@@ -181,7 +181,7 @@ required_capabilities = [
 For V0, prefer:
 
 - no capabilities for pure compute utilities;
-- exact network grants for local/internal HTTP fixtures;
+- exact network capability declarations for local/internal HTTP fixtures;
 - secret references only through the Verlet secret system;
 - no WASI or ambient filesystem assumptions unless the ABI surface explicitly
   supports them.
@@ -199,7 +199,6 @@ type = "direct_tool"
 id = "csv_profile"
 tool_name = "csv_profile"
 operation_ref = "op://data/csv_profile@sha256:<hash>"
-grants = []
 ```
 
 ```toml
@@ -209,16 +208,15 @@ type = "bash_tool"
 id = "csv_profile"
 command = "data profile"
 operation_ref = "op://data/csv_profile@sha256:<hash>"
-grants = []
 ```
 
 The `tools` entry is a reference to a published package, not a copy of the
 tool. The package record owns the accepted interface; the agent record owns the
-selected operation reference and the grants that ride on that row (there is no
-manifest-global grant pool).
+selected operation reference and any explicit secret or private-network
+attachment config.
 
 `op://` refs come in two forms: `op://<record>@sha256:<hash>` binds the whole
-record (grants must cover every operation it declares);
+record;
 `op://<record>/<operation>@sha256:<hash>` selects one operation. Read the
 `<hash>` from the operation registry — the `active_artifact_hash` field in
 `records/<name>.json` under the operations registry root, the console's
@@ -249,7 +247,7 @@ operation.
 ## Good V0 Examples
 
 - `data.csv_profile`: pure utility, JSON input/output, no credentials.
-- `employee.lookup`: internal HTTP call with exact local network grant.
+- `employee.lookup`: internal HTTP call with an exact local network capability.
 - `pdf.extract_text`: later utility for document ingestion. Prefer a deterministic
   text extraction crate before attempting OCR.
 

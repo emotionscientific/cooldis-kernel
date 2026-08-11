@@ -55,7 +55,6 @@ pub struct VirtualBashRuntimeConfig {
     /// must re-present one filesystem tree.
     pub workspace_vfs: Option<std::sync::Arc<verlet_vfs::VerletVfs>>,
     pub capability_grants: std::collections::BTreeSet<String>,
-    pub capability_grant_expiries: Vec<verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
     pub execution_policy: verlet_vbash::BashExecutionPolicy,
     pub external_executor:
         Option<std::sync::Arc<dyn verlet_process::execution::ExternalCommandExecutor>>,
@@ -91,7 +90,6 @@ impl std::fmt::Debug for VirtualBashRuntimeConfig {
                 &self.workspace_vfs.as_ref().map(|_| "<VerletVfs>"),
             )
             .field("capability_grants", &self.capability_grants)
-            .field("capability_grant_expiries", &self.capability_grant_expiries)
             .field("execution_policy", &self.execution_policy)
             .field(
                 "external_executor",
@@ -119,7 +117,6 @@ impl Default for VirtualBashRuntimeConfig {
                 verlet_operations::operation_registry::KernelDispatchOverlay::new(),
             workspace_vfs: None,
             capability_grants: std::collections::BTreeSet::new(),
-            capability_grant_expiries: Vec::new(),
             execution_policy: verlet_vbash::BashExecutionPolicy::virtual_only(),
             external_executor: None,
         }
@@ -216,14 +213,6 @@ impl VirtualBashRuntimeConfig {
 
     pub fn with_capability_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
         self.capability_grants.extend(grants);
-        self
-    }
-
-    pub fn with_capability_grant_expiries(
-        mut self,
-        expiries: impl IntoIterator<Item = verlet_agent::manifest_schema::AgentManifestGrantExpiry>,
-    ) -> Self {
-        self.capability_grant_expiries.extend(expiries);
         self
     }
 
@@ -460,18 +449,6 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for BashToolProvid
         self.invoke_tool_call_inner(call, None).await
     }
 
-    async fn invoke_tool_call_at(
-        &self,
-        call: crate::agent::agent_tool_router::AgentKernelToolCall,
-        now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_history::CanonicalMessage>> {
-        crate::agent::manifest_bind::ensure_grant_expiries_live(
-            &self.config.capability_grant_expiries,
-            now_ms,
-        )?;
-        self.invoke_tool_call_inner(call, None).await
-    }
-
     async fn invoke_tool_call_cancellable(
         &self,
         call: crate::agent::agent_tool_router::AgentKernelToolCall,
@@ -479,23 +456,6 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for BashToolProvid
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::agent::agent_tool_router::AgentKernelToolOutcome,
     > {
-        self.invoke_tool_call_inner(call, Some(cancellation))
-            .await
-            .map(crate::agent::agent_tool_router::AgentKernelToolOutcome::Completed)
-    }
-
-    async fn invoke_tool_call_cancellable_at(
-        &self,
-        call: crate::agent::agent_tool_router::AgentKernelToolCall,
-        cancellation: crate::agent::agent_tool_router::ToolInvocationCancellation,
-        now_ms: i64,
-    ) -> crate::kernel::runtime_host::VerletResult<
-        crate::agent::agent_tool_router::AgentKernelToolOutcome,
-    > {
-        crate::agent::manifest_bind::ensure_grant_expiries_live(
-            &self.config.capability_grant_expiries,
-            now_ms,
-        )?;
         self.invoke_tool_call_inner(call, Some(cancellation))
             .await
             .map(crate::agent::agent_tool_router::AgentKernelToolOutcome::Completed)

@@ -54,7 +54,7 @@ static context source, including when the manifest declares an explicit
 ```text
 agent publish
   resolve mutable refs
-  validate grants and compatibility
+  validate operation refs, attachment config, and compatibility
   store immutable manifest record
   emit publish receipt with resolved versions and hashes
 ```
@@ -72,12 +72,10 @@ op://<record>@sha256:<hash>
 op://<record>/<operation>@sha256:<hash>
 ```
 
-The single-segment form binds the whole record, so bind-time grants must cover
-every operation declared by that record. The two-segment form selects one
-operation within the record; bind-time grants are checked against that
-operation's required capabilities, and the thread catalog exposes only the
-selected operation for that binding. In both forms, the hash addresses the
-record artifact, not a per-operation artifact.
+The single-segment form binds the whole record. The two-segment form selects
+one operation within the record, and the thread catalog exposes only that
+operation for the binding. In both forms, the hash addresses the record
+artifact, not a per-operation artifact.
 
 ## Components
 
@@ -123,7 +121,7 @@ skills
 context pipelines
 couplings
 hooks (reserved; host debug only)
-policies and grants
+policies and attachment config
 topology
 IO
 persistence
@@ -144,7 +142,7 @@ tool refs
 operation names
 aliases/surfaces
 schemas
-required grants
+package-declared capabilities
 availability scope
 tool routing rules
 ```
@@ -154,9 +152,9 @@ tool artifacts into itself.
 
 First-party kernel tools are still operation artifacts. For example,
 `verlet-threads/thread_spawn` is bound as
-`op://verlet-threads/thread_spawn@sha256:<record-hash>` and requires the
-`threads.spawn` grant. The manifest binds published operation records by
-artifact hash rather than copying tool implementations into itself.
+`op://verlet-threads/thread_spawn@sha256:<record-hash>`. The manifest binds
+published operation records by artifact hash rather than copying tool
+implementations into itself.
 
 Every `bash_tool`, `direct_tool`, and `protocol_tool_import` row may declare an
 effect class:
@@ -175,25 +173,21 @@ event and call-id reuse behavior. Pinned protocol imports copy their declared
 class into the bind receipt; dynamic tool-universe calls remain
 `at-most-once`.
 
-Every `grants` array on `bash_tool`, `direct_tool`,
-`protocol_tool_import`, and coupling rows accepts either the existing bare
-capability string or an expiring object:
+Every `bash_tool` and `direct_tool` row may carry attachment configuration for
+the two runtime authorities enforced at attachment time:
 
 ```toml
-grants = [
-  "fs.read:/workspace",
-  { capability = "net:https://example.com", expires_at = "2026-07-16T20:00:00Z" },
-]
+[tools.attachment]
+allowed_secrets = ["SEARCH_API_KEY"]
+
+[tools.attachment.allowed_private_network]
+"http://127.0.0.1:*" = ["GET"]
 ```
 
-`expires_at` is an absolute RFC3339 UTC instant; duration shorthand is not
-accepted. A bare string has no expiry and retains the legacy serialized and
-content-addressed manifest shape. If any grant on a tool row has already
-expired at bind, the whole tool row is omitted from the presented surface and
-the bind receipt records the lapsed grant and exclusion. Authority remains
-live after bind: form snapshots remain stable for a running turn, but the next
-invocation after a grant expires fails closed and names the capability and
-expiry. A later bind with a fresh grant is the only way to restore that power.
+An operation not attached is unavailable. An attached operation needs no
+second static string-membership check. Public `net.http` requests remain
+constrained by the operation package's declared capabilities; private-network
+and secret access are allowed only by this explicit attachment block.
 
 ### Resources
 
@@ -296,7 +290,7 @@ deterministic package index:
 The index is materialized as a pinned `kernel://assembler/static` context
 segment. Skill bodies are not all pinned into model context; they are mounted
 read-only in the thread VFS at `/skills/<name>.md`, where existing virtual bash
-commands such as `cat` or `view` can read them. Skill resources grant no
+commands such as `cat` or `view` can read them. Skill resources provide no
 ambient host authority.
 
 The workspace-discovery index adds the workspace-relative body path:
@@ -324,8 +318,8 @@ record selection over discharged events
 ```
 
 Context pipelines consume resources, discharged events, and thread history.
-Blob access belongs to resources and grants; blob inclusion in a prompt
-belongs to the pipeline. When `prompts/system.md` exists, declaring an
+Blob access belongs to declared resources; blob inclusion in a prompt belongs
+to the pipeline. When `prompts/system.md` exists, declaring an
 explicit `input` on the `identity` static source is rejected because prompt
 provenance would be ambiguous; either leave `input` unset for folder-first
 lowering or move the file out of `prompts/system.md` and point at a declared
@@ -351,7 +345,7 @@ produced from. Declared couplings may use built-in `std::` executors or custom
 Wasm operations referenced by pinned `op://<record>/<operation>@sha256:<hash>`
 refs. Custom coupling capsules are pure compute: the invocation carries trigger
 and selected source events plus config, and the guest may only propose discharge
-events. The kernel validates the declared sink, applies stream grants, enforces
+events. The kernel validates the coupling's declared source and sink, enforces
 budgets/depth, and stamps discharged provenance. HTTP, VFS, secrets, and other
 effectful imports stay tool capabilities rather than coupling authority.
 
@@ -378,27 +372,22 @@ Hooks are host-scope debug tooling, not a manifest authority surface. The
 manifest `[hooks]` table remains reserved; runtime control that must be replayed
 or audited belongs in witnessed couplings.
 
-### Policies And Grants
+### Policies And Attachments
 
 The authority boundary.
 
 ```text
-capability grants
 deny/allow rules
 budget limits
-network limits
 filesystem limits
-resource read/write grants
+operation attachment config
 tool approval rules
 child-thread creation rules
 ```
 
-The model cannot grant itself new powers. Publish and start must validate that
-declared tools, resources, couplings, and effects are allowed. Coupling grants
-use the same bare-string or expiring-object form as tool grants. An expired
-coupling row is excluded at bind; a coupling grant that lapses later fails
-before the next source read, executor invocation, or sink write, with the lapse
-recorded on the control stream.
+The model cannot attach tools or widen attachment config. Publish and start
+validate declared tools, resources, couplings, and effects. Conditional
+authorization belongs to witnessed approval controllers, not static strings.
 
 ### Admission
 
@@ -558,11 +547,11 @@ Thread-control tools follow the same rule. At startup, a daemon with an
 operation registry root publishes the kernel-native `verlet-threads` record and
 the default manifest declares five `direct_tool` rows pinned to it:
 `thread_spawn`, `thread_submit`, `thread_wait`, `thread_status`, and
-`thread_cancel`. Those rows carry the `threads.spawn`, `threads.control`, and
-`threads.read` grants required by the package. A manifest with
+`thread_cancel`. Those rows directly attach the corresponding operations. A manifest with
 `allow_child_agents = false` and no thread rows receives no thread-control
 tools, including inside virtual bash. If such a manifest declares a
-`thread_spawn` row, bind fails because that row requires `threads.spawn`.
+`thread_spawn` row, bind fails because the child-agent policy forbids that
+attachment.
 
 ## Example Shape
 
@@ -581,7 +570,6 @@ type = "direct_tool"
 id = "csv_profile"
 tool_name = "csv_profile"
 operation_ref = "op://data/csv_profile@sha256:..."
-grants = []
 
 [[resources]]
 name = "release-review"
@@ -621,7 +609,6 @@ budget_share = "rest"
 # [hooks] is reserved. Use witnessed couplings for replayable control.
 
 [policies]
-network = "deny"
 filesystem = "vfs"
 allow_child_agents = true
 
@@ -652,7 +639,7 @@ set it only when `[runtime.overrides].allow` contains `"max_tool_rounds"`.
 ## Boundary Summary
 
 ```text
-resources + policies/grants
+resources + policies/attachments
   control access to blobs, skills, files, artifacts, datasets, and schemas
 
 context pipelines

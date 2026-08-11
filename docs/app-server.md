@@ -731,8 +731,7 @@ At startup, the app-server synthesizes first-party kernel operation records into
 the configured registry: `verlet-threads`, `verlet-schedule`,
 `verlet-process`, and `verlet-notify`. The default manifest binds the
 thread-control package only; agents that need other first-party operations bind
-the corresponding `op://...@sha256:<record-hash>` explicitly with the required
-grants.
+the corresponding `op://...@sha256:<record-hash>` explicitly.
 
 ### `model/list`
 
@@ -937,7 +936,7 @@ Result: `{ "deleted": true | false }`.
 Params: `{ "name": "arcade", "tool": "search", "arguments": { ... } }`.
 
 Result: `{ "toolName": "...", "content": [...], "contentText": "...",
-"isError": false }`. This is a setup/test call for UI flows; granting a source
+"isError": false }`. This is a setup/test call for UI flows; attaching a source
 to an agent still happens through a manifest `protocol_tool_import`.
 
 ### `mcpSource/manifestPatch`
@@ -1096,7 +1095,7 @@ Result:
 V1 projects bound couplings from the latest `manifest.bind.completed` receipt
 for the thread. Each row includes id, inferred role, trigger kind/match,
 source streams/kinds, sink stream/kinds, function ref, artifact hash, optional
-operation name, grants, budget, and config hash. This is an inspection surface:
+operation name, budget, and config hash. This is an inspection surface:
 it reads the immutable bind receipt and does not mutate a runtime hook list.
 
 ### `thread/approvals/list`

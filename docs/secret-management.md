@@ -36,7 +36,7 @@ SecretStore
   keeps local secret values or secret references
 
 SecretBinding
-  grants a scoped runtime object permission to request a named secret
+  allows an attached runtime object to request a named secret
 
 SecretBroker
   resolves a named secret for a specific invocation after policy passes
@@ -68,7 +68,8 @@ The concrete proof target is a provider-neutral HTTP operation:
 
 ```text
 published HTTP Wasm operation
--> operation declares secret:EXAMPLE_API_KEY and net.http grant
+-> operation declares secret:EXAMPLE_API_KEY and net.http capabilities
+-> agent attachment allows EXAMPLE_API_KEY and any private origins
 -> EXAMPLE_API_KEY exists as a Verlet secret ref
 -> model provider sees the operation as a normal tool
 -> model provider calls the tool

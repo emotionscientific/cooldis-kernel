@@ -386,16 +386,6 @@ impl RuntimeServices {
         if executable_couplings.is_empty() {
             return Ok(());
         }
-        let grant_expiries = executable_couplings
-            .iter()
-            .filter_map(|coupling| {
-                coupling_set
-                    .grant_expiries
-                    .get(&coupling.id)
-                    .cloned()
-                    .map(|expiries| (coupling.id.clone(), expiries))
-            })
-            .collect();
         let executor = crate::kernel::coupling_executor_registry::CouplingExecutorRegistry::new(
             self.operation_registry_root.clone(),
         );
@@ -405,10 +395,9 @@ impl RuntimeServices {
         );
         scheduler
             .run_batch(
-                &crate::agent::manifest_bind::BoundCouplingSet::new_with_grant_expiries(
+                &crate::agent::manifest_bind::BoundCouplingSet::new(
                     coupling_set.snapshot_id.clone(),
                     executable_couplings,
-                    grant_expiries,
                 ),
                 appended,
             )

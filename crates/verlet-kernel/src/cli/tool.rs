@@ -497,7 +497,7 @@ pub(super) async fn run_tool_package_fixtures(
     ))
     .with_capability_grants(capability_requests.clone())
     .with_attachment_config(
-        crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+        crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
             &capability_requests,
         ),
     );
@@ -751,7 +751,7 @@ pub(super) async fn tool_run(
             };
             let mut config = registry.load_runtime_config_for_record(&record).await?;
             config = config.with_attachment_config(
-                crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
                     &record.capability_grants,
                 ),
             );
@@ -2063,7 +2063,7 @@ Usage:\n\
 \n\
 Publishes a package-validated Wasm tool artifact into the local operation\n\
 registry. The package proof gate validates the declared interface and fixtures\n\
-before the published tool can become visible through bindings and grants.\n"
+before the published tool can become visible through agent attachments.\n"
     );
 }
 

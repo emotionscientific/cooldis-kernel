@@ -9114,8 +9114,6 @@ async fn daemon_fork_copies_the_parent_workspace_bind_witness() {
             static_context_segments: Vec::new(),
             tool_universes: Vec::new(),
             couplings: Vec::new(),
-            granted: Vec::new(),
-            grant_bindings: Vec::new(),
             effective_runtime: verlet_agent::manifest_schema::AgentManifestRuntimeDefaults::default(
             ),
             overridden_keys: Vec::new(),

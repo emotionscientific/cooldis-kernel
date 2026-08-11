@@ -17,7 +17,7 @@ agent workloads, written in Rust.
 
 You declare an agent before anything runs. A manifest names the model profile,
 tools, resources, secrets, permissions, and context policy; the kernel turns
-that declaration into governed runtime work: capability grants, tool
+that declaration into governed runtime work: tool attachment, package capability
 visibility, provider access, operation dispatch, event records, cancellation,
 resume, and audit receipts.
 
@@ -30,8 +30,8 @@ dispatch, authority, and the record.
 The engine is modular and recomposes without changing meaning. Embed it in a
 process, run it as a daemon, drive workflows with it: however it is assembled,
 it is the same machine, with the same behavior and the same event stream. And
-because an agent is a declaration plus content-addressed tools and named
-grants, an agent is packageable: exportable, diffable, and reproducible on
+because an agent is a declaration plus content-addressed tools and explicit
+attachment config, an agent is packageable: exportable, diffable, and reproducible on
 another machine.
 
 Everything is event-sourced. Every action is an event in an append-only
@@ -49,7 +49,7 @@ contracts those systems depend on.
 privileged core that owns mechanism and refuses to own policy. The test for
 what belongs in it is simple: if changing a thing could make the system's
 audit receipts lie, it is compiled into the kernel (event ordering,
-provenance, fail-closed grants, budgets, receipts), and everything else lives
+provenance, fail-closed attachment, budgets, receipts), and everything else lives
 above it, named, versioned, and swappable. The kernel does not think, does not
 prompt, and does not orchestrate. (So: not "kernel" as in a Jupyter kernel,
 which is an evaluator, and not "kernel" as in an orchestration SDK.) The
@@ -59,7 +59,7 @@ an event whose authority is the system's own attestation, not some function's
 output. And a **harness** (the industry's word for everything wrapped around
 a model) is here not something you hand-write but something the system
 resolves: an agent's effective execution envelope, derived from its
-declarations and grants, exportable and diffable like a lockfile.
+declarations and attachments, exportable and diffable like a lockfile.
 
 ## Repository Scope
 
@@ -68,7 +68,7 @@ This repository contains the standalone Verlet kernel workspace:
 - Runtime primitives: tenant hosts, thread lifecycle, history, events,
   cancellation, resume, and supervisor routing.
 - Agent and operation contracts: manifests, tool publication, operation ABI,
-  coupling ABI, grants, command projections, and Wasm operation support.
+  coupling ABI, attachment config, command projections, and Wasm operation support.
 - Runtime surfaces: CLI, daemon, app-server RPC, MCP, ACP, provider adapters,
   virtual bash, VFS, process handles, and daemon-embedded store-primary stream
   sync with scoped credentials and single-writer leases.

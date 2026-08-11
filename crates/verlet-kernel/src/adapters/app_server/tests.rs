@@ -6679,10 +6679,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
                 .as_str()
             )
         );
-        assert_eq!(
-            json_array_string_set(&row["grants"]),
-            std::collections::BTreeSet::from([thread_operation_capability(operation).to_string()])
-        );
+        assert!(row.get("grants").is_none());
     }
 
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
@@ -6739,14 +6736,7 @@ async fn startup_publishes_verlet_threads_and_default_manifest_direct_rows() {
             .map(|operation| (*operation).to_string())
             .collect::<std::collections::BTreeSet<_>>()
     );
-    assert_eq!(
-        json_array_string_set(&binding["grants"]),
-        std::collections::BTreeSet::from([
-            crate::operations::kernel_packages::THREADS_CONTROL_CAPABILITY.to_string(),
-            crate::operations::kernel_packages::THREADS_READ_CAPABILITY.to_string(),
-            crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY.to_string()
-        ])
-    );
+    assert!(binding.get("grants").is_none());
     let direct_tools = binding["direct_tools"].as_array().unwrap();
     assert_eq!(direct_tools.len(), thread_operation_names().len());
     for direct_tool in direct_tools {
@@ -7586,7 +7576,6 @@ type = "direct_tool"
 id = "thread_spawn"
 tool_name = "thread_spawn"
 operation_ref = "op://verlet-threads/thread_spawn@sha256:{}"
-grants = ["threads.spawn"]
 
 [policies]
 allow_child_agents = false
@@ -7625,12 +7614,11 @@ streaming = false
         .unwrap_err();
     assert!(err.message.contains("allow_child_agents = false"));
     assert!(err.message.contains("thread_spawn"));
-    assert!(err.message.contains("threads.spawn"));
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
-async fn schedule_manifest_direct_tool_starts_mandate_and_requires_grant() {
+async fn schedule_manifest_direct_tool_starts_mandate_when_attached() {
     let root = unique_test_root("app-server-schedule-direct-tool");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -7663,43 +7651,6 @@ type = "direct_tool"
 id = "mandate_start"
 tool_name = "mandate_start"
 operation_ref = "op://verlet-schedule/mandate_start@sha256:{}"
-grants = ["{}"]
-
-[runtime]
-default_cwd = "."
-streaming = false
-"#,
-            operation_record.active_artifact_hash,
-            crate::operations::kernel_packages::SCHEDULE_MANAGE_CAPABILITY
-        ),
-    )
-    .unwrap();
-    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
-        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
-        .unwrap();
-
-    let no_grant_manifest_path = root.join("scheduler-no-grant.verlet.agent.toml");
-    std::fs::write(
-        &no_grant_manifest_path,
-        format!(
-            r#"
-[agent]
-name = "scheduler-no-grant"
-version = "0.1.0"
-kind = "verlet.agent-manifest"
-schema_version = 1
-
-[[model_profiles]]
-id = "default"
-provider_ref = "provider://local_offline"
-model_ref = "model://local_offline/echo"
-
-[[tools]]
-type = "direct_tool"
-id = "mandate_start"
-tool_name = "mandate_start"
-operation_ref = "op://verlet-schedule/mandate_start@sha256:{}"
-grants = []
 
 [runtime]
 default_cwd = "."
@@ -7709,14 +7660,9 @@ streaming = false
         ),
     )
     .unwrap();
-    let err = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
-        .publish_manifest_path_with_operation_registry(
-            &no_grant_manifest_path,
-            &operation_registry_root,
-        )
-        .unwrap_err();
-    assert!(err.to_string().contains("requires grants"));
-    assert!(err.to_string().contains("mandate_start:schedule.manage"));
+    crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
+        .unwrap();
 
     let client = std::sync::Arc::new(ScheduleMandateStartClient::default());
     let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
@@ -8249,6 +8195,228 @@ async fn app_server_startup_skips_stale_manifest_threads() {
         "unexpected resume error: {err:?}"
     );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn app_server_resume_migrates_legacy_manifest_and_binding_authority() {
+    let root = unique_test_root("app-server-legacy-manifest-resume");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation =
+        publish_echo_operation(&operation_registry_root, "search", "search", "search").await;
+    let agent_registry_root = root.join("agents");
+    let manifest_path = root.join("legacy-resume.verlet.agent.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"[agent]
+name = "legacy-resume"
+version = "0.1.0"
+kind = "verlet.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "direct_tool"
+id = "search"
+tool_name = "search"
+operation_ref = "op://search@sha256:{}"
+
+[tools.attachment]
+allowed_secrets = ["API_TOKEN"]
+
+[tools.attachment.allowed_private_network]
+"http://127.0.0.1:9000" = ["POST"]
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#,
+            operation.active_artifact_hash
+        ),
+    )
+    .unwrap();
+    let record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
+        .unwrap();
+    let thread_id = {
+        // lexicon-allow: capsule - existing app-server test client name
+        let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
+        let app = test_app_with_provider_root(
+            &root,
+            &workspace,
+            provider_client,
+            // lexicon-allow: capsule - existing app-server test config type
+            crate::adapters::app_server::CapsuleBindingsConfig::default()
+                .with_registry_root(&operation_registry_root),
+        )
+        .await;
+        let (connection, _outbound_rx) = test_connection(app.clone()).await;
+        initialize_for_test(&connection).await;
+        let started = app
+            .dispatch_request(
+                &connection,
+                "thread/start",
+                Some(serde_json::json!({
+                    "agentRef": "agent://legacy-resume@latest"
+                })),
+            )
+            .await
+            .unwrap();
+        let thread_id = started["thread"]["id"].as_str().unwrap().to_string();
+        let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
+        let mut lifecycle = app
+            .inner
+            .metadata_store
+            .get_thread_lifecycle(parsed)
+            .await
+            .unwrap()
+            .unwrap();
+        lifecycle.metadata.insert(
+            crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+            format!(
+                r#"[{{"name":"search","artifact_hash":"{}","grants":["net.http.private:POST:http://127.0.0.1:9000","secret:API_TOKEN"],"direct_tools":[{{"tool_name":"search","operation":"search","grant_expiries":[{{"capability":"secret:API_TOKEN","expires_at":"2025-01-01T00:00:00Z"}}]}}]}}]"#,
+                operation.active_artifact_hash
+            ),
+        );
+        app.inner
+            .metadata_store
+            .upsert_thread_lifecycle(lifecycle)
+            .await
+            .unwrap();
+        thread_id
+    };
+
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
+    let mut legacy_record = record.clone();
+    legacy_record.resolved_manifest["policies"]["network"] = serde_json::json!("declared-origins");
+    let tool = legacy_record.resolved_manifest["tools"][0]
+        .as_object_mut()
+        .unwrap();
+    tool.remove("attachment");
+    tool.insert(
+        "grants".to_string(),
+        serde_json::json!([
+            "net.http.private:POST:http://127.0.0.1:9000",
+            "secret:API_TOKEN"
+        ]),
+    );
+    let mut legacy_record_wire = serde_json::to_value(&legacy_record).unwrap();
+    legacy_record_wire["tool_refs"][0]["grants"] = serde_json::json!([
+        "net.http.private:POST:http://127.0.0.1:9000",
+        "secret:API_TOKEN"
+    ]);
+    legacy_record_wire["tool_refs"][0]["grant_expiries"] = serde_json::json!([{
+        "capability": "secret:API_TOKEN",
+        "expires_at": "2025-01-01T00:00:00Z"
+    }]);
+    let encoded = serde_json::to_vec_pretty(&legacy_record_wire).unwrap();
+    for path in [
+        registry.record_path(&record.name).unwrap(),
+        registry
+            .version_record_path(&record.name, &record.version)
+            .unwrap(),
+    ] {
+        std::fs::write(path, &encoded).unwrap();
+    }
+
+    // lexicon-allow: capsule - existing app-server test client name
+    let client = std::sync::Arc::new(InspectingCapsuleClient::default());
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client;
+    let restarted = test_app_with_provider_root(
+        &root,
+        &workspace,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server test config type
+        crate::adapters::app_server::CapsuleBindingsConfig::default()
+            .with_registry_root(&operation_registry_root),
+    )
+    .await;
+    let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let resumed = restarted
+        .dispatch_request(
+            &connection,
+            "thread/resume",
+            Some(serde_json::json!({
+                "threadId": thread_id,
+                "excludeTurns": true,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed["thread"]["id"].as_str(), Some(thread_id.as_str()));
+
+    let lifecycle = restarted
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        lifecycle.coordinates.clone(),
+        lifecycle.topology.clone(),
+        lifecycle.metadata.clone(),
+    );
+    let bindings =
+        crate::adapters::app_server::threads::thread_manifest_operation_bindings(&context).unwrap();
+    assert_eq!(
+        bindings[0].attachment_config,
+        verlet_wasm::WasmAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::from(["API_TOKEN".to_string()]),
+            allowed_private_network: std::collections::BTreeMap::from([(
+                "http://127.0.0.1:9000".to_string(),
+                std::collections::BTreeSet::from(["POST".to_string()]),
+            )]),
+        }
+    );
+
+    let normalized_bindings = serde_json::to_string(&bindings).unwrap();
+    assert!(!normalized_bindings.contains("grants"));
+    assert!(normalized_bindings.contains("attachment_config"));
+    let mut normalized_lifecycle = lifecycle.clone();
+    normalized_lifecycle.metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        normalized_bindings,
+    );
+    restarted
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(normalized_lifecycle)
+        .await
+        .unwrap();
+
+    let reopened = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        &restarted.inner.metadata_store_path,
+    )
+    .await
+    .unwrap();
+    let reloaded = reopened
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let reloaded_context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        reloaded.coordinates,
+        reloaded.topology,
+        reloaded.metadata,
+    );
+    let reloaded_bindings =
+        crate::adapters::app_server::threads::thread_manifest_operation_bindings(&reloaded_context)
+            .unwrap();
+    assert_eq!(
+        reloaded_bindings[0].attachment_config,
+        bindings[0].attachment_config
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -11219,7 +11387,6 @@ model_ref = "model://local_offline/echo"
 [[couplings]]
 id = "std::context.spill"
 function_ref = "op://std-context-spill/run@sha256:{}"
-grants = []
 
 [couplings.trigger]
 kind = "context.compile.completed"
@@ -11546,9 +11713,7 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
             artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            grants: vec!["net:https://example.com".to_string()],
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -11622,35 +11787,6 @@ fn apply_manifest_runtime_metadata_injects_legacy_tool_use_instruction() {
     assert_eq!(config.system.len(), 1);
     assert!(config.system[0].text.contains("agent://legacy@0.1.0"));
     assert!(config.system[0].text.contains("call the tool immediately"));
-}
-
-#[tokio::test]
-async fn manifest_operation_grants_extend_loaded_record_without_duplicates() {
-    let root = unique_test_root("app-server-manifest-operation-grants");
-    let operation_registry_root = root.join("operations");
-    let mut record =
-        publish_echo_operation(&operation_registry_root, "search", "search", "search").await;
-    record
-        .capability_grants
-        .insert("package:required".to_string());
-
-    crate::adapters::app_server::threads::apply_manifest_operation_grants(
-        &mut record,
-        [
-            "net.http:GET:https://example.com".to_string(),
-            "package:required".to_string(),
-            "net.http:GET:https://example.com".to_string(),
-        ],
-    );
-
-    assert_eq!(
-        record.capability_grants,
-        std::collections::BTreeSet::from([
-            "net.http:GET:https://example.com".to_string(),
-            "package:required".to_string(),
-        ])
-    );
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -20342,23 +20478,6 @@ fn thread_operation_names() -> Vec<&'static str> {
         crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
         crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
     ]
-}
-
-fn thread_operation_capability(operation: &str) -> &'static str {
-    match operation {
-        crate::operations::kernel_packages::THREAD_SPAWN_OPERATION => {
-            crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
-        }
-        crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION
-        | crate::operations::kernel_packages::THREAD_CANCEL_OPERATION => {
-            crate::operations::kernel_packages::THREADS_CONTROL_CAPABILITY
-        }
-        crate::operations::kernel_packages::THREAD_WAIT_OPERATION
-        | crate::operations::kernel_packages::THREAD_STATUS_OPERATION => {
-            crate::operations::kernel_packages::THREADS_READ_CAPABILITY
-        }
-        other => panic!("unknown thread operation {other}"),
-    }
 }
 
 fn json_array_string_set(value: &serde_json::Value) -> std::collections::BTreeSet<String> {

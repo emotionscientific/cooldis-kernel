@@ -905,10 +905,6 @@ mod tests {
                 artifact_hash: operation.active_artifact_hash.clone(),
                 operation_name: Some(operation_name.to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                format!("stream.write:{sink_stream}"),
-            ],
             budget: Default::default(),
             config: serde_json::Value::Null,
             config_hash: "sha256:test".to_string(),

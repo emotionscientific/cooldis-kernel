@@ -99,14 +99,14 @@ baseline, and repo-relative affected-surface paths that resolve to files.
 - Mitigation: Existing: RPC-originated turns now require an authenticated principal before dispatch, the ingress record carries that principal with `via="caller:{session_id}"` pointing at the witnessed session, and the admission record references that ingress event; external io lanes carry their own witnessed principal per ADR 0007. Required: a per-thread ownership policy so a principal authorized for a method class is still checked against the specific target thread (grant algebra, future ticket family).
 - Deterministic guard: `crates/verlet-kernel/tests/boundary_auth.rs` pins the caller stamp deriving from a witnessed session. Required: lifecycle tests proving cross-principal submissions against a non-owned thread are rejected once thread ownership exists.
 
-## TM-AUTHZ-002: Manifest-declared grants are not independently authorized
+## TM-AUTHZ-002: Manifest-declared static authority strings were not independently authorized
 
-- Status: OPEN
+- Status: MITIGATED
 - Severity: High
-- Threat: Bind verifies that a tool row declares every capability required by its pinned operation, but the manifest's own grant strings become the effective granted set. There is no independent operator allowlist or policy decision proving the publisher may grant host, network, secret, or child-thread authority.
+- Threat: The former manifest grant strings became effective authority without an independent reviewer.
 - Affected surface: `crates/verlet-kernel/src/agent/manifest_bind.rs`, `crates/verlet-agent/src/manifest_schema.rs`
-- Mitigation: Required: separate requested grants from operator-authorized grants, intersect them at bind, and record the authorizing principal, policy, and snapshot in the bind receipt.
-- Deterministic guard: None. Required: bind tests where a correctly declared but unauthorized capability fails closed.
+- Mitigation: The grant-string authority layer was deleted. Attachment is the gate; secret and private-network access use explicit attachment config, while conditional authorization uses witnessed approval controllers.
+- Deterministic guard: Manifest schema tests reject legacy `grants` and `policies.network`; router tests prove an attached operation no longer performs manifest string membership checks; the attachment parity/default-deny suite remains authoritative.
 
 ## TM-AUTHZ-003: Approval and mandate mutation have no caller authorization
 

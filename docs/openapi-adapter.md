@@ -113,10 +113,10 @@ oauth2/openIdConnect  -> rejected until invocation identity delegation lands
 ```
 
 Loopback and private origins use the existing
-`net.http.private:<METHOD>:<origin>` grant required by the HTTP host policy.
+matching `allowed_private_network` attachment entry required by the HTTP host policy.
 
-The adapter must require both manifest declaration and registry grant binding
-before publish succeeds.
+The adapter must require a registry capability declaration before publish
+succeeds; an agent attachment must separately allow private origins and secrets.
 
 ## Publish Contract
 
@@ -175,7 +175,7 @@ and a normalized HTTP request envelope, and publication still passes through
 - operationId maps to ABI operation name;
 - duplicate operationIds are rejected;
 - API-key header auth becomes `secret_headers`;
-- missing `net.http` or `secret` grants reject publish;
+- missing package `net.http` or `secret` capabilities reject publish;
 - mock Example Search-style OpenAPI spec generates a callable operation;
 - HTTP 500 from upstream returns an operation output, not a failed host call;
 - unsupported OAuth/callback/multipart shapes return typed adapter errors.

@@ -29,12 +29,12 @@ A Verlet agent declaration can include:
 - events, receipts, versioning, rollback, and audit records.
 
 This declared shape becomes the runtime object: the thing Verlet can install,
-inspect, grant, run, resume, publish, revoke, and audit.
+inspect, attach, run, resume, publish, detach, and audit.
 
 ## Why Declaration Matters
 
 Application code hides too much. A declaration can be planned, diffed, approved,
-tested, installed, granted, revoked, resumed, and moved between local and
+tested, installed, attached, detached, resumed, and moved between local and
 managed placement.
 
 Without a declaration, each serious agent becomes a bespoke backend. With a

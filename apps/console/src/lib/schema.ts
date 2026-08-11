@@ -202,7 +202,8 @@ export interface ThreadEvent {
 export interface ThreadEnvelopeBinding {
   name: string;
   artifactHash: string;
-  grants: string[];
+  /** Effective host attachment authority on this operation binding. */
+  attachmentConfig: Record<string, unknown> | null;
   /** Empty means the binding exposes the whole record. */
   operations: string[];
   /** Direct model/tool-router aliases from direct_tool rows. */
@@ -217,8 +218,6 @@ export interface ThreadEnvelope {
   modelId: string;
   toolIds: string[];
   operationBindings: ThreadEnvelopeBinding[];
-  /** Union of effect grants across the bound rows. */
-  granted: string[];
   effectiveCwd: string;
   streaming: boolean | undefined;
   turnTimeoutMs: number | undefined;
@@ -244,7 +243,6 @@ export interface ThreadCouplingRow {
   functionRef: string;
   artifactHash: string;
   operationName: string | null;
-  grants: string[];
   budget: Record<string, unknown> | null;
   configHash: string | null;
   [key: string]: unknown;

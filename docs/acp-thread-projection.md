@@ -12,7 +12,7 @@ ACP client / host
 -> manifest-bound Verlet thread
 ```
 
-The app-server remains the canonical control plane. Manifest binding, grants,
+The app-server remains the canonical control plane. Manifest binding, attachments,
 operation registry state, provider configuration, thread durability, topology,
 placement, and lifecycle records remain Verlet-owned.
 
@@ -50,7 +50,7 @@ thread, but it cannot define the runtime contract.
 | `session/list` | defer | only after ACP session info maps to Verlet durable thread history without implying false residency |
 | `session/delete` | defer | only after ACP history deletion semantics map to Verlet retention policy |
 | `session/request_permission` | defer | only after the Verlet permission coupling outlet is designed |
-| `fs/*`, terminal, extra directory affordances | defer or reject | only expose after a grant-preserving Verlet mapping exists |
+| `fs/*`, terminal, extra directory affordances | defer or reject | only expose after an authority-preserving Verlet mapping exists |
 | unknown methods | reject | deterministic JSON-RPC method-not-found error |
 
 ## Session Identity
@@ -119,7 +119,7 @@ clear error instead of pretending the turn completed normally.
 
 ACP can carry MCP server configuration in `session/new`. In Verlet V1, those
 configs are compatibility inputs only. Tool authority still comes from manifest
-binding, configured MCP source records, and grant checks.
+attachment and configured MCP source records.
 
 V1 should choose one of these explicit behaviors:
 
@@ -161,7 +161,7 @@ Unsupported selector changes fail closed.
 ACP `session/request_permission` is intentionally not wired in V1. The bridge
 needs a coupling outlet: a Verlet-owned place where ACP client allow, deny, and
 cancel decisions can become witnessed control facts without bypassing manifest
-binding, grants, runtime policy, or durable approval receipts.
+attachment, runtime policy, or durable approval receipts.
 
 Until that outlet exists, ACP hosts cannot approve Verlet operations on behalf
 of a thread. Verlet tool and approval policy remains internal and fail-closed.
@@ -197,7 +197,7 @@ protocols should lower into the same small vocabulary:
 - load or resume only when the protocol semantics match Verlet durability.
 
 Reusable adapter helpers may own framing, session tables, stop-reason mapping,
-and event projection. They must not own scheduling, manifest binding, grants, or
+and event projection. They must not own scheduling, manifest binding, attachment, or
 runtime execution. Those remain app-server and kernel responsibilities.
 
 ## Test Plan

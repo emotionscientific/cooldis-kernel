@@ -507,7 +507,7 @@ pub fn verlet_process_kernel_package() -> KernelPackageDefinition {
                     exit_status: manual_exit_status(),
                     generated: false,
                     warnings: vec![
-                        "Host process execution must be explicitly granted; it is not included in the default agent manifest.".to_string(),
+                        "Host process execution must be explicitly attached; it is not included in the default agent manifest.".to_string(),
                     ],
                 }),
             }

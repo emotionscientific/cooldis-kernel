@@ -194,24 +194,14 @@
                   <span class="pill mono" title={directToolTitle(direct)}>{direct.toolName || "unnamed direct tool"}</span>
                 {/each}
               </div>
-              {#if binding.grants.length}
-                <div class="env-pills">
-                  {#each binding.grants as grant}<span class="pill grant mono" title={grant}>{grant}</span>{/each}
-                </div>
+              {#if binding.attachmentConfig}
+                <pre class="control-json mono">{prettyJson(binding.attachmentConfig)}</pre>
               {/if}
             </div>
           {:else}
             <p class="env-note">No operation-backed tool rows bound.</p>
           {/each}
         </div>
-          {#if envelope.granted.length}
-          <div class="insp-section">
-            <h4>Granted</h4>
-            <div class="env-pills">
-              {#each envelope.granted as grant}<span class="pill grant mono" title={grant}>{grant}</span>{/each}
-            </div>
-          </div>
-        {/if}
       {/if}
       <div class="insp-section">
         <div class="insp-section-head">
@@ -257,9 +247,6 @@
                 {/if}
                 {#if row.sourceKinds.length}
                   <div class="env-pills">{#each row.sourceKinds as kind}<span class="pill mono">{kind}</span>{/each}</div>
-                {/if}
-                {#if row.grants.length}
-                  <div class="env-pills">{#each row.grants as grant}<span class="pill grant mono">{grant}</span>{/each}</div>
                 {/if}
                 <pre class="control-json mono">{prettyJson(row)}</pre>
               </details>

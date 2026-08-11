@@ -150,15 +150,12 @@ Publish rejects an `op://` tool row when:
 - the operation registry root is missing;
 - `records/<record>.json` is absent or invalid;
 - `versions/<record>/<hash>.json` is absent or does not match the hash;
-- a two-segment ref names an operation not declared by that version record;
-- the row's `grants` do not cover the selected operation's
-  `required_capabilities`.
+- a two-segment ref names an operation not declared by that version record.
 
-Whole-record refs must cover every operation in the version record. Two-segment
-refs only need to cover the selected operation. `verlet agent plan` remains an
-offline dry run: when an operations registry is present it performs the same
-verification and prints `[verified]`; when the registry is absent it succeeds
-and prints `[unverified-offline]` for `op://` rows.
+`verlet agent plan` remains an offline dry run: when an operations registry is
+present it performs the same verification and prints `[verified]`; when the
+registry is absent it succeeds and prints `[unverified-offline]` for `op://`
+rows.
 
 ## Local Plugin Path
 

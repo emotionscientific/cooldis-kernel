@@ -1376,7 +1376,6 @@ type = "direct_tool"
 id = "csv_profile"
 tool_name = "csv_profile"
 operation_ref = "op://data/csv_profile@sha256:{active_hash}"
-grants = []
 "#,
         ),
     )
@@ -2062,7 +2061,6 @@ type = "direct_tool"
 id = "spawn"
 tool_name = "thread_spawn"
 operation_ref = "op://{legacy_name}/thread_spawn"
-grants = ["threads.spawn"]
 "#
         ),
     )

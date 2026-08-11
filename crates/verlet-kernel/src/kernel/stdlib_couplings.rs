@@ -610,21 +610,6 @@ fn invoke_supervisor_spawn(
             ),
         ));
     }
-    if !request
-        .coupling
-        .grants
-        .iter()
-        .any(|grant| grant == crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY)
-    {
-        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-            format!(
-                "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} requires {THREADS_SPAWN_CAPABILITY} grant",
-                THREADS_SPAWN_CAPABILITY =
-                    crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
-            ),
-        ));
-    }
-
     let config = supervisor_spawn_config(&request.coupling.config)?;
     let parent_turn_id = config
         .parent_turn_id
@@ -3964,76 +3949,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn std_supervisor_spawn_without_threads_spawn_grant_is_refused_and_recorded() {
-        let coordinates =
-            verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
-        let store = verlet_history::InMemorySessionStore::default();
-        let thread_stream = verlet_history::EventStreamId::for_thread(&coordinates);
-        let submitted = store
-            .append_events(
-                &thread_stream,
-                vec![verlet_history::NewEventRecord::witnessed(
-                    coordinates.clone(),
-                    verlet_history::EventKind::TurnSubmitted,
-                    serde_json::json!({
-                        "schema": verlet_history::EventKind::TurnSubmitted.payload_schema_id(),
-                        "turn_id": "parent-turn-1",
-                    }),
-                )],
-            )
-            .await
-            .unwrap();
-        let mut coupling = std_supervisor_spawn_coupling(serde_json::json!({
-            "initial_submission": "collect release evidence",
-            "block_parent": true,
-        }));
-        coupling.grants.retain(|grant| grant != "threads.spawn");
-
-        let executor = crate::kernel::stdlib_couplings::StdlibCouplingExecutor;
-        let scheduler =
-            crate::kernel::coupling_scheduler::CouplingScheduler::new(&store, &executor);
-        let receipt = scheduler
-            .run_batch(
-                &crate::agent::manifest_bind::BoundCouplingSet::new("snapshot-a", vec![coupling]),
-                submitted,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(receipt.runs.len(), 1);
-        assert_eq!(
-            receipt.runs[0].coupling_id,
-            crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
-        );
-        assert_eq!(
-            receipt.runs[0].status,
-            crate::kernel::coupling_scheduler::CouplingRunStatus::Failed
-        );
-        assert!(
-            receipt.runs[0]
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("threads.spawn"))
-        );
-
-        let control_stream = scheduler.stream_id_for(&coordinates, "control");
-        let control_events = store.read_events(&control_stream, None).await.unwrap();
-        assert!(
-            control_events
-                .iter()
-                .all(|event| event.kind != verlet_history::EventKind::ThreadSpawnRequested)
-        );
-        assert!(control_events.iter().any(|event| {
-            event.kind == verlet_history::EventKind::CouplingRunFailed
-                && event
-                    .payload
-                    .get("reason")
-                    .and_then(|reason| reason.as_str())
-                    .is_some_and(|reason| reason.contains("threads.spawn"))
-        }));
-    }
-
-    #[tokio::test]
     async fn std_supervisor_child_completion_joins_child_turn_to_parent_control_fact() {
         let coordinates =
             verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
@@ -4471,10 +4386,6 @@ mod tests {
                 artifact_hash: "a".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -4515,10 +4426,6 @@ mod tests {
                 artifact_hash: "b".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:control".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -4557,10 +4464,6 @@ mod tests {
                 artifact_hash: "c".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:derived:context".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
@@ -4593,10 +4496,6 @@ mod tests {
                 artifact_hash: "d".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -4638,10 +4537,6 @@ mod tests {
                 artifact_hash: "e".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:derived:context".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
@@ -4674,10 +4569,6 @@ mod tests {
                 artifact_hash: "h".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -4716,10 +4607,6 @@ mod tests {
                 artifact_hash: "h".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:control".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -4763,10 +4650,6 @@ mod tests {
                 artifact_hash: "d".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:control".to_string(),
-                "stream.write:derived:deadletter".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -4808,10 +4691,6 @@ mod tests {
                 artifact_hash: "e".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:control".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -4857,10 +4736,6 @@ mod tests {
                 artifact_hash: "s".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:control".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -4911,11 +4786,6 @@ mod tests {
                 artifact_hash: "i".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-                "threads.spawn".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
@@ -4955,10 +4825,6 @@ mod tests {
                 artifact_hash: "j".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -5002,10 +4868,6 @@ mod tests {
                 artifact_hash: "p".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -5047,10 +4909,6 @@ mod tests {
                 artifact_hash: "q".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:control".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(2),
                 max_ms: None,
@@ -5086,10 +4944,6 @@ mod tests {
                 artifact_hash: "f".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:thread".to_string(),
-                "stream.write:derived:memory".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
@@ -5122,10 +4976,6 @@ mod tests {
                 artifact_hash: "f".repeat(64),
                 operation_name: Some("run".to_string()),
             },
-            grants: vec![
-                "stream.read:derived:memory".to_string(),
-                "stream.write:derived:context".to_string(),
-            ],
             budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget {
                 max_discharge_events: Some(1),
                 max_ms: None,
