@@ -889,6 +889,11 @@ without a catalog entry), and `active` (the provider of the runtime-active
 model). Configured providers sort first, then the active provider, then
 alphabetical display names. Credential values are never returned.
 
+Provider base URLs, API families, and auth kinds ship only in the reviewed
+checked-in snapshot. The background refresh updates model metadata and
+non-endpoint provider display metadata for providers already in that snapshot.
+Providers found only by the refresh do not enter the catalog provider view.
+
 ### `mcpSource/list`
 
 Params: none.

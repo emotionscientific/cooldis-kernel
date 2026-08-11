@@ -1282,9 +1282,31 @@ async fn model_provider_auth_set_templates_a_catalog_provider_record_on_demand()
 }
 
 #[tokio::test]
-async fn model_provider_auth_set_keeps_not_found_for_unknown_provider() {
-    let root = unique_test_root("app-server-auth-set-unknown");
-    let config = local_model_select_test_config(&root, "auth-set-unknown");
+async fn model_provider_auth_set_keeps_not_found_for_remote_only_provider() {
+    let root = unique_test_root("app-server-auth-set-remote-only");
+    let config = local_model_select_test_config(&root, "auth-set-remote-only");
+    let cache_dir = config.user_state_home.join("model-catalog");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::write(
+        cache_dir.join("models.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "providers": [{
+                "provider_id": "remote-only-provider",
+                "display_name": "Remote Only Provider",
+                "base_url": "https://remote-only.example.invalid/v1",
+                "api": "openai_chat_completions",
+                "auth_kind": "api_key",
+                "env_vars": ["REMOTE_ONLY_API_KEY"]
+            }],
+            "models": [{
+                "provider_id": "remote-only-provider",
+                "model_id": "remote-only-model",
+                "display_name": "Remote Only Model"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
@@ -1296,7 +1318,7 @@ async fn model_provider_auth_set_keeps_not_found_for_unknown_provider() {
             &connection,
             "modelProvider/auth/set",
             Some(serde_json::json!({
-                "providerId": "unknown-everywhere",
+                "providerId": "remote-only-provider",
                 "apiKey": "must-not-store",
             })),
         )
@@ -1305,12 +1327,12 @@ async fn model_provider_auth_set_keeps_not_found_for_unknown_provider() {
     assert_eq!(error.code, -32602);
     assert_eq!(
         error.message,
-        "model provider \"unknown-everywhere\" was not found"
+        "model provider \"remote-only-provider\" was not found"
     );
     assert!(
         app.inner
             .metadata_store
-            .get_provider("unknown-everywhere")
+            .get_provider("remote-only-provider")
             .await
             .unwrap()
             .is_none()
@@ -1318,7 +1340,7 @@ async fn model_provider_auth_set_keeps_not_found_for_unknown_provider() {
     assert_eq!(
         app.inner
             .user_metadata_store
-            .get_credential("unknown-everywhere")
+            .get_credential("remote-only-provider")
             .await
             .unwrap(),
         None

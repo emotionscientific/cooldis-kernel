@@ -613,7 +613,15 @@ impl MergedModelCatalog {
             // provider metadata; the built-in provider set stays authoritative.
             Ok(Some(cached)) => {
                 for provider in cached.providers {
-                    merged.insert(provider.provider_id.clone(), provider);
+                    let Some(reviewed) = merged.get_mut(&provider.provider_id) else {
+                        continue;
+                    };
+                    // Endpoint and auth semantics are trust-bearing and ship
+                    // only in the reviewed snapshot. The refresh may update
+                    // non-endpoint provider display metadata.
+                    reviewed.display_name = provider.display_name;
+                    reviewed.env_vars = provider.env_vars;
+                    reviewed.doc_url = provider.doc_url;
                 }
             }
             Ok(None) => {}
@@ -1318,6 +1326,11 @@ mod tests {
     fn cached_remote_overlays_builtin_by_provider_and_model() {
         let state_home = test_state_home("overlay");
         let built_in = super::built_in_snapshot();
+        let built_in_provider = built_in
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "anthropic")
+            .unwrap();
         let target = built_in
             .models
             .iter()
@@ -1325,7 +1338,32 @@ mod tests {
             .unwrap();
         let cached = super::ModelCatalogSnapshot {
             comment: None,
-            providers: Vec::new(),
+            providers: vec![
+                super::ModelCatalogProvider {
+                    provider_id: "anthropic".to_string(),
+                    display_name: "Remote Anthropic".to_string(),
+                    base_url: "https://credential-redirect.example.invalid".to_string(),
+                    api: super::CATALOG_API_OPENAI_RESPONSES.to_string(),
+                    auth_kind: super::CATALOG_AUTH_KIND_OAUTH.to_string(),
+                    env_vars: vec!["REMOTE_ANTHROPIC_API_KEY".to_string()],
+                    doc_url: Some("https://remote-docs.example.invalid".to_string()),
+                },
+                super::ModelCatalogProvider {
+                    provider_id: "remote-only-provider".to_string(),
+                    display_name: "Remote Only Provider".to_string(),
+                    base_url: "https://remote-only.example.invalid/v1".to_string(),
+                    api: super::CATALOG_API_OPENAI_CHAT_COMPLETIONS.to_string(),
+                    auth_kind: super::CATALOG_AUTH_KIND_API_KEY.to_string(),
+                    env_vars: vec!["REMOTE_ONLY_API_KEY".to_string()],
+                    doc_url: None,
+                },
+                built_in
+                    .providers
+                    .iter()
+                    .find(|provider| provider.provider_id == "openai")
+                    .unwrap()
+                    .clone(),
+            ],
             models: vec![
                 super::ModelCatalogModel {
                     provider_id: target.provider_id.clone(),
@@ -1354,6 +1392,26 @@ mod tests {
         super::write_catalog_cache(&state_home, &cached).unwrap();
 
         let catalog = super::MergedModelCatalog::new(&state_home);
+        let providers = catalog.providers();
+        let provider = providers
+            .iter()
+            .find(|provider| provider.provider_id == "anthropic")
+            .unwrap();
+        assert_eq!(provider.display_name, "Remote Anthropic");
+        assert_eq!(provider.base_url, built_in_provider.base_url);
+        assert_eq!(provider.api, built_in_provider.api);
+        assert_eq!(provider.auth_kind, built_in_provider.auth_kind);
+        assert_eq!(provider.env_vars, vec!["REMOTE_ANTHROPIC_API_KEY"]);
+        assert_eq!(
+            provider.doc_url.as_deref(),
+            Some("https://remote-docs.example.invalid")
+        );
+        assert!(
+            providers
+                .iter()
+                .all(|provider| provider.provider_id != "remote-only-provider"),
+            "providers absent from the reviewed snapshot must not enter the merged view"
+        );
         let full = catalog.full_entries();
         let replaced = full
             .iter()
