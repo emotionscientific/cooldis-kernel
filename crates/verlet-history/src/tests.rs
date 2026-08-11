@@ -589,6 +589,81 @@ fn event_kind_parse_round_trips_and_fails_closed() {
 }
 
 #[test]
+fn v03_journal_event_kinds_remain_decodable_after_v04_bump() {
+    let v03_kinds = [
+        "session.entry.appended",
+        "context.compile.completed",
+        "context.summary.completed",
+        "context.read_plan.set",
+        "manifest.compile.completed",
+        "manifest.bind.completed",
+        "tool.universe.discovery.completed",
+        "tool.universe.call.completed",
+        "tool.call.requested",
+        "tool.call.suspended",
+        "tool.call.decision",
+        "tool.call.completed",
+        "turn.submitted",
+        "turn.waiting",
+        "turn.resumed",
+        "turn.completed",
+        "approval.requested",
+        "approval.resolved",
+        "mandate.started",
+        "mandate.revoked",
+        "turn.continue.requested",
+        "turn.continuation.accepted",
+        "turn.continuation.rejected",
+        "loop.completed",
+        "loop.blocked",
+        "loop.budget_exhausted",
+        "loop.denied",
+        "coupling.run.completed",
+        "coupling.run.failed",
+        "placement.decision",
+        "thread.spawn.requested",
+        "thread.spawned",
+        "thread.joined",
+        "thread.branch.selected",
+        "thread.reload.degraded",
+        "policy.bound",
+        "grant.petitioned",
+        "timer.fired",
+        "client.record.appended",
+        "io.ingress.received",
+        "io.ingress.claimed",
+        "io.ingress.settled",
+        "io.egress.requested",
+        "io.egress.delivered",
+        "io.egress.failed",
+        "admission.decided",
+    ];
+    let coordinates = coords("tenant_a", "user_1", "v03-journal");
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+
+    for (index, encoded_kind) in v03_kinds.into_iter().enumerate() {
+        let kind = encoded_kind.parse::<crate::EventKind>().unwrap();
+        let record = crate::EventRecord::from_new(
+            stream_id.clone(),
+            crate::EventSequence::new(index as i64 + 1),
+            crate::NewEventRecord::witnessed(
+                coordinates.clone(),
+                kind,
+                serde_json::json!({"legacy": true}),
+            ),
+        );
+        let decoded =
+            serde_json::from_value::<crate::EventRecord>(serde_json::to_value(&record).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            decoded.kind, kind,
+            "failed to decode v0.3 kind {encoded_kind}"
+        );
+    }
+}
+
+#[test]
 fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
     assert_eq!(
         crate::EventKind::BindingAttached.payload_schema_id(),

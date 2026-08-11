@@ -729,6 +729,70 @@ fn binding_attachment_config_matches_wasm_attachment_wire_shape() {
     );
 }
 
+#[test]
+fn binding_direct_tool_matches_manifest_binding_wire_shape() {
+    let cases = [
+        (
+            verlet_agent::manifest_schema::EffectClass::Pure,
+            verlet_history::BindingEffectClass::Pure,
+        ),
+        (
+            verlet_agent::manifest_schema::EffectClass::Idempotent,
+            verlet_history::BindingEffectClass::Idempotent,
+        ),
+        (
+            verlet_agent::manifest_schema::EffectClass::AtMostOnce,
+            verlet_history::BindingEffectClass::AtMostOnce,
+        ),
+    ];
+
+    for (manifest_effect, history_effect) in cases {
+        let manifest = crate::agent::manifest_bind::AgentManifestDirectToolBinding {
+            tool_name: "search_web".to_string(),
+            operation: "search".to_string(),
+            effect_class: manifest_effect,
+        };
+        let history = verlet_history::BindingAttachedDirectToolBinding {
+            tool_name: "search_web".to_string(),
+            operation: "search".to_string(),
+            effect_class: history_effect,
+        };
+
+        assert_eq!(
+            serde_json::to_value(history).unwrap(),
+            serde_json::to_value(manifest).unwrap()
+        );
+    }
+}
+
+#[test]
+fn binding_effect_class_matches_manifest_wire_values() {
+    let cases = [
+        (
+            verlet_agent::manifest_schema::EffectClass::Pure,
+            verlet_history::BindingEffectClass::Pure,
+            "pure",
+        ),
+        (
+            verlet_agent::manifest_schema::EffectClass::Idempotent,
+            verlet_history::BindingEffectClass::Idempotent,
+            "idempotent",
+        ),
+        (
+            verlet_agent::manifest_schema::EffectClass::AtMostOnce,
+            verlet_history::BindingEffectClass::AtMostOnce,
+            "at-most-once",
+        ),
+    ];
+
+    for (manifest, history, expected) in cases {
+        let manifest = serde_json::to_value(manifest).unwrap();
+        let history = serde_json::to_value(history).unwrap();
+        assert_eq!(history, manifest);
+        assert_eq!(history, serde_json::json!(expected));
+    }
+}
+
 #[tokio::test]
 async fn protocol_tool_import_pin_drift_fails_bind_with_both_hashes() {
     let witnessed = witnessed_tool("verlet_mcp_echo", "string");

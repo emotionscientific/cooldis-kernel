@@ -639,15 +639,17 @@ manifest. Legacy explicit parameters lower as follows:
   at start time.
 
 Manifest-backed starts atomically emit `manifest.compile.completed`,
-`manifest.bind.completed`, and exactly one witnessed `placement.decision` on
-the thread event stream before the first turn. The placement fact is derived
-from the same effective binding stored on the bind receipt, including defaulted
-local, so the receipt cannot commit without its witness. The compile and bind
-events are discharged and include provenance. An `@latest` start includes the
-alias resolution receipt in the compile event payload. A remote child records
-the same bind receipt and unchanged `placement.decision` in its local stream
-before that stream converges to the parent store. Without a served sync backend,
-`remote` retains the missing-capability error; `sandbox` always does.
+`manifest.bind.completed`, one discharged `binding.attached` per operation
+binding, and exactly one witnessed `placement.decision` on the thread event
+stream before the first turn. The binding and placement facts are derived from
+the same effective binding stored on the bind receipt, including defaulted
+local, so the receipt cannot commit without its witnesses. The compile, bind,
+and attachment events are discharged and include provenance. An `@latest`
+start includes the alias resolution receipt in the compile event payload. A
+remote child records the same bind receipt, attachments, and unchanged
+`placement.decision` in its local stream before that stream converges to the
+parent store. Without a served sync backend, `remote` retains the
+missing-capability error; `sandbox` always does.
 When present, the effective workspace mount is part of that same
 `manifest.bind.completed` payload and atomic append. Thread lifecycle metadata
 stores the resolved mount for factory reconstruction. Missing or corrupt
