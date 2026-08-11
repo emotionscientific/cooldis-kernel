@@ -24,13 +24,14 @@ async fn search_style_http_operation_registers_and_invokes_through_registry() {
 
     registry
         .register(
-            verlet_operations::operation_registry::OperationRegistration::new(
+            verlet_operations::operation_registry::OperationRegistration::from_config(
                 "search",
-                verlet_wasm::WasmRuntimeArtifact::bytes(wasm),
+                verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wasm))
+                    .with_capability_grant(http_grant)
+                    .with_capability_grant("secret:EXAMPLE_API_KEY")
+                    .with_attachment_config(search_attachment_config(&base_url))
+                    .with_secret("EXAMPLE_API_KEY", "fixture-secret"),
             )
-            .with_capability_grant(http_grant)
-            .with_capability_grant("secret:EXAMPLE_API_KEY")
-            .with_secret("EXAMPLE_API_KEY", "fixture-secret")
             .with_metadata("provider", "search")
             .with_metadata("shape", "http-api-wrapper"),
         )
@@ -73,13 +74,14 @@ async fn search_style_http_operation_runs_through_shell_command() {
 
     registry
         .register(
-            verlet_operations::operation_registry::OperationRegistration::new(
+            verlet_operations::operation_registry::OperationRegistration::from_config(
                 "search",
-                verlet_wasm::WasmRuntimeArtifact::bytes(wasm),
+                verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wasm))
+                    .with_capability_grant(http_grant.clone())
+                    .with_capability_grant("secret:EXAMPLE_API_KEY")
+                    .with_attachment_config(search_attachment_config(&base_url))
+                    .with_secret("EXAMPLE_API_KEY", "fixture-secret"),
             )
-            .with_capability_grant(http_grant.clone())
-            .with_capability_grant("secret:EXAMPLE_API_KEY")
-            .with_secret("EXAMPLE_API_KEY", "fixture-secret")
             .with_metadata("provider", "search")
             .with_metadata("shape", "http-api-wrapper"),
         )
@@ -197,6 +199,16 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
     ));
     server.await.unwrap();
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn search_attachment_config(origin: &str) -> verlet_wasm::WasmAttachmentConfig {
+    verlet_wasm::WasmAttachmentConfig {
+        allowed_secrets: std::collections::BTreeSet::from(["EXAMPLE_API_KEY".to_string()]),
+        allowed_private_network: std::collections::BTreeMap::from([(
+            origin.to_string(),
+            std::collections::BTreeSet::from(["POST".to_string()]),
+        )]),
+    }
 }
 
 fn render_search_fixture(url: &str, http_grant: &str) -> String {

@@ -2,6 +2,43 @@ pub struct WasmRuntimeFactory {
     core: std::sync::Arc<verlet_wasm::runner::WasmRuntimeFactory>,
 }
 
+pub(crate) fn attachment_config_from_legacy_grants(
+    grants: &std::collections::BTreeSet<String>,
+) -> verlet_wasm::WasmAttachmentConfig {
+    let mut config = verlet_wasm::WasmAttachmentConfig::default();
+    for grant in grants {
+        if let Some(secret_name) = grant.strip_prefix("secret:") {
+            config.allowed_secrets.insert(secret_name.to_string());
+            continue;
+        }
+        let Some(rule) = grant.strip_prefix("net.http.private:") else {
+            continue;
+        };
+        let (method, origin) = if rule == "*" {
+            ("*", "*")
+        } else if let Some(origin) = rule.strip_prefix("*:") {
+            ("*", origin)
+        } else if let Some((method, origin)) = rule.split_once(':') {
+            if origin.starts_with("//")
+                || matches!(method, "http" | "https")
+                || method.contains('*')
+            {
+                ("*", rule)
+            } else {
+                (method, origin)
+            }
+        } else {
+            ("*", rule)
+        };
+        config
+            .allowed_private_network
+            .entry(origin.to_string())
+            .or_default()
+            .insert(method.to_string());
+    }
+    config
+}
+
 impl WasmRuntimeFactory {
     pub fn new(
         config: verlet_wasm::WasmRuntimeConfig,

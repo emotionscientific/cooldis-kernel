@@ -578,6 +578,20 @@ fn http_request_bytes(
     .unwrap()
 }
 
+fn http_attachment_config(
+    origin: &str,
+    method: &str,
+    allowed_secrets: impl IntoIterator<Item = &'static str>,
+) -> verlet_wasm::WasmAttachmentConfig {
+    verlet_wasm::WasmAttachmentConfig {
+        allowed_secrets: allowed_secrets.into_iter().map(String::from).collect(),
+        allowed_private_network: std::collections::BTreeMap::from([(
+            origin.to_string(),
+            std::collections::BTreeSet::from([method.to_string()]),
+        )]),
+    }
+}
+
 async fn next_output(
     events: &mut tokio::sync::broadcast::Receiver<
         crate::kernel::runtime_host::runtime_api::ThreadEvent,
@@ -1094,6 +1108,7 @@ async fn wasm_http_operation_can_call_mock_exa_api() {
         )))
         .with_capability_grant(http_grant)
         .with_capability_grant("secret:EXAMPLE_API_KEY")
+        .with_attachment_config(http_attachment_config(&origin, "POST", ["EXAMPLE_API_KEY"]))
         .with_secret("EXAMPLE_API_KEY", "test-secret"),
     )
     .unwrap();
@@ -1141,6 +1156,7 @@ async fn wasm_http_import_uses_invocation_context_grants_for_privileged_work() {
             &guest,
         )))
         .with_invocation_context(context)
+        .with_attachment_config(http_attachment_config(&origin, "POST", ["EXAMPLE_API_KEY"]))
         .with_secret("EXAMPLE_API_KEY", "delegated-secret"),
     )
     .unwrap();
@@ -1183,6 +1199,7 @@ async fn wasm_http_operation_treats_http_error_status_as_response() {
         )))
         .with_capability_grant(http_grant)
         .with_capability_grant("secret:EXAMPLE_API_KEY")
+        .with_attachment_config(http_attachment_config(&origin, "POST", ["EXAMPLE_API_KEY"]))
         .with_secret("EXAMPLE_API_KEY", "test-secret"),
     )
     .unwrap();
@@ -1229,6 +1246,7 @@ async fn wasm_http_request_truncates_response_to_requested_cap() {
         http_request_bytes(&url, Some(4), Vec::new()),
         br#"{"query":"verlet"}"#.to_vec(),
         grants,
+        http_attachment_config(&origin, "POST", []),
         std::collections::BTreeMap::new(),
     )
     .await
@@ -1262,6 +1280,7 @@ async fn wasm_http_response_envelope_stays_valid_and_within_the_requested_cap() 
         serde_json::to_vec(&request).unwrap(),
         Vec::new(),
         grants,
+        http_attachment_config(&origin, "POST", []),
         std::collections::BTreeMap::new(),
     )
     .await
@@ -1304,6 +1323,7 @@ async fn wasm_http_input_mapping_enforces_pinned_parameter_schemas() {
         serde_json::to_vec(&request).unwrap(),
         br#"{"id":"not-an-integer"}"#.to_vec(),
         grants,
+        http_attachment_config(&origin, "GET", []),
         std::collections::BTreeMap::new(),
     )
     .await
@@ -1342,6 +1362,7 @@ async fn wasm_http_input_mapping_allows_an_omitted_optional_body() {
         serde_json::to_vec(&request).unwrap(),
         br#"{}"#.to_vec(),
         grants,
+        http_attachment_config(&origin, "POST", []),
         std::collections::BTreeMap::new(),
     )
     .await
@@ -1376,6 +1397,7 @@ async fn wasm_http_rejects_protected_secret_header_injection() {
         serde_json::to_vec(&request).unwrap(),
         Vec::new(),
         grants,
+        http_attachment_config(&origin, "POST", ["HOST_OVERRIDE"]),
         std::collections::BTreeMap::from([(
             "HOST_OVERRIDE".to_string(),
             "other.example".to_string(),
@@ -1404,6 +1426,7 @@ async fn wasm_http_request_does_not_follow_redirects() {
         http_request_bytes(&url, None, Vec::new()),
         Vec::new(),
         grants,
+        http_attachment_config(&origin, "POST", []),
         std::collections::BTreeMap::new(),
     )
     .await
@@ -1424,6 +1447,7 @@ async fn wasm_http_request_requires_private_grant_for_loopback() {
         http_request_bytes(url, None, Vec::new()),
         Vec::new(),
         grants,
+        verlet_wasm::WasmAttachmentConfig::default(),
         std::collections::BTreeMap::new(),
     )
     .await
@@ -1431,6 +1455,147 @@ async fn wasm_http_request_requires_private_grant_for_loopback() {
 
     assert_eq!(err.status, verlet_wasm::runner::STATUS_CAPABILITY_DENIED);
     assert!(err.message.contains("net.http.private:POST"));
+}
+
+#[test]
+fn wasm_private_http_attachment_config_allows_only_listed_origin_and_method() {
+    let origin = "http://127.0.0.1:9000";
+    let attachment_config = verlet_wasm::WasmAttachmentConfig {
+        allowed_secrets: std::collections::BTreeSet::new(),
+        allowed_private_network: std::collections::BTreeMap::from([(
+            origin.to_string(),
+            std::collections::BTreeSet::from(["POST".to_string()]),
+        )]),
+    };
+
+    verlet_wasm::runner::ensure_http_capability(
+        &std::collections::BTreeSet::new(),
+        &attachment_config,
+        &reqwest::Method::POST,
+        origin,
+        true,
+    )
+    .unwrap();
+
+    for (method, denied_origin) in [
+        (reqwest::Method::GET, origin),
+        (reqwest::Method::POST, "http://127.0.0.1:9001"),
+    ] {
+        let err = verlet_wasm::runner::ensure_http_capability(
+            &std::collections::BTreeSet::new(),
+            &attachment_config,
+            &method,
+            denied_origin,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(err.status, verlet_wasm::runner::STATUS_CAPABILITY_DENIED);
+    }
+}
+
+#[tokio::test]
+async fn wasm_http_attachment_config_injects_only_listed_secret() {
+    let (base_url, server) =
+        spawn_http_server(200, r#"{"ok":true}"#, vec!["x-api-key: test-secret"]).await;
+    let url = format!("{base_url}/search");
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(&url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([
+        format!("net.http.private:POST:{origin}"),
+        "secret:EXAMPLE_API_KEY".to_string(),
+    ]);
+    let secrets = std::collections::BTreeMap::from([(
+        "EXAMPLE_API_KEY".to_string(),
+        "test-secret".to_string(),
+    )]);
+    let private_network = std::collections::BTreeMap::from([(
+        origin,
+        std::collections::BTreeSet::from(["POST".to_string()]),
+    )]);
+
+    let denied = verlet_wasm::runner::execute_http_request(
+        http_request_bytes(
+            &url,
+            None,
+            vec![("x-api-key".to_string(), "EXAMPLE_API_KEY".to_string())],
+        ),
+        Vec::new(),
+        grants,
+        verlet_wasm::WasmAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::new(),
+            allowed_private_network: private_network.clone(),
+        },
+        secrets.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied.status, verlet_wasm::runner::STATUS_CAPABILITY_DENIED);
+    assert_eq!(denied.message, "missing required secret capability");
+
+    let exchange = verlet_wasm::runner::execute_http_request(
+        http_request_bytes(
+            &url,
+            None,
+            vec![("x-api-key".to_string(), "EXAMPLE_API_KEY".to_string())],
+        ),
+        Vec::new(),
+        std::collections::BTreeSet::new(),
+        verlet_wasm::WasmAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::from(["EXAMPLE_API_KEY".to_string()]),
+            allowed_private_network: private_network,
+        },
+        secrets,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(exchange.response.status, 200);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn wasm_http_attachment_without_config_denies_private_network_and_secret_injection() {
+    let url = "http://127.0.0.1:9/search";
+    let origin = verlet_wasm::runner::http_origin(&reqwest::Url::parse(url).unwrap()).unwrap();
+    let grants = std::collections::BTreeSet::from([format!("net.http.private:POST:{origin}")]);
+
+    let err = verlet_wasm::runner::execute_http_request(
+        http_request_bytes(url, None, Vec::new()),
+        Vec::new(),
+        grants,
+        verlet_wasm::WasmAttachmentConfig::default(),
+        std::collections::BTreeMap::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, verlet_wasm::runner::STATUS_CAPABILITY_DENIED);
+    assert!(err.message.contains("net.http.private:POST"));
+
+    let public_url = "https://example.com/search";
+    let public_origin =
+        verlet_wasm::runner::http_origin(&reqwest::Url::parse(public_url).unwrap()).unwrap();
+    let err = verlet_wasm::runner::execute_http_request(
+        http_request_bytes(
+            public_url,
+            None,
+            vec![("x-api-key".to_string(), "EXAMPLE_API_KEY".to_string())],
+        ),
+        Vec::new(),
+        std::collections::BTreeSet::from([
+            format!("net.http:POST:{public_origin}"),
+            "secret:EXAMPLE_API_KEY".to_string(),
+        ]),
+        verlet_wasm::WasmAttachmentConfig::default(),
+        std::collections::BTreeMap::from([(
+            "EXAMPLE_API_KEY".to_string(),
+            "test-secret".to_string(),
+        )]),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, verlet_wasm::runner::STATUS_CAPABILITY_DENIED);
+    assert_eq!(err.message, "missing required secret capability");
 }
 
 #[test]
@@ -1442,6 +1607,7 @@ fn wasm_http_capability_allows_public_origin_wildcards() {
 
     verlet_wasm::runner::ensure_http_capability(
         &grants,
+        &verlet_wasm::WasmAttachmentConfig::default(),
         &reqwest::Method::GET,
         "https://example.com",
         false,
@@ -1449,6 +1615,7 @@ fn wasm_http_capability_allows_public_origin_wildcards() {
     .unwrap();
     verlet_wasm::runner::ensure_http_capability(
         &grants,
+        &verlet_wasm::WasmAttachmentConfig::default(),
         &reqwest::Method::GET,
         "http://news.example:8080",
         false,
@@ -1456,6 +1623,7 @@ fn wasm_http_capability_allows_public_origin_wildcards() {
     .unwrap();
     let err = verlet_wasm::runner::ensure_http_capability(
         &grants,
+        &verlet_wasm::WasmAttachmentConfig::default(),
         &reqwest::Method::POST,
         "https://example.com",
         false,
@@ -1470,6 +1638,7 @@ fn wasm_http_capability_wildcards_do_not_cross_private_namespace() {
 
     let err = verlet_wasm::runner::ensure_http_capability(
         &grants,
+        &verlet_wasm::WasmAttachmentConfig::default(),
         &reqwest::Method::GET,
         "http://127.0.0.1:9",
         true,
@@ -1487,6 +1656,7 @@ fn wasm_http_capability_allows_method_wildcards() {
 
     verlet_wasm::runner::ensure_http_capability(
         &grants,
+        &verlet_wasm::WasmAttachmentConfig::default(),
         &reqwest::Method::GET,
         "https://api.example.com",
         false,
@@ -1494,6 +1664,7 @@ fn wasm_http_capability_allows_method_wildcards() {
     .unwrap();
     verlet_wasm::runner::ensure_http_capability(
         &grants,
+        &verlet_wasm::WasmAttachmentConfig::default(),
         &reqwest::Method::POST,
         "https://api.example.com",
         false,
@@ -1512,6 +1683,7 @@ async fn wasm_http_secret_diagnostics_redact_secret_names() {
         http_request_bytes(url, None, secret_headers.clone()),
         Vec::new(),
         grants.clone(),
+        http_attachment_config(&origin, "POST", []),
         std::collections::BTreeMap::new(),
     )
     .await
@@ -1530,6 +1702,7 @@ async fn wasm_http_secret_diagnostics_redact_secret_names() {
             .into_iter()
             .chain(["secret:EXAMPLE_API_KEY".to_string()])
             .collect(),
+        http_attachment_config(&origin, "POST", ["EXAMPLE_API_KEY"]),
         std::collections::BTreeMap::new(),
     )
     .await

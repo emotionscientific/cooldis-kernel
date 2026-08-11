@@ -11547,6 +11547,7 @@ fn thread_manifest_operation_bindings_accept_legacy_metadata_without_operations(
                 .to_string(),
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             grants: vec!["net:https://example.com".to_string()],
+            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
             grant_expiries: Vec::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),

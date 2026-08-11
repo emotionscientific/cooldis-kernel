@@ -89,15 +89,21 @@ impl LocalPluginCatalogConfig {
 pub struct LocalPluginCatalogRecord {
     pub record: verlet_operations::operation_store::PublishedOperationRecord,
     pub operation_names: std::collections::BTreeSet<String>,
+    pub attachment_config: verlet_wasm::WasmAttachmentConfig,
 }
 
 impl LocalPluginCatalogRecord {
     pub fn whole_record(
         record: verlet_operations::operation_store::PublishedOperationRecord,
     ) -> Self {
+        let attachment_config =
+            crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                &record.capability_grants,
+            );
         Self {
             record,
             operation_names: std::collections::BTreeSet::new(),
+            attachment_config,
         }
     }
 
@@ -109,10 +115,23 @@ impl LocalPluginCatalogRecord {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        let attachment_config =
+            crate::capabilities::wasm_runner::attachment_config_from_legacy_grants(
+                &record.capability_grants,
+            );
         Self {
             record,
             operation_names: operation_names.into_iter().map(Into::into).collect(),
+            attachment_config,
         }
+    }
+
+    pub fn with_attachment_config(
+        mut self,
+        attachment_config: verlet_wasm::WasmAttachmentConfig,
+    ) -> Self {
+        self.attachment_config = attachment_config;
+        self
     }
 }
 
@@ -221,6 +240,7 @@ impl LocalPluginCatalog {
             let LocalPluginCatalogRecord {
                 record,
                 operation_names,
+                attachment_config,
             } = selected_record;
             if matches!(
                 &record.source,
@@ -274,7 +294,9 @@ impl LocalPluginCatalog {
                 }
                 runtime_config = runtime_config.with_secrets(resolution.values);
             };
-            runtime_config = runtime_config.with_vfs(std::sync::Arc::clone(&vfs));
+            runtime_config = runtime_config
+                .with_attachment_config(attachment_config)
+                .with_vfs(std::sync::Arc::clone(&vfs));
             let mut registration =
                 verlet_operations::operation_registry::OperationRegistration::from_config(
                     record.name.clone(),

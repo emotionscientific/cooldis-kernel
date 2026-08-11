@@ -553,6 +553,7 @@ struct WasmTurnState {
     output_truncated: bool,
     max_output_bytes: usize,
     capability_grants: std::collections::BTreeSet<String>,
+    attachment_config: crate::WasmAttachmentConfig,
     invocation_context: verlet_abi::InvocationContext,
     secrets: std::collections::BTreeMap<String, String>,
     vfs: Option<std::sync::Arc<verlet_vfs::VerletVfs>>,
@@ -586,6 +587,7 @@ impl WasmTurnState {
             output_truncated: false,
             max_output_bytes: config.max_output_bytes,
             capability_grants: config.effective_capability_grants(),
+            attachment_config: config.attachment_config.clone(),
             invocation_context: config.invocation_context.clone(),
             secrets: config.secrets.clone(),
             vfs: config.vfs.clone(),
@@ -853,9 +855,18 @@ fn add_verlet_imports(linker: &mut wasmtime::Linker<WasmTurnState>) -> wasmtime:
                     return STATUS_NOT_FOUND;
                 }
                 let grants = caller.data().capability_grants.clone();
+                let attachment_config = caller.data().attachment_config.clone();
                 let secrets = caller.data().secrets.clone();
 
-                match execute_http_request(request_bytes, body_bytes, grants, secrets).await {
+                match execute_http_request(
+                    request_bytes,
+                    body_bytes,
+                    grants,
+                    attachment_config,
+                    secrets,
+                )
+                .await
+                {
                     Ok(exchange) => {
                         let Some(body_source_ptr) = out_ptr.checked_add(4) else {
                             return STATUS_INVALID_ARGUMENT;
@@ -1114,6 +1125,7 @@ pub async fn execute_http_request(
     request_bytes: Vec<u8>,
     body: Vec<u8>,
     grants: std::collections::BTreeSet<String>,
+    attachment_config: crate::WasmAttachmentConfig,
     secrets: std::collections::BTreeMap<String, String>,
 ) -> Result<WasmHttpExchange, WasmHttpError> {
     let mut request: crate::WasmHttpRequest = serde_json::from_slice(&request_bytes)
@@ -1137,7 +1149,13 @@ pub async fn execute_http_request(
     }
     let url = reqwest::Url::parse(&target.url)
         .map_err(|_| WasmHttpError::invalid_argument("invalid canonical HTTP URL"))?;
-    ensure_http_capability(&grants, &method, &target.origin, target.private_destination)?;
+    ensure_http_capability(
+        &grants,
+        &attachment_config,
+        &method,
+        &target.origin,
+        target.private_destination,
+    )?;
 
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -1160,8 +1178,7 @@ pub async fn execute_http_request(
     }
     for (name, secret_name) in request.secret_headers {
         let name = outbound_header_name(&name, "invalid HTTP secret header name")?;
-        let capability = format!("secret:{secret_name}");
-        if !grants.contains(&capability) {
+        if !attachment_config.allowed_secrets.contains(&secret_name) {
             return Err(WasmHttpError::capability_denied(
                 "missing required secret capability",
             ));
@@ -1178,8 +1195,7 @@ pub async fn execute_http_request(
     }
     for (name, secret_name, prefix) in request.secret_header_prefixes {
         let name = outbound_header_name(&name, "invalid HTTP prefixed secret header name")?;
-        let capability = format!("secret:{secret_name}");
-        if !grants.contains(&capability) {
+        if !attachment_config.allowed_secrets.contains(&secret_name) {
             return Err(WasmHttpError::capability_denied(
                 "missing required secret capability",
             ));
@@ -1529,15 +1545,30 @@ fn percent_encode_path_segment(value: &str) -> String {
 #[doc(hidden)]
 pub fn ensure_http_capability(
     grants: &std::collections::BTreeSet<String>,
+    attachment_config: &crate::WasmAttachmentConfig,
     method: &reqwest::Method,
     origin: &str,
     private_destination: bool,
 ) -> Result<(), WasmHttpError> {
-    let namespace = if private_destination {
-        "net.http.private"
-    } else {
-        "net.http"
-    };
+    if private_destination {
+        let allowed =
+            attachment_config
+                .allowed_private_network
+                .iter()
+                .any(|(origin_pattern, methods)| {
+                    (methods.contains("*") || methods.contains(method.as_str()))
+                        && wildcard_match(origin_pattern, origin)
+                });
+        if allowed {
+            return Ok(());
+        }
+        return Err(WasmHttpError::capability_denied(format!(
+            "missing required capability net.http.private:{}:{origin}",
+            method.as_str()
+        )));
+    }
+
+    let namespace = "net.http";
     let method_grant = format!("{namespace}:{}:{origin}", method.as_str());
     if grants
         .iter()

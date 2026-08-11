@@ -165,7 +165,8 @@ async fn http_fetch_reads_from_local_server() {
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
             http_fetch_wasm(),
         ))
-        .with_capability_grant(grant),
+        .with_capability_grant(grant)
+        .with_attachment_config(private_get_attachment_config(&base_url)),
     )
     .unwrap();
 
@@ -199,7 +200,8 @@ async fn http_fetch_reports_cap_edge_truncation() {
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
             http_fetch_wasm(),
         ))
-        .with_capability_grant(zero_grant),
+        .with_capability_grant(zero_grant)
+        .with_attachment_config(private_get_attachment_config(&zero_base_url)),
     )
     .unwrap();
     let zero = zero_factory
@@ -223,7 +225,8 @@ async fn http_fetch_reports_cap_edge_truncation() {
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
             http_fetch_wasm(),
         ))
-        .with_capability_grant(exact_grant),
+        .with_capability_grant(exact_grant)
+        .with_attachment_config(private_get_attachment_config(&exact_base_url)),
     )
     .unwrap();
     let exact = exact_factory
@@ -265,6 +268,16 @@ fn standard_operation_factory(
         verlet_wasm::WasmRuntimeArtifact::bytes(wasm),
     ))
     .unwrap()
+}
+
+fn private_get_attachment_config(origin: &str) -> verlet_wasm::WasmAttachmentConfig {
+    verlet_wasm::WasmAttachmentConfig {
+        allowed_secrets: std::collections::BTreeSet::new(),
+        allowed_private_network: std::collections::BTreeMap::from([(
+            origin.to_string(),
+            std::collections::BTreeSet::from(["GET".to_string()]),
+        )]),
+    }
 }
 
 fn http_fetch_wasm() -> Vec<u8> {

@@ -5,6 +5,13 @@ set -euo pipefail
 # need more test-thread stack headroom than libtest's default.
 export RUST_MIN_STACK=16777216
 
+# The parallel daemon IO tests exhaust macOS's default 256-descriptor soft
+# limit (EMFILE flakes in daemon_io tests); raise it before running anything.
+soft_fd_limit="$(ulimit -n)"
+if [[ "$soft_fd_limit" != "unlimited" && "$soft_fd_limit" -lt 8192 ]]; then
+  ulimit -n 8192 || true
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/env-compat.sh"
 for env_name in \

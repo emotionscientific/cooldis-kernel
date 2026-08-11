@@ -223,6 +223,7 @@ fn recovery_bind_receipt(
             artifact_hash: "test".to_string(),
             effect_class,
             grants: Vec::new(),
+            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
             grant_expiries: Vec::new(),
             operations: vec!["recovery_tool".to_string()],
             direct_tools: vec![
