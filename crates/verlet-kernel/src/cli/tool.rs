@@ -2063,7 +2063,7 @@ Usage:\n\
 \n\
 Publishes a package-validated Wasm tool artifact into the local operation\n\
 registry. The package proof gate validates the declared interface and fixtures\n\
-before the published tool can become visible through bindings and grants.\n"
+before the published tool can become visible through agent attachments.\n"
     );
 }
 

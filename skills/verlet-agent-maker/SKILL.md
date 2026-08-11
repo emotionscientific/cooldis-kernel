@@ -101,11 +101,10 @@ reasoning_effort = "medium"
 Secrets never live in a manifest; `credentials.ref` is a reference resolved
 inside the runtime boundary.
 
-### `[[tools]]` — the authority surface
+### `[[tools]]` — the attachment surface
 
 Three row types. Every row binds a published, content-addressed contract;
-nothing mutable backs a tool row. Effect grants ride on the row that uses
-them — there is no manifest-global grant pool.
+nothing mutable backs a tool row. Attachment itself is the gate.
 
 **`bash_tool`** — the operation becomes a command inside virtual bash:
 
@@ -115,7 +114,12 @@ type = "bash_tool"
 id = "http_fetch"
 command = "http_fetch"
 operation_ref = "op://http-fetch@sha256:<hash>"
-grants = ["net.http:GET:https://example.com"]
+
+[tools.attachment]
+allowed_secrets = ["SEARCH_API_KEY"]
+
+[tools.attachment.allowed_private_network]
+"http://127.0.0.1:*" = ["GET"]
 ```
 
 **`direct_tool`** — the operation becomes a structured model-visible tool:
@@ -129,7 +133,7 @@ operation_ref = "op://json-query@sha256:<hash>"
 ```
 
 `op://` refs come in two forms: `op://<record>@sha256:<hash>` binds the whole
-record (grants must cover every operation it declares);
+record;
 `op://<record>/<operation>@sha256:<hash>` selects one operation. Read the
 hashes with `verlet tool list --registry-root <operations-root>`; it prints
 the full active artifact hash from the operation registry. The raw
@@ -146,7 +150,6 @@ id = "search"
 protocol = "mcp"
 server_ref = "mcp://search"        # name-only: names a configured source
 include_tools = ["search"]  # optional narrowing
-grants = []
 # expose = ["direct_tool"] requires pin = "mcptool://<server>/<tool>@sha256:<hash>"
 ```
 
@@ -156,10 +159,8 @@ direct row. With `expose` empty the universe is searchable in-context only.
 
 **Thread control is declared, not ambient.** Spawning and supervising child
 threads requires (a) `allow_child_agents = true` in policies and (b) rows
-binding the kernel-published `verlet-threads` operations — `thread_spawn`
-(grant `threads.spawn`), `thread_submit`/`thread_cancel` (`threads.control`),
-`thread_wait`/`thread_status` (`threads.read`). An agent with no such rows
-has no thread powers, full stop.
+binding the kernel-published `verlet-threads` operations. An agent with no
+such rows has no thread powers, full stop.
 
 ```toml
 [[tools]]
@@ -167,11 +168,10 @@ type = "direct_tool"
 id = "verlet-threads.thread_spawn"
 tool_name = "thread_spawn"
 operation_ref = "op://verlet-threads/thread_spawn@sha256:<hash>"
-grants = ["threads.spawn"]
 ```
 
-A `threads.spawn`-granting row with `allow_child_agents = false` is rejected
-at bind with a teaching error — fix the policy or drop the row. The
+A `thread_spawn` row with `allow_child_agents = false` is rejected at bind
+with a teaching error — fix the policy or drop the row. The
 `verlet-threads` record is kernel-published at daemon startup; read its
 hash from the registry like any other operation.
 
@@ -186,7 +186,7 @@ mount = "context"                      # only value in V1
 mode = "read"                          # only value in V1
 ```
 
-Declaring a resource grants nothing by itself: model visibility comes from a
+Declaring a resource provides no visibility by itself: model visibility comes from a
 context pipeline source that selects it.
 
 ### `[context]` — how model-visible context is assembled (optional)
@@ -198,11 +198,10 @@ unique; fractional shares sum to ≤ 1; at most one `"rest"`; `pinned = true`
 sources sit outside budget arithmetic. See the worked pipeline in
 `docs/agent-manifest-ontology.md`.
 
-### `[policies]` — the thread-level authority boundary
+### `[policies]` — thread-level runtime policy
 
 ```toml
 [policies]
-network = "declared-origins"   # or "deny" (default)
 filesystem = "vfs"             # or "none"; default "vfs"
 allow_child_agents = false     # default false; see thread control above
 
@@ -210,10 +209,6 @@ allow_child_agents = false     # default false; see thread control above
 max_turns = 50
 max_tool_calls_per_turn = 8
 ```
-
-`network = "declared-origins"` means reachable origins are exactly those
-declared by tool grants (`net.http:GET:<origin>`); the broker enforces at
-request time, fail closed.
 
 ### `[runtime]` — thread-start defaults
 
@@ -249,15 +244,14 @@ The compiler teaches; trust it over guesswork:
 - unknown-operation errors mean a two-segment ref selected an operation the
   version record does not declare — use the available operation name or bind
   the whole record;
-- grant-coverage errors name the operation and the missing capability —
-  add the grant to that row or switch to the two-segment `op://` form;
 - reserved-section errors name a deferred V1 scope — that feature does not
   exist yet; design around it rather than emulating it in prose.
 
 ## Worked examples
 
-- `examples/agents/researcher/` — three standard ops as bash commands,
-  declared-origins network, cwd override allowlisted. The canonical small
+- `examples/agents/researcher/` — three standard ops as bash commands with
+  package-declared public HTTP capabilities and a cwd override allowlist. The
+  canonical small
   agent; copy its publish.sh pattern for hash substitution.
 - A minimal chat agent is just `[agent]` + one `[[model_profiles]]` row —
   no tools, no resources. Useful as a smoke test of the publish loop.

@@ -5,7 +5,7 @@
 //! published record's resolved manifest into the typed schema and rides a
 //! discharged `manifest.compile.completed` event; bind enforces the schema
 //! against the live runtime surface (provider records, operation registry,
-//! grants, runtime defaults plus caller overrides) and rides a discharged
+//! attachments, runtime defaults plus caller overrides) and rides a discharged
 //! `manifest.bind.completed` event. Both fail closed: a thread either starts
 //! with a fully resolved, receipted configuration or it does not start.
 

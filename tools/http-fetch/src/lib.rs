@@ -11,7 +11,10 @@ pub extern "C" fn __verlet_describe_module__(sink: u32) -> i32 {
             output: verlet_guest_sdk::OperationValueKind::Json,
             events: verlet_guest_sdk::OperationEventKind::Jsonl,
             mode: verlet_guest_sdk::OperationMode::Sync,
-            required_capabilities: Vec::new(),
+            required_capabilities: vec![
+                "net.http:GET:https://*".to_string(),
+                "net.http:GET:http://*".to_string(),
+            ],
         }]);
     let bytes = match manifest.to_json_vec() {
         Ok(bytes) => bytes,

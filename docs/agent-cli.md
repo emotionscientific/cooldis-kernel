@@ -80,8 +80,7 @@ readable but do not gain an authored form retroactively.
 
 `publish` is a registry oracle for `op://` refs. Every operation tool row must
 name a local operation record, pin a published version hash, select either the
-whole record or a declared operation, and declare grants that cover the selected
-operation requirements. Use `--operations-registry-root <dir>` when the
+whole record or a declared operation. Use `--operations-registry-root <dir>` when the
 operations registry is not the conventional `.verlet/operations` root. Missing
 or fabricated operation refs reject before the agent record is written. Passing
 `--resolve-ops` is an authoring convenience only: unpinned `op://name` and
@@ -192,7 +191,7 @@ streaming = false
 
 The raw resolved manifest is preserved as canonical JSON in the published record
 so later schema expansion can add more provider refs, operation refs, resources,
-policies, grants, context defaults, and runtime defaults without changing the
+policies, attachment config, context defaults, and runtime defaults without changing the
 publication boundary.
 
 ## Removal Semantics

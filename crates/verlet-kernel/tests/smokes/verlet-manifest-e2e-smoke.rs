@@ -450,7 +450,6 @@ id = "search"
 protocol = "mcp"
 server_ref = "mcp://search"
 include_tools = ["search"]
-grants = []
 "#;
     std::fs::write(&manifest_path, rendered)?;
     Ok(

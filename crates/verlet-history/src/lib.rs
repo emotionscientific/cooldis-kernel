@@ -449,8 +449,8 @@ pub enum AdmissionDecision {
 
 /// Payload of `thread.spawn.requested`: a coupling's proposal to spawn
 /// supervised child work. The projector that consumes it performs the spawn
-/// under the parent's `threads.spawn` grant and `allow_child_agents` policy —
-/// the coupling route grants no authority of its own.
+/// under the parent's attached supervisor coupling and `allow_child_agents`
+/// policy; the coupling route supplies no authority of its own.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadSpawnRequestedPayload {
     pub parent_thread_id: verlet_runtime_contracts::ThreadId,

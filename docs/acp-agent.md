@@ -206,8 +206,7 @@ ACP is intentionally narrower than the Verlet app-server API:
 - ACP cannot mutate provider secrets, tenant identity, operation registry state,
   placement policy, or sandbox policy.
 - ACP `mcpServers` input is not a silent tool-injection path; tool authority
-  still comes from Verlet manifest binding, configured MCP source records, and
-  grants.
+  still comes from Verlet manifest attachment and configured MCP source records.
 - ACP permission bridging is deferred until the Verlet permission coupling
   outlet exists. See
   [ACP: design permission coupling outlet](https://github.com/emotionscientific/cooldis/issues/153).

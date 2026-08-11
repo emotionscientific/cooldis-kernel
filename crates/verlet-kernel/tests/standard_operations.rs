@@ -2,6 +2,23 @@ use bashkit::FileSystem as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 
+#[test]
+fn http_fetch_package_declares_public_get_capabilities() {
+    let package = verlet_operations::tool_package::ToolPackageSource::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/http-fetch"),
+    )
+    .unwrap();
+    let required = &package.manifest.operations[0].required_capabilities;
+
+    assert_eq!(
+        required,
+        &std::collections::BTreeSet::from([
+            "net.http:GET:https://*".to_string(),
+            "net.http:GET:http://*".to_string(),
+        ])
+    );
+}
+
 #[tokio::test]
 async fn json_query_reads_nested_value() {
     let factory = standard_operation_factory(json_query_wasm());
@@ -160,13 +177,9 @@ async fn http_fetch_reads_from_local_server() {
     )
     .await;
     let url = format!("{base_url}/fetch");
-    let grant = format!("net.http.private:GET:{base_url}");
     let factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
-            http_fetch_wasm(),
-        ))
-        .with_capability_grant(grant)
-        .with_attachment_config(private_get_attachment_config(&base_url)),
+        http_fetch_runtime_config()
+            .with_attachment_config(private_get_attachment_config(&base_url)),
     )
     .unwrap();
 
@@ -195,13 +208,9 @@ async fn http_fetch_reads_from_local_server() {
 #[tokio::test]
 async fn http_fetch_reports_cap_edge_truncation() {
     let (zero_base_url, zero_server) = spawn_http_server("abc", vec![]).await;
-    let zero_grant = format!("net.http.private:GET:{zero_base_url}");
     let zero_factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
-            http_fetch_wasm(),
-        ))
-        .with_capability_grant(zero_grant)
-        .with_attachment_config(private_get_attachment_config(&zero_base_url)),
+        http_fetch_runtime_config()
+            .with_attachment_config(private_get_attachment_config(&zero_base_url)),
     )
     .unwrap();
     let zero = zero_factory
@@ -220,13 +229,9 @@ async fn http_fetch_reports_cap_edge_truncation() {
     zero_server.await.unwrap();
 
     let (exact_base_url, exact_server) = spawn_http_server("abcd", vec![]).await;
-    let exact_grant = format!("net.http.private:GET:{exact_base_url}");
     let exact_factory = verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
-            http_fetch_wasm(),
-        ))
-        .with_capability_grant(exact_grant)
-        .with_attachment_config(private_get_attachment_config(&exact_base_url)),
+        http_fetch_runtime_config()
+            .with_attachment_config(private_get_attachment_config(&exact_base_url)),
     )
     .unwrap();
     let exact = exact_factory
@@ -247,7 +252,9 @@ async fn http_fetch_reports_cap_edge_truncation() {
 
 #[tokio::test]
 async fn http_fetch_denied_origin_fails_closed() {
-    let factory = standard_operation_factory(http_fetch_wasm());
+    let factory =
+        verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(http_fetch_runtime_config())
+            .unwrap();
     let output = factory
         .invoke_operation_bytes(
             "http_fetch",
@@ -278,6 +285,14 @@ fn private_get_attachment_config(origin: &str) -> verlet_wasm::WasmAttachmentCon
             std::collections::BTreeSet::from(["GET".to_string()]),
         )]),
     }
+}
+
+fn http_fetch_runtime_config() -> verlet_wasm::WasmRuntimeConfig {
+    verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(http_fetch_wasm()))
+        .with_capability_grants([
+            "net.http:GET:https://*".to_string(),
+            "net.http:GET:http://*".to_string(),
+        ])
 }
 
 fn http_fetch_wasm() -> Vec<u8> {

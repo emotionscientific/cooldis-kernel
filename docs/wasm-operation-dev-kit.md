@@ -10,17 +10,17 @@ The dev kit is that lane:
 ```text
 agent idea
 -> scaffold Rust operation
--> declare tool package manifest, schemas, fixtures, projections, and grants
+-> declare tool package manifest, schemas, fixtures, projections, and capabilities
 -> build wasm32-unknown-unknown
 -> validate Verlet ABI
 -> run fixtures against the actual artifact
 -> publish to registry
--> bind/grant to thread, tenant, or global scope
+-> attach to an agent
 -> next turn sees tool / CLI / HTTP / MCP projection
 ```
 
 The important boundary: the dev kit is not the runtime. It produces an immutable
-Wasm artifact plus a manifest. Verlet validates, publishes, binds, grants, and
+Wasm artifact plus a manifest. Verlet validates, publishes, attaches, and
 runs the artifact under the normal operation contract.
 
 ## SpacetimeDB Reference
@@ -146,7 +146,7 @@ ToolBuildReceipt       dry-run receipt with source, runtime, operations, schemas
                       fixtures, capabilities, and projections
 Fixture runner        executes declared fixtures against the real Wasm artifact
 Publish persistence   stores the accepted interface beside artifact/projections
-Agent manifest        references published tools with tool:// refs and grants
+Agent manifest        references published operations with pinned op:// refs
 ```
 
 Raw `--module-path` and `--bin-path` remain useful for low-level conversion and
@@ -175,7 +175,7 @@ scaffold:
 - `crates/verlet-kernel/tests/fixtures/wasm-csv-profile/` for a pure JSON
   operation with no capabilities;
 - `crates/verlet-kernel/tests/fixtures/wasm-employee-lookup/` for a host-import
-  HTTP operation with exact local network grants.
+  HTTP operation with exact package network capabilities.
 
 V0 stores JSON schemas in the accepted interface contract and uses fixtures as
 the executable proof. Full JSON Schema validation belongs to the next package
@@ -193,7 +193,7 @@ computer safely:
 4. Do not import WASI or ambient host APIs.
 5. Use verlet-guest-sdk host wrappers only.
 6. Build and validate before publishing.
-7. Publish, bind/grant narrowly, then prove the new projection by invoking it.
+7. Publish, attach narrowly, then prove the new projection by invoking it.
 ```
 
 The skill can call the npm wrapper, but the wrapper must still end at
@@ -404,7 +404,7 @@ then prove the same operation is visible to a real model:
 spawn authoring subagent
 -> subagent writes the Rust operation from template
 -> build/validate/publish
--> bind/grant to the provider-backed thread
+-> attach to the provider-backed thread
 -> model provider sees data_csv_profile and calls it
 -> restart app-server
 -> resume thread and prove the operation remains visible

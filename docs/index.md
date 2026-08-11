@@ -11,7 +11,7 @@ the managed platform is acceleration, not lock-in.
 Verlet treats an agent as a declarative unit: describe the behavior, tools,
 resources, secrets, permissions, context policy, and placement needs before the
 agent runs. The runtime turns that declaration into something it can inspect,
-grant, run, resume, publish, revoke, and audit.
+attach, run, resume, publish, revoke, and audit.
 
 ## Why Care
 
@@ -26,7 +26,7 @@ allowed to exercise.
 ## What You Can Do
 
 - Build an agent locally from a manifest.
-- Attach tools, resources, secrets, and runtime grants.
+- Attach tools and resources, with explicit secret and private-network config.
 - Publish static prompt and context files as immutable blob resources.
 - Publish local skill directories, author manifests against a package name, and
   receive a content hash in the bind receipt.
@@ -52,7 +52,7 @@ agent declaration
 + capability bindings
 + resources
 + context pipeline
-+ couplings and grants
++ couplings and attachment config
 + placement requirements
 -> governed agent runtime
 ```
@@ -68,13 +68,13 @@ define locally, inspect the runtime shape, publish when ready, observe what
 happened, and keep the source definition portable.
 
 If you know Terraform or Dockerfiles, the familiar part is declaration. Declare
-the agent, tools, resources, grants, behavior, and placement instead of hiding
+the agent, tools, resources, attachments, behavior, and placement instead of hiding
 that shape inside application code. Verlet turns the declaration into a running
 agent across local and future cloud runtimes.
 
 If you know package managers, the destination is installable agents and tools:
-fetch a versioned agent or tool package, inspect the powers it asks for, grant
-what you approve, and run it under policy.
+fetch a versioned agent or tool package, inspect its attachments and package
+capabilities, and run it under policy.
 
 ## Current Status
 

@@ -674,7 +674,7 @@ pub enum AgentManifestToolSurface {
 }
 
 /// A declared read-only artifact (audit section 5). Declaring a resource
-/// grants nothing by itself: visibility comes from a pipeline source.
+/// provides no visibility by itself: visibility comes from a pipeline source.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestResource {

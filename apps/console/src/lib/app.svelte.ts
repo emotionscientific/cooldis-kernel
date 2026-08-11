@@ -1846,7 +1846,6 @@ function envelopeFromBindReceipt(payload: unknown): ThreadEnvelope | null {
     modelId: stringField(payload, "model_id") ?? "",
     toolIds: stringArrayField(payload, "tool_ids"),
     operationBindings: arrayField(payload, "operation_bindings").map(envelopeBinding),
-    granted: stringArrayField(payload, "granted"),
     effectiveCwd: stringField(runtime, "default_cwd") ?? "",
     streaming: booleanField(runtime, "streaming"),
     turnTimeoutMs: numberRecordField(runtime, "turn_timeout_ms"),
@@ -1858,7 +1857,6 @@ function envelopeBinding(value: unknown): ThreadEnvelopeBinding {
   return {
     name: stringField(value, "name") ?? "",
     artifactHash: stringField(value, "artifact_hash") ?? "",
-    grants: stringArrayField(value, "grants"),
     operations: stringArrayField(value, "operations"),
     directTools: arrayField(value, "direct_tools").map((tool) => ({
       toolName: stringField(tool, "tool_name") ?? "",

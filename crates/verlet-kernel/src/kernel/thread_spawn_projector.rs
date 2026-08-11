@@ -109,7 +109,7 @@ impl ThreadSpawnProjector {
         &self,
         coordinates: &verlet_runtime_contracts::ThreadCoordinates,
         payload: verlet_history::ThreadSpawnRequestedPayload,
-        require_supervisor_grant: bool,
+        require_supervisor_attachment: bool,
     ) -> crate::kernel::runtime_host::VerletResult<ThreadSpawnDispatchReceipt> {
         if payload.parent_thread_id != coordinates.thread_id {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
@@ -226,7 +226,7 @@ impl ThreadSpawnProjector {
                                 parent,
                                 request_event,
                                 request_payload,
-                                require_supervisor_grant,
+                                require_supervisor_attachment,
                             )
                             .await
                         {
@@ -577,17 +577,16 @@ impl ThreadSpawnProjector {
         parent: crate::kernel::runtime_host::RuntimeThreadHandle,
         request_event: &verlet_history::EventRecord,
         payload: verlet_history::ThreadSpawnRequestedPayload,
-        require_supervisor_grant: bool,
+        require_supervisor_attachment: bool,
     ) -> crate::kernel::runtime_host::VerletResult<ThreadSpawnProjected> {
-        if require_supervisor_grant && !parent_allows_supervisor_spawn(&parent.context().metadata)?
+        if require_supervisor_attachment
+            && !parent_has_supervisor_spawn_attachment(&parent.context().metadata)?
         {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
                 format!(
-                    "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} projector requires parent thread bound coupling grant {THREADS_SPAWN_CAPABILITY}",
+                    "{STD_SUPERVISOR_SPAWN_TEMPLATE_ID} projector requires the parent thread to attach that supervisor coupling",
                     STD_SUPERVISOR_SPAWN_TEMPLATE_ID =
-                        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID,
-                    THREADS_SPAWN_CAPABILITY =
-                        crate::operations::kernel_packages::THREADS_SPAWN_CAPABILITY
+                        crate::kernel::stdlib_couplings::STD_SUPERVISOR_SPAWN_TEMPLATE_ID
                 ),
             ));
         }
@@ -1277,7 +1276,7 @@ pub(crate) fn fold_thread_handle_bindings(
     Ok(bindings.into_values().collect())
 }
 
-fn parent_allows_supervisor_spawn(
+fn parent_has_supervisor_spawn_attachment(
     metadata: &std::collections::BTreeMap<String, String>,
 ) -> crate::kernel::runtime_host::VerletResult<bool> {
     let Some(raw) = metadata.get(crate::kernel::runtime_host::THREAD_BOUND_COUPLING_SET_METADATA)

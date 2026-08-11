@@ -745,7 +745,6 @@ function parseThreadCouplingRow(value: JsonValue): ThreadCouplingRow {
     functionRef: requiredString(value, "functionRef"),
     artifactHash: requiredString(value, "artifactHash"),
     operationName: nullableString(value, "operationName") ?? null,
-    grants: stringsFromArray(optionalArray(value, "grants") ?? []),
     budget: optionalRecord(value, "budget") ?? null,
     configHash: nullableString(value, "configHash") ?? null,
   };

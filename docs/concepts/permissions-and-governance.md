@@ -1,10 +1,10 @@
 # Permissions And Governance
 
-Verlet gives agents power through explicit grants.
+Verlet gives agents power through explicit attachment and witnessed policy.
 
-An agent can see a tool without being allowed to use it. An agent can be
-published without being trusted in every workspace. A secret can be bound to one
-agent without becoming globally available.
+An operation is unavailable until it is attached. An agent can be published
+without being trusted in every workspace. A secret can be allowed for one
+attachment without becoming globally available.
 
 That separation is the governance model: visibility, publication, permission,
 secret access, resource access, and execution placement are different decisions.
@@ -12,13 +12,14 @@ Privileged actions produce events and receipts.
 
 This is how Verlet aims to provide managed-agent convenience without vendor
 lock-in: the managed runtime can operate agents, while the agent definition,
-tool contracts, grants, and receipts stay inspectable and portable.
+tool contracts, attachments, and receipts stay inspectable and portable.
 
 ## Permission Surfaces
 
 Verlet permissioning centers on:
 
-- capability grants;
+- operation attachment;
+- package-declared capabilities;
 - secret bindings;
 - resource bindings;
 - placement policy;

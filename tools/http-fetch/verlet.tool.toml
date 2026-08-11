@@ -18,7 +18,7 @@ name = "http_fetch"
 description = "Fetch a URL with GET and return text plus response metadata."
 input_schema = "schemas/http_fetch.input.json"
 output_schema = "schemas/http_fetch.output.json"
-required_capabilities = []
+required_capabilities = ["net.http:GET:https://*", "net.http:GET:http://*"]
 
 [operations.command]
 name = "http-fetch fetch"

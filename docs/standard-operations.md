@@ -1,7 +1,7 @@
 # Standard Operations
 
 Verlet V1 treats the standard library as published records, not application
-imports. Agent manifests should point at operation refs and grants; the runtime
+imports. Agent manifests should point at operation refs and attachment config; the runtime
 then decides whether a record runs as Wasm, a kernel-native package, a process
 placement, or a future remote placement.
 
@@ -123,7 +123,7 @@ the journal, not in these tool results.
 the thread query surface. `thread_cancel` cancels and shuts down the scoped
 target thread, leaving its lifecycle record in the terminal `stopped` status.
 
-Manifests receive these operations only through declared tool rows and grants.
+Manifests receive these operations only through declared tool rows.
 The default manifest declares them as `direct_tool` rows when the registry root
 exists and its child-thread policy allows it. A manifest with
 `allow_child_agents = false` may bind read/control rows, but binding a
@@ -246,11 +246,11 @@ Output:
 }
 ```
 
-`http_fetch` is GET-only. It declares no package-time capability because the
-origin is caller input. The HTTP broker checks the concrete request at call
-time. Grant the concrete origin with `net.http:GET:<origin>` for public
-destinations or `net.http.private:GET:<origin>` for loopback/private
-destinations. Origin patterns may use `*`, such as `net.http:GET:https://*`;
+`http_fetch` is GET-only. Its package declares
+`net.http:GET:https://*` and `net.http:GET:http://*`; the HTTP broker still
+checks the concrete request at call time. Loopback/private destinations require
+a matching method and origin in the attachment config's
+`allowed_private_network` map instead. Package origin patterns may use `*`;
 public wildcards never cross into the private namespace. Denials return a JSON
 `error` object instead of trapping the operation.
 
@@ -471,8 +471,9 @@ Kernel-backed templates already have a matching primitive or scheduler surface:
 `std::context.truncate`, `std::context.summarize`,
 `std::permission.tool_gate`, `std::supervisor.spawn`, and
 `std::supervisor.child_completion`; all have executable V1 references today.
-`std::supervisor.spawn` is pure at coupling time: it validates the bound
-`threads.spawn` grant, discharges `thread.spawn.requested`, and lets the
+`std::supervisor.spawn` is pure at coupling time: it verifies the bound
+child-agent policy and attached spawn operation or supervisor coupling,
+discharges `thread.spawn.requested`, and lets the
 durable thread-spawn projector perform the local child-thread effect and
 witness `thread.spawned`.
 `std::supervisor.child_completion` deliberately consumes a completion fact that
