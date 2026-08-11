@@ -2,7 +2,7 @@
 # line edits do not churn the baseline. This file only shrinks.
 crates/verlet-kernel/src/adapters/app_server/connection.rs capsule 45
 crates/verlet-kernel/src/adapters/app_server.rs capsule 25
-crates/verlet-kernel/src/adapters/app_server/tests.rs capsule 118
+crates/verlet-kernel/src/adapters/app_server/tests.rs capsule 117
 crates/verlet-kernel/src/adapters/app_server/threads.rs capsule 10
 crates/verlet-kernel/src/adapters/mcp_server.rs capsule 28
 crates/verlet-kernel/src/adapters/mcp_server/tests.rs capsule 32
