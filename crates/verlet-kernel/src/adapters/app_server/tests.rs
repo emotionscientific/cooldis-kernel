@@ -18960,8 +18960,7 @@ async fn spawn_provider_sse_with_model_list_fixture(body: impl Into<String>) -> 
     let body = body.into();
     let request = tokio::spawn(async move {
         let mut turn_request = None;
-        let mut served_model_list = false;
-        while turn_request.is_none() || !served_model_list {
+        while turn_request.is_none() {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_provider_fixture_request(&mut stream).await;
             if request.starts_with("GET /v1/models HTTP/1.1") {
@@ -18972,7 +18971,6 @@ async fn spawn_provider_sse_with_model_list_fixture(body: impl Into<String>) -> 
                     list_body,
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
-                served_model_list = true;
             } else {
                 assert!(
                     request.starts_with("POST "),

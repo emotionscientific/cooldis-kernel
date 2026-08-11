@@ -30,17 +30,41 @@ impl std::fmt::Debug for RefreshCredential {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
+enum CredentialFingerprint {
+    ApiKey([u8; 32]),
+    None,
+}
+
+impl From<&RefreshCredential> for CredentialFingerprint {
+    fn from(credential: &RefreshCredential) -> Self {
+        match credential {
+            RefreshCredential::ApiKey(key) => {
+                use sha2::Digest as _;
+
+                Self::ApiKey(sha2::Sha256::digest(key.as_bytes()).into())
+            }
+            RefreshCredential::None => Self::None,
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 struct ProviderFingerprint {
     api: verlet_history::ProviderApi,
     base_url: String,
+    credential: CredentialFingerprint,
 }
 
-impl From<&verlet_metadata::provider_store::LlmProviderRecord> for ProviderFingerprint {
-    fn from(provider: &verlet_metadata::provider_store::LlmProviderRecord) -> Self {
+impl ProviderFingerprint {
+    fn new(
+        provider: &verlet_metadata::provider_store::LlmProviderRecord,
+        credential: &RefreshCredential,
+    ) -> Self {
         Self {
             api: provider.api.clone(),
             base_url: provider.base_url.clone(),
+            credential: CredentialFingerprint::from(credential),
         }
     }
 }
@@ -80,7 +104,7 @@ impl LiveModelCache {
         provider: &verlet_metadata::provider_store::LlmProviderRecord,
         credential: RefreshCredential,
     ) -> Vec<LiveModel> {
-        let fingerprint = ProviderFingerprint::from(provider);
+        let fingerprint = ProviderFingerprint::new(provider, &credential);
         let now = tokio::time::Instant::now();
         let (models, stale) = {
             let entries = self
@@ -103,7 +127,12 @@ impl LiveModelCache {
             let provider_id = refresh_id.clone();
             let cache = std::sync::Arc::clone(self);
             let request_timeout = self.request_timeout;
-            let accepted = tasks.spawn_cancellable(async move {
+            let refresh_marker = RefreshMarker {
+                cache: std::sync::Arc::clone(self),
+                provider_id: refresh_id,
+            };
+            tasks.spawn_cancellable(async move {
+                let _refresh_marker = refresh_marker;
                 match fetch_models(&provider, &credential, request_timeout).await {
                     Ok(models) => cache.finish_refresh(
                         provider_id,
@@ -126,9 +155,6 @@ impl LiveModelCache {
                     }
                 }
             });
-            if !accepted {
-                self.clear_refresh(&refresh_id);
-            }
         }
         models
     }
@@ -187,7 +213,6 @@ impl LiveModelCache {
                 },
             }
         }
-        self.clear_refresh(&provider_id);
     }
 
     #[cfg(test)]
@@ -202,6 +227,7 @@ impl LiveModelCache {
     fn seed_for_test(
         &self,
         provider: &verlet_metadata::provider_store::LlmProviderRecord,
+        credential: &RefreshCredential,
         models: Vec<LiveModel>,
         age: std::time::Duration,
     ) {
@@ -211,11 +237,22 @@ impl LiveModelCache {
             .insert(
                 provider.provider_id.clone(),
                 CachedModels {
-                    fingerprint: ProviderFingerprint::from(provider),
+                    fingerprint: ProviderFingerprint::new(provider, credential),
                     models,
                     checked_at: tokio::time::Instant::now() - age,
                 },
             );
+    }
+}
+
+struct RefreshMarker {
+    cache: std::sync::Arc<LiveModelCache>,
+    provider_id: String,
+}
+
+impl Drop for RefreshMarker {
+    fn drop(&mut self) {
+        self.cache.clear_refresh(&self.provider_id);
     }
 }
 
@@ -595,7 +632,6 @@ mod tests {
         let mut server = spawn_http_sequence(vec![
             HttpResponse::ok(r#"{"data":[{"id":"live-model"}]}"#)
                 .gated(std::sync::Arc::clone(&release)),
-            HttpResponse::ok(r#"{"data":[{"id":"unexpected-second-request"}]}"#),
         ])
         .await;
         let provider = verlet_metadata::provider_store::LlmProviderRecord::new(
@@ -618,11 +654,7 @@ mod tests {
         }
         let request = next_request(&mut server).await;
         assert!(request.starts_with("GET /v1/models HTTP/1.1"));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), server.requests.recv(),)
-                .await
-                .is_err()
-        );
+        assert_eq!(tasks.task_count(), 1);
 
         release.add_permits(1);
         wait_until_idle(&cache, "single-flight-fixture").await;
@@ -638,7 +670,6 @@ mod tests {
         let mut server = spawn_http_sequence(vec![
             HttpResponse::ok(r#"{"data":[{"id":"refreshed-model"}]}"#)
                 .gated(std::sync::Arc::clone(&release)),
-            HttpResponse::ok(r#"{"data":[{"id":"unexpected-second-request"}]}"#),
         ])
         .await;
         let provider = verlet_metadata::provider_store::LlmProviderRecord::new(
@@ -650,6 +681,7 @@ mod tests {
         let cache = std::sync::Arc::new(super::LiveModelCache::new());
         cache.seed_for_test(
             &provider,
+            &super::RefreshCredential::ApiKey("fixture-key".to_string()),
             vec![super::LiveModel {
                 provider_id: provider.provider_id.clone(),
                 model_id: "stale-model".to_string(),
@@ -666,16 +698,135 @@ mod tests {
             assert_eq!(models[0].model_id, "stale-model");
         }
         let _request = next_request(&mut server).await;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), server.requests.recv(),)
-                .await
-                .is_err()
-        );
+        assert_eq!(tasks.task_count(), 1);
 
         release.add_permits(1);
         wait_until_idle(&cache, "ttl-fixture").await;
         let models = cache.entries_and_refresh(&tasks, &provider, credential);
         assert_eq!(models[0].model_id, "refreshed-model");
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_is_not_retried_before_the_ttl() {
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let mut server = spawn_http_sequence(vec![
+            HttpResponse {
+                status: "500 Internal Server Error",
+                body: String::new(),
+                release: None,
+            },
+            HttpResponse::ok(r#"{"data":[]}"#).gated(std::sync::Arc::clone(&release)),
+        ])
+        .await;
+        let provider = verlet_metadata::provider_store::LlmProviderRecord::new(
+            "failed-refresh-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            format!("{}/v1", server.base_url),
+        )
+        .with_auth_header(true);
+        let cache = std::sync::Arc::new(super::LiveModelCache::new());
+        let tasks =
+            std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
+        let credential = super::RefreshCredential::ApiKey("fixture-key".to_string());
+
+        cache.entries_and_refresh(&tasks, &provider, credential.clone());
+        let _request = next_request(&mut server).await;
+        wait_until_idle(&cache, "failed-refresh-fixture").await;
+
+        assert!(
+            cache
+                .entries_and_refresh(&tasks, &provider, credential)
+                .is_empty()
+        );
+        assert!(
+            !cache.is_refreshing_for_test("failed-refresh-fixture"),
+            "a failed refresh must advance checked_at and suppress retries until the TTL"
+        );
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_clears_the_single_flight_marker() {
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let mut server = spawn_http_sequence(vec![
+            HttpResponse::ok(r#"{"data":[]}"#).gated(std::sync::Arc::clone(&release)),
+        ])
+        .await;
+        let provider = verlet_metadata::provider_store::LlmProviderRecord::new(
+            "cancelled-refresh-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            format!("{}/v1", server.base_url),
+        )
+        .with_auth_header(true);
+        let cache = std::sync::Arc::new(super::LiveModelCache::new());
+        let tasks =
+            std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
+
+        cache.entries_and_refresh(
+            &tasks,
+            &provider,
+            super::RefreshCredential::ApiKey("fixture-key".to_string()),
+        );
+        let _request = next_request(&mut server).await;
+        assert!(cache.is_refreshing_for_test("cancelled-refresh-fixture"));
+
+        tasks.shutdown().await;
+
+        assert!(!cache.is_refreshing_for_test("cancelled-refresh-fixture"));
+    }
+
+    #[tokio::test]
+    async fn credential_changes_do_not_serve_models_from_the_previous_credential() {
+        let mut server = spawn_http_sequence(vec![
+            HttpResponse::ok(r#"{"data":[{"id":"old-account-model"}]}"#),
+            HttpResponse::ok(r#"{"data":[{"id":"new-account-model"}]}"#),
+        ])
+        .await;
+        let provider = verlet_metadata::provider_store::LlmProviderRecord::new(
+            "credential-change-fixture",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            format!("{}/v1", server.base_url),
+        )
+        .with_auth_header(true);
+        let cache = std::sync::Arc::new(super::LiveModelCache::new());
+        let tasks =
+            std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
+
+        cache.entries_and_refresh(
+            &tasks,
+            &provider,
+            super::RefreshCredential::ApiKey("old-account-key".to_string()),
+        );
+        let _request = next_request(&mut server).await;
+        wait_until_idle(&cache, "credential-change-fixture").await;
+        assert_eq!(
+            cache.entries_and_refresh(
+                &tasks,
+                &provider,
+                super::RefreshCredential::ApiKey("old-account-key".to_string()),
+            )[0]
+            .model_id,
+            "old-account-model"
+        );
+
+        let after_change = cache.entries_and_refresh(
+            &tasks,
+            &provider,
+            super::RefreshCredential::ApiKey("new-account-key".to_string()),
+        );
+        assert!(
+            after_change.is_empty(),
+            "models fetched with the previous credential must not cross the credential boundary"
+        );
+        let _request = next_request(&mut server).await;
+        wait_until_idle(&cache, "credential-change-fixture").await;
+        let models = cache.entries_and_refresh(
+            &tasks,
+            &provider,
+            super::RefreshCredential::ApiKey("new-account-key".to_string()),
+        );
+        assert_eq!(models[0].model_id, "new-account-model");
         tasks.shutdown().await;
     }
 }
