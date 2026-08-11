@@ -35,6 +35,20 @@ openai-codex` shows the account without exposing tokens, and `verlet auth delete
 openai-codex` signs the local Verlet installation out. Verlet refreshes expiring
 tokens automatically.
 
+The same setup is available inside the TUI through `/setup`. The wizard lists
+providers, accepts pasted API keys for key-based providers, and offers browser
+or device-code sign-in for `openai-codex`. Browser sign-in opens on the machine
+running `verlet chat` and listens on that machine's localhost callback, even
+when the chat was started with `--attach`; the OAuth flow is client-side and
+only the completed credential is sent to the attached app-server. If the
+active model is missing credentials, the wizard opens automatically at
+startup.
+
+An attached app-server must support `modelProvider/auth/setOAuth` to complete
+in-TUI OpenAI Codex sign-in (use a kernel build containing this chat credential
+wiring or newer). Device-code sign-in is the appropriate choice when the chat
+client machine is headless or cannot open a browser.
+
 The built-in seed guarantees `gpt-5.6-sol`, `gpt-5.6-terra`, and
 `gpt-5.6-luna`; `gpt-5.6-sol` is the default. The merged model catalog can add
 other current Codex-plan models without replacing those baseline rows.
@@ -86,7 +100,10 @@ are not the authority for cloud metering.
 - Slash-command popup with filtering and Tab completion:
   `/help`, `/quit`, `/q`, `/interrupt`, `/clear`, `/status`, `/new`,
   `/sessions`, `/resume <thread-id>`, `/rename <name>`, `/fork`, `/compact`,
-  and `/models`.
+  `/models`, and `/setup`.
+- `/setup` opens the provider credential wizard. It stores pasted keys through
+  the app-server RPC boundary and runs OpenAI Codex browser/device OAuth in the
+  chat client process before sending the completed credential to the server.
 - `/models` opens a modal picker backed by a fresh `model/list` request.
   Selecting a row calls `model/select`; missing credentials are reported by
   the app-server without changing the active model. While the picker is open,

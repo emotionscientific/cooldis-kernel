@@ -1,3 +1,271 @@
+use base64::Engine as _;
+use futures_util::{SinkExt as _, StreamExt as _};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+#[derive(Clone)]
+struct MockRpcReply {
+    method: &'static str,
+    result: Result<serde_json::Value, &'static str>,
+}
+
+fn rpc_ok(method: &'static str, result: serde_json::Value) -> MockRpcReply {
+    MockRpcReply {
+        method,
+        result: Ok(result),
+    }
+}
+
+fn rpc_err(method: &'static str, message: &'static str) -> MockRpcReply {
+    MockRpcReply {
+        method,
+        result: Err(message),
+    }
+}
+
+async fn mock_operator_client(
+    replies: Vec<MockRpcReply>,
+) -> (
+    crate::adapters::operator_client::OperatorClient<tokio::io::DuplexStream>,
+    Arc<Mutex<Vec<crate::adapters::app_server::connection::JsonRpcRequest>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let client_websocket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        client_io,
+        tokio_tungstenite::tungstenite::protocol::Role::Client,
+        None,
+    )
+    .await;
+    let mut server_websocket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        server_io,
+        tokio_tungstenite::tungstenite::protocol::Role::Server,
+        None,
+    )
+    .await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+    let task = tokio::spawn(async move {
+        let mut replies = VecDeque::from(replies);
+        while let Some(message) = server_websocket.next().await {
+            let message = message.expect("mock app-server websocket read");
+            let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                if message.is_close() {
+                    break;
+                }
+                continue;
+            };
+            let message = serde_json::from_str::<
+                crate::adapters::app_server::connection::JsonRpcMessage,
+            >(&text)
+            .expect("mock app-server JSON-RPC request");
+            let crate::adapters::app_server::connection::JsonRpcMessage::Request(request) = message
+            else {
+                continue;
+            };
+            let answer = if request.method == "initialize" {
+                crate::adapters::app_server::connection::JsonRpcMessage::Response(
+                    crate::adapters::app_server::connection::JsonRpcResponse {
+                        id: request.id.clone(),
+                        result: serde_json::json!({}),
+                    },
+                )
+            } else {
+                captured.lock().unwrap().push(request.clone());
+                let reply = replies.pop_front().expect("unexpected JSON-RPC request");
+                assert_eq!(request.method, reply.method);
+                match reply.result {
+                    Ok(result) => {
+                        crate::adapters::app_server::connection::JsonRpcMessage::Response(
+                            crate::adapters::app_server::connection::JsonRpcResponse {
+                                id: request.id.clone(),
+                                result,
+                            },
+                        )
+                    }
+                    Err(message) => crate::adapters::app_server::connection::JsonRpcMessage::Error(
+                        crate::adapters::app_server::connection::JsonRpcError {
+                            id: request.id.clone(),
+                            error: crate::adapters::app_server::connection::JsonRpcErrorError {
+                                code: -32602,
+                                message: message.to_string(),
+                                data: None,
+                            },
+                        },
+                    ),
+                }
+            };
+            let text = serde_json::to_string(&answer).unwrap();
+            server_websocket
+                .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+                .await
+                .expect("mock app-server websocket write");
+        }
+        assert!(replies.is_empty(), "unused mock JSON-RPC replies");
+    });
+    let client = crate::adapters::operator_client::OperatorClient::connect_with_websocket(
+        client_websocket,
+        "memory://chat-test",
+        crate::adapters::operator_client::OperatorConnectConfig::default(),
+    )
+    .await
+    .unwrap();
+    (client, requests, task)
+}
+
+async fn drive_actions(
+    replies: Vec<MockRpcReply>,
+    actions: Vec<verlet_chat::Action>,
+) -> (
+    Vec<verlet_chat::ChatEvent>,
+    Vec<crate::adapters::app_server::connection::JsonRpcRequest>,
+) {
+    let (mut client, requests, server) = mock_operator_client(replies).await;
+    let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    for action in actions {
+        action_tx.send(action).unwrap();
+    }
+    drop(action_tx);
+    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    driver
+        .drive(&mut client, action_rx, event_tx)
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        events.push(event);
+    }
+    client.close().await.unwrap();
+    server.await.unwrap();
+    let requests = requests.lock().unwrap().clone();
+    (events, requests)
+}
+
+struct FakeOAuthServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+async fn fake_oauth_server(responses: Vec<(u16, serde_json::Value)>) -> FakeOAuthServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+    let task = tokio::spawn(async move {
+        for (status, body) in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            captured.lock().unwrap().push(request);
+            let body = serde_json::to_string(&body).unwrap();
+            let reason = if status < 300 { "OK" } else { "Bad Request" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    FakeOAuthServer {
+        base_url: format!("http://{address}"),
+        requests,
+        task,
+    }
+}
+
+async fn pending_oauth_server() -> (
+    String,
+    Arc<Mutex<Vec<String>>>,
+    Arc<tokio::sync::Notify>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let stop = Arc::clone(&shutdown);
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await;
+        captured.lock().unwrap().push(request);
+        let body = serde_json::json!({
+            "device_auth_id": "pending-device",
+            "user_code": "WAIT-CODE",
+            "verification_uri": "https://example.test/device",
+            "interval": 0
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        stop.notified().await;
+    });
+    (format!("http://{address}"), requests, shutdown, task)
+}
+
+async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = socket.read(&mut buffer).await.unwrap();
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        if bytes.len() >= header_end + 4 + content_length {
+            break;
+        }
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
+fn oauth_access_token() -> String {
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-device"},
+            "email": "user@example.com"
+        })
+        .to_string(),
+    );
+    format!("{header}.{payload}.signature")
+}
+
+fn oauth_token_response(access: &str, refresh: &str) -> serde_json::Value {
+    serde_json::json!({
+        "access_token": access,
+        "refresh_token": refresh,
+        "expires_in": 3600
+    })
+}
+
+async fn recv_event(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<verlet_chat::ChatEvent>,
+) -> verlet_chat::ChatEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(30), events.recv())
+        .await
+        .expect("chat event timed out")
+        .expect("chat event channel closed")
+}
+
 #[test]
 fn parse_attach_target_accepts_unix_and_websocket() {
     assert_eq!(
@@ -28,10 +296,9 @@ fn notification(
 }
 
 fn driver() -> super::ChatDriver {
-    super::ChatDriver {
-        thread_id: "thread-1".to_string(),
-        active_turn_id: Some("turn-1".to_string()),
-    }
+    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    driver.active_turn_id = Some("turn-1".to_string());
+    driver
 }
 
 #[test]
@@ -359,4 +626,577 @@ fn model_rows_preserve_coordinates_auth_and_active_selection() {
             active: true,
         }]
     );
+}
+
+#[test]
+fn provider_rows_match_auth_catalog_status_and_active_model() {
+    let auth = crate::adapters::operator_client::OperatorModelProviderAuthList {
+        auth: None,
+        data: vec![
+            crate::adapters::operator_client::OperatorModelProviderAuth {
+                provider_id: "openai-codex".to_string(),
+                display_name: "OpenAI Codex".to_string(),
+                configured: true,
+                source: Some("stored".to_string()),
+                label: Some("signed in".to_string()),
+            },
+            crate::adapters::operator_client::OperatorModelProviderAuth {
+                provider_id: "anthropic".to_string(),
+                display_name: String::new(),
+                configured: true,
+                source: Some("environment".to_string()),
+                label: Some("ANTHROPIC_API_KEY detected".to_string()),
+            },
+            crate::adapters::operator_client::OperatorModelProviderAuth {
+                provider_id: "openai".to_string(),
+                display_name: "OpenAI".to_string(),
+                configured: false,
+                source: None,
+                label: None,
+            },
+        ],
+        next_cursor: None,
+    };
+    let models = crate::adapters::operator_client::OperatorModelList {
+        data: vec![crate::adapters::operator_client::OperatorModel {
+            provider_id: "anthropic".to_string(),
+            model: "claude".to_string(),
+            display_name: "Claude".to_string(),
+            auth_status: crate::adapters::operator_client::OperatorModelAuthStatus::Env,
+            active: true,
+        }],
+        next_cursor: None,
+    };
+
+    assert_eq!(
+        super::provider_rows(&auth, &models),
+        vec![
+            verlet_chat::ProviderRow {
+                provider_id: "openai-codex".to_string(),
+                display_name: "OpenAI Codex".to_string(),
+                auth_status: "configured".to_string(),
+                label: "signed in".to_string(),
+                oauth: true,
+                active: false,
+            },
+            verlet_chat::ProviderRow {
+                provider_id: "anthropic".to_string(),
+                display_name: String::new(),
+                auth_status: "env".to_string(),
+                label: "ANTHROPIC_API_KEY detected".to_string(),
+                oauth: false,
+                active: true,
+            },
+            verlet_chat::ProviderRow {
+                provider_id: "openai".to_string(),
+                display_name: "OpenAI".to_string(),
+                auth_status: "missing".to_string(),
+                label: String::new(),
+                oauth: false,
+                active: false,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn list_providers_fetches_catalog_and_active_model() {
+    let (events, requests) = drive_actions(
+        vec![
+            rpc_ok(
+                "modelProvider/auth/status",
+                serde_json::json!({
+                    "auth": null,
+                    "data": [{
+                        "providerId": "openai-codex",
+                        "displayName": "OpenAI Codex",
+                        "configured": false,
+                        "source": null,
+                        "label": null
+                    }],
+                    "nextCursor": null
+                }),
+            ),
+            rpc_ok(
+                "model/list",
+                serde_json::json!({
+                    "data": [{
+                        "providerId": "openai-codex",
+                        "model": "gpt-5.6-sol",
+                        "displayName": "GPT-5.6 Sol",
+                        "authStatus": "missing",
+                        "active": true
+                    }],
+                    "nextCursor": null
+                }),
+            ),
+        ],
+        vec![verlet_chat::Action::ListProviders],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::Providers(vec![
+            verlet_chat::ProviderRow {
+                provider_id: "openai-codex".to_string(),
+                display_name: "OpenAI Codex".to_string(),
+                auth_status: "missing".to_string(),
+                label: String::new(),
+                oauth: true,
+                active: true,
+            }
+        ])]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect::<Vec<_>>(),
+        ["modelProvider/auth/status", "model/list"]
+    );
+}
+
+#[tokio::test]
+async fn set_provider_key_maps_success_to_credential_result() {
+    let (events, requests) = drive_actions(
+        vec![rpc_ok(
+            "modelProvider/auth/set",
+            serde_json::json!({
+                "auth": {
+                    "providerId": "anthropic",
+                    "displayName": "Anthropic",
+                    "configured": true,
+                    "source": "stored",
+                    "label": "stored credential"
+                }
+            }),
+        )],
+        vec![verlet_chat::Action::SetProviderKey {
+            provider_id: "anthropic".to_string(),
+            api_key: "paste-secret".to_string(),
+        }],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CredentialResult {
+            provider_id: "anthropic".to_string(),
+            error: None,
+        }]
+    );
+    assert_eq!(requests[0].method, "modelProvider/auth/set");
+    assert_eq!(
+        requests[0].params.as_ref().unwrap()["apiKey"],
+        "paste-secret"
+    );
+}
+
+#[tokio::test]
+async fn set_provider_key_maps_rpc_error_without_echoing_the_key() {
+    let (events, _) = drive_actions(
+        vec![rpc_err(
+            "modelProvider/auth/set",
+            "credential paste-secret rejected by policy",
+        )],
+        vec![verlet_chat::Action::SetProviderKey {
+            provider_id: "anthropic".to_string(),
+            api_key: "paste-secret".to_string(),
+        }],
+    )
+    .await;
+
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CredentialResult {
+            provider_id: "anthropic".to_string(),
+            error: Some(
+                "request `modelProvider/auth/set` was refused: credential [redacted] rejected by policy"
+                    .to_string(),
+            ),
+        }]
+    );
+    assert!(!format!("{events:?}").contains("paste-secret"));
+}
+
+#[test]
+fn oauth_rpc_error_redaction_removes_access_and_refresh_values() {
+    assert_eq!(
+        super::redact_secret_values(
+            "server echoed access-secret and refresh-secret".to_string(),
+            [&"access-secret".to_string(), &"refresh-secret".to_string()],
+        ),
+        "server echoed [redacted] and [redacted]"
+    );
+}
+
+#[tokio::test]
+async fn pending_login_aborts_its_task_when_dropped() {
+    struct NotifyDrop(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for NotifyDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _notify = NotifyDrop(Some(dropped_tx));
+        let _ = started_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    started_rx.await.unwrap();
+    drop(super::PendingLogin { id: 1, task });
+    tokio::time::timeout(std::time::Duration::from_secs(30), dropped_rx)
+        .await
+        .expect("aborted login task did not drop")
+        .unwrap();
+}
+
+#[test]
+fn provider_auth_display_name_defaults_for_older_servers() {
+    let auth =
+        serde_json::from_value::<crate::adapters::operator_client::OperatorModelProviderAuth>(
+            serde_json::json!({
+                "providerId": "older-provider",
+                "configured": false
+            }),
+        )
+        .unwrap();
+    assert_eq!(auth.display_name, "");
+}
+
+#[tokio::test]
+async fn clear_credential_calls_delete_and_reports_success() {
+    let (events, requests) = drive_actions(
+        vec![rpc_ok(
+            "modelProvider/auth/delete",
+            serde_json::json!({
+                "auth": {
+                    "providerId": "anthropic",
+                    "configured": false,
+                    "source": null,
+                    "label": null
+                }
+            }),
+        )],
+        vec![verlet_chat::Action::ClearCredential {
+            provider_id: "anthropic".to_string(),
+        }],
+    )
+    .await;
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::CredentialCleared {
+            provider_id: "anthropic".to_string()
+        }]
+    );
+    assert_eq!(requests[0].method, "modelProvider/auth/delete");
+}
+
+#[tokio::test]
+async fn device_login_emits_code_then_sends_oauth_credential_over_rpc() {
+    let access_token = oauth_access_token();
+    let oauth = fake_oauth_server(vec![
+        (
+            200,
+            serde_json::json!({
+                "device_auth_id": "device-123",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://example.test/device",
+                "interval": 0
+            }),
+        ),
+        (
+            200,
+            serde_json::json!({
+                "authorization_code": "device-code",
+                "code_verifier": "device-verifier"
+            }),
+        ),
+        (200, oauth_token_response(&access_token, "refresh-secret")),
+    ])
+    .await;
+    let (mut client, requests, server) = mock_operator_client(vec![rpc_ok(
+        "modelProvider/auth/setOAuth",
+        serde_json::json!({
+            "auth": {
+                "providerId": "openai-codex",
+                "displayName": "OpenAI Codex",
+                "configured": true,
+                "source": "stored",
+                "label": "signed in"
+            }
+        }),
+    )])
+    .await;
+    let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    driver.oauth_client =
+        crate::openai_codex::OpenAICodexOAuthClient::with_test_endpoints(&oauth.base_url).unwrap();
+
+    let driven = driver.drive(&mut client, action_rx, event_tx);
+    let interaction = async move {
+        action_tx
+            .send(verlet_chat::Action::StartLogin {
+                provider_id: "openai-codex".to_string(),
+                method: verlet_chat::LoginMethod::Device,
+            })
+            .unwrap();
+        let first = recv_event(&mut event_rx).await;
+        let second = recv_event(&mut event_rx).await;
+        drop(action_tx);
+        (first, second)
+    };
+    let (drive_result, (first, second)) = tokio::join!(driven, interaction);
+    drive_result.unwrap();
+    assert_eq!(
+        first,
+        verlet_chat::ChatEvent::LoginDeviceCode {
+            verification_uri: "https://example.test/device".to_string(),
+            user_code: "ABCD-EFGH".to_string(),
+        }
+    );
+    assert_eq!(
+        second,
+        verlet_chat::ChatEvent::CredentialResult {
+            provider_id: "openai-codex".to_string(),
+            error: None,
+        }
+    );
+    let rendered_events = format!("{first:?}{second:?}");
+    assert!(!rendered_events.contains(&access_token));
+    assert!(!rendered_events.contains("refresh-secret"));
+
+    client.close().await.unwrap();
+    server.await.unwrap();
+    oauth.task.await.unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "modelProvider/auth/setOAuth");
+    let params = requests[0].params.as_ref().unwrap();
+    assert_eq!(params["access"], access_token);
+    assert_eq!(params["refresh"], "refresh-secret");
+    assert_eq!(oauth.requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn second_start_login_while_pending_reports_error_without_spawning() {
+    let (base_url, http_requests, shutdown, oauth_task) = pending_oauth_server().await;
+    let (mut client, _, server) = mock_operator_client(Vec::new()).await;
+    let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    driver.oauth_client =
+        crate::openai_codex::OpenAICodexOAuthClient::with_test_endpoints(&base_url).unwrap();
+
+    let driven = driver.drive(&mut client, action_rx, event_tx);
+    let interaction = async move {
+        action_tx
+            .send(verlet_chat::Action::StartLogin {
+                provider_id: "openai-codex".to_string(),
+                method: verlet_chat::LoginMethod::Device,
+            })
+            .unwrap();
+        assert!(matches!(
+            recv_event(&mut event_rx).await,
+            verlet_chat::ChatEvent::LoginDeviceCode { .. }
+        ));
+        action_tx
+            .send(verlet_chat::Action::StartLogin {
+                provider_id: "openai-codex".to_string(),
+                method: verlet_chat::LoginMethod::Device,
+            })
+            .unwrap();
+        let answer = recv_event(&mut event_rx).await;
+        action_tx.send(verlet_chat::Action::CancelLogin).unwrap();
+        drop(action_tx);
+        answer
+    };
+    let (drive_result, answer) = tokio::join!(driven, interaction);
+    drive_result.unwrap();
+    assert_eq!(
+        answer,
+        verlet_chat::ChatEvent::CredentialResult {
+            provider_id: "openai-codex".to_string(),
+            error: Some("a sign-in is already in progress".to_string()),
+        }
+    );
+    assert_eq!(driver.next_login_id, 1);
+    assert!(driver.pending_login.is_none());
+    assert_eq!(http_requests.lock().unwrap().len(), 1);
+
+    shutdown.notify_one();
+    oauth_task.await.unwrap();
+    client.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_login_completion_after_cancel_is_ignored() {
+    let (mut client, requests, server) = mock_operator_client(Vec::new()).await;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (login_tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    driver.pending_login = Some(super::PendingLogin {
+        id: 7,
+        task: tokio::spawn(std::future::pending()),
+    });
+    driver
+        .execute(
+            &mut client,
+            &event_tx,
+            &login_tx,
+            verlet_chat::Action::CancelLogin,
+        )
+        .await
+        .unwrap();
+    driver
+        .apply_login_event(
+            &mut client,
+            &event_tx,
+            super::LoginTaskEvent::Finished {
+                id: 7,
+                provider_id: "openai-codex".to_string(),
+                result: Ok(
+                    verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                        access: "stale-access".to_string(),
+                        refresh: "stale-refresh".to_string(),
+                        expires_at_ms: 123,
+                        account_id: None,
+                        email: None,
+                    },
+                ),
+            },
+        )
+        .await;
+    assert!(event_rx.try_recv().is_err());
+    assert!(requests.lock().unwrap().is_empty());
+
+    client.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn set_provider_key_while_login_pending_is_rejected_without_rpc() {
+    let (mut client, requests, server) = mock_operator_client(Vec::new()).await;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (login_tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    driver.pending_login = Some(super::PendingLogin {
+        id: 11,
+        task: tokio::spawn(std::future::pending()),
+    });
+
+    driver
+        .execute(
+            &mut client,
+            &event_tx,
+            &login_tx,
+            verlet_chat::Action::SetProviderKey {
+                provider_id: "anthropic".to_string(),
+                api_key: "must-not-send".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        event_rx.try_recv().unwrap(),
+        verlet_chat::ChatEvent::CredentialResult {
+            provider_id: "anthropic".to_string(),
+            error: Some("a sign-in is already in progress".to_string()),
+        }
+    );
+    assert!(requests.lock().unwrap().is_empty());
+
+    driver.abort_pending_login();
+    client.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn clear_credential_rpc_failure_is_a_transcript_error() {
+    let (events, _) = drive_actions(
+        vec![rpc_err(
+            "modelProvider/auth/delete",
+            "cannot clear the active OAuth provider",
+        )],
+        vec![verlet_chat::Action::ClearCredential {
+            provider_id: "openai-codex".to_string(),
+        }],
+    )
+    .await;
+    assert_eq!(
+        events,
+        vec![verlet_chat::ChatEvent::Error {
+            title: "request `modelProvider/auth/delete` was refused: cannot clear the active OAuth provider"
+                .to_string(),
+            body: Vec::new(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_missing_active_model_emits_provider_catalog() {
+    let (mut client, requests, server) = mock_operator_client(vec![
+        rpc_ok("account/read", serde_json::json!({})),
+        rpc_ok(
+            "config/read",
+            serde_json::json!({"config": {"cwd": "/tmp/work"}}),
+        ),
+        rpc_ok(
+            "model/list",
+            serde_json::json!({
+                "data": [{
+                    "providerId": "openai-codex",
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6 Sol",
+                    "authStatus": "missing",
+                    "active": true
+                }],
+                "nextCursor": null
+            }),
+        ),
+        rpc_ok(
+            "modelProvider/auth/status",
+            serde_json::json!({
+                "auth": null,
+                "data": [{
+                    "providerId": "openai-codex",
+                    "displayName": "OpenAI Codex",
+                    "configured": false,
+                    "source": null,
+                    "label": null
+                }],
+                "nextCursor": null
+            }),
+        ),
+    ])
+    .await;
+
+    let session = super::bootstrap_chat_client(&mut client, "attach ws://test".to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        session.initial_events,
+        vec![verlet_chat::ChatEvent::Providers(vec![
+            verlet_chat::ProviderRow {
+                provider_id: "openai-codex".to_string(),
+                display_name: "OpenAI Codex".to_string(),
+                auth_status: "missing".to_string(),
+                label: String::new(),
+                oauth: true,
+                active: true,
+            }
+        ])]
+    );
+    assert_eq!(requests.lock().unwrap().len(), 4);
+
+    client.close().await.unwrap();
+    server.await.unwrap();
 }

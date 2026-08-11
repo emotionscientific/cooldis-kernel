@@ -108,6 +108,8 @@ pub struct OperatorModelSelectResult {
 #[serde(rename_all = "camelCase")]
 pub struct OperatorModelProviderAuth {
     pub provider_id: String,
+    #[serde(default)]
+    pub display_name: String,
     pub configured: bool,
     #[serde(default)]
     pub source: Option<String>,
@@ -398,6 +400,27 @@ where
                     "invalid modelProvider/auth/setOAuth response: {err}"
                 ))
             })
+    }
+
+    pub async fn model_provider_auth_delete(
+        &mut self,
+        provider_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "modelProvider/auth/delete",
+            serde_json::json!({ "providerId": provider_id }),
+        )
+        .await
+    }
+
+    pub async fn model_provider_auth_delete_typed(
+        &mut self,
+        provider_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<OperatorModelProviderAuth> {
+        let value = self.model_provider_auth_delete(provider_id).await?;
+        serde_json::from_value::<OperatorModelProviderAuthResult>(value)
+            .map(|result| result.auth)
+            .map_err(|err| tui_error(format!("invalid modelProvider/auth/delete response: {err}")))
     }
 
     pub async fn config_read(
