@@ -687,6 +687,29 @@ impl verlet_history::EventStore for AdmissionTestStore {
         self.inner.append_events(stream_id, records).await
     }
 
+    async fn append_events_fenced(
+        &self,
+        stream_id: &verlet_history::EventStreamId,
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
+        let appends_admission = records
+            .iter()
+            .any(|record| record.kind == verlet_history::EventKind::AdmissionDecided);
+        if appends_admission && let Some(barrier) = &self.admission_barrier {
+            barrier.arrive_and_wait().await;
+        }
+        let appends_manifest_bind = records
+            .iter()
+            .any(|record| record.kind == verlet_history::EventKind::ManifestBindCompleted);
+        if appends_manifest_bind && let Some(barrier) = &self.manifest_barrier {
+            barrier.arrive_and_wait().await;
+        }
+        self.inner
+            .append_events_fenced(stream_id, expected_next_sequence, records)
+            .await
+    }
+
     async fn read_events(
         &self,
         stream_id: &verlet_history::EventStreamId,
@@ -5086,7 +5109,7 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
             verlet_history::InMemorySessionStore::new(),
         ))
         .fail_nth(
-            "append_events",
+            "append_events_fenced",
             2,
             "a second manifest append must not occur",
         ),
@@ -5119,7 +5142,7 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
         .await
         .unwrap();
 
-    assert_eq!(store.call_count("append_events"), 1);
+    assert_eq!(store.call_count("append_events_fenced"), 1);
     let events = store
         .read_events(
             &verlet_history::EventStreamId::for_thread(&thread.context().coordinates),
@@ -5281,7 +5304,7 @@ async fn failed_manifest_batch_leaves_no_bind_receipt_without_placement_witness(
         crate::support::fault::FaultingRuntimeStore::new(std::sync::Arc::new(
             verlet_history::InMemorySessionStore::new(),
         ))
-        .fail_nth("append_events", 1, "manifest batch failed"),
+        .fail_nth("append_events_fenced", 1, "manifest batch failed"),
     );
     let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
         std::sync::Arc::new(EchoRuntimeFactory),

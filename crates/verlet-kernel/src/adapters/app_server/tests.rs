@@ -8428,11 +8428,15 @@ async fn thread_start_with_agent_ref_records_manifest_receipts_before_turns() {
     let root = unique_test_root("app-server-manifest-start");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation =
+        publish_echo_operation(&operation_registry_root, "search", "search", "search").await;
     let agent_registry_root = root.join("agents");
     let manifest_path = root.join("local.verlet.agent.toml");
     std::fs::write(
         &manifest_path,
-        r#"
+        format!(
+            r#"
 [agent]
 name = "local-runner"
 version = "0.1.0"
@@ -8444,6 +8448,19 @@ id = "default"
 provider_ref = "provider://local_offline"
 model_ref = "model://echo"
 
+[[tools]]
+type = "direct_tool"
+id = "search"
+tool_name = "search"
+operation_ref = "op://search@sha256:{}"
+effect_class = "idempotent"
+
+[tools.attachment]
+allowed_secrets = ["SEARCH_TOKEN"]
+
+[tools.attachment.allowed_private_network]
+"http://127.0.0.1:9000" = ["POST"]
+
 [runtime]
 default_cwd = "agent-workspace"
 streaming = true
@@ -8451,13 +8468,19 @@ streaming = true
 [runtime.overrides]
 allow = ["streaming"]
 "#,
+            operation.active_artifact_hash
+        ),
     )
     .unwrap();
     let record = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root)
-        .publish_manifest_path(&manifest_path)
+        .publish_manifest_path_with_operation_registry(&manifest_path, &operation_registry_root)
         .unwrap();
 
-    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+        .with_capsule_bindings(
+            crate::adapters::app_server::CapsuleBindingsConfig::default()
+                .with_registry_root(&operation_registry_root),
+        );
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
@@ -8467,6 +8490,7 @@ allow = ["streaming"]
         .await
         .unwrap();
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    let expected_principal = connection.resolved_principal.principal_id.to_string();
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -8524,9 +8548,70 @@ allow = ["streaming"]
         .unwrap();
     let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
-    assert_eq!(events.len(), 4);
     let compile = event_by_kind(&events, verlet_history::EventKind::ManifestCompileCompleted);
     let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
+    let bind_receipt = serde_json::from_value::<
+        crate::agent::manifest_bind::AgentManifestBindReceipt,
+    >(bind.payload.clone())
+    .unwrap();
+    let attached = events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .collect::<Vec<_>>();
+    assert_eq!(attached.len(), bind_receipt.operation_bindings.len());
+    for (index, (event, binding)) in attached
+        .iter()
+        .zip(&bind_receipt.operation_bindings)
+        .enumerate()
+    {
+        assert_eq!(event.sequence.get(), bind.sequence.get() + index as i64 + 1);
+        assert_eq!(event.origin, verlet_history::EventOrigin::Discharged);
+        assert_eq!(
+            event.provenance.source_event_ids,
+            vec![bind.id],
+            "attachment must cite its bind receipt"
+        );
+        assert_eq!(
+            event.provenance.discharged_by.as_deref(),
+            Some(crate::agent::manifest_bind::MANIFEST_BINDER_DISCHARGED_BY)
+        );
+        let payload =
+            serde_json::from_value::<verlet_history::BindingAttachedPayload>(event.payload.clone())
+                .unwrap();
+        assert_eq!(payload.name, binding.name);
+        assert_eq!(payload.artifact_hash, binding.artifact_hash);
+        assert_eq!(payload.operations, binding.operations);
+        assert_eq!(
+            serde_json::to_value(&payload.direct_tools).unwrap(),
+            serde_json::to_value(&binding.direct_tools).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&payload.attachment_config).unwrap(),
+            serde_json::to_value(&binding.attachment_config).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(payload.effect_class).unwrap(),
+            serde_json::to_value(binding.effect_class).unwrap()
+        );
+        assert_eq!(payload.requested_by, expected_principal);
+        assert_eq!(payload.decided_by, expected_principal);
+        assert_eq!(payload.decision_event_id, None);
+    }
+    let folded = crate::kernel::binding_projector::fold_thread_bindings(&events);
+    assert!(folded.anomalies.is_empty());
+    assert_eq!(folded.active.len(), bind_receipt.operation_bindings.len());
+    assert_eq!(
+        folded
+            .active
+            .iter()
+            .map(|binding| binding.payload.name.as_str())
+            .collect::<Vec<_>>(),
+        bind_receipt
+            .operation_bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(compile.origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(bind.origin, verlet_history::EventOrigin::Discharged);
     assert_eq!(
@@ -8616,8 +8701,13 @@ async fn cancelled_manifest_lifecycle_caller_cannot_split_receipt_from_metadata(
             .witness_and_persist_lifecycle(handle, move |handle| async move {
                 operation_entered.notify_one();
                 operation_release.notified().await;
-                crate::adapters::app_server::threads::record_bound_agent_receipts(&handle, &bound)
-                    .await?;
+                let principal_id = handle.context().coordinates.user_id.clone();
+                crate::adapters::app_server::threads::record_bound_agent_receipts(
+                    &handle,
+                    &bound,
+                    &principal_id,
+                )
+                .await?;
                 operation_app
                     .persist_thread_lifecycle_record_with_metadata(
                         &handle,
@@ -14317,6 +14407,7 @@ async fn restored_thread_provider_requests_end_with_current_input() {
         &root,
         &workspace,
         provider_client,
+        // lexicon-allow: capsule - existing app-server test config type
         crate::adapters::app_server::CapsuleBindingsConfig::default(),
     )
     .await;
@@ -14376,6 +14467,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let thread_id = {
+        // lexicon-allow: capsule - existing app-server test client name
         let first_client = std::sync::Arc::new(SequencedStreamCapsuleClient::new([
             "before restart completion",
         ]));

@@ -3843,8 +3843,12 @@ impl crate::adapters::app_server::VerletAppServer {
             })
             .await
             .map_err(internal_error)?;
-        self.witness_bound_agent_and_persist_lifecycle(handle.clone(), bound_agent)
-            .await?;
+        self.witness_bound_agent_and_persist_lifecycle(
+            handle.clone(),
+            bound_agent,
+            connection.resolved_principal.principal_id.to_string(),
+        )
+        .await?;
         crate::adapters::app_server::subscriptions::wait_for_initial_thread_status(&handle).await;
         let context = handle.context();
         let coordinates = context.coordinates.clone();
@@ -4362,6 +4366,7 @@ impl crate::adapters::app_server::VerletAppServer {
                 handle.clone(),
                 compile_payload,
                 bind_payload,
+                connection.resolved_principal.principal_id.to_string(),
             )
             .await?;
         } else {
@@ -4547,8 +4552,12 @@ impl crate::adapters::app_server::VerletAppServer {
             })
             .await
             .map_err(internal_error)?;
-        self.witness_bound_agent_and_persist_lifecycle(handle.clone(), bound_agent.clone())
-            .await?;
+        self.witness_bound_agent_and_persist_lifecycle(
+            handle.clone(),
+            bound_agent.clone(),
+            connection.resolved_principal.principal_id.to_string(),
+        )
+        .await?;
         crate::adapters::app_server::subscriptions::wait_for_initial_thread_status(&handle).await;
 
         let child_coordinates = handle.context().coordinates.clone();

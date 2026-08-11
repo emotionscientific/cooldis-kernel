@@ -469,7 +469,10 @@ impl crate::adapters::app_server::VerletAppServer {
                 ),
             ));
         }
-        record_bound_agent_receipts(handle, &bound).await.map(Some)
+        let principal_id = handle.context().coordinates.user_id.clone();
+        record_bound_agent_receipts(handle, &bound, &principal_id)
+            .await
+            .map(Some)
     }
 
     pub(crate) fn agent_registry_root(&self) -> &std::path::Path {
@@ -1702,6 +1705,7 @@ is present in the conversation.",
 pub(super) async fn record_bound_agent_receipts(
     handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     bound: &crate::agent::manifest_bind::AgentManifestBoundThread,
+    principal_id: &str,
 ) -> crate::kernel::runtime_host::VerletResult<(
     verlet_history::EventRecord,
     verlet_history::EventRecord,
@@ -1717,7 +1721,7 @@ pub(super) async fn record_bound_agent_receipts(
         ))
     })?;
     let manifest_events = handle
-        .record_manifest_receipts(compile_payload, bind_payload)
+        .record_manifest_receipts_for_principal(compile_payload, bind_payload, principal_id)
         .await?;
     let discovery_payloads = bound
         .tool_universes
@@ -1777,10 +1781,11 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         bound: crate::agent::manifest_bind::AgentManifestBoundThread,
+        principal_id: String,
     ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
         let app = self.clone();
         self.witness_and_persist_lifecycle(handle, move |handle| async move {
-            record_bound_agent_receipts(&handle, &bound).await?;
+            record_bound_agent_receipts(&handle, &bound, &principal_id).await?;
             app.persist_thread_lifecycle_record_with_metadata(
                 &handle,
                 std::collections::BTreeMap::new(),
@@ -1796,11 +1801,16 @@ impl crate::adapters::app_server::VerletAppServer {
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
+        principal_id: String,
     ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
         let app = self.clone();
         self.witness_and_persist_lifecycle(handle, move |handle| async move {
             handle
-                .record_manifest_receipts(compile_payload, bind_payload)
+                .record_manifest_receipts_for_principal(
+                    compile_payload,
+                    bind_payload,
+                    &principal_id,
+                )
                 .await?;
             app.persist_thread_lifecycle_record_with_metadata(
                 &handle,
