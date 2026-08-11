@@ -194,6 +194,9 @@
                   <span class="pill mono" title={directToolTitle(direct)}>{direct.toolName || "unnamed direct tool"}</span>
                 {/each}
               </div>
+              {#if binding.attachmentConfig}
+                <pre class="control-json mono">{prettyJson(binding.attachmentConfig)}</pre>
+              {/if}
             </div>
           {:else}
             <p class="env-note">No operation-backed tool rows bound.</p>

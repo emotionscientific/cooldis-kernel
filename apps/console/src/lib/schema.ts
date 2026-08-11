@@ -202,6 +202,8 @@ export interface ThreadEvent {
 export interface ThreadEnvelopeBinding {
   name: string;
   artifactHash: string;
+  /** Effective host attachment authority on this operation binding. */
+  attachmentConfig: Record<string, unknown> | null;
   /** Empty means the binding exposes the whole record. */
   operations: string[];
   /** Direct model/tool-router aliases from direct_tool rows. */

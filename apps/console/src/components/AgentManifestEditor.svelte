@@ -358,10 +358,10 @@
       note = errorMessage(cause);
       return;
     }
-    const attachment = {
-      allowed_secrets: splitList(addToolSecrets),
-      allowed_private_network: privateNetwork,
-    };
+    const allowedSecrets = splitList(addToolSecrets);
+    const attachment = allowedSecrets.length || Object.keys(privateNetwork).length
+      ? { allowed_secrets: allowedSecrets, allowed_private_network: privateNetwork }
+      : undefined;
     updateManifest((draft) => {
       const rows = ensureArray(draft, "tools");
       rows.push(
@@ -371,14 +371,14 @@
               id,
               command: surface,
               operation_ref: operationRef(operation),
-              attachment,
+              ...(attachment ? { attachment } : {}),
             }
           : {
               type: "direct_tool",
               id,
               tool_name: surface,
               operation_ref: operationRef(operation),
-              attachment,
+              ...(attachment ? { attachment } : {}),
             },
       );
     });
