@@ -141,45 +141,22 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
             .unwrap_or_else(|| verlet_history::EventSequence::new(1));
         let folded = crate::kernel::binding_projector::fold_thread_bindings(&existing_events);
+        if let Some(message) = folded.anomaly_message() {
+            return Err(crate::kernel::runtime_host::VerletError::History(message));
+        }
         let desired_bindings = operation_bindings
             .iter()
             .map(|binding| {
                 crate::agent::manifest_bind::binding_attached_payload(binding, principal_id)
             })
             .collect::<Vec<_>>();
-        let mut matched_active = vec![false; folded.active.len()];
-        let mut matched_desired = vec![false; desired_bindings.len()];
-        for (desired_index, desired) in desired_bindings.iter().enumerate() {
-            if let Some((active_index, _)) =
-                folded
-                    .active
-                    .iter()
-                    .enumerate()
-                    .find(|(active_index, active)| {
-                        !matched_active[*active_index]
-                            && crate::kernel::binding_projector::binding_payload_identity_matches(
-                                &active.payload,
-                                desired,
-                            )
-                    })
-            {
-                matched_active[active_index] = true;
-                matched_desired[desired_index] = true;
-            }
-        }
-        let removed_attach_event_ids = folded
-            .active
-            .iter()
-            .enumerate()
-            .filter_map(|(index, binding)| {
-                (!matched_active[index]).then_some(binding.attach_event_id)
-            })
-            .collect::<Vec<_>>();
-        let added_bindings = desired_bindings
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, binding)| (!matched_desired[index]).then_some(binding))
-            .collect::<Vec<_>>();
+        let crate::kernel::binding_projector::ThreadBindingDelta {
+            removed_attach_event_ids,
+            added_bindings,
+        } = crate::kernel::binding_projector::reconcile_thread_bindings(
+            &folded.active,
+            desired_bindings,
+        );
         let mut placement =
             bind_payload
                 .get("placement")

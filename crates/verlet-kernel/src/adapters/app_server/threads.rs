@@ -1517,6 +1517,8 @@ pub(super) fn append_bound_agent_metadata(
             crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
             instruction,
         );
+    } else {
+        metadata.remove(crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA);
     }
     metadata.insert(
         crate::adapters::app_server::THREAD_AGENT_RUNTIME_STREAMING_METADATA.to_string(),
@@ -1547,18 +1549,16 @@ pub(super) fn append_bound_agent_metadata(
             auto_at_text_bytes.to_string(),
         );
     }
-    if !bound.operation_bindings.is_empty() {
-        let encoded = serde_json::to_string(&bound.operation_bindings).map_err(|err| {
-            crate::adapters::app_server::connection::jsonrpc_error(
-                -32602,
-                format!("failed to encode manifest operation bindings: {err}"),
-            )
-        })?;
-        metadata.insert(
-            crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
-            encoded,
-        );
-    }
+    let encoded = serde_json::to_string(&bound.operation_bindings).map_err(|err| {
+        crate::adapters::app_server::connection::jsonrpc_error(
+            -32602,
+            format!("failed to encode manifest operation bindings: {err}"),
+        )
+    })?;
+    metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        encoded,
+    );
     if !bound.skill_packages.is_empty() {
         let encoded = serde_json::to_string(&bound.skill_packages).map_err(|err| {
             crate::adapters::app_server::connection::jsonrpc_error(
@@ -1669,14 +1669,9 @@ fn manifest_tool_use_system_instruction(
 fn legacy_manifest_tool_use_system_instruction(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> Option<String> {
-    let has_tool_metadata = context
-        .metadata
-        .get(crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA)
-        .is_some_and(|value| !value.trim().is_empty())
-        || context
-            .metadata
-            .get(crate::adapters::app_server::THREAD_AGENT_TOOL_UNIVERSES_METADATA)
-            .is_some_and(|value| !value.trim().is_empty());
+    let has_tool_metadata = thread_manifest_operation_bindings(context)
+        .is_ok_and(|bindings| !bindings.is_empty())
+        || thread_manifest_tool_universes(context).is_ok_and(|bindings| !bindings.is_empty());
     if !has_tool_metadata {
         return None;
     }
@@ -2007,7 +2002,11 @@ pub(super) fn thread_operation_bindings_from_events(
             verlet_history::EventKind::BindingAttached | verlet_history::EventKind::BindingDetached
         )
     }) {
-        let bindings = crate::kernel::binding_projector::fold_thread_bindings(events)
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(events);
+        if let Some(message) = folded.anomaly_message() {
+            return Err(crate::kernel::runtime_host::VerletError::History(message));
+        }
+        let bindings = folded
             .active
             .into_iter()
             .map(|binding| ThreadOperationBinding {

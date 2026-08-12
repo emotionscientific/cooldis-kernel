@@ -11446,11 +11446,14 @@ streaming = false
         "gpt-test",
     );
     runtime_config.max_tokens = 128;
-    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
-        runtime_config,
-        provider_client,
-        capsule_bindings,
-    );
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            capsule_bindings,
+            None,
+            &config,
+        );
     let app =
         crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
             .await
@@ -11467,6 +11470,29 @@ streaming = false
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    app.inner
+        .supervisor
+        .shutdown_thread_at(&lifecycle.coordinates)
+        .await
+        .unwrap();
+    app.inner.state.write().await.threads.remove(&thread_id);
+    app.dispatch_request(
+        &connection,
+        "thread/resume",
+        Some(serde_json::json!({
+            "threadId": thread_id,
+            "excludeTurns": true,
+        })),
+    )
+    .await
+    .unwrap();
     app.dispatch_request(
         &connection,
         "turn/start",
@@ -11997,6 +12023,106 @@ streaming = false
     assert_eq!(receipt_bindings[0].binding.operations, ["profile"]);
     assert_eq!(receipt_bindings[0].attach_event_id, None);
 
+    let mut anomalous_events = events.clone();
+    anomalous_events
+        .iter_mut()
+        .find(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .unwrap()
+        .payload = serde_json::json!({"name": "missing-required-fields"});
+    let error = crate::adapters::app_server::threads::thread_operation_bindings_from_events(
+        &anomalous_events,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("binding history is anomalous"));
+
+    let mut detached_events = events.clone();
+    let mut next_sequence = detached_events.last().unwrap().sequence.get() + 1;
+    for attach_event_id in events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .map(|event| event.id)
+    {
+        let detached = verlet_history::NewEventRecord::witnessed(
+            lifecycle.coordinates.clone(),
+            verlet_history::EventKind::BindingDetached,
+            serde_json::to_value(verlet_history::BindingDetachedPayload {
+                attach_event_id,
+                requested_by: "principal:test".to_string(),
+                decided_by: "principal:test".to_string(),
+                decision_event_id: None,
+            })
+            .unwrap(),
+        );
+        detached_events.push(verlet_history::EventRecord::from_new(
+            stream_id.clone(),
+            verlet_history::EventSequence::new(next_sequence),
+            detached,
+        ));
+        next_sequence += 1;
+    }
+    let empty_fold = crate::adapters::app_server::threads::thread_operation_bindings_from_events(
+        &detached_events,
+    )
+    .unwrap()
+    .expect("binding events must remain authoritative after detaching every binding");
+    assert!(empty_fold.is_empty());
+
+    let old_analytics_attach = events
+        .iter()
+        .find(|event| {
+            event.kind == verlet_history::EventKind::BindingAttached
+                && event.payload["name"] == "analytics"
+        })
+        .unwrap();
+    let mut changed_events = events.clone();
+    let detach = verlet_history::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        verlet_history::EventKind::BindingDetached,
+        serde_json::to_value(verlet_history::BindingDetachedPayload {
+            attach_event_id: old_analytics_attach.id,
+            requested_by: "principal:test".to_string(),
+            decided_by: "principal:test".to_string(),
+            decision_event_id: None,
+        })
+        .unwrap(),
+    );
+    changed_events.push(verlet_history::EventRecord::from_new(
+        stream_id.clone(),
+        verlet_history::EventSequence::new(next_sequence),
+        detach,
+    ));
+    let mut changed_payload = serde_json::from_value::<verlet_history::BindingAttachedPayload>(
+        old_analytics_attach.payload.clone(),
+    )
+    .unwrap();
+    changed_payload.operations = vec!["summarize".to_string()];
+    let attach = verlet_history::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        verlet_history::EventKind::BindingAttached,
+        serde_json::to_value(changed_payload).unwrap(),
+    );
+    let new_analytics_attach = attach.id;
+    changed_events.push(verlet_history::EventRecord::from_new(
+        stream_id.clone(),
+        verlet_history::EventSequence::new(next_sequence + 1),
+        attach,
+    ));
+    let changed_bindings =
+        crate::adapters::app_server::threads::thread_operation_bindings_from_events(
+            &changed_events,
+        )
+        .unwrap()
+        .unwrap();
+    let changed_analytics = changed_bindings
+        .iter()
+        .find(|binding| binding.binding.name == "analytics")
+        .unwrap();
+    assert_eq!(changed_analytics.binding.operations, ["summarize"]);
+    assert_eq!(
+        changed_analytics.attach_event_id,
+        Some(new_analytics_attach)
+    );
+
     let mut corrupted_lifecycle = lifecycle.clone();
     let mut cached_bindings =
         serde_json::from_str::<Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>>(
@@ -12054,6 +12180,79 @@ streaming = false
     assert_bash_tool_describes(&requests[0], "profile");
     assert_bash_tool_omits(&requests[0], "summarize");
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn bound_agent_metadata_cache_replaces_changed_and_empty_binding_sets() {
+    let app = test_app().await;
+    let mut bound = app
+        .bind_app_server_agent_ref(
+            crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
+            &crate::agent::manifest_bind::AgentManifestModelProfileSelection::default(),
+            &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!bound.operation_bindings.is_empty());
+    let mut metadata = std::collections::BTreeMap::new();
+    crate::adapters::app_server::threads::append_bound_agent_metadata(
+        &mut metadata,
+        &bound,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let retained = bound.operation_bindings[0].clone();
+    bound.operation_bindings = vec![retained.clone()];
+    bound.bind_receipt.operation_bindings = vec![retained.clone()];
+    crate::adapters::app_server::threads::append_bound_agent_metadata(
+        &mut metadata,
+        &bound,
+        None,
+        None,
+    )
+    .unwrap();
+    let changed =
+        serde_json::from_str::<Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>>(
+            &metadata[crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA],
+        )
+        .unwrap();
+    assert_eq!(changed, [retained]);
+
+    bound.operation_bindings.clear();
+    bound.bind_receipt.operation_bindings.clear();
+    bound.bind_receipt.tool_ids.clear();
+    crate::adapters::app_server::threads::append_bound_agent_metadata(
+        &mut metadata,
+        &bound,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        metadata[crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA],
+        "[]"
+    );
+    assert!(
+        !metadata
+            .contains_key(crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA)
+    );
+    let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "empty-cache"),
+        verlet_runtime_contracts::ThreadTopology::root(),
+        metadata,
+    );
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    crate::adapters::app_server::threads::apply_manifest_runtime_metadata(&context, &mut config)
+        .unwrap();
+    assert!(config.system.is_empty());
 }
 
 #[test]

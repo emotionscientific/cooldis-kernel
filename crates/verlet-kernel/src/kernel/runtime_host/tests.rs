@@ -5344,6 +5344,223 @@ async fn manifest_rebind_emits_only_changed_binding_deltas_in_the_fenced_batch()
             ("search".to_string(), "sha256:search-b".to_string()),
         ]
     );
+    let folded = crate::kernel::binding_projector::fold_thread_bindings(&events);
+    let rebound_search = folded
+        .active
+        .iter()
+        .find(|binding| binding.payload.name == "search")
+        .unwrap();
+    assert_eq!(rebound_search.payload.artifact_hash, "sha256:search-b");
+    assert!(
+        delta[4..6]
+            .iter()
+            .any(|event| event.id == rebound_search.attach_event_id)
+    );
+}
+
+#[tokio::test]
+async fn manifest_bind_fence_conflict_never_appends_a_stale_binding_diff() {
+    let barrier = std::sync::Arc::new(AdmissionAppendBarrier::default());
+    let store = std::sync::Arc::new(AdmissionTestStore::blocking_manifest(barrier.clone()));
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "binding-fence-conflict"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let coordinates = thread.context().coordinates.clone();
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let recorder = tokio::spawn(async move {
+        thread
+            .record_manifest_receipts(
+                serde_json::json!({"manifest_hash": "snapshot-stale"}),
+                serde_json::json!({
+                    "manifest_hash": "snapshot-stale",
+                    "operation_bindings": [
+                        {"name": "search", "artifact_hash": "sha256:search"}
+                    ]
+                }),
+            )
+            .await
+    });
+
+    barrier.wait_for_entries(1).await;
+    let concurrent = verlet_history::NewEventRecord::witnessed(
+        coordinates,
+        verlet_history::EventKind::TurnSubmitted,
+        serde_json::json!({"turn_id": "turn-concurrent"}),
+    );
+    store
+        .append_events(&stream_id, vec![concurrent])
+        .await
+        .unwrap();
+    barrier.release();
+
+    let error = recorder.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("fenced append"));
+    let events = store.read_events(&stream_id, None).await.unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == verlet_history::EventKind::TurnSubmitted
+            && event.payload["turn_id"] == "turn-concurrent"
+    }));
+    assert!(events.iter().all(|event| {
+        !matches!(
+            event.kind,
+            verlet_history::EventKind::ManifestCompileCompleted
+                | verlet_history::EventKind::ManifestBindCompleted
+                | verlet_history::EventKind::BindingAttached
+                | verlet_history::EventKind::BindingDetached
+                | verlet_history::EventKind::PlacementDecision
+        )
+    }));
+}
+
+#[tokio::test]
+async fn manifest_rebind_matches_duplicate_bindings_one_for_one() {
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "binding-duplicates"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let duplicate = serde_json::json!({
+        "name": "search",
+        "artifact_hash": "sha256:search"
+    });
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({"manifest_hash": "snapshot-a"}),
+            serde_json::json!({
+                "manifest_hash": "snapshot-a",
+                "operation_bindings": [duplicate.clone(), duplicate.clone()]
+            }),
+        )
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&thread.context().coordinates);
+    let before_unchanged = store.read_events(&stream_id, None).await.unwrap();
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({"manifest_hash": "snapshot-b"}),
+            serde_json::json!({
+                "manifest_hash": "snapshot-b",
+                "operation_bindings": [duplicate.clone(), duplicate.clone()]
+            }),
+        )
+        .await
+        .unwrap();
+    let after_unchanged = store.read_events(&stream_id, None).await.unwrap();
+    assert!(
+        after_unchanged[before_unchanged.len()..]
+            .iter()
+            .all(|event| !matches!(
+                event.kind,
+                verlet_history::EventKind::BindingAttached
+                    | verlet_history::EventKind::BindingDetached
+            ))
+    );
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({"manifest_hash": "snapshot-c"}),
+            serde_json::json!({
+                "manifest_hash": "snapshot-c",
+                "operation_bindings": [duplicate]
+            }),
+        )
+        .await
+        .unwrap();
+    let after_removal = store.read_events(&stream_id, None).await.unwrap();
+    let removal_delta = &after_removal[after_unchanged.len()..];
+    assert_eq!(
+        removal_delta
+            .iter()
+            .filter(|event| event.kind == verlet_history::EventKind::BindingDetached)
+            .count(),
+        1
+    );
+    assert_eq!(
+        removal_delta
+            .iter()
+            .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+            .count(),
+        0
+    );
+    let folded = crate::kernel::binding_projector::fold_thread_bindings(&after_removal);
+    assert!(folded.anomalies.is_empty());
+    assert_eq!(folded.active.len(), 1);
+}
+
+#[tokio::test]
+async fn manifest_rebind_rejects_an_anomalous_binding_fold() {
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "binding-anomaly"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&thread.context().coordinates);
+    store
+        .append_events(
+            &stream_id,
+            vec![verlet_history::NewEventRecord::witnessed(
+                thread.context().coordinates.clone(),
+                verlet_history::EventKind::BindingAttached,
+                serde_json::json!({"name": "missing-required-fields"}),
+            )],
+        )
+        .await
+        .unwrap();
+
+    let error = thread
+        .record_manifest_receipts(
+            serde_json::json!({"manifest_hash": "snapshot-a"}),
+            serde_json::json!({
+                "manifest_hash": "snapshot-a",
+                "operation_bindings": [
+                    {"name": "search", "artifact_hash": "sha256:search"}
+                ]
+            }),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("binding history is anomalous"));
+    let events = store.read_events(&stream_id, None).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+            .count(),
+        1
+    );
+    assert!(events.iter().all(|event| {
+        !matches!(
+            event.kind,
+            verlet_history::EventKind::ManifestCompileCompleted
+                | verlet_history::EventKind::ManifestBindCompleted
+                | verlet_history::EventKind::BindingDetached
+                | verlet_history::EventKind::PlacementDecision
+        )
+    }));
 }
 
 #[tokio::test]

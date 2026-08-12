@@ -30,7 +30,14 @@ pub struct ThreadBindingsFold {
     pub anomalies: Vec<ThreadBindingAnomaly>,
 }
 
-pub(crate) fn binding_payload_identity_matches(
+impl ThreadBindingsFold {
+    pub(crate) fn anomaly_message(&self) -> Option<String> {
+        (!self.anomalies.is_empty())
+            .then(|| format!("thread binding history is anomalous: {:?}", self.anomalies))
+    }
+}
+
+fn binding_payload_identity_matches(
     left: &verlet_history::BindingAttachedPayload,
     right: &verlet_history::BindingAttachedPayload,
 ) -> bool {
@@ -42,10 +49,42 @@ pub(crate) fn binding_payload_identity_matches(
         && left.effect_class == right.effect_class
 }
 
+pub(crate) struct ThreadBindingDelta {
+    pub removed_attach_event_ids: Vec<verlet_history::EventRecordId>,
+    pub added_bindings: Vec<verlet_history::BindingAttachedPayload>,
+}
+
+pub(crate) fn reconcile_thread_bindings(
+    active: &[ThreadBinding],
+    desired: Vec<verlet_history::BindingAttachedPayload>,
+) -> ThreadBindingDelta {
+    let mut unmatched_active = vec![true; active.len()];
+    let mut added_bindings = Vec::new();
+    for desired_binding in desired {
+        if let Some((index, _)) = active.iter().enumerate().find(|(index, active_binding)| {
+            unmatched_active[*index]
+                && binding_payload_identity_matches(&active_binding.payload, &desired_binding)
+        }) {
+            unmatched_active[index] = false;
+        } else {
+            added_bindings.push(desired_binding);
+        }
+    }
+    let removed_attach_event_ids = active
+        .iter()
+        .zip(unmatched_active)
+        .filter_map(|(binding, unmatched)| unmatched.then_some(binding.attach_event_id))
+        .collect();
+    ThreadBindingDelta {
+        removed_attach_event_ids,
+        added_bindings,
+    }
+}
+
 #[derive(Default)]
 struct BindingBatchObservation {
     attached_count: usize,
-    attached_payloads: Vec<verlet_history::BindingAttachedPayload>,
+    attached_bindings: Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
     has_detach: bool,
 }
 
@@ -56,15 +95,12 @@ fn full_reemission_bind_batches(
         .iter()
         .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
         .filter_map(|event| {
-            let bindings = serde_json::from_value::<
+            let mut bindings = serde_json::from_value::<
                 Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
             >(event.payload.get("operation_bindings")?.clone())
             .ok()?;
-            let payloads = bindings
-                .iter()
-                .map(|binding| crate::agent::manifest_bind::binding_attached_payload(binding, ""))
-                .collect::<Vec<_>>();
-            Some((event.id, payloads))
+            bindings.sort();
+            Some((event.id, bindings))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let mut observed = std::collections::HashMap::<_, BindingBatchObservation>::new();
@@ -82,7 +118,11 @@ fn full_reemission_bind_batches(
                 if let Ok(payload) = serde_json::from_value::<verlet_history::BindingAttachedPayload>(
                     event.payload.clone(),
                 ) {
-                    observation.attached_payloads.push(payload);
+                    observation.attached_bindings.push(
+                        crate::agent::manifest_bind::operation_binding_from_attached_payload(
+                            payload,
+                        ),
+                    );
                 }
             }
             verlet_history::EventKind::BindingDetached => {
@@ -94,30 +134,22 @@ fn full_reemission_bind_batches(
 
     expected
         .into_iter()
-        .filter_map(|(bind_event_id, expected_payloads)| {
+        .filter_map(|(bind_event_id, expected_bindings)| {
             let observation = observed.get(&bind_event_id);
             let attached_count = observation.map_or(0, |batch| batch.attached_count);
             if observation.is_some_and(|batch| batch.has_detach)
-                || attached_count != expected_payloads.len()
+                || attached_count != expected_bindings.len()
             {
                 return None;
             }
-            let decoded = observation
-                .map(|batch| batch.attached_payloads.as_slice())
+            let mut attached_bindings = observation
+                .map(|batch| batch.attached_bindings.clone())
                 .unwrap_or_default();
-            if decoded.len() == attached_count {
-                let mut matched = vec![false; decoded.len()];
-                for expected_payload in &expected_payloads {
-                    let Some((index, _)) = decoded.iter().enumerate().find(|(index, actual)| {
-                        !matched[*index]
-                            && binding_payload_identity_matches(expected_payload, actual)
-                    }) else {
-                        return None;
-                    };
-                    matched[index] = true;
-                }
+            if attached_bindings.len() != attached_count {
+                return None;
             }
-            Some((bind_event_id, attached_count))
+            attached_bindings.sort();
+            (attached_bindings == expected_bindings).then_some((bind_event_id, attached_count))
         })
         .collect()
 }
@@ -302,6 +334,19 @@ mod tests {
             })
             .unwrap(),
         )
+    }
+
+    fn detach_event_for_bind(
+        sequence: i64,
+        id: u128,
+        attach_event_id: verlet_history::EventRecordId,
+        bind_id: u128,
+    ) -> verlet_history::EventRecord {
+        let mut event = detach_event(sequence, id, attach_event_id);
+        event.provenance.source_event_ids = vec![verlet_history::EventRecordId::from_uuid(
+            uuid::Uuid::from_u128(bind_id),
+        )];
+        event
     }
 
     #[test]
@@ -491,6 +536,97 @@ mod tests {
     }
 
     #[test]
+    fn modern_changed_delta_is_not_mistaken_for_a_full_reemission() {
+        let first_bind = bind_event(
+            1,
+            900,
+            serde_json::json!([
+                {"name": "search-tools", "artifact_hash": "sha256:search-tools"},
+                {"name": "file-tools", "artifact_hash": "sha256:file-tools"}
+            ]),
+        );
+        let first_search = attach_event_for_bind(2, 400, "search-tools", 900);
+        let first_files = attach_event_for_bind(3, 300, "file-tools", 900);
+        let second_bind = bind_event(
+            4,
+            901,
+            serde_json::json!([
+                {"name": "search-tools", "artifact_hash": "sha256:search-tools-v2"},
+                {"name": "file-tools", "artifact_hash": "sha256:file-tools"}
+            ]),
+        );
+        let mut second_search = attach_event_for_bind(5, 200, "search-tools", 901);
+        second_search.payload["artifact_hash"] = serde_json::json!("sha256:search-tools-v2");
+        let detach_first_search = detach_event_for_bind(6, 100, first_search.id, 901);
+
+        let folded = super::fold_thread_bindings(&[
+            first_bind,
+            first_search,
+            first_files.clone(),
+            second_bind,
+            second_search.clone(),
+            detach_first_search,
+        ]);
+
+        assert!(folded.anomalies.is_empty());
+        assert_eq!(
+            folded
+                .active
+                .iter()
+                .map(|binding| binding.attach_event_id)
+                .collect::<Vec<_>>(),
+            vec![first_files.id, second_search.id]
+        );
+    }
+
+    #[test]
+    fn many_emo_584_full_reemissions_keep_only_the_latest_generation() {
+        let mut events = Vec::new();
+        let mut sequence = 1;
+        let mut expected_ids = Vec::new();
+        for generation in 0..12_u128 {
+            let bind_id = 1_000 + generation;
+            let search_name = format!("search-tools-{generation}");
+            let file_name = format!("file-tools-{generation}");
+            events.push(bind_event(
+                sequence,
+                bind_id,
+                serde_json::json!([
+                    {
+                        "name": search_name,
+                        "artifact_hash": format!("sha256:search-tools-{generation}")
+                    },
+                    {
+                        "name": file_name,
+                        "artifact_hash": format!("sha256:file-tools-{generation}")
+                    }
+                ]),
+            ));
+            sequence += 1;
+            let search =
+                attach_event_for_bind(sequence, 2_000 + generation * 2, &search_name, bind_id);
+            sequence += 1;
+            let files =
+                attach_event_for_bind(sequence, 2_001 + generation * 2, &file_name, bind_id);
+            sequence += 1;
+            expected_ids = vec![search.id, files.id];
+            events.extend([search, files]);
+        }
+
+        let folded = super::fold_thread_bindings(&events);
+
+        assert!(folded.anomalies.is_empty());
+        assert_eq!(
+            folded
+                .active
+                .iter()
+                .map(|binding| binding.attach_event_id)
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+    }
+
+    #[test]
     fn emo_584_empty_reemission_retires_the_prior_generation() {
         let first_bind = bind_event(
             1,
@@ -613,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_new_bind_batch_retires_the_previous_batch() {
+    fn undecodable_attach_cannot_prove_a_full_reemission_batch() {
         let old_bind = bind_event(
             1,
             900,
@@ -641,7 +777,16 @@ mod tests {
 
         let folded = super::fold_thread_bindings(&[old_bind, old, new_bind, bad_attach.clone()]);
 
-        assert!(folded.active.is_empty());
+        assert_eq!(
+            folded
+                .active
+                .iter()
+                .map(|binding| binding.attach_event_id)
+                .collect::<Vec<_>>(),
+            vec![verlet_history::EventRecordId::from_uuid(
+                uuid::Uuid::from_u128(1)
+            )]
+        );
         assert!(matches!(
             folded.anomalies.as_slice(),
             [super::ThreadBindingAnomaly::UndecodableAttached { event_id, .. }]
