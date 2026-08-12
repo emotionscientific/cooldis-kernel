@@ -1,15 +1,3 @@
-fn binding_payload_identity_matches(
-    left: &verlet_history::BindingAttachedPayload,
-    right: &verlet_history::BindingAttachedPayload,
-) -> bool {
-    left.name == right.name
-        && left.artifact_hash == right.artifact_hash
-        && left.operations == right.operations
-        && left.direct_tools == right.direct_tools
-        && left.attachment_config == right.attachment_config
-        && left.effect_class == right.effect_class
-}
-
 impl crate::kernel::runtime_host::RuntimeThreadHandle {
     pub fn context(&self) -> &verlet_runtime_contracts::ThreadContext {
         &self.thread.context
@@ -169,7 +157,10 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                     .enumerate()
                     .find(|(active_index, active)| {
                         !matched_active[*active_index]
-                            && binding_payload_identity_matches(&active.payload, desired)
+                            && crate::kernel::binding_projector::binding_payload_identity_matches(
+                                &active.payload,
+                                desired,
+                            )
                     })
             {
                 matched_active[active_index] = true;
