@@ -8685,6 +8685,256 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[derive(Clone, Copy)]
+enum ResumeAgentRegistryMutation {
+    Republished,
+    Deleted,
+}
+
+#[tokio::test]
+async fn app_server_resume_uses_stream_when_agent_record_was_republished() {
+    assert_app_server_resume_uses_stream_after_registry_mutation(
+        ResumeAgentRegistryMutation::Republished,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn app_server_resume_uses_stream_when_agent_record_was_deleted() {
+    assert_app_server_resume_uses_stream_after_registry_mutation(
+        ResumeAgentRegistryMutation::Deleted,
+    )
+    .await;
+}
+
+async fn assert_app_server_resume_uses_stream_after_registry_mutation(
+    mutation: ResumeAgentRegistryMutation,
+) {
+    let label = match mutation {
+        ResumeAgentRegistryMutation::Republished => "republished",
+        ResumeAgentRegistryMutation::Deleted => "deleted",
+    };
+    let root = unique_test_root(&format!("app-server-resume-{label}-agent"));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation =
+        publish_echo_operation(&operation_registry_root, "search", "search", "search").await;
+    let agent_registry_root = root.join("agents");
+    let original_record = publish_direct_operation_agent(
+        &root,
+        &agent_registry_root,
+        &operation_registry_root,
+        "resume-wedge",
+        "Original resume fixture",
+        &operation.active_artifact_hash,
+    );
+    // lexicon-allow: capsule - existing app-server test fixture config
+    let binding_config = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&operation_registry_root);
+    let thread_id;
+    let coordinates;
+    let original_events;
+    let original_fold;
+    let original_attach_event_id;
+
+    {
+        let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
+            // lexicon-allow: capsule - existing app-server test provider fixture
+            std::sync::Arc::new(InspectingCapsuleClient::default());
+        let app =
+            test_manifest_resume_app(&root, &workspace, provider_client, binding_config.clone())
+                .await;
+        let (connection, _outbound_rx) = test_connection(app.clone()).await;
+        initialize_for_test(&connection).await;
+        let started = app
+            .dispatch_request(
+                &connection,
+                "thread/start",
+                Some(serde_json::json!({
+                    "agentRef": "agent://resume-wedge@latest"
+                })),
+            )
+            .await
+            .unwrap();
+        thread_id = started["thread"]["id"].as_str().unwrap().to_string();
+        let lifecycle = app
+            .inner
+            .metadata_store
+            .get_thread_lifecycle(
+                verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap(),
+            )
+            .await
+            .unwrap()
+            .expect("thread/start should persist the wedge lifecycle");
+        coordinates = lifecycle.coordinates;
+        let session_store =
+            verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
+                .await
+                .unwrap();
+        original_events = session_store
+            .read_events(
+                &verlet_history::EventStreamId::for_thread(&coordinates),
+                None,
+            )
+            .await
+            .unwrap();
+        original_fold = crate::kernel::binding_projector::fold_thread_bindings(&original_events);
+        original_attach_event_id = original_fold
+            .active
+            .iter()
+            .find(|binding| binding.payload.name == "search")
+            .expect("opening bind should attach search")
+            .attach_event_id;
+    }
+
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
+    match mutation {
+        ResumeAgentRegistryMutation::Republished => {
+            let replacement_root = root.join("replacement");
+            let replacement_registry_root = replacement_root.join("agents");
+            let replacement = publish_direct_operation_agent(
+                &replacement_root,
+                &replacement_registry_root,
+                &operation_registry_root,
+                "resume-wedge",
+                "Republished resume fixture",
+                &operation.active_artifact_hash,
+            );
+            assert_ne!(replacement.manifest_hash, original_record.manifest_hash);
+            let replacement_registry =
+                crate::agent::manifest::LocalAgentRegistry::new(&replacement_registry_root);
+            for (source, destination) in [
+                (
+                    replacement_registry
+                        .version_record_path("resume-wedge", "0.1.0")
+                        .unwrap(),
+                    registry
+                        .version_record_path("resume-wedge", "0.1.0")
+                        .unwrap(),
+                ),
+                (
+                    replacement_registry.record_path("resume-wedge").unwrap(),
+                    registry.record_path("resume-wedge").unwrap(),
+                ),
+                (
+                    replacement_registry
+                        .alias_record_path("resume-wedge", "latest")
+                        .unwrap(),
+                    registry
+                        .alias_record_path("resume-wedge", "latest")
+                        .unwrap(),
+                ),
+            ] {
+                std::fs::copy(source, destination).unwrap();
+            }
+        }
+        ResumeAgentRegistryMutation::Deleted => {
+            for path in [
+                registry
+                    .version_record_path("resume-wedge", "0.1.0")
+                    .unwrap(),
+                registry.record_path("resume-wedge").unwrap(),
+                registry
+                    .alias_record_path("resume-wedge", "latest")
+                    .unwrap(),
+            ] {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    let client = std::sync::Arc::new(DirectOperationCallingClient::new("search", "search:verlet"));
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
+    let restarted =
+        test_manifest_resume_app(&root, &workspace, provider_client, binding_config).await;
+    let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
+    initialize_for_test(&connection).await;
+    let loaded = restarted
+        .dispatch_request(
+            &connection,
+            "thread/loaded/list",
+            Some(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+    assert!(
+        loaded["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|loaded_id| loaded_id.as_str() == Some(thread_id.as_str())),
+        "startup should recover the thread without the registry record"
+    );
+    let resumed = restarted
+        .dispatch_request(
+            &connection,
+            "thread/resume",
+            Some(serde_json::json!({
+                "threadId": thread_id,
+                "excludeTurns": true,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed["thread"]["id"].as_str(), Some(thread_id.as_str()));
+
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&restarted.inner.session_store_path)
+            .await
+            .unwrap();
+    let resumed_events = session_store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resumed_events, original_events,
+        "resume must append no events"
+    );
+    assert_eq!(
+        crate::kernel::binding_projector::fold_thread_bindings(&resumed_events),
+        original_fold,
+        "resume must mount the recorded binding catalog"
+    );
+
+    restarted
+        .dispatch_request(
+            &connection,
+            "turn/start",
+            Some(serde_json::json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": "use search", "text_elements": [] }],
+            })),
+        )
+        .await
+        .unwrap();
+    wait_for_provider_requests(&client, 2).await;
+    let completed_events = session_store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let request = completed_events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallRequested)
+        .filter_map(|event| {
+            serde_json::from_value::<crate::kernel::control_decision::ToolCallRequestedPayload>(
+                event.payload.clone(),
+            )
+            .ok()
+        })
+        .find(|payload| payload.tool_name == "search")
+        .expect("resumed real turn should request search");
+    assert_eq!(request.attach_event_id, Some(original_attach_event_id));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn app_server_resume_migrates_legacy_manifest_and_binding_authority() {
     let root = unique_test_root("app-server-legacy-manifest-resume");
@@ -19195,6 +19445,49 @@ async fn test_app_with_provider_root(
         .await
 }
 
+async fn test_manifest_resume_app(
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+    // lexicon-allow: capsule - existing operation binding config type
+    operation_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
+) -> crate::adapters::app_server::VerletAppServer {
+    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
+        format!("verlet-manifest-resume-test-{}.sock", uuid::Uuid::now_v7()),
+    ));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, cwd)
+        // lexicon-allow: capsule - existing app-server test fixture config
+        .with_capsule_bindings(operation_bindings.clone());
+    config.runtime_home = root.join("runtime");
+    config.state_home = root.join("state");
+    config.agent_registry_root = root.join("agents");
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    runtime_config.max_tokens = 128;
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            operation_bindings,
+            None,
+            &config,
+        );
+    let metadata_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_store(
+        config,
+        runtime_factory,
+        metadata_store,
+    )
+    .await
+    .unwrap()
+}
+
 async fn test_app_with_provider_root_and_stream(
     root: &std::path::Path,
     cwd: &std::path::Path,
@@ -19737,6 +20030,50 @@ streaming = false
     .unwrap();
     crate::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
         .publish_manifest_path(&manifest_path)
+        .unwrap()
+}
+
+fn publish_direct_operation_agent(
+    root: &std::path::Path,
+    agent_registry_root: &std::path::Path,
+    operation_registry_root: &std::path::Path,
+    name: &str,
+    description: &str,
+    artifact_hash: &str,
+) -> crate::agent::manifest::PublishedAgentRecord {
+    std::fs::create_dir_all(root).unwrap();
+    let manifest_path = root.join(format!("{name}-{}.verlet.agent.toml", uuid::Uuid::now_v7()));
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[agent]
+name = "{name}"
+version = "0.1.0"
+description = "{description}"
+kind = "verlet.agent-manifest"
+schema_version = 1
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://local_offline"
+model_ref = "model://local_offline/echo"
+
+[[tools]]
+type = "direct_tool"
+id = "search"
+tool_name = "search"
+operation_ref = "op://search/search@sha256:{artifact_hash}"
+
+[runtime]
+default_cwd = "."
+streaming = false
+"#
+        ),
+    )
+    .unwrap();
+    crate::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
+        .publish_manifest_path_with_operation_registry(&manifest_path, operation_registry_root)
         .unwrap()
 }
 

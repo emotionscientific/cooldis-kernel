@@ -3421,7 +3421,7 @@ async fn route_agent_identity_survives_true_runtime_restart() {
     let operation_registry_root = root.join("operations");
     let operation = publish_route_test_operation(&operation_registry_root).await;
     let agent_registry_root = root.join("agents");
-    publish_route_agent_manifest(
+    let agent = publish_route_agent_manifest(
         &root,
         &agent_registry_root,
         &operation_registry_root,
@@ -3440,6 +3440,7 @@ async fn route_agent_identity_survives_true_runtime_restart() {
         first_client.clone(),
     )
     .await;
+    let session_store_path = first_server.session_store_path().to_path_buf();
     let first_bridge =
         crate::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(&first_server);
     register_route_state(&first_bridge, &route, &db).await;
@@ -3449,8 +3450,39 @@ async fn route_agent_identity_survives_true_runtime_restart() {
         .unwrap();
     wait_for_provider_requests(&first_client, 1).await;
     let coordinates = only_thread_coordinates(&first_bridge).await;
+    let first_handle = first_bridge
+        .supervisor
+        .get_thread_at(&coordinates)
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let events_before_restart = loop {
+        let events = thread_events_for(&session_store_path, &coordinates).await;
+        if first_handle.status() == verlet_runtime_contracts::ThreadStatus::Idle
+            && events
+                .iter()
+                .any(|event| event.kind == verlet_history::EventKind::TurnCompleted)
+        {
+            break events;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    let fold_before_restart =
+        crate::kernel::binding_projector::fold_thread_bindings(&events_before_restart);
     drop(first_bridge);
     drop(first_server);
+
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
+    for path in [
+        registry
+            .version_record_path(&agent.name, &agent.version)
+            .unwrap(),
+        registry.record_path(&agent.name).unwrap(),
+        registry.alias_record_path(&agent.name, "latest").unwrap(),
+    ] {
+        std::fs::remove_file(path).unwrap();
+    }
 
     let restarted_client = std::sync::Arc::new(RecordingRouteProviderClient::default());
     let restarted_server = test_server_with_route_provider_at_root(
@@ -3468,6 +3500,19 @@ async fn route_agent_identity_survives_true_runtime_restart() {
         restarted.supervisor.get_thread_at(&coordinates).await,
         Err(crate::kernel::runtime_host::VerletError::ThreadNotFound(_))
     ));
+    let reloaded = restarted
+        .get_or_load_thread_handle(&coordinates)
+        .await
+        .expect("daemon lazy reload should not require the agent registry");
+    let events_after_reload = thread_events_for(&session_store_path, &coordinates).await;
+    assert_eq!(
+        events_after_reload, events_before_restart,
+        "daemon lazy reload must append no events"
+    );
+    assert_eq!(
+        crate::kernel::binding_projector::fold_thread_bindings(&events_after_reload),
+        fold_before_restart
+    );
 
     route_sink_for_bridge(restarted.direct_sink(), &route, &restarted)
         .submit(test_envelope("after restart"))
@@ -3481,11 +3526,6 @@ async fn route_agent_identity_survives_true_runtime_restart() {
         "You are the daemon route prompt runner.\n"
     );
     assert!(requests[0].tools.iter().any(|tool| tool.name == "lookup"));
-    let reloaded = restarted
-        .supervisor
-        .get_thread_at(&coordinates)
-        .await
-        .unwrap();
     assert!(
         reloaded.context().metadata.contains_key(
             crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA
