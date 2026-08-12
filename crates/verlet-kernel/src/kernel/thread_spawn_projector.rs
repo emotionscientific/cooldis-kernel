@@ -668,6 +668,7 @@ impl ThreadSpawnProjector {
                             witness,
                             binding.compile_receipt,
                             binding.bind_receipt,
+                            binding.principal_id,
                         )
                         .await?
                 } else {
@@ -686,8 +687,14 @@ impl ThreadSpawnProjector {
                 }
             }
             crate::kernel::control_decision::PlacementTarget::Remote => {
-                let (compile_payload, bind_payload) = agent_binding
-                    .map(|binding| (Some(binding.compile_receipt), Some(binding.bind_receipt)))
+                let (compile_payload, bind_payload, binding_principal_id) = agent_binding
+                    .map(|binding| {
+                        (
+                            Some(binding.compile_receipt),
+                            Some(binding.bind_receipt),
+                            Some(binding.principal_id),
+                        )
+                    })
                     .unwrap_or_default();
                 self.host
                     .kernel_control()
@@ -701,6 +708,7 @@ impl ThreadSpawnProjector {
                         witness,
                         compile_payload,
                         bind_payload,
+                        binding_principal_id,
                     )
                     .await?
             }
@@ -1522,6 +1530,7 @@ mod tests {
                     workspace_origin: None,
                 })
                 .unwrap(),
+                principal_id: "user:forged-remote-workspace".to_string(),
             })
         }
     }

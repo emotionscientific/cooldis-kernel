@@ -765,9 +765,15 @@ pub(crate) async fn run_remote_child(
         bootstrap.request.compile_payload.clone(),
         bootstrap.request.bind_payload.clone(),
     ) {
-        child_handle
-            .record_remote_manifest_receipts(compile, bind)
-            .await?;
+        if let Some(principal_id) = bootstrap.request.binding_principal_id.as_deref() {
+            child_handle
+                .record_remote_manifest_receipts_for_principal(compile, bind, principal_id)
+                .await?;
+        } else {
+            child_handle
+                .record_remote_manifest_receipts(compile, bind)
+                .await?;
+        }
     }
 
     let local_store = verlet_history_sqlite::SqliteSessionStore::open(app.session_store_path())
@@ -1142,6 +1148,7 @@ mod tests {
             spawned_event_id: verlet_history::EventRecordId::new(),
             compile_payload: None,
             bind_payload: None,
+            binding_principal_id: None,
         }
     }
 
@@ -1162,6 +1169,26 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("cannot carry"));
+    }
+
+    #[test]
+    fn remote_spawn_request_round_trips_the_binding_principal() {
+        let mut request = request_fixture();
+        request.binding_principal_id = Some("principal:remote-operator".to_string());
+
+        let encoded = serde_json::to_value(&request).unwrap();
+        let decoded: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest =
+            serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.binding_principal_id, request.binding_principal_id);
+
+        let mut legacy = encoded;
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("binding_principal_id");
+        let decoded: crate::daemon::remote_store::placement::RemoteThreadSpawnRequest =
+            serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.binding_principal_id, None);
     }
 
     fn child_record(

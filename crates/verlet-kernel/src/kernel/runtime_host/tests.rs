@@ -687,6 +687,29 @@ impl verlet_history::EventStore for AdmissionTestStore {
         self.inner.append_events(stream_id, records).await
     }
 
+    async fn append_events_fenced(
+        &self,
+        stream_id: &verlet_history::EventStreamId,
+        expected_next_sequence: verlet_history::EventSequence,
+        records: Vec<verlet_history::NewEventRecord>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
+        let appends_admission = records
+            .iter()
+            .any(|record| record.kind == verlet_history::EventKind::AdmissionDecided);
+        if appends_admission && let Some(barrier) = &self.admission_barrier {
+            barrier.arrive_and_wait().await;
+        }
+        let appends_manifest_bind = records
+            .iter()
+            .any(|record| record.kind == verlet_history::EventKind::ManifestBindCompleted);
+        if appends_manifest_bind && let Some(barrier) = &self.manifest_barrier {
+            barrier.arrive_and_wait().await;
+        }
+        self.inner
+            .append_events_fenced(stream_id, expected_next_sequence, records)
+            .await
+    }
+
     async fn read_events(
         &self,
         stream_id: &verlet_history::EventStreamId,
@@ -5086,7 +5109,7 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
             verlet_history::InMemorySessionStore::new(),
         ))
         .fail_nth(
-            "append_events",
+            "append_events_fenced",
             2,
             "a second manifest append must not occur",
         ),
@@ -5119,7 +5142,7 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
         .await
         .unwrap();
 
-    assert_eq!(store.call_count("append_events"), 1);
+    assert_eq!(store.call_count("append_events_fenced"), 1);
     let events = store
         .read_events(
             &verlet_history::EventStreamId::for_thread(&thread.context().coordinates),
@@ -5148,6 +5171,59 @@ async fn manifest_bind_receipt_and_placement_witness_share_one_atomic_append() {
         placement_events[0].payload["snapshot_id"],
         "snapshot-placement"
     );
+}
+
+#[tokio::test]
+async fn manifest_binding_rejects_an_empty_principal_before_append() {
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "empty-bind-principal"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    let error = thread
+        .record_manifest_receipts_for_principal(
+            serde_json::json!({
+                "ref_uri": "agent://principal@0.1.0",
+                "manifest_hash": "snapshot-principal",
+                "source_hash": "sha256:source"
+            }),
+            serde_json::json!({
+                "ref_uri": "agent://principal@0.1.0",
+                "manifest_hash": "snapshot-principal",
+                "operation_bindings": [{
+                    "name": "search",
+                    "artifact_hash": "sha256:search"
+                }]
+            }),
+            "  ",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("principal is required"));
+    let events = store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(events.iter().all(|event| {
+        !matches!(
+            event.kind,
+            verlet_history::EventKind::ManifestCompileCompleted
+                | verlet_history::EventKind::ManifestBindCompleted
+                | verlet_history::EventKind::BindingAttached
+        )
+    }));
 }
 
 #[tokio::test]
@@ -5276,12 +5352,63 @@ async fn remote_manifest_receipt_rejects_a_workspace_before_witnessing_it() {
 }
 
 #[tokio::test]
+async fn remote_manifest_binding_preserves_the_resolved_principal() {
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "thread-user", "remote-principal-bind"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    thread
+        .record_remote_manifest_receipts_for_principal(
+            serde_json::json!({
+                "manifest_hash": "snapshot-remote-principal",
+                "source_hash": "sha256:source"
+            }),
+            serde_json::json!({
+                "manifest_hash": "snapshot-remote-principal",
+                "placement": {"target": "remote"},
+                "operation_bindings": [{
+                    "name": "search",
+                    "artifact_hash": "sha256:search"
+                }]
+            }),
+            "principal:remote-operator",
+        )
+        .await
+        .unwrap();
+
+    let events = store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&thread.context().coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let attached = events
+        .iter()
+        .find(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .unwrap();
+    let payload: verlet_history::BindingAttachedPayload =
+        serde_json::from_value(attached.payload.clone()).unwrap();
+    assert_eq!(payload.requested_by, "principal:remote-operator");
+    assert_eq!(payload.decided_by, "principal:remote-operator");
+}
+
+#[tokio::test]
 async fn failed_manifest_batch_leaves_no_bind_receipt_without_placement_witness() {
     let store = std::sync::Arc::new(
         crate::support::fault::FaultingRuntimeStore::new(std::sync::Arc::new(
             verlet_history::InMemorySessionStore::new(),
         ))
-        .fail_nth("append_events", 1, "manifest batch failed"),
+        .fail_nth("append_events_fenced", 1, "manifest batch failed"),
     );
     let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
         std::sync::Arc::new(EchoRuntimeFactory),

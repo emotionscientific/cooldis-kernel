@@ -3286,6 +3286,51 @@ pub struct AgentManifestDirectToolBinding {
     pub effect_class: verlet_agent::manifest_schema::EffectClass,
 }
 
+pub(crate) fn binding_attached_payload(
+    binding: &AgentManifestOperationBinding,
+    principal_id: &str,
+) -> verlet_history::BindingAttachedPayload {
+    fn effect_class(
+        effect_class: verlet_agent::manifest_schema::EffectClass,
+    ) -> verlet_history::BindingEffectClass {
+        match effect_class {
+            verlet_agent::manifest_schema::EffectClass::Pure => {
+                verlet_history::BindingEffectClass::Pure
+            }
+            verlet_agent::manifest_schema::EffectClass::Idempotent => {
+                verlet_history::BindingEffectClass::Idempotent
+            }
+            verlet_agent::manifest_schema::EffectClass::AtMostOnce => {
+                verlet_history::BindingEffectClass::AtMostOnce
+            }
+        }
+    }
+    let direct_tools = binding
+        .direct_tools
+        .iter()
+        .map(|direct| verlet_history::BindingAttachedDirectToolBinding {
+            tool_name: direct.tool_name.clone(),
+            operation: direct.operation.clone(),
+            effect_class: effect_class(direct.effect_class),
+        })
+        .collect();
+
+    verlet_history::BindingAttachedPayload {
+        name: binding.name.clone(),
+        artifact_hash: binding.artifact_hash.clone(),
+        operations: binding.operations.clone(),
+        direct_tools,
+        attachment_config: verlet_history::BindingAttachmentConfig {
+            allowed_secrets: binding.attachment_config.allowed_secrets.clone(),
+            allowed_private_network: binding.attachment_config.allowed_private_network.clone(),
+        },
+        effect_class: effect_class(binding.effect_class),
+        requested_by: principal_id.to_string(),
+        decided_by: principal_id.to_string(),
+        decision_event_id: None,
+    }
+}
+
 /// Apply caller overrides onto the manifest's runtime defaults, enforcing
 /// the deny-by-default allowlist. Returns the effective defaults plus the
 /// list of keys actually overridden, for the bind receipt.

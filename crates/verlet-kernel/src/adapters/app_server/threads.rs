@@ -469,7 +469,10 @@ impl crate::adapters::app_server::VerletAppServer {
                 ),
             ));
         }
-        record_bound_agent_receipts(handle, &bound).await.map(Some)
+        let principal_id = handle.context().coordinates.user_id.clone();
+        record_bound_agent_receipts(handle, &bound, &principal_id)
+            .await
+            .map(Some)
     }
 
     pub(crate) fn agent_registry_root(&self) -> &std::path::Path {
@@ -511,6 +514,7 @@ impl crate::adapters::app_server::VerletAppServer {
             &self.inner.cwd,
             self.inner.capsule_bindings.registry_root.as_deref(),
             None,
+            self.inner.user_id.clone(),
         )
     }
 
@@ -1702,6 +1706,7 @@ is present in the conversation.",
 pub(super) async fn record_bound_agent_receipts(
     handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     bound: &crate::agent::manifest_bind::AgentManifestBoundThread,
+    principal_id: &str,
 ) -> crate::kernel::runtime_host::VerletResult<(
     verlet_history::EventRecord,
     verlet_history::EventRecord,
@@ -1717,7 +1722,7 @@ pub(super) async fn record_bound_agent_receipts(
         ))
     })?;
     let manifest_events = handle
-        .record_manifest_receipts(compile_payload, bind_payload)
+        .record_manifest_receipts_for_principal(compile_payload, bind_payload, principal_id)
         .await?;
     let discovery_payloads = bound
         .tool_universes
@@ -1777,10 +1782,11 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         bound: crate::agent::manifest_bind::AgentManifestBoundThread,
+        principal_id: String,
     ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
         let app = self.clone();
         self.witness_and_persist_lifecycle(handle, move |handle| async move {
-            record_bound_agent_receipts(&handle, &bound).await?;
+            record_bound_agent_receipts(&handle, &bound, &principal_id).await?;
             app.persist_thread_lifecycle_record_with_metadata(
                 &handle,
                 std::collections::BTreeMap::new(),
@@ -1796,11 +1802,16 @@ impl crate::adapters::app_server::VerletAppServer {
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
+        principal_id: String,
     ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
         let app = self.clone();
         self.witness_and_persist_lifecycle(handle, move |handle| async move {
             handle
-                .record_manifest_receipts(compile_payload, bind_payload)
+                .record_manifest_receipts_for_principal(
+                    compile_payload,
+                    bind_payload,
+                    &principal_id,
+                )
                 .await?;
             app.persist_thread_lifecycle_record_with_metadata(
                 &handle,
@@ -1857,6 +1868,7 @@ fn kernel_thread_spawn_agent_binding(
     cwd_root: &std::path::Path,
     operation_registry_root: Option<&std::path::Path>,
     overrides: Option<&crate::agent::manifest_bind::AgentManifestBindOverrides>,
+    principal_id: String,
 ) -> crate::kernel::runtime_host::VerletResult<
     crate::agent::agent_process::KernelThreadSpawnAgentBinding,
 > {
@@ -1881,6 +1893,7 @@ fn kernel_thread_spawn_agent_binding(
         metadata,
         compile_receipt,
         bind_receipt,
+        principal_id,
     })
 }
 
@@ -2203,6 +2216,7 @@ pub(super) struct AppServerThreadSpawnAgentResolver {
     remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
     placement_override: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
     workspace_override: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    binding_principal_id: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -2218,7 +2232,7 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
 
     async fn resolve_agent_ref(
         &self,
-        _caller: &verlet_runtime_contracts::ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         agent_ref: &str,
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::agent::agent_process::KernelThreadSpawnAgentBinding,
@@ -2257,6 +2271,9 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
             &self.cwd,
             self.operation_registry_root.as_deref(),
             None,
+            self.binding_principal_id
+                .clone()
+                .unwrap_or_else(|| caller.coordinates.user_id.clone()),
         )
     }
 }
@@ -2321,6 +2338,7 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         placement_override: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
         workspace_override: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+        binding_principal_id: String,
     ) -> crate::kernel::runtime_host::VerletResult<AppServerThreadSpawnAgentResolver> {
         Ok(AppServerThreadSpawnAgentResolver {
             agent_registry_root: self.inner.agent_registry_root.clone(),
@@ -2336,6 +2354,7 @@ impl crate::adapters::app_server::VerletAppServer {
             remote_event_store_served: std::sync::Arc::clone(&self.inner.remote_event_store_served),
             placement_override,
             workspace_override,
+            binding_principal_id: Some(binding_principal_id),
         })
     }
 }
@@ -2360,6 +2379,7 @@ impl CapsuleBindingRuntimeFactory {
             remote_event_store_served: std::sync::Arc::clone(&self.remote_event_store_served),
             placement_override: None,
             workspace_override: None,
+            binding_principal_id: None,
         })
     }
 

@@ -1300,7 +1300,7 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
 
     async fn resolve_agent_ref(
         &self,
-        _caller: &verlet_runtime_contracts::ThreadContext,
+        caller: &verlet_runtime_contracts::ThreadContext,
         agent_ref: &str,
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::agent::agent_process::KernelThreadSpawnAgentBinding,
@@ -1341,6 +1341,7 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
                 },
             )
             .unwrap(),
+            principal_id: caller.coordinates.user_id.clone(),
         })
     }
 }

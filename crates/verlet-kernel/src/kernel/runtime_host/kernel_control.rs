@@ -381,6 +381,7 @@ impl RuntimeKernelControl {
         witness: ThreadSpawnWitness,
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
+        principal_id: String,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         self.spawn_child_cancellation_safe(
             caller,
@@ -388,7 +389,7 @@ impl RuntimeKernelControl {
             input,
             metadata,
             witness,
-            Some((compile_payload, bind_payload)),
+            Some((compile_payload, bind_payload, principal_id)),
         )
         .await
     }
@@ -400,7 +401,7 @@ impl RuntimeKernelControl {
         input: crate::kernel::runtime_host::turn::TurnInput,
         metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
-        manifest_payloads: Option<(serde_json::Value, serde_json::Value)>,
+        manifest_payloads: Option<(serde_json::Value, serde_json::Value, String)>,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         let control = self.clone();
         let caller = caller.clone();
@@ -431,7 +432,7 @@ impl RuntimeKernelControl {
         input: crate::kernel::runtime_host::turn::TurnInput,
         mut metadata: std::collections::BTreeMap<String, String>,
         witness: ThreadSpawnWitness,
-        manifest_payloads: Option<(serde_json::Value, serde_json::Value)>,
+        manifest_payloads: Option<(serde_json::Value, serde_json::Value, String)>,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
         let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
@@ -484,9 +485,13 @@ impl RuntimeKernelControl {
             let _ = host.shutdown_thread(child_thread_id).await;
             return Err(err);
         }
-        if let Some((compile_payload, bind_payload)) = manifest_payloads
+        if let Some((compile_payload, bind_payload, principal_id)) = manifest_payloads
             && let Err(err) = child
-                .record_manifest_receipts(compile_payload, bind_payload)
+                .record_manifest_receipts_for_principal(
+                    compile_payload,
+                    bind_payload,
+                    &principal_id,
+                )
                 .await
         {
             let _ = host.shutdown_thread(child_thread_id).await;
@@ -523,6 +528,7 @@ impl RuntimeKernelControl {
         witness: ThreadSpawnWitness,
         compile_payload: Option<serde_json::Value>,
         bind_payload: Option<serde_json::Value>,
+        binding_principal_id: Option<String>,
     ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
         let host = self.host()?;
         let executor = host.remote_thread_executor().await.ok_or_else(|| {
@@ -578,6 +584,7 @@ impl RuntimeKernelControl {
             spawned_event_id: spawned.id,
             compile_payload,
             bind_payload,
+            binding_principal_id,
         };
         if let Err(error) = executor.spawn(request).await {
             let _ = crate::kernel::runtime_host::runtime_services::append_thread_joined_first_wins(

@@ -651,6 +651,7 @@ pub struct KernelThreadSpawnAgentBinding {
     pub metadata: std::collections::BTreeMap<String, String>,
     pub compile_receipt: serde_json::Value,
     pub bind_receipt: serde_json::Value,
+    pub principal_id: String,
 }
 
 #[async_trait::async_trait]

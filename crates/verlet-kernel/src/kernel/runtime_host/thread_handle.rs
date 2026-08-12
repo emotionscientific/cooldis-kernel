@@ -51,7 +51,21 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         verlet_history::EventRecord,
         verlet_history::EventRecord,
     )> {
-        self.record_manifest_receipts_inner(compile_payload, bind_payload, false)
+        let principal_id = self.thread.context.coordinates.user_id.clone();
+        self.record_manifest_receipts_inner(compile_payload, bind_payload, &principal_id, false)
+            .await
+    }
+
+    pub(crate) async fn record_manifest_receipts_for_principal(
+        &self,
+        compile_payload: serde_json::Value,
+        bind_payload: serde_json::Value,
+        principal_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<(
+        verlet_history::EventRecord,
+        verlet_history::EventRecord,
+    )> {
+        self.record_manifest_receipts_inner(compile_payload, bind_payload, principal_id, false)
             .await
     }
 
@@ -67,7 +81,21 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         verlet_history::EventRecord,
         verlet_history::EventRecord,
     )> {
-        self.record_manifest_receipts_inner(compile_payload, bind_payload, true)
+        let principal_id = self.thread.context.coordinates.user_id.clone();
+        self.record_manifest_receipts_inner(compile_payload, bind_payload, &principal_id, true)
+            .await
+    }
+
+    pub(crate) async fn record_remote_manifest_receipts_for_principal(
+        &self,
+        compile_payload: serde_json::Value,
+        bind_payload: serde_json::Value,
+        principal_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<(
+        verlet_history::EventRecord,
+        verlet_history::EventRecord,
+    )> {
+        self.record_manifest_receipts_inner(compile_payload, bind_payload, principal_id, true)
             .await
     }
 
@@ -75,13 +103,34 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         &self,
         compile_payload: serde_json::Value,
         bind_payload: serde_json::Value,
+        principal_id: &str,
         remote_execution_authorized: bool,
     ) -> crate::kernel::runtime_host::VerletResult<(
         verlet_history::EventRecord,
         verlet_history::EventRecord,
     )> {
+        if principal_id.trim().is_empty() {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "manifest bind principal is required".to_string(),
+            ));
+        }
         let coordinates = self.thread.context.coordinates.clone();
         let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+        let operation_bindings = bind_payload
+            .get("operation_bindings")
+            .cloned()
+            .map(
+                serde_json::from_value::<
+                    Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
+                >,
+            )
+            .transpose()
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::History(format!(
+                    "manifest operation binding payload codec failed: {err}"
+                ))
+            })?
+            .unwrap_or_default();
         let mut placement =
             bind_payload
                 .get("placement")
@@ -171,10 +220,46 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             verlet_history::EventKind::PlacementDecision,
             placement_payload,
         );
-        // Receipt and witness share one atomic store append. This closes the
+        let attachment_events = operation_bindings
+            .iter()
+            .map(|binding| {
+                let payload =
+                    crate::agent::manifest_bind::binding_attached_payload(binding, principal_id);
+                serde_json::to_value(payload)
+                    .map(|payload| {
+                        verlet_history::NewEventRecord::discharged(
+                            coordinates.clone(),
+                            verlet_history::EventKind::BindingAttached,
+                            payload,
+                            verlet_history::EventProvenance {
+                                source_streams: vec![stream_id.clone()],
+                                source_event_ids: vec![bind_event.id],
+                                discharged_by: Some(
+                                    crate::agent::manifest_bind::MANIFEST_BINDER_DISCHARGED_BY
+                                        .to_string(),
+                                ),
+                                function: Some(
+                                    crate::agent::manifest_bind::MANIFEST_BINDER_FUNCTION
+                                        .to_string(),
+                                ),
+                                ..verlet_history::EventProvenance::default()
+                            },
+                        )
+                    })
+                    .map_err(|err| {
+                        crate::kernel::runtime_host::VerletError::History(format!(
+                            "binding.attached payload codec failed: {err}"
+                        ))
+                    })
+            })
+            .collect::<crate::kernel::runtime_host::VerletResult<Vec<_>>>()?;
+        // Receipts and witnesses share one atomic store append. This closes the
         // crash/race window: callers never receive a bind receipt unless its
-        // effective placement fact committed in the same batch.
-        let mut records = vec![compile_event, bind_event, placement_event];
+        // effective binding and placement facts committed in the same batch.
+        let minimum_event_count = 3 + attachment_events.len();
+        let mut records = vec![compile_event, bind_event];
+        records.extend(attachment_events);
+        records.push(placement_event);
         if let Some(raw_coupling_set) = self
             .thread
             .context
@@ -232,8 +317,18 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         // start guards separately remove a thread cancelled during factory
         // construction, so no mounted runtime survives without this batch.
         let runtime_store = self.thread.services.runtime_store();
-        let append =
-            tokio::spawn(async move { runtime_store.append_events(&stream_id, records).await });
+        let expected_next_sequence = runtime_store
+            .read_events(&stream_id, None)
+            .await
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+            .last()
+            .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+            .unwrap_or_else(|| verlet_history::EventSequence::new(1));
+        let append = tokio::spawn(async move {
+            runtime_store
+                .append_events_fenced(&stream_id, expected_next_sequence, records)
+                .await
+        });
         let events = append
             .await
             .map_err(|err| {
@@ -242,7 +337,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                 ))
             })?
             .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
-        if events.len() < 3 {
+        if events.len() < minimum_event_count {
             return Err(crate::kernel::runtime_host::VerletError::History(format!(
                 "manifest receipt append returned {} record(s)",
                 events.len()

@@ -19,7 +19,7 @@ pub const STREAM_APPEND_ACK_SCHEMA_V1: &str = "cooldis.stream.append_ack/1";
 pub const STREAM_ROUTING_DECISION_SCHEMA_V1: &str = "cooldis.stream.routing_decision/1";
 pub const CONTEXT_READ_PLAN_SCHEMA_V1: &str = "cooldis.context.read_plan/1";
 pub const DEBUG_THREAD_EXPORT_SCHEMA_V1: &str = "cooldis.debug.thread_export/1";
-pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.3";
+pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.4";
 
 pub const COMPACTION_SUMMARY_PREFIX: &str = "Compacted conversation summary:";
 
@@ -198,7 +198,7 @@ impl std::fmt::Display for EventRecordId {
     }
 }
 
-/// Frozen event-kind vocabulary, version `cooldis.events/0.3`.
+/// Frozen event-kind vocabulary, version `cooldis.events/0.4`.
 ///
 /// Laws:
 /// - The vocabulary is append-only: kinds may be added in later versions,
@@ -244,6 +244,13 @@ pub enum EventKind {
     /// the payload is the bind receipt. Emitted at publish and at run time.
     #[strum(serialize = "manifest.bind.completed")]
     ManifestBindCompleted,
+    /// An operation package binding became active. Its event id is the
+    /// binding identity referenced by a later detach.
+    #[strum(serialize = "binding.attached")]
+    BindingAttached,
+    /// An active operation package binding ended.
+    #[strum(serialize = "binding.detached")]
+    BindingDetached,
     /// A tool universe's contracts were witnessed (at bind or on demand);
     /// the payload is `ToolUniverseDiscoveryReceipt` — server ref, discovery
     /// hash, and per-tool schema hashes. Witnessed origin: the contracts
@@ -445,6 +452,88 @@ pub enum AdmissionDecision {
     Observe,
     Reject,
     Coalesce,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum BindingEffectClass {
+    Pure,
+    Idempotent,
+    #[default]
+    AtMostOnce,
+}
+
+impl BindingEffectClass {
+    fn is_at_most_once(&self) -> bool {
+        *self == Self::AtMostOnce
+    }
+}
+
+#[derive(
+    Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct BindingAttachmentConfig {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub allowed_secrets: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub allowed_private_network:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl BindingAttachmentConfig {
+    fn is_empty(&self) -> bool {
+        self.allowed_secrets.is_empty() && self.allowed_private_network.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingAttachedDirectToolBinding {
+    pub tool_name: String,
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "BindingEffectClass::is_at_most_once")]
+    pub effect_class: BindingEffectClass,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingAttachedPayload {
+    pub name: String,
+    pub artifact_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub direct_tools: Vec<BindingAttachedDirectToolBinding>,
+    #[serde(default, skip_serializing_if = "BindingAttachmentConfig::is_empty")]
+    pub attachment_config: BindingAttachmentConfig,
+    #[serde(default, skip_serializing_if = "BindingEffectClass::is_at_most_once")]
+    pub effect_class: BindingEffectClass,
+    pub requested_by: String,
+    pub decided_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_event_id: Option<EventRecordId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingDetachedPayload {
+    pub attach_event_id: EventRecordId,
+    pub requested_by: String,
+    pub decided_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_event_id: Option<EventRecordId>,
 }
 
 /// Payload of `thread.spawn.requested`: a coupling's proposal to spawn
@@ -1221,6 +1310,14 @@ pub fn stream_schema_registry_v1() -> &'static verlet_runtime_contracts::schema:
                 context_read_plan_set_payload_schema_v1(),
             )?;
             registry.register(
+                EventKind::BindingAttached.payload_schema_id(),
+                binding_attached_payload_schema_v1(),
+            )?;
+            registry.register(
+                EventKind::BindingDetached.payload_schema_id(),
+                binding_detached_payload_schema_v1(),
+            )?;
+            registry.register(
                 EventKind::ThreadSpawnRequested.payload_schema_id(),
                 thread_spawn_requested_payload_schema_v1(),
             )?;
@@ -1679,6 +1776,69 @@ fn context_read_plan_set_payload_schema_v1() -> serde_json::Value {
             "read_plan": context_read_plan_schema_v1()
         }
     })
+}
+
+pub fn binding_attached_payload_schema_v1() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["name", "artifact_hash", "requested_by", "decided_by"],
+        "additionalProperties": false,
+        "properties": {
+            "name": {"type": "string"},
+            "artifact_hash": {"type": "string"},
+            "operations": string_array_schema_v1(),
+            "direct_tools": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["tool_name", "operation"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "tool_name": {"type": "string"},
+                        "operation": {"type": "string"},
+                        "effect_class": binding_effect_class_schema_v1()
+                    }
+                }
+            },
+            "attachment_config": binding_attachment_config_schema_v1(),
+            "effect_class": binding_effect_class_schema_v1(),
+            "requested_by": {"type": "string"},
+            "decided_by": {"type": "string"},
+            "decision_event_id": {"type": "string"}
+        }
+    })
+}
+
+pub fn binding_detached_payload_schema_v1() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["attach_event_id", "requested_by", "decided_by"],
+        "additionalProperties": false,
+        "properties": {
+            "attach_event_id": {"type": "string"},
+            "requested_by": {"type": "string"},
+            "decided_by": {"type": "string"},
+            "decision_event_id": {"type": "string"}
+        }
+    })
+}
+
+fn binding_attachment_config_schema_v1() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "allowed_secrets": string_array_schema_v1(),
+            "allowed_private_network": {
+                "type": "object",
+                "additionalProperties": string_array_schema_v1()
+            }
+        }
+    })
+}
+
+fn binding_effect_class_schema_v1() -> serde_json::Value {
+    serde_json::json!({"enum": ["pure", "idempotent", "at-most-once"]})
 }
 
 fn thread_spawned_payload_schema_v1() -> serde_json::Value {

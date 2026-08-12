@@ -523,6 +523,8 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "context.read_plan.set",
         "manifest.compile.completed",
         "manifest.bind.completed",
+        "binding.attached",
+        "binding.detached",
         "tool.universe.discovery.completed",
         "tool.universe.call.completed",
         "tool.call.requested",
@@ -564,7 +566,7 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "io.egress.failed",
         "admission.decided",
     ];
-    assert_eq!(crate::EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.3");
+    assert_eq!(crate::EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.4");
     let kinds = <crate::EventKind as strum::VariantArray>::VARIANTS;
     let actual: Vec<&str> = kinds.iter().map(|kind| kind.as_ref()).collect();
     assert_eq!(actual, expected);
@@ -587,7 +589,90 @@ fn event_kind_parse_round_trips_and_fails_closed() {
 }
 
 #[test]
+fn v03_journal_event_kinds_remain_decodable_after_v04_bump() {
+    let v03_kinds = [
+        "session.entry.appended",
+        "context.compile.completed",
+        "context.summary.completed",
+        "context.read_plan.set",
+        "manifest.compile.completed",
+        "manifest.bind.completed",
+        "tool.universe.discovery.completed",
+        "tool.universe.call.completed",
+        "tool.call.requested",
+        "tool.call.suspended",
+        "tool.call.decision",
+        "tool.call.completed",
+        "turn.submitted",
+        "turn.waiting",
+        "turn.resumed",
+        "turn.completed",
+        "approval.requested",
+        "approval.resolved",
+        "mandate.started",
+        "mandate.revoked",
+        "turn.continue.requested",
+        "turn.continuation.accepted",
+        "turn.continuation.rejected",
+        "loop.completed",
+        "loop.blocked",
+        "loop.budget_exhausted",
+        "loop.denied",
+        "coupling.run.completed",
+        "coupling.run.failed",
+        "placement.decision",
+        "thread.spawn.requested",
+        "thread.spawned",
+        "thread.joined",
+        "thread.branch.selected",
+        "thread.reload.degraded",
+        "policy.bound",
+        "grant.petitioned",
+        "timer.fired",
+        "client.record.appended",
+        "io.ingress.received",
+        "io.ingress.claimed",
+        "io.ingress.settled",
+        "io.egress.requested",
+        "io.egress.delivered",
+        "io.egress.failed",
+        "admission.decided",
+    ];
+    let coordinates = coords("tenant_a", "user_1", "v03-journal");
+    let stream_id = crate::EventStreamId::for_thread(&coordinates);
+
+    for (index, encoded_kind) in v03_kinds.into_iter().enumerate() {
+        let kind = encoded_kind.parse::<crate::EventKind>().unwrap();
+        let record = crate::EventRecord::from_new(
+            stream_id.clone(),
+            crate::EventSequence::new(index as i64 + 1),
+            crate::NewEventRecord::witnessed(
+                coordinates.clone(),
+                kind,
+                serde_json::json!({"legacy": true}),
+            ),
+        );
+        let decoded =
+            serde_json::from_value::<crate::EventRecord>(serde_json::to_value(&record).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            decoded.kind, kind,
+            "failed to decode v0.3 kind {encoded_kind}"
+        );
+    }
+}
+
+#[test]
 fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
+    assert_eq!(
+        crate::EventKind::BindingAttached.payload_schema_id(),
+        "cooldis.event.binding.attached/1"
+    );
+    assert_eq!(
+        crate::EventKind::BindingDetached.payload_schema_id(),
+        "cooldis.event.binding.detached/1"
+    );
     assert_eq!(
         crate::EventKind::ContextCompileCompleted.payload_schema_id(),
         "cooldis.event.context.compile.completed/1"
@@ -664,6 +749,115 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
         crate::EventKind::AdmissionDecided.payload_schema_id(),
         "cooldis.event.admission.decided/1"
     );
+}
+
+#[test]
+fn binding_attached_payload_wire_shape_is_frozen() {
+    let payload = crate::BindingAttachedPayload {
+        name: "search-tools".to_string(),
+        artifact_hash: "sha256:search-tools".to_string(),
+        operations: vec!["search".to_string(), "answer".to_string()],
+        direct_tools: vec![crate::BindingAttachedDirectToolBinding {
+            tool_name: "search_web".to_string(),
+            operation: "search".to_string(),
+            effect_class: crate::BindingEffectClass::Pure,
+        }],
+        attachment_config: crate::BindingAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]),
+            allowed_private_network: std::collections::BTreeMap::from([(
+                "http://127.0.0.1:*".to_string(),
+                std::collections::BTreeSet::from(["GET".to_string(), "POST".to_string()]),
+            )]),
+        },
+        effect_class: crate::BindingEffectClass::Idempotent,
+        requested_by: "principal:operator".to_string(),
+        decided_by: "principal:operator".to_string(),
+        decision_event_id: None,
+    };
+
+    let expected = serde_json::json!({
+        "name": "search-tools",
+        "artifact_hash": "sha256:search-tools",
+        "operations": ["search", "answer"],
+        "direct_tools": [{
+            "tool_name": "search_web",
+            "operation": "search",
+            "effect_class": "pure"
+        }],
+        "attachment_config": {
+            "allowed_secrets": ["SEARCH_TOKEN"],
+            "allowed_private_network": {
+                "http://127.0.0.1:*": ["GET", "POST"]
+            }
+        },
+        "effect_class": "idempotent",
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator"
+    });
+    let actual = serde_json::to_value(&payload).unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        serde_json::from_value::<crate::BindingAttachedPayload>(actual).unwrap(),
+        payload
+    );
+    crate::stream_schema_registry_v1()
+        .validate(
+            &crate::EventKind::BindingAttached.payload_schema_id(),
+            &expected,
+        )
+        .unwrap();
+}
+
+#[test]
+fn binding_detached_payload_wire_shape_is_frozen() {
+    let attach_event_id = crate::EventRecordId::from_uuid(
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000041").unwrap(),
+    );
+    let payload = crate::BindingDetachedPayload {
+        attach_event_id,
+        requested_by: "principal:operator".to_string(),
+        decided_by: "principal:operator".to_string(),
+        decision_event_id: None,
+    };
+    let expected = serde_json::json!({
+        "attach_event_id": "018f0000-0000-7000-8000-000000000041",
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator"
+    });
+    let actual = serde_json::to_value(&payload).unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        serde_json::from_value::<crate::BindingDetachedPayload>(actual).unwrap(),
+        payload
+    );
+    crate::stream_schema_registry_v1()
+        .validate(
+            &crate::EventKind::BindingDetached.payload_schema_id(),
+            &expected,
+        )
+        .unwrap();
+}
+
+#[test]
+fn binding_payloads_reject_unknown_fields() {
+    let attached = serde_json::json!({
+        "name": "search-tools",
+        "artifact_hash": "sha256:search-tools",
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator",
+        "scheduled_detach": true
+    });
+    assert!(serde_json::from_value::<crate::BindingAttachedPayload>(attached).is_err());
+
+    let detached = serde_json::json!({
+        "attach_event_id": "018f0000-0000-7000-8000-000000000041",
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator",
+        "scheduled_detach": true
+    });
+    assert!(serde_json::from_value::<crate::BindingDetachedPayload>(detached).is_err());
 }
 
 #[test]
