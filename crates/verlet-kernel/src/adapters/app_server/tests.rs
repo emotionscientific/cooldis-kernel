@@ -3521,6 +3521,350 @@ async fn model_list_scopes_catalog_models_to_store_configured_providers() {
 }
 
 #[tokio::test]
+async fn model_list_unions_catalog_and_live_models_with_catalog_metadata_winning() {
+    let server =
+        spawn_provider_sse_fixture(r#"{"data":[{"id":"gpt-5.2"},{"id":"gpt-live-only"}]}"#).await;
+    let root = unique_test_root("app-server-model-list-live-union");
+    let config = test_config_at_root(&root);
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "openai",
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                format!("{}/v1", server.base_url),
+            )
+            .with_auth_header(true)
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("gpt-5.2")
+                    .with_display_name("Stored GPT 5.2")
+                    .with_context_window_tokens(777)
+                    .with_max_output_tokens(333),
+            ),
+        )
+        .await
+        .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            "openai",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "live-list-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let first = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        first["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["model"] != "gpt-live-only")
+    );
+
+    let request = server.request.await.unwrap();
+    let request_lower = request.to_ascii_lowercase();
+    assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+    assert!(request_lower.contains("authorization: bearer live-list-secret"));
+    let models = wait_for_model_list_entry(&app, &connection, "openai", "gpt-live-only").await;
+    let data = models["data"].as_array().unwrap();
+    let stored = data
+        .iter()
+        .find(|entry| entry["providerId"] == "openai" && entry["model"] == "gpt-5.2")
+        .unwrap();
+    assert_eq!(
+        data.iter()
+            .filter(|entry| entry["providerId"] == "openai" && entry["model"] == "gpt-5.2")
+            .count(),
+        1
+    );
+    assert_eq!(stored["displayName"], "Stored GPT 5.2");
+    assert_eq!(stored["contextWindowTokens"], 777);
+    assert_eq!(stored["maxOutputTokens"], 333);
+    assert!(stored.get("origin").is_none());
+    let live = data
+        .iter()
+        .find(|entry| entry["providerId"] == "openai" && entry["model"] == "gpt-live-only")
+        .unwrap();
+    assert_eq!(live["origin"], "live");
+    assert_eq!(live["contextWindowTokens"], serde_json::Value::Null);
+    assert_eq!(live["maxOutputTokens"], serde_json::Value::Null);
+    assert!(
+        !serde_json::to_string(&models)
+            .unwrap()
+            .contains("live-list-secret")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_list_does_not_call_uncredentialed_or_oauth_provider_endpoints() {
+    let missing_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let oauth_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = unique_test_root("app-server-model-list-live-ineligible-auth");
+    let config = test_config_at_root(&root);
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    for provider in [
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "missing-live-auth",
+            verlet_history::ProviderApi::OpenAIChatCompletions,
+            format!("http://{}/v1", missing_listener.local_addr().unwrap()),
+        )
+        .with_auth_header(true)
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("missing-catalog-model"),
+        ),
+        verlet_metadata::provider_store::LlmProviderRecord::new(
+            "oauth-live-auth",
+            verlet_history::ProviderApi::OpenAIResponses,
+            format!("http://{}/v1", oauth_listener.local_addr().unwrap()),
+        )
+        .with_auth_header(true)
+        .with_model(
+            verlet_metadata::provider_store::LlmProviderModelRecord::new("oauth-catalog-model"),
+        ),
+    ] {
+        project_store.upsert_provider(provider).await.unwrap();
+    }
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            "oauth-live-auth",
+            verlet_metadata::provider_store::LlmProviderCredential::OAuth {
+                access: "oauth-live-secret".to_string(),
+                refresh: "oauth-refresh-secret".to_string(),
+                expires_at_ms: verlet_history::now_ms() + 3_600_000,
+                account_id: None,
+                email: None,
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let models = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(
+        models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["model"] == "missing-catalog-model")
+    );
+    assert!(
+        models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["model"] == "oauth-catalog-model")
+    );
+    assert!(
+        // tight-timeout: an ineligible missing-auth provider must make no model-list request
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            missing_listener.accept(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        // tight-timeout: an OAuth provider must make no API-key model-list request
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            oauth_listener.accept(),
+        )
+        .await
+        .is_err()
+    );
+    let encoded = serde_json::to_string(&models).unwrap();
+    assert!(!encoded.contains("oauth-live-secret"));
+    assert!(!encoded.contains("oauth-refresh-secret"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn model_list_enriches_keyless_provider_without_authorization() {
+    let server = spawn_provider_sse_fixture(r#"{"data":[{"id":"keyless-live-model"}]}"#).await;
+    let root = unique_test_root("app-server-model-list-live-keyless");
+    let config = test_config_at_root(&root);
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "keyless-live",
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                format!("{}/v1", server.base_url),
+            )
+            .with_auth(verlet_metadata::provider_store::LlmProviderAuthConfig::None)
+            .with_auth_header(false),
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let first = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    assert!(first["data"].as_array().unwrap().iter().all(|entry| {
+        entry["providerId"] != "keyless-live" || entry["model"] != "keyless-live-model"
+    }));
+    let request = server.request.await.unwrap();
+    assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+    assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    let models =
+        wait_for_model_list_entry(&app, &connection, "keyless-live", "keyless-live-model").await;
+    let row = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["providerId"] == "keyless-live")
+        .unwrap();
+    assert_eq!(row["origin"], "live");
+    assert_eq!(row["authStatus"], "configured");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn slow_failing_live_endpoint_does_not_delay_or_break_model_list() {
+    let fixture =
+        spawn_gated_model_list_fixture("500 Internal Server Error", "failure-response-secret")
+            .await;
+    let GatedModelListFixture {
+        base_url,
+        request,
+        release,
+        task,
+    } = fixture;
+    let root = unique_test_root("app-server-model-list-live-slow-failure");
+    let config = test_config_at_root(&root);
+    let project_store =
+        verlet_metadata::provider_store::SqliteMetadataStore::open(config.metadata_store_path())
+            .await
+            .unwrap();
+    project_store
+        .upsert_provider(
+            verlet_metadata::provider_store::LlmProviderRecord::new(
+                "slow-live",
+                verlet_history::ProviderApi::OpenAIChatCompletions,
+                format!("{base_url}/v1"),
+            )
+            .with_auth_header(true)
+            .with_model(
+                verlet_metadata::provider_store::LlmProviderModelRecord::new("slow-catalog-model"),
+            ),
+        )
+        .await
+        .unwrap();
+    let user_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
+        config.user_metadata_store_path(),
+    )
+    .await
+    .unwrap();
+    user_store
+        .set_credential(
+            "slow-live",
+            verlet_metadata::provider_store::LlmProviderCredential::ApiKey {
+                key: "slow-live-secret".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(project_store);
+    drop(user_store);
+
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    // tight-timeout: model/list must return without waiting on a gated live endpoint
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.dispatch_request(&connection, "model/list", None),
+    )
+    .await
+    .expect("model/list waited for the live endpoint")
+    .unwrap();
+    assert!(
+        first["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["model"] == "slow-catalog-model")
+    );
+    let captured = request.await.unwrap();
+    assert!(captured.starts_with("GET /v1/models HTTP/1.1"));
+    // tight-timeout: model/list must return while a live refresh remains in flight
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.dispatch_request(&connection, "model/list", None),
+    )
+    .await
+    .expect("model/list waited for an in-flight live endpoint")
+    .unwrap();
+    assert!(
+        second["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["model"] == "slow-catalog-model")
+    );
+    release.add_permits(1);
+    task.await.unwrap();
+    let third = app
+        .dispatch_request(&connection, "model/list", None)
+        .await
+        .unwrap();
+    let encoded = serde_json::to_string(&third).unwrap();
+    assert!(!encoded.contains("slow-live-secret"));
+    assert!(!encoded.contains("failure-response-secret"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn model_provider_catalog_merges_catalog_metadata_with_store_state() {
     const ENV_NAME: &str = "VERLET_CATALOG_MERGE_ENV_FIXTURE";
     let root = unique_test_root("app-server-provider-catalog-merge");
@@ -4400,7 +4744,7 @@ async fn model_list_suppresses_the_launch_row_when_another_model_is_active() {
 
 #[tokio::test]
 async fn model_select_routes_anthropic_store_provider_with_stored_key() {
-    let server = spawn_provider_sse_fixture(concat!(
+    let server = spawn_provider_sse_with_model_list_fixture(concat!(
         "event: message_start\n",
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n",
         "event: content_block_delta\n",
@@ -4556,7 +4900,7 @@ async fn model_select_routes_anthropic_store_provider_with_stored_key() {
 
 #[tokio::test]
 async fn model_select_routes_generic_openai_responses_store_provider() {
-    let server = spawn_provider_sse_fixture(concat!(
+    let server = spawn_provider_sse_with_model_list_fixture(concat!(
         "event: response.output_text.delta\n",
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"RESPONSES_STORE_OK\"}\n\n",
         "event: response.completed\n",
@@ -4737,7 +5081,7 @@ async fn model_select_routes_auth_free_responses_without_authorization() {
 /// routed turn that sends no Authorization header.
 #[tokio::test]
 async fn keyless_custom_provider_counts_configured_and_routes_without_authorization() {
-    let server = spawn_provider_sse_fixture(concat!(
+    let server = spawn_provider_sse_with_model_list_fixture(concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"KEYLESS_OK\"},\"finish_reason\":null}]}\n\n",
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
         "data: [DONE]\n\n",
@@ -18770,6 +19114,80 @@ async fn assert_latest_assistant_coordinates(
     assert_eq!(model, expected_model);
 }
 
+async fn wait_for_model_list_entry(
+    app: &crate::adapters::app_server::VerletAppServer,
+    connection: &crate::adapters::app_server::connection::ConnectionState,
+    provider_id: &str,
+    model_id: &str,
+) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let models = app
+                .dispatch_request(connection, "model/list", None)
+                .await
+                .unwrap();
+            if models["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["providerId"] == provider_id && entry["model"] == model_id)
+            {
+                break models;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("live model did not reach model/list")
+}
+
+struct GatedModelListFixture {
+    base_url: String,
+    request: tokio::sync::oneshot::Receiver<String>,
+    release: std::sync::Arc<tokio::sync::Semaphore>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+async fn spawn_gated_model_list_fixture(
+    status: &'static str,
+    body: &'static str,
+) -> GatedModelListFixture {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let task_release = std::sync::Arc::clone(&release);
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "model-list request ended before its headers");
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                break;
+            }
+        }
+        request_tx
+            .send(String::from_utf8(request).unwrap())
+            .unwrap();
+        let permit = task_release.acquire().await.unwrap();
+        permit.forget();
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    });
+    GatedModelListFixture {
+        base_url: format!("http://{address}"),
+        request: request_rx,
+        release,
+        task,
+    }
+}
+
 struct ProviderSseFixture {
     base_url: String,
     request: tokio::task::JoinHandle<String>,
@@ -18819,6 +19237,74 @@ async fn spawn_provider_sse_fixture(body: impl Into<String>) -> ProviderSseFixtu
         base_url: format!("http://{address}"),
         request,
     }
+}
+
+async fn spawn_provider_sse_with_model_list_fixture(body: impl Into<String>) -> ProviderSseFixture {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = body.into();
+    let request = tokio::spawn(async move {
+        let mut turn_request = None;
+        while turn_request.is_none() {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_provider_fixture_request(&mut stream).await;
+            if request.starts_with("GET /v1/models HTTP/1.1") {
+                let list_body = r#"{"data":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    list_body.len(),
+                    list_body,
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            } else {
+                assert!(
+                    request.starts_with("POST "),
+                    "unexpected provider request: {request}"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                turn_request = Some(request);
+            }
+        }
+        turn_request.unwrap()
+    });
+    ProviderSseFixture {
+        base_url: format!("http://{address}"),
+        request,
+    }
+}
+
+async fn read_provider_fixture_request(stream: &mut tokio::net::TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let header_end = loop {
+        let mut chunk = [0_u8; 1024];
+        let read = stream.read(&mut chunk).await.unwrap();
+        assert!(read > 0, "provider request ended before its headers");
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(index) = find_http_header_end(&buffer) {
+            break index;
+        }
+    };
+    let content_length = String::from_utf8_lossy(&buffer[..header_end])
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().unwrap())
+        })
+        .unwrap_or(0);
+    let request_end = header_end + 4 + content_length;
+    while buffer.len() < request_end {
+        let mut chunk = [0_u8; 1024];
+        let read = stream.read(&mut chunk).await.unwrap();
+        assert!(read > 0, "provider request ended before its body");
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    String::from_utf8(buffer[..request_end].to_vec()).unwrap()
 }
 
 fn unique_test_root(name: &str) -> std::path::PathBuf {

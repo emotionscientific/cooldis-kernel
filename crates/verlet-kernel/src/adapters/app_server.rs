@@ -11,6 +11,7 @@ pub mod connection;
 mod default_manifest;
 pub mod instance;
 pub mod lifecycle;
+pub(crate) mod live_models;
 pub(crate) mod model_catalog;
 mod orchestrator_boundary;
 mod subscriptions;
@@ -901,6 +902,7 @@ struct VerletAppServerInner {
     metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
     user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
     model_catalog: model_catalog::MergedModelCatalog,
+    live_models: std::sync::Arc<live_models::LiveModelCache>,
     process_manager: verlet_process::live::AsyncExecutionManager,
     process_dispatcher:
         tokio::sync::OnceCell<crate::kernel::process_handle_dispatch::ProcessHandleDispatcher>,
@@ -1377,6 +1379,7 @@ impl VerletAppServer {
                 metadata_store,
                 user_metadata_store,
                 model_catalog,
+                live_models: std::sync::Arc::new(live_models::LiveModelCache::new()),
                 process_manager,
                 process_dispatcher: tokio::sync::OnceCell::new(),
                 subscriptions: tokio::sync::Mutex::new(

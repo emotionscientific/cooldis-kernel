@@ -5867,6 +5867,7 @@ impl crate::adapters::app_server::VerletAppServer {
             crate::adapters::app_server::model_catalog::StaticModelCatalog::new(catalog_entries);
         let auth_context = self.inner.instance_environment.provider_auth.resolve();
         let mut auth_statuses = std::collections::BTreeMap::new();
+        let mut live_entries = Vec::new();
         for provider in &providers {
             let status = verlet_metadata::provider_store::llm_provider_auth_status(
                 &self.inner.user_metadata_store,
@@ -5885,13 +5886,47 @@ impl crate::adapters::app_server::VerletAppServer {
                 None => "missing",
             };
             auth_statuses.insert(provider.provider_id.clone(), label);
+            match crate::adapters::app_server::live_models::resolve_refresh_credential(
+                &self.inner.user_metadata_store,
+                provider,
+                &auth_context,
+            )
+            .await
+            {
+                Ok(Some(credential)) => {
+                    live_entries.extend(self.inner.live_models.entries_and_refresh(
+                        &self.inner.tasks,
+                        provider,
+                        credential,
+                    ))
+                }
+                Ok(None) => {}
+                Err(error) => log::debug!(
+                    "live model auth unavailable for provider {}: {}",
+                    provider.provider_id,
+                    error
+                ),
+            }
         }
         let mut seen = std::collections::BTreeSet::new();
         Ok(catalog
             .entries()
             .into_iter()
-            .filter(|entry| seen.insert((entry.provider_id.clone(), entry.model_id.clone())))
-            .map(|entry| {
+            .map(|entry| (entry, false))
+            .chain(live_entries.into_iter().map(|model| {
+                (
+                    crate::adapters::app_server::model_catalog::ModelCatalogEntry {
+                        provider_id: model.provider_id,
+                        model_id: model.model_id,
+                        display_name: model.display_name,
+                        context_window: None,
+                        max_output_tokens: None,
+                    },
+                    true,
+                )
+            }))
+            .filter(|(entry, _)| seen.insert((entry.provider_id.clone(), entry.model_id.clone())))
+            .map(|(entry, live)| {
                 let is_active =
                     entry.provider_id == active.model_provider && entry.model_id == active.model;
                 let launch_only = entry.provider_id == self.inner.model_provider
@@ -5941,6 +5976,9 @@ impl crate::adapters::app_server::VerletAppServer {
                     "maxOutputTokens".to_string(),
                     serde_json::json!(entry.max_output_tokens),
                 );
+                if live {
+                    object.insert("origin".to_string(), serde_json::json!("live"));
+                }
                 if let Some(provider) = provider_records.get(&entry.provider_id)
                     && let Some(model) = provider
                         .models
