@@ -496,6 +496,11 @@ fn assert_binding_fold_matches_latest_bind(
         bind.payload.clone(),
     )
     .unwrap();
+    let bind_event_ids = events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+        .map(|event| event.id)
+        .collect::<std::collections::HashSet<_>>();
     let folded = crate::kernel::binding_projector::fold_thread_bindings(events);
 
     assert!(folded.anomalies.is_empty());
@@ -518,7 +523,10 @@ fn assert_binding_fold_matches_latest_bind(
             .iter()
             .find(|event| event.id == binding.attach_event_id)
             .expect("active binding must retain its attach event");
-        assert_eq!(event.provenance.source_event_ids, vec![bind.id]);
+        assert!(matches!(
+            event.provenance.source_event_ids.as_slice(),
+            [bind_event_id] if bind_event_ids.contains(bind_event_id)
+        ));
         assert_eq!(binding.payload.requested_by, expected_principal);
         assert_eq!(binding.payload.decided_by, expected_principal);
     }
@@ -13327,6 +13335,11 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
         Some(record.active_artifact_hash.as_str())
     );
     assert_eq!(exa_binding["operations"], serde_json::json!(["search"]));
+    let original_attach_event_ids = events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
     assert_binding_fold_matches_latest_bind(
         &events,
         connection.resolved_principal.principal_id.as_str(),
@@ -13356,7 +13369,24 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
             .count(),
         2
     );
-    assert_binding_fold_matches_latest_bind(&resumed_events, &lifecycle.coordinates.user_id);
+    assert!(resumed_events[events.len()..].iter().all(|event| {
+        !matches!(
+            event.kind,
+            verlet_history::EventKind::BindingAttached | verlet_history::EventKind::BindingDetached
+        )
+    }));
+    assert_eq!(
+        crate::kernel::binding_projector::fold_thread_bindings(&resumed_events)
+            .active
+            .iter()
+            .map(|binding| binding.attach_event_id)
+            .collect::<Vec<_>>(),
+        original_attach_event_ids
+    );
+    assert_binding_fold_matches_latest_bind(
+        &resumed_events,
+        connection.resolved_principal.principal_id.as_str(),
+    );
     let expected_fork_bindings =
         crate::adapters::app_server::threads::thread_manifest_operation_bindings(
             app.handle_for_thread(&thread_id).await.unwrap().context(),

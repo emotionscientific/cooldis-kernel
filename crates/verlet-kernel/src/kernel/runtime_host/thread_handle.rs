@@ -1,3 +1,15 @@
+fn binding_payload_identity_matches(
+    left: &verlet_history::BindingAttachedPayload,
+    right: &verlet_history::BindingAttachedPayload,
+) -> bool {
+    left.name == right.name
+        && left.artifact_hash == right.artifact_hash
+        && left.operations == right.operations
+        && left.direct_tools == right.direct_tools
+        && left.attachment_config == right.attachment_config
+        && left.effect_class == right.effect_class
+}
+
 impl crate::kernel::runtime_host::RuntimeThreadHandle {
     pub fn context(&self) -> &verlet_runtime_contracts::ThreadContext {
         &self.thread.context
@@ -131,6 +143,52 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
                 ))
             })?
             .unwrap_or_default();
+        let runtime_store = self.thread.services.runtime_store();
+        let existing_events = runtime_store
+            .read_events(&stream_id, None)
+            .await
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+        let expected_next_sequence = existing_events
+            .last()
+            .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
+            .unwrap_or_else(|| verlet_history::EventSequence::new(1));
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&existing_events);
+        let desired_bindings = operation_bindings
+            .iter()
+            .map(|binding| {
+                crate::agent::manifest_bind::binding_attached_payload(binding, principal_id)
+            })
+            .collect::<Vec<_>>();
+        let mut matched_active = vec![false; folded.active.len()];
+        let mut matched_desired = vec![false; desired_bindings.len()];
+        for (desired_index, desired) in desired_bindings.iter().enumerate() {
+            if let Some((active_index, _)) =
+                folded
+                    .active
+                    .iter()
+                    .enumerate()
+                    .find(|(active_index, active)| {
+                        !matched_active[*active_index]
+                            && binding_payload_identity_matches(&active.payload, desired)
+                    })
+            {
+                matched_active[active_index] = true;
+                matched_desired[desired_index] = true;
+            }
+        }
+        let removed_attach_event_ids = folded
+            .active
+            .iter()
+            .enumerate()
+            .filter_map(|(index, binding)| {
+                (!matched_active[index]).then_some(binding.attach_event_id)
+            })
+            .collect::<Vec<_>>();
+        let added_bindings = desired_bindings
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, binding)| (!matched_desired[index]).then_some(binding))
+            .collect::<Vec<_>>();
         let mut placement =
             bind_payload
                 .get("placement")
@@ -220,11 +278,46 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             verlet_history::EventKind::PlacementDecision,
             placement_payload,
         );
-        let attachment_events = operation_bindings
-            .iter()
-            .map(|binding| {
-                let payload =
-                    crate::agent::manifest_bind::binding_attached_payload(binding, principal_id);
+        let detachment_events = removed_attach_event_ids
+            .into_iter()
+            .map(|attach_event_id| {
+                let payload = verlet_history::BindingDetachedPayload {
+                    attach_event_id,
+                    requested_by: principal_id.to_string(),
+                    decided_by: principal_id.to_string(),
+                    decision_event_id: None,
+                };
+                serde_json::to_value(payload)
+                    .map(|payload| {
+                        verlet_history::NewEventRecord::discharged(
+                            coordinates.clone(),
+                            verlet_history::EventKind::BindingDetached,
+                            payload,
+                            verlet_history::EventProvenance {
+                                source_streams: vec![stream_id.clone()],
+                                source_event_ids: vec![bind_event.id],
+                                discharged_by: Some(
+                                    crate::agent::manifest_bind::MANIFEST_BINDER_DISCHARGED_BY
+                                        .to_string(),
+                                ),
+                                function: Some(
+                                    crate::agent::manifest_bind::MANIFEST_BINDER_FUNCTION
+                                        .to_string(),
+                                ),
+                                ..verlet_history::EventProvenance::default()
+                            },
+                        )
+                    })
+                    .map_err(|err| {
+                        crate::kernel::runtime_host::VerletError::History(format!(
+                            "binding.detached payload codec failed: {err}"
+                        ))
+                    })
+            })
+            .collect::<crate::kernel::runtime_host::VerletResult<Vec<_>>>()?;
+        let attachment_events = added_bindings
+            .into_iter()
+            .map(|payload| {
                 serde_json::to_value(payload)
                     .map(|payload| {
                         verlet_history::NewEventRecord::discharged(
@@ -256,8 +349,9 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         // Receipts and witnesses share one atomic store append. This closes the
         // crash/race window: callers never receive a bind receipt unless its
         // effective binding and placement facts committed in the same batch.
-        let minimum_event_count = 3 + attachment_events.len();
+        let minimum_event_count = 3 + detachment_events.len() + attachment_events.len();
         let mut records = vec![compile_event, bind_event];
+        records.extend(detachment_events);
         records.extend(attachment_events);
         records.push(placement_event);
         if let Some(raw_coupling_set) = self
@@ -316,14 +410,6 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
         // RPC task that initiated the bind is cancelled. The runtime-host
         // start guards separately remove a thread cancelled during factory
         // construction, so no mounted runtime survives without this batch.
-        let runtime_store = self.thread.services.runtime_store();
-        let expected_next_sequence = runtime_store
-            .read_events(&stream_id, None)
-            .await
-            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
-            .last()
-            .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))
-            .unwrap_or_else(|| verlet_history::EventSequence::new(1));
         let append = tokio::spawn(async move {
             runtime_store
                 .append_events_fenced(&stream_id, expected_next_sequence, records)

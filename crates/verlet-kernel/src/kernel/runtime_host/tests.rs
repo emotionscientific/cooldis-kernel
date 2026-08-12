@@ -5227,6 +5227,191 @@ async fn manifest_binding_rejects_an_empty_principal_before_append() {
 }
 
 #[tokio::test]
+async fn manifest_rebind_emits_only_changed_binding_deltas_in_the_fenced_batch() {
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "binding-delta"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({
+                "manifest_hash": "snapshot-a",
+                "source_hash": "sha256:source-a"
+            }),
+            serde_json::json!({
+                "manifest_hash": "snapshot-a",
+                "operation_bindings": [
+                    {"name": "files", "artifact_hash": "sha256:files"},
+                    {"name": "logs", "artifact_hash": "sha256:logs"},
+                    {"name": "search", "artifact_hash": "sha256:search-a"}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&thread.context().coordinates);
+    let before = store.read_events(&stream_id, None).await.unwrap();
+    let first_attaches = before
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .map(|event| {
+            let payload: verlet_history::BindingAttachedPayload =
+                serde_json::from_value(event.payload.clone()).unwrap();
+            (payload.name, event.id)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({
+                "manifest_hash": "snapshot-b",
+                "source_hash": "sha256:source-b"
+            }),
+            serde_json::json!({
+                "manifest_hash": "snapshot-b",
+                "operation_bindings": [
+                    {"name": "clock", "artifact_hash": "sha256:clock"},
+                    {"name": "files", "artifact_hash": "sha256:files"},
+                    {"name": "search", "artifact_hash": "sha256:search-b"}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+    let events = store.read_events(&stream_id, None).await.unwrap();
+    let delta = &events[before.len()..];
+    assert_eq!(
+        delta.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        vec![
+            verlet_history::EventKind::ManifestCompileCompleted,
+            verlet_history::EventKind::ManifestBindCompleted,
+            verlet_history::EventKind::BindingDetached,
+            verlet_history::EventKind::BindingDetached,
+            verlet_history::EventKind::BindingAttached,
+            verlet_history::EventKind::BindingAttached,
+            verlet_history::EventKind::PlacementDecision,
+        ]
+    );
+    let bind_id = delta[1].id;
+    assert!(
+        delta[2..6]
+            .iter()
+            .all(|event| event.provenance.source_event_ids == vec![bind_id])
+    );
+    let detached = delta[2..4]
+        .iter()
+        .map(|event| {
+            serde_json::from_value::<verlet_history::BindingDetachedPayload>(event.payload.clone())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        detached
+            .iter()
+            .map(|payload| payload.attach_event_id)
+            .collect::<std::collections::HashSet<_>>(),
+        ["logs", "search"]
+            .into_iter()
+            .map(|name| first_attaches[name])
+            .collect()
+    );
+    assert!(detached.iter().all(|payload| {
+        payload.requested_by == "user_1"
+            && payload.decided_by == "user_1"
+            && payload.decision_event_id.is_none()
+    }));
+    assert_eq!(
+        delta[4..6]
+            .iter()
+            .map(|event| {
+                let payload: verlet_history::BindingAttachedPayload =
+                    serde_json::from_value(event.payload.clone()).unwrap();
+                (payload.name, payload.artifact_hash)
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("clock".to_string(), "sha256:clock".to_string()),
+            ("search".to_string(), "sha256:search-b".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn manifest_rebind_to_zero_operations_detaches_every_active_binding() {
+    let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let host = crate::kernel::runtime_host::RuntimeHost::with_session_store(
+        std::sync::Arc::new(EchoRuntimeFactory),
+        store.clone(),
+    );
+    let thread = host
+        .start_thread(
+            coords("tenant_a", "user_1", "binding-delta-empty"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({"manifest_hash": "snapshot-a"}),
+            serde_json::json!({
+                "manifest_hash": "snapshot-a",
+                "operation_bindings": [
+                    {"name": "files", "artifact_hash": "sha256:files"},
+                    {"name": "search", "artifact_hash": "sha256:search"}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&thread.context().coordinates);
+    let before = store.read_events(&stream_id, None).await.unwrap();
+
+    thread
+        .record_manifest_receipts(
+            serde_json::json!({"manifest_hash": "snapshot-b"}),
+            serde_json::json!({
+                "manifest_hash": "snapshot-b",
+                "operation_bindings": []
+            }),
+        )
+        .await
+        .unwrap();
+
+    let events = store.read_events(&stream_id, None).await.unwrap();
+    let delta = &events[before.len()..];
+    assert_eq!(
+        delta
+            .iter()
+            .filter(|event| event.kind == verlet_history::EventKind::BindingDetached)
+            .count(),
+        2
+    );
+    assert_eq!(
+        delta
+            .iter()
+            .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+            .count(),
+        0
+    );
+    assert!(
+        crate::kernel::binding_projector::fold_thread_bindings(&events)
+            .active
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn cancelled_manifest_receipt_caller_cannot_leave_a_half_witnessed_workspace() {
     let barrier = std::sync::Arc::new(AdmissionAppendBarrier::default());
     let store = std::sync::Arc::new(AdmissionTestStore::blocking_manifest(barrier.clone()));
