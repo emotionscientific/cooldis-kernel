@@ -11967,6 +11967,7 @@ streaming = false
         snapshot_id: bind.payload["manifest_hash"].as_str().unwrap().to_string(),
         tool_name: verlet_vbash::BASH_TOOL.to_string(),
         arguments: serde_json::json!({"command":"profile customer-1"}),
+        attach_event_id: None,
         args_fingerprint: None,
         holds: Vec::new(),
     };
@@ -13351,20 +13352,39 @@ async fn model_provider_capabilities_read_reports_bedrock_streaming() {
 async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle() {
     let registry_root = unique_test_root("capsule-global-registry");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
-    let client = std::sync::Arc::new(BashCallingCapsuleClient::new(
-        "search",
-        "search",
-        "command -v search && printf verlet | search",
-        "search:verlet",
-    ));
+    let client = std::sync::Arc::new(DirectOperationCallingClient::new("search", "search:verlet"));
     let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
-    let app = test_app_with_provider_and_capsule_bindings(
-        provider_client,
-        crate::adapters::app_server::CapsuleBindingsConfig::default()
-            .with_registry_root(&registry_root)
-            .with_global_operation_name("search"),
-    )
-    .await;
+    let app_root = unique_test_root("binding-attach-receipt");
+    let workspace = app_root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let binding_config = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&registry_root)
+        .with_global_operation_name("search");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(app_root.join("app-server.sock"));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+        .with_capsule_bindings(binding_config.clone());
+    config.runtime_home = app_root.join("runtime");
+    config.state_home = app_root.join("state");
+    config.agent_registry_root = app_root.join("agents");
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    runtime_config.max_tokens = 128;
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            binding_config,
+            None,
+            &config,
+        );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
+            .await
+            .unwrap();
     let mut principal = operator_principal(&app);
     principal.principal_id = crate::daemon::identity::PrincipalId::new("principal:binding-review");
     let (connection, _outbound_rx) = test_connection_for_principal(app.clone(), principal).await;
@@ -13520,6 +13540,26 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
     let requests = client.requests();
     assert!(tool_names(&requests[0]).contains(&"search".to_string()));
     assert_bash_tool_describes(&requests[0], "search");
+    let completed_events = session_store.read_events(&stream_id, None).await.unwrap();
+    let search_attach = completed_events
+        .iter()
+        .find(|event| {
+            event.kind == verlet_history::EventKind::BindingAttached
+                && event.payload["name"].as_str() == Some("search")
+        })
+        .expect("search should have a binding attachment");
+    let search_request = completed_events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallRequested)
+        .find_map(|event| {
+            serde_json::from_value::<crate::kernel::control_decision::ToolCallRequestedPayload>(
+                event.payload.clone(),
+            )
+            .ok()
+            .filter(|payload| payload.tool_name == "search")
+        })
+        .expect("the operation-backed search call should be witnessed");
+    assert_eq!(search_request.attach_event_id, Some(search_attach.id));
 
     let spawned = app
         .dispatch_request(
@@ -13569,6 +13609,7 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
         .as_slice(),
         expected_fork_bindings.as_slice()
     );
+    let _ = std::fs::remove_dir_all(app_root);
     let _ = std::fs::remove_dir_all(registry_root);
 }
 
@@ -20222,6 +20263,68 @@ struct BashCallingCapsuleClient {
     expected_output: String,
 }
 
+struct DirectOperationCallingClient {
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
+    tool_name: String,
+    expected_output: String,
+}
+
+impl DirectOperationCallingClient {
+    fn new(tool_name: &str, expected_output: &str) -> Self {
+        Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+            tool_name: tool_name.to_string(),
+            expected_output: expected_output.to_string(),
+        }
+    }
+
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl verlet_provider::ProviderClient for DirectOperationCallingClient {
+    async fn complete(
+        &self,
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
+        if !has_tool_result {
+            assert!(tool_names(request).contains(&self.tool_name));
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
+                    "call_direct_operation_1",
+                    self.tool_name.clone(),
+                    serde_json::json!({"input": "verlet"}),
+                )],
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            });
+        }
+
+        let text = text_from_canonical_messages(&request.messages);
+        assert!(text.contains(&self.expected_output));
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "direct operation completed",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
+        })
+    }
+}
+
+impl ProviderRequestRecorder for DirectOperationCallingClient {
+    fn recorded_request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
 // lexicon-allow: capsule - existing test client name
 impl BashCallingCapsuleClient {
     fn new(
@@ -20237,10 +20340,6 @@ impl BashCallingCapsuleClient {
             command: command.to_string(),
             expected_output: expected_output.to_string(),
         }
-    }
-
-    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
-        self.requests.lock().unwrap().clone()
     }
 }
 

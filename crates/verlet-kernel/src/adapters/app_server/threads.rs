@@ -2556,7 +2556,7 @@ impl CapsuleBindingRuntimeFactory {
         for thread_binding in manifest_operation_bindings {
             let ThreadOperationBinding {
                 binding,
-                attach_event_id: _,
+                attach_event_id,
             } = thread_binding;
             let crate::agent::manifest_bind::AgentManifestOperationBinding {
                 name,
@@ -2566,13 +2566,6 @@ impl CapsuleBindingRuntimeFactory {
                 operations,
                 direct_tools,
             } = binding;
-            tool_aliases.extend(direct_tools.into_iter().map(|direct_tool| {
-                crate::agent::agent_tool_router::OperationToolAlias {
-                    tool_name: direct_tool.tool_name,
-                    registered_name: name.clone(),
-                    operation_name: direct_tool.operation,
-                }
-            }));
             let record = registry
                 .load_version_record(&name, &artifact_hash)
                 .map_err(|err| {
@@ -2581,6 +2574,41 @@ impl CapsuleBindingRuntimeFactory {
                         name, artifact_hash
                     ))
                 })?;
+            let is_kernel = matches!(
+                &record.source,
+                verlet_operations::operation_store::PublishedOperationSource::Kernel { .. }
+            );
+            let alias_attach_event_id = if is_kernel { None } else { attach_event_id };
+            tool_aliases.extend(direct_tools.into_iter().map(|direct_tool| {
+                crate::agent::agent_tool_router::OperationToolAlias {
+                    tool_name: direct_tool.tool_name,
+                    registered_name: name.clone(),
+                    operation_name: direct_tool.operation,
+                    attach_event_id: alias_attach_event_id,
+                }
+            }));
+            if !is_kernel {
+                tool_aliases.extend(
+                    record
+                        .manifest
+                        .operations
+                        .iter()
+                        .filter(|operation| {
+                            operations.is_empty() || operations.contains(&operation.name)
+                        })
+                        .map(
+                            |operation| crate::agent::agent_tool_router::OperationToolAlias {
+                                tool_name: verlet_operations::projection_tool_name(
+                                    &name,
+                                    &operation.name,
+                                ),
+                                registered_name: name.clone(),
+                                operation_name: operation.name.clone(),
+                                attach_event_id: alias_attach_event_id,
+                            },
+                        ),
+                );
+            }
             let record = if operations.is_empty() {
                 crate::operations::plugins::LocalPluginCatalogRecord::whole_record(record)
             } else {

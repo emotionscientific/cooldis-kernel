@@ -322,6 +322,7 @@ async fn append_recovery_request(
                     snapshot_id: "snapshot-recovery".to_string(),
                     tool_name: "recovery_tool".to_string(),
                     arguments,
+                    attach_event_id: None,
                     args_fingerprint: Some(fingerprint),
                     holds: Vec::new(),
                 })
@@ -824,6 +825,7 @@ async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class
                 snapshot_id: "snapshot-recovery".to_string(),
                 tool_name: verlet_vbash::BASH_TOOL.to_string(),
                 arguments,
+                attach_event_id: None,
                 args_fingerprint: Some(fingerprint),
                 holds: Vec::new(),
             })
@@ -980,6 +982,7 @@ async fn turn_rerun_replays_witnessed_assistant_batch_without_redecode_mismatch(
                 arguments: arguments.clone(),
             },
             "snapshot-recovery".to_string(),
+            None,
         )],
         assistant_entry.entry_id,
     )
@@ -3931,6 +3934,7 @@ async fn persisted_round_accounting_rejects_a_request_without_an_assistant_sourc
                 snapshot_id: "unbound".to_string(),
                 tool_name: "thread_status".to_string(),
                 arguments: serde_json::json!({"task_name": "worker-a"}),
+                attach_event_id: None,
                 args_fingerprint: None,
                 holds: Vec::new(),
             })
@@ -4047,6 +4051,7 @@ async fn persisted_round_accounting_rejects_a_cross_turn_assistant_source() {
                     snapshot_id: "unbound".to_string(),
                     tool_name: "thread_status".to_string(),
                     arguments: serde_json::json!({"task_name": "worker-a"}),
+                    attach_event_id: None,
                     args_fingerprint: None,
                     holds: Vec::new(),
                 })
@@ -5612,6 +5617,7 @@ async fn detached_completion_retry_is_idempotent_before_and_after_a_store_failur
                             snapshot_id: "snapshot-1".to_string(),
                             tool_name: "thread_status".to_string(),
                             arguments: serde_json::json!({}),
+                            attach_event_id: None,
                             args_fingerprint: None,
                             holds: Vec::new(),
                         },
@@ -5872,6 +5878,7 @@ async fn legacy_completion_does_not_swallow_a_new_fingerprinted_completion() {
                     snapshot_id: "snapshot-recovery".to_string(),
                     tool_name: "recovery_tool".to_string(),
                     arguments: serde_json::json!({"input":"legacy"}),
+                    attach_event_id: None,
                     args_fingerprint: None,
                     holds: Vec::new(),
                 })
@@ -6082,6 +6089,7 @@ async fn resume_sweep_settles_only_dangling_calls_from_the_full_cancelled_turn_w
                 snapshot_id: "snapshot-cancelled".to_string(),
                 tool_name: "thread_status".to_string(),
                 arguments,
+                attach_event_id: None,
                 args_fingerprint: Some(fingerprint),
                 holds: Vec::new(),
             })
@@ -7996,6 +8004,7 @@ async fn kernel_thread_router() -> crate::agent::agent_tool_router::AgentToolRou
             tool_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
+            attach_event_id: None,
         },
     ])
 }

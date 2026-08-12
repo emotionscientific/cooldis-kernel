@@ -4437,7 +4437,10 @@ async fn prepare_tool_results(
     .unwrap_or_else(|| "unbound".to_string());
     let calls_with_snapshots = tool_calls
         .into_iter()
-        .map(|tool_call| (tool_call, active_snapshot_id.clone()))
+        .map(|tool_call| {
+            let attach_event_id = tool_router.attach_event_id_for_tool_name(&tool_call.name);
+            (tool_call, active_snapshot_id.clone(), attach_event_id)
+        })
         .collect::<Vec<_>>();
     let request_events = append_tool_call_requested_events(
         services,
@@ -4447,7 +4450,7 @@ async fn prepare_tool_results(
     )
     .await?;
     let mut witnessed_calls = Vec::with_capacity(calls_with_snapshots.len());
-    for ((tool_call, active_snapshot_id), request_event) in
+    for ((tool_call, active_snapshot_id, _), request_event) in
         calls_with_snapshots.into_iter().zip(request_events)
     {
         let holds = decode_witnessed_tool_holds(&request_event)?;
@@ -5738,7 +5741,11 @@ async fn append_turn_resumed_event(
 async fn append_tool_call_requested_events(
     services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
     turn_context: &crate::kernel::runtime_host::turn::TurnContext,
-    calls: &[(ProviderToolCall, String)],
+    calls: &[(
+        ProviderToolCall,
+        String,
+        Option<verlet_history::EventRecordId>,
+    )],
     assistant_entry_id: verlet_history::SessionEntryId,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
     let assistant_event_id =
@@ -5750,7 +5757,7 @@ async fn append_tool_call_requested_events(
                 ))
             })?;
     let mut records = Vec::with_capacity(calls.len());
-    for (tool_call, snapshot_id) in calls {
+    for (tool_call, snapshot_id, attach_event_id) in calls {
         let args_fingerprint =
             crate::agent::tool_universe::args_fingerprint(&tool_call.name, &tool_call.arguments)?;
         let mut payload =
@@ -5762,6 +5769,7 @@ async fn append_tool_call_requested_events(
                 snapshot_id: snapshot_id.clone(),
                 tool_name: tool_call.name.clone(),
                 arguments: tool_call.arguments.clone(),
+                attach_event_id: *attach_event_id,
                 args_fingerprint: Some(args_fingerprint),
                 holds: tool_holds::derive_tool_holds(&tool_call.name, &tool_call.arguments)
                     .into_iter()
