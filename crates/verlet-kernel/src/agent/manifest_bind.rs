@@ -3157,7 +3157,7 @@ pub struct AgentManifestCouplingBinding {
 }
 
 impl AgentManifestCouplingBinding {
-    fn from_bound(coupling: &BoundCoupling) -> Self {
+    pub(crate) fn from_bound(coupling: &BoundCoupling) -> Self {
         let source_streams = coupling
             .source_selectors
             .iter()

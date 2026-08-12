@@ -12536,12 +12536,29 @@ streaming = false
         })
         .cloned()
         .collect::<Vec<_>>();
+    let mut competing_receipt_stream = pre_binding_event_stream.clone();
+    let mut competing_payload = bind.payload.clone();
+    competing_payload["ref_uri"] = serde_json::json!("agent://other-operation-segment@0.1.0");
+    competing_payload["operation_bindings"] = serde_json::json!([]);
+    let competing = verlet_history::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        verlet_history::EventKind::ManifestBindCompleted,
+        competing_payload,
+    );
+    competing_receipt_stream.push(verlet_history::EventRecord::from_new(
+        stream_id.clone(),
+        verlet_history::EventSequence::new(
+            competing_receipt_stream.last().unwrap().sequence.get() + 1,
+        ),
+        competing,
+    ));
     let receipt_bindings =
         crate::adapters::app_server::threads::thread_operation_bindings_from_events(
-            &pre_binding_event_stream,
+            &competing_receipt_stream,
+            &lifecycle.metadata,
         )
         .unwrap()
-        .expect("a pre-EMO-584 bind receipt should remain authoritative");
+        .expect("a pre-EMO-584 matching bind receipt should remain authoritative");
     assert_eq!(receipt_bindings.len(), 1);
     assert_eq!(receipt_bindings[0].binding.operations, ["profile"]);
     assert_eq!(receipt_bindings[0].attach_event_id, None);
@@ -12554,6 +12571,7 @@ streaming = false
         .payload = serde_json::json!({"name": "missing-required-fields"});
     let error = crate::adapters::app_server::threads::thread_operation_bindings_from_events(
         &anomalous_events,
+        &lifecycle.metadata,
     )
     .unwrap_err();
     assert!(error.to_string().contains("binding history is anomalous"));
@@ -12585,6 +12603,7 @@ streaming = false
     }
     let empty_fold = crate::adapters::app_server::threads::thread_operation_bindings_from_events(
         &detached_events,
+        &lifecycle.metadata,
     )
     .unwrap()
     .expect("binding events must remain authoritative after detaching every binding");
@@ -12633,6 +12652,7 @@ streaming = false
     let changed_bindings =
         crate::adapters::app_server::threads::thread_operation_bindings_from_events(
             &changed_events,
+            &lifecycle.metadata,
         )
         .unwrap()
         .unwrap();
@@ -13434,6 +13454,144 @@ async fn thread_resume_returns_loaded_thread() {
     assert_eq!(resume["thread"]["turns"].as_array().unwrap().len(), 0);
 }
 
+struct BlockingResumeRuntimeFactory {
+    inner: std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
+    builds: std::sync::atomic::AtomicUsize,
+    blocked: tokio::sync::Notify,
+    released: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl BlockingResumeRuntimeFactory {
+    async fn wait_for_resume_build(&self) {
+        loop {
+            let blocked = self.blocked.notified();
+            if self.builds.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+                return;
+            }
+            blocked.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
+    for BlockingResumeRuntimeFactory
+{
+    async fn build(
+        &self,
+        context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<
+        Box<dyn crate::kernel::runtime_host::runtime_api::AgentRuntime>,
+    > {
+        let build = self
+            .builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if build >= 2 {
+            self.blocked.notify_waiters();
+            while !self.released.load(std::sync::atomic::Ordering::SeqCst) {
+                let released = self.release.notified();
+                if self.released.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                released.await;
+            }
+        }
+        self.inner.build(context).await
+    }
+}
+
+#[tokio::test]
+async fn concurrent_thread_resume_calls_share_the_runtime_build() {
+    let root = unique_test_root("app-server-concurrent-resume");
+    let config = test_config_at_root(&root);
+    let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(root.join("operations"));
+    let inner = crate::adapters::app_server::runtime_factory_from_provider_parts(
+        crate::adapters::agent_loop::AgentLoopConfig::new(
+            verlet_history::ProviderApi::OpenAIResponses,
+            crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+            crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
+        ),
+        std::sync::Arc::new(InspectingCapsuleClient::default()), // lexicon-allow: capsule - existing test provider helper.
+        capsule_bindings, // lexicon-allow: capsule - existing config type.
+    );
+    let gate = std::sync::Arc::new(BlockingResumeRuntimeFactory {
+        inner,
+        builds: std::sync::atomic::AtomicUsize::new(0),
+        blocked: tokio::sync::Notify::new(),
+        released: std::sync::atomic::AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
+    });
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, gate.clone())
+            .await
+            .unwrap();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let started = app
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id = started["thread"]["id"].as_str().unwrap().to_string();
+    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
+    let record = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    app.inner
+        .supervisor
+        .shutdown_thread_at(&record.coordinates)
+        .await
+        .unwrap();
+    app.inner.state.write().await.threads.remove(&thread_id);
+
+    let first_app = app.clone();
+    let first_connection = connection.clone();
+    let first_thread_id = thread_id.clone();
+    let first = tokio::spawn(async move {
+        first_app
+            .dispatch_request(
+                &first_connection,
+                "thread/resume",
+                Some(serde_json::json!({"threadId": first_thread_id})),
+            )
+            .await
+    });
+    gate.wait_for_resume_build().await;
+    let second_app = app.clone();
+    let second_connection = connection.clone();
+    let second_thread_id = thread_id.clone();
+    let second = tokio::spawn(async move {
+        second_app
+            .dispatch_request(
+                &second_connection,
+                "thread/resume",
+                Some(serde_json::json!({"threadId": second_thread_id})),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    gate.release();
+
+    for result in [first.await.unwrap(), second.await.unwrap()] {
+        let resumed = result.expect("concurrent resume should share the resident runtime");
+        assert_eq!(resumed["thread"]["id"], thread_id);
+    }
+    assert_eq!(gate.builds.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn thread_resume_loads_thread_from_metadata_when_not_resident() {
     let app = test_app().await;
@@ -13750,6 +13908,14 @@ streaming = false
         )
         .await
         .unwrap();
+    let matching = first
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(serde_json::json!({"agentRef": "agent://workspace-reload@latest"})),
+        )
+        .await
+        .unwrap();
     let valid_fork = first
         .dispatch_request(
             &connection,
@@ -13766,6 +13932,9 @@ streaming = false
             .unwrap();
     let drifted_id =
         verlet_runtime_contracts::ThreadId::parse_str(drifted["thread"]["id"].as_str().unwrap())
+            .unwrap();
+    let matching_id =
+        verlet_runtime_contracts::ThreadId::parse_str(matching["thread"]["id"].as_str().unwrap())
             .unwrap();
     let mut absent_lifecycle = first
         .inner
@@ -13798,6 +13967,13 @@ streaming = false
         .await
         .unwrap()
         .unwrap();
+    let mut matching_lifecycle = first
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(matching_id)
+        .await
+        .unwrap()
+        .unwrap();
     let valid_fork_lifecycle = first
         .inner
         .metadata_store
@@ -13824,6 +14000,55 @@ streaming = false
             .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted),
         "a plain fork must receive its own durable workspace bind witness"
     );
+    let session_store =
+        verlet_history_sqlite::SqliteSessionStore::open(&first.inner.session_store_path)
+            .await
+            .unwrap();
+    let matching_events = session_store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&matching_lifecycle.coordinates),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut mismatched_compile = matching_events
+        .iter()
+        .find(|event| event.kind == verlet_history::EventKind::ManifestCompileCompleted)
+        .unwrap()
+        .payload
+        .clone();
+    let mut mismatched_bind = matching_events
+        .iter()
+        .find(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+        .unwrap()
+        .payload
+        .clone();
+    mismatched_compile["ref_uri"] = serde_json::json!("agent://other-workspace@0.1.0");
+    mismatched_compile["source_hash"] = serde_json::json!("sha256:mismatched-source");
+    mismatched_bind["ref_uri"] = serde_json::json!("agent://other-workspace@0.1.0");
+    mismatched_bind["workspace"]["host_path"] =
+        serde_json::json!(std::fs::canonicalize(&replacement_workspace).unwrap());
+    first
+        .handle_for_thread(matching["thread"]["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .record_manifest_receipts(mismatched_compile, mismatched_bind)
+        .await
+        .unwrap();
+    assert_eq!(
+        session_store
+            .read_events(
+                &verlet_history::EventStreamId::for_thread(&matching_lifecycle.coordinates),
+                None,
+            )
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+            .count(),
+        2,
+        "the compatibility lane must choose between multiple durable receipts"
+    );
     absent_lifecycle
         .metadata
         .remove(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA);
@@ -13842,6 +14067,30 @@ streaming = false
         )
         .unwrap(),
     );
+    matching_lifecycle
+        .metadata
+        .remove(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA);
+    let unwitnessed_context = vec![
+        crate::agent::manifest_bind::AgentManifestStaticContextSegment {
+            id: "unwitnessed".to_string(),
+            assembler: "kernel://assembler/static".to_string(),
+            input: "unwitnessed".to_string(),
+            pinned: true,
+            budget_share: None,
+            ref_uri: format!("resource://artifact/sha256:{}", "a".repeat(64)),
+            content_sha256: verlet_agent::contracts::sha256_hex(b"unwitnessed prompt"),
+            content: "unwitnessed prompt".to_string(),
+        },
+    ];
+    for key in [
+        crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA,
+        crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
+    ] {
+        matching_lifecycle.metadata.insert(
+            key.to_string(),
+            serde_json::to_string(&unwitnessed_context).unwrap(),
+        );
+    }
     first
         .inner
         .metadata_store
@@ -13860,11 +14109,18 @@ streaming = false
         .upsert_thread_lifecycle(drifted_lifecycle.clone())
         .await
         .unwrap();
+    first
+        .inner
+        .metadata_store
+        .upsert_thread_lifecycle(matching_lifecycle.clone())
+        .await
+        .unwrap();
     for lifecycle in [
         &absent_lifecycle,
         &corrupt_lifecycle,
         &drifted_lifecycle,
         &valid_lifecycle,
+        &matching_lifecycle,
     ] {
         first
             .inner
@@ -13901,6 +14157,7 @@ streaming = false
         corrupt["thread"]["id"].as_str().unwrap(),
         drifted["thread"]["id"].as_str().unwrap(),
         valid["thread"]["id"].as_str().unwrap(),
+        matching["thread"]["id"].as_str().unwrap(),
         valid_fork["thread"]["id"].as_str().unwrap(),
     ];
     assert_eq!(
@@ -13920,6 +14177,16 @@ streaming = false
             std::fs::canonicalize(&first_workspace).unwrap(),
             "resume must not consult the replacement daemon default"
         );
+        if thread_id == matching["thread"]["id"].as_str().unwrap() {
+            assert!(
+                !handle.context().metadata.contains_key(
+                    crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA
+                ) && !handle.context().metadata.contains_key(
+                    crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA
+                ),
+                "resume must discard context metadata absent from the matching durable receipt"
+            );
+        }
     }
     let valid_reloaded = restarted
         .inner
@@ -14922,6 +15189,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let thread_id = {
+        // lexicon-allow: capsule - existing app-server provider test double
         let first_client = std::sync::Arc::new(InspectingCapsuleClient::default());
         let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
             first_client.clone();
@@ -14983,6 +15251,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
         thread_id
     };
 
+    // lexicon-allow: capsule - existing app-server provider test double
     let second_client = std::sync::Arc::new(InspectingCapsuleClient::default());
     let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> =
         second_client.clone();

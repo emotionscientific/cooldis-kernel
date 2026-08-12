@@ -3535,6 +3535,143 @@ async fn route_agent_identity_survives_true_runtime_restart() {
 }
 
 #[tokio::test]
+async fn lazy_reload_gap_fills_legacy_start_metadata_from_receipt_without_events() {
+    let root = test_root("route-agent-restart-legacy-metadata");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let operation_registry_root = root.join("operations");
+    let operation = publish_route_test_operation(&operation_registry_root).await;
+    let agent_registry_root = root.join("agents");
+    let agent = publish_route_agent_manifest(
+        &root,
+        &agent_registry_root,
+        &operation_registry_root,
+        &operation.active_artifact_hash,
+    );
+    let first_client = std::sync::Arc::new(RecordingRouteProviderClient::default());
+    let first_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        first_client,
+    )
+    .await;
+    let binding = first_server
+        .bind_daemon_route_agent("agent://daemon-route-runner@latest")
+        .await
+        .unwrap();
+    let mut legacy_metadata = binding.metadata;
+    for key in [
+        "cooldis.agent.model_profile_id",
+        "cooldis.agent.provider_id",
+        "cooldis.agent.model_id",
+        "cooldis.app_server.model_provider",
+        "cooldis.app_server.cwd",
+        "cooldis.agent.runtime.streaming",
+        "cooldis.agent.system_instruction",
+        "cooldis.agent.operation_bindings",
+        crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
+    ] {
+        legacy_metadata.remove(key);
+    }
+    let first_handle = first_server
+        .supervisor()
+        .start_thread(crate::kernel::supervisor::ThreadStartRequest {
+            tenant_id: first_server.tenant_id().to_string(),
+            user_id: first_server.user_id().to_string(),
+            session_id: format!("legacy-metadata-{}", uuid::Uuid::now_v7()),
+            topology: verlet_runtime_contracts::ThreadTopology::root(),
+            metadata: legacy_metadata,
+        })
+        .await
+        .unwrap();
+    let coordinates = first_handle.context().coordinates.clone();
+    first_handle
+        .record_manifest_receipts_for_principal(
+            binding.compile_receipt,
+            binding.bind_receipt,
+            &binding.principal_id,
+        )
+        .await
+        .unwrap();
+    first_server
+        .supervisor()
+        .shutdown_thread_at(&coordinates)
+        .await
+        .unwrap();
+    let session_store_path = first_server.session_store_path().to_path_buf();
+    let events_before_reload = thread_events_for(&session_store_path, &coordinates).await;
+    drop(first_server);
+
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
+    for path in [
+        registry
+            .version_record_path(&agent.name, &agent.version)
+            .unwrap(),
+        registry.record_path(&agent.name).unwrap(),
+        registry.alias_record_path(&agent.name, "latest").unwrap(),
+    ] {
+        std::fs::remove_file(path).unwrap();
+    }
+
+    let restarted_client = std::sync::Arc::new(RecordingRouteProviderClient::default());
+    let restarted_server = test_server_with_route_provider_at_root(
+        &root,
+        &workspace,
+        &agent_registry_root,
+        &operation_registry_root,
+        restarted_client.clone(),
+    )
+    .await;
+    let restarted =
+        crate::daemon::daemon_io::VerletDaemonIoBridge::from_app_server(&restarted_server);
+    let reloaded = restarted
+        .get_or_load_thread_handle(&coordinates)
+        .await
+        .expect("legacy daemon metadata should rehydrate from durable receipts");
+    assert_eq!(
+        thread_events_for(&session_store_path, &coordinates).await,
+        events_before_reload,
+        "legacy daemon lazy reload must append no events"
+    );
+    for key in [
+        "cooldis.agent.model_profile_id",
+        "cooldis.agent.provider_id",
+        "cooldis.agent.model_id",
+        "cooldis.app_server.model_provider",
+        "cooldis.app_server.cwd",
+        "cooldis.agent.runtime.streaming",
+        "cooldis.agent.system_instruction",
+        "cooldis.agent.operation_bindings",
+        crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
+    ] {
+        assert!(
+            reloaded.context().metadata.contains_key(key),
+            "resume did not restore {key}"
+        );
+    }
+    restarted
+        .supervisor
+        .submit(
+            &coordinates.tenant_id,
+            coordinates.thread_id,
+            "after-legacy-reload",
+            "after legacy reload",
+        )
+        .await
+        .unwrap();
+    wait_for_provider_requests(&restarted_client, 1).await;
+    let requests = restarted_client.requests();
+    assert_eq!(
+        requests[0].system[0].text,
+        "You are the daemon route prompt runner.\n"
+    );
+    assert!(requests[0].tools.iter().any(|tool| tool.name == "lookup"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn fork_child_identity_survives_true_runtime_restart() {
     let root = test_root("route-fork-restart-identity");
     let workspace = root.join("workspace");
@@ -3610,7 +3747,7 @@ async fn fork_child_identity_survives_true_runtime_restart() {
 }
 
 #[tokio::test]
-async fn legacy_lazy_reload_fabricates_root_and_witnesses_every_fallback() {
+async fn legacy_lazy_reload_fabricates_root_without_appending_events() {
     let root = test_root("legacy-reload-degraded");
     let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
     let envelope = test_envelope("legacy reload");
@@ -3622,7 +3759,9 @@ async fn legacy_lazy_reload_fabricates_root_and_witnesses_every_fallback() {
         thread_id: verlet_runtime_contracts::ThreadId::new(),
     };
 
-    for expected_witnesses in 1..=2 {
+    let events_before =
+        thread_events_for(bridge.session_store_path.as_ref().unwrap(), &coordinates).await;
+    for _ in 0..2 {
         let handle = bridge
             .get_or_load_thread_handle(&coordinates)
             .await
@@ -3639,21 +3778,12 @@ async fn legacy_lazy_reload_fabricates_root_and_witnesses_every_fallback() {
             .await
             .unwrap();
 
-        let events =
+        let events_after =
             thread_events_for(bridge.session_store_path.as_ref().unwrap(), &coordinates).await;
-        let degraded = events
-            .iter()
-            .filter(|event| event.kind == verlet_history::EventKind::ThreadReloadDegraded)
-            .collect::<Vec<_>>();
-        assert_eq!(degraded.len(), expected_witnesses);
-        let payload: verlet_history::ThreadReloadDegradedPayload =
-            serde_json::from_value(degraded.last().unwrap().payload.clone()).unwrap();
-        assert_eq!(payload.thread_id, coordinates.thread_id);
         assert_eq!(
-            payload.missing,
-            vec!["topology", "parent_thread_id", "metadata"]
+            events_after, events_before,
+            "lazy resume must not append a degraded-reload witness"
         );
-        assert_eq!(payload.fallback, "fabricated_root");
     }
     let _ = std::fs::remove_dir_all(root);
 }
@@ -9299,6 +9429,13 @@ async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
         thread_id: verlet_runtime_contracts::ThreadId::new(),
     };
     gate.block_first_build(coordinates.clone());
+    let store = bridge
+        .supervisor
+        .runtime_store(&coordinates.tenant_id)
+        .await
+        .unwrap();
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let events_before = store.read_events(&stream_id, None).await.unwrap();
 
     let first_bridge = bridge.clone();
     let first_coordinates = coordinates.clone();
@@ -9333,24 +9470,10 @@ async fn concurrent_lazy_loads_build_one_runtime_and_share_its_handle() {
     assert_eq!(first_handle.context().coordinates, coordinates);
     assert_eq!(second_handle.context().coordinates, coordinates);
     assert_eq!(gate.matching_builds(), 1);
-    let store = bridge
-        .supervisor
-        .runtime_store(&coordinates.tenant_id)
-        .await
-        .unwrap();
     assert_eq!(
-        store
-            .read_events(
-                &verlet_history::EventStreamId::for_thread(&coordinates),
-                None
-            )
-            .await
-            .unwrap()
-            .iter()
-            .filter(|event| event.kind == verlet_history::EventKind::ThreadReloadDegraded)
-            .count(),
-        1,
-        "racing lazy loads must share one degraded-reload witness"
+        store.read_events(&stream_id, None).await.unwrap(),
+        events_before,
+        "racing lazy loads must not append a degraded-reload witness"
     );
     bridge
         .supervisor
