@@ -37,6 +37,44 @@ async fn command_hook_handler_reads_json_stdin_and_returns_pre_tool_output() {
     assert_eq!(outcome.additional_contexts, vec!["ctx"]);
 }
 
+#[tokio::test]
+async fn command_hook_handler_tolerates_hook_that_never_reads_stdin() {
+    let hook = crate::agent::hooks::CommandHookHandler::new(
+        "no-stdin",
+        crate::agent::hooks::HookEventName::PreToolUse,
+        r#"printf '%s' '{"additional_context":"ignored stdin"}'"#,
+    )
+    .with_matcher("echo_search");
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let turn_context = crate::kernel::runtime_host::turn::TurnContext::new(
+        verlet_runtime_contracts::ThreadContext::root(coordinates),
+        "turn-1",
+        &crate::kernel::runtime_host::turn::TurnInput::text("hello"),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    // Larger than any pipe buffer, so the stdin write cannot complete before
+    // the hook exits and the broken pipe is guaranteed rather than a race.
+    let request = crate::agent::hooks::PreToolUseHookRequest {
+        turn_context: turn_context.snapshot(),
+        call_id: "call_1".to_string(),
+        tool_name: "echo_search".to_string(),
+        arguments: serde_json::json!({"input": "x".repeat(4 * 1024 * 1024)}),
+    };
+    let outcome = crate::agent::hooks::HookPipeline::new()
+        .with_command_handler(hook)
+        .run_pre_tool_use(request, |_| {})
+        .await;
+
+    assert_eq!(
+        outcome.records[0].status,
+        crate::agent::hooks::HookRunStatus::Completed,
+        "hook records: {:?}",
+        outcome.records
+    );
+    assert_eq!(outcome.additional_contexts, vec!["ignored stdin"]);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn command_hook_handler_prefers_injected_shell() {
