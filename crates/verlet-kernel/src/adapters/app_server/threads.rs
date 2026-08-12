@@ -146,7 +146,233 @@ pub(crate) async fn recover_unwitnessed_workspace_metadata_as_unbound(
     Ok(())
 }
 
+fn insert_resume_metadata_json_if_absent<T: serde::Serialize>(
+    metadata: &mut std::collections::BTreeMap<String, String>,
+    key: &str,
+    value: &T,
+    label: &str,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    if metadata.contains_key(key) {
+        return Ok(());
+    }
+    let encoded = serde_json::to_string(value).map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to encode recorded {label} for resume: {err}"
+        ))
+    })?;
+    metadata.insert(key.to_string(), encoded);
+    Ok(())
+}
+
+fn recorded_runtime_overrides(
+    receipt: &crate::agent::manifest_bind::AgentManifestBindReceipt,
+) -> crate::agent::manifest_bind::AgentManifestBindOverrides {
+    let mut overrides = crate::agent::manifest_bind::AgentManifestBindOverrides::default();
+    for key in &receipt.overridden_keys {
+        match key.as_str() {
+            "default_cwd" => {
+                overrides.default_cwd = Some(receipt.effective_runtime.default_cwd.clone())
+            }
+            "streaming" => overrides.streaming = Some(receipt.effective_runtime.streaming),
+            "turn_timeout_ms" => {
+                overrides.turn_timeout_ms = receipt.effective_runtime.turn_timeout_ms
+            }
+            "cancellation_grace_ms" => {
+                overrides.cancellation_grace_ms = receipt.effective_runtime.cancellation_grace_ms
+            }
+            "max_tool_rounds" => {
+                overrides.max_tool_rounds = receipt.effective_runtime.max_tool_rounds
+            }
+            "compaction.auto_at_text_bytes" => {
+                overrides.compaction_auto_at_text_bytes =
+                    receipt.effective_runtime.compaction.auto_at_text_bytes
+            }
+            _ => {}
+        }
+    }
+    overrides
+}
+
 impl crate::adapters::app_server::VerletAppServer {
+    async fn rehydrate_loaded_manifest_thread_metadata(
+        &self,
+        record: &mut verlet_runtime_contracts::ThreadLifecycleRecord,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
+        let runtime_store = self
+            .inner
+            .supervisor
+            .runtime_store(&record.coordinates.tenant_id)
+            .await?;
+        let Some((_, receipt)) = crate::kernel::control_decision::active_manifest_bind_receipt(
+            runtime_store.as_ref(),
+            &record.coordinates,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+
+        let metadata = &mut record.metadata;
+        if metadata
+            .get(crate::adapters::app_server::THREAD_AGENT_PLACEMENT_METADATA)
+            .is_some_and(|raw| {
+                serde_json::from_str::<crate::agent::manifest_bind::AgentManifestPlacementBinding>(
+                    raw,
+                )
+                .is_err()
+            })
+        {
+            eprintln!(
+                "verlet app-server recovered invalid stored manifest placement from the durable receipt for thread {}",
+                record.coordinates.thread_id
+            );
+            metadata.remove(crate::adapters::app_server::THREAD_AGENT_PLACEMENT_METADATA);
+        }
+        metadata
+            .entry(crate::adapters::app_server::THREAD_AGENT_REF_METADATA.to_string())
+            .or_insert_with(|| receipt.ref_uri.clone());
+        metadata
+            .entry(crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA.to_string())
+            .or_insert_with(|| receipt.manifest_hash.clone());
+        metadata
+            .entry(crate::adapters::app_server::THREAD_AGENT_MODEL_PROFILE_ID_METADATA.to_string())
+            .or_insert_with(|| receipt.model_profile_id.clone());
+        metadata
+            .entry(crate::adapters::app_server::THREAD_AGENT_PROVIDER_ID_METADATA.to_string())
+            .or_insert_with(|| receipt.provider_id.clone());
+        metadata
+            .entry(crate::adapters::app_server::THREAD_AGENT_MODEL_ID_METADATA.to_string())
+            .or_insert_with(|| receipt.model_id.clone());
+        metadata
+            .entry(
+                crate::adapters::app_server::THREAD_APP_SERVER_MODEL_PROVIDER_METADATA.to_string(),
+            )
+            .or_insert_with(|| receipt.provider_id.clone());
+        metadata
+            .entry(crate::adapters::app_server::THREAD_APP_SERVER_CWD_METADATA.to_string())
+            .or_insert_with(|| {
+                crate::adapters::app_server::connection::cwd_string(&resolve_cwd(
+                    &self.inner.cwd,
+                    Some(receipt.effective_runtime.default_cwd.as_str()),
+                ))
+            });
+        metadata
+            .entry(crate::adapters::app_server::THREAD_AGENT_RUNTIME_STREAMING_METADATA.to_string())
+            .or_insert_with(|| receipt.effective_runtime.streaming.to_string());
+        if let Some(max_tool_rounds) = receipt.effective_runtime.max_tool_rounds {
+            let value = match max_tool_rounds {
+                verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Limited(rounds) => {
+                    rounds.to_string()
+                }
+                verlet_agent::manifest_schema::AgentManifestMaxToolRounds::Unlimited => {
+                    "unlimited".to_string()
+                }
+            };
+            metadata
+                .entry(
+                    crate::adapters::app_server::THREAD_AGENT_RUNTIME_MAX_TOOL_ROUNDS_METADATA
+                        .to_string(),
+                )
+                .or_insert(value);
+        }
+        if let Some(auto_at_text_bytes) = receipt.effective_runtime.compaction.auto_at_text_bytes {
+            metadata
+                .entry(
+                    crate::adapters::app_server::THREAD_AGENT_RUNTIME_COMPACTION_AUTO_AT_TEXT_BYTES_METADATA
+                        .to_string(),
+                )
+                .or_insert_with(|| auto_at_text_bytes.to_string());
+        }
+        if !receipt.tool_ids.is_empty() {
+            let mut tool_ids = receipt.tool_ids.clone();
+            tool_ids.sort();
+            metadata
+                .entry(
+                    crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA
+                        .to_string(),
+                )
+                .or_insert_with(|| {
+                    manifest_tool_use_instruction_text(&receipt.ref_uri, Some(&tool_ids.join(", ")))
+                });
+        }
+        insert_resume_metadata_json_if_absent(
+            metadata,
+            crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA,
+            &receipt.operation_bindings,
+            "operation bindings",
+        )?;
+        let overrides = recorded_runtime_overrides(&receipt);
+        if !overrides.is_empty() {
+            insert_resume_metadata_json_if_absent(
+                metadata,
+                crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA,
+                &overrides,
+                "runtime overrides",
+            )?;
+        }
+        let recorded_placement = receipt.placement.clone().unwrap_or_default();
+        insert_resume_metadata_json_if_absent(
+            metadata,
+            crate::adapters::app_server::THREAD_AGENT_PLACEMENT_METADATA,
+            &recorded_placement,
+            "placement binding",
+        )?;
+        if let Some(workspace) = &receipt.workspace {
+            insert_resume_metadata_json_if_absent(
+                metadata,
+                crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA,
+                workspace,
+                "workspace binding",
+            )?;
+        }
+        if !receipt.skill_packages.is_empty() {
+            metadata.insert(
+                crate::agent::manifest_bind::THREAD_AGENT_SKILL_PACKAGES_METADATA.to_string(),
+                serde_json::to_string(&receipt.skill_packages).map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "failed to encode recorded skill package bindings for resume: {err}"
+                    ))
+                })?,
+            );
+        }
+        if let Some(discovery) = &receipt.skill_discovery {
+            metadata.insert(
+                crate::agent::manifest_bind::THREAD_AGENT_SKILL_DISCOVERY_METADATA.to_string(),
+                serde_json::to_string(discovery).map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "failed to encode recorded skill discovery witness for resume: {err}"
+                    ))
+                })?,
+            );
+        }
+        if !receipt.static_context_segments.is_empty() {
+            insert_resume_metadata_json_if_absent(
+                metadata,
+                crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
+                &receipt.static_context_segments,
+                "static context segments",
+            )?;
+        }
+        if !receipt.skill_packages.is_empty() || receipt.skill_discovery.is_some() {
+            let skill_context_segments =
+                crate::agent::manifest_bind::skill_context_segments_for_witnesses(
+                    &receipt.skill_packages,
+                    Some(self.inner.skill_registry_root.as_path()),
+                    receipt.skill_discovery.as_ref(),
+                )?;
+            metadata.insert(
+                crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA
+                    .to_string(),
+                serde_json::to_string(&skill_context_segments).map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "failed to encode recorded skill context segments for resume: {err}"
+                    ))
+                })?,
+            );
+        }
+        Ok(())
+    }
+
     pub(super) async fn load_threads_from_metadata(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -167,6 +393,16 @@ impl crate::adapters::app_server::VerletAppServer {
             {
                 continue;
             }
+            if let Err(err) = self
+                .rehydrate_loaded_manifest_thread_metadata(&mut record)
+                .await
+            {
+                eprintln!(
+                    "verlet app-server skipped thread {} with invalid durable bind history: {err}",
+                    record.coordinates.thread_id
+                );
+                continue;
+            }
             let thread_id = record.coordinates.thread_id.to_string();
             if self
                 .inner
@@ -185,28 +421,6 @@ impl crate::adapters::app_server::VerletAppServer {
                 .await?;
             crate::adapters::app_server::subscriptions::wait_for_initial_thread_status(&handle)
                 .await;
-            if let Err(err) = self.rebind_loaded_manifest_thread(&handle).await {
-                let _ = self
-                    .inner
-                    .supervisor
-                    .shutdown_thread_at(&handle.context().coordinates)
-                    .await;
-                eprintln!(
-                    "verlet app-server skipped unavailable thread {}: agent_ref={}, stored_hash={}, error={err}",
-                    record.coordinates.thread_id,
-                    record
-                        .metadata
-                        .get(crate::adapters::app_server::THREAD_AGENT_REF_METADATA)
-                        .map(String::as_str)
-                        .unwrap_or("<none>"),
-                    record
-                        .metadata
-                        .get(crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA)
-                        .map(String::as_str)
-                        .unwrap_or("<none>")
-                );
-                continue;
-            }
             let thread_state = self
                 .thread_state_from_lifecycle(&record, handle.status())
                 .await?;
@@ -246,6 +460,9 @@ impl crate::adapters::app_server::VerletAppServer {
                 thread_id,
             ));
         }
+        self.rehydrate_loaded_manifest_thread_metadata(&mut record)
+            .await
+            .map_err(crate::adapters::app_server::connection::internal_error)?;
         let handle = self
             .inner
             .supervisor
@@ -253,14 +470,6 @@ impl crate::adapters::app_server::VerletAppServer {
             .await
             .map_err(crate::adapters::app_server::connection::internal_error)?;
         crate::adapters::app_server::subscriptions::wait_for_initial_thread_status(&handle).await;
-        if let Err(err) = self.rebind_loaded_manifest_thread(&handle).await {
-            let _ = self
-                .inner
-                .supervisor
-                .shutdown_thread_at(&handle.context().coordinates)
-                .await;
-            return Err(crate::adapters::app_server::connection::internal_error(err));
-        }
         let thread_state = self
             .thread_state_from_lifecycle(&record, handle.status())
             .await

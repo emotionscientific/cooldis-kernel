@@ -7798,13 +7798,24 @@ Changed discovery body marker.
     )
     .unwrap();
     let parsed_thread_id = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
-    let lifecycle = app
+    let mut lifecycle = app
         .inner
         .metadata_store
         .get_thread_lifecycle(parsed_thread_id)
         .await
         .unwrap()
         .expect("thread/start should persist discovery metadata");
+    lifecycle
+        .metadata
+        .remove(crate::agent::manifest_bind::THREAD_AGENT_SKILL_DISCOVERY_METADATA);
+    lifecycle
+        .metadata
+        .remove(crate::agent::manifest_bind::THREAD_AGENT_SKILL_CONTEXT_SEGMENTS_METADATA);
+    app.inner
+        .metadata_store
+        .upsert_thread_lifecycle(lifecycle.clone())
+        .await
+        .unwrap();
     app.inner
         .supervisor
         .shutdown_thread_at(&lifecycle.coordinates)
@@ -8671,88 +8682,6 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
         lifecycle.metadata[crate::adapters::app_server::THREAD_AGENT_MODEL_ID_METADATA],
         "echo-v1"
     );
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn app_server_startup_skips_stale_manifest_threads() {
-    let root = unique_test_root("app-server-stale-manifest-startup");
-    let workspace = root.join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
-    let agent_registry_root = root.join("agents");
-    let metadata_path;
-    let thread_id;
-
-    {
-        let listen =
-            crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
-                format!("verlet-stale-manifest-a-{}.sock", uuid::Uuid::now_v7()),
-            ));
-        let mut config =
-            crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
-        config.runtime_home = root.join("runtime");
-        config.state_home = root.join("state");
-        config.agent_registry_root = agent_registry_root.clone();
-        metadata_path = config.metadata_store_path();
-        let app = crate::adapters::app_server::VerletAppServer::new_local(config)
-            .await
-            .unwrap();
-        let (connection, _outbound_rx) = test_connection(app.clone()).await;
-        initialize_for_test(&connection).await;
-
-        let thread_start = app
-            .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
-            .await
-            .unwrap();
-        thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    }
-
-    let parsed = verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap();
-    let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
-        .await
-        .unwrap();
-    let mut lifecycle = store
-        .get_thread_lifecycle(parsed)
-        .await
-        .unwrap()
-        .expect("thread/start should persist lifecycle metadata");
-    lifecycle.metadata.insert(
-        crate::adapters::app_server::THREAD_AGENT_MANIFEST_HASH_METADATA.to_string(),
-        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-    );
-    store.upsert_thread_lifecycle(lifecycle).await.unwrap();
-    drop(store);
-
-    let listen = crate::adapters::app_server::AppServerListenAddr::Unix(std::env::temp_dir().join(
-        format!("verlet-stale-manifest-b-{}.sock", uuid::Uuid::now_v7()),
-    ));
-    let mut restarted_config =
-        crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace);
-    restarted_config.runtime_home = root.join("runtime");
-    restarted_config.state_home = root.join("state");
-    restarted_config.agent_registry_root = agent_registry_root.clone();
-    let restarted = crate::adapters::app_server::VerletAppServer::new_local(restarted_config)
-        .await
-        .unwrap();
-    let (connection, _outbound_rx) = test_connection(restarted.clone()).await;
-    initialize_for_test(&connection).await;
-
-    let err = restarted
-        .dispatch_request(
-            &connection,
-            "thread/resume",
-            Some(serde_json::json!({
-                "threadId": thread_id,
-                "excludeTurns": true,
-            })),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        err.message.contains("manifest thread stored hash"),
-        "unexpected resume error: {err:?}"
-    );
-
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -13456,7 +13385,7 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
             .iter()
             .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
             .collect::<Vec<_>>();
-        assert_eq!(bind_events.len(), 2);
+        assert_eq!(bind_events.len(), 1);
         assert!(
             bind_events
                 .iter()
@@ -13466,7 +13395,7 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
             .iter()
             .filter(|event| event.kind == verlet_history::EventKind::PlacementDecision)
             .collect::<Vec<_>>();
-        assert_eq!(placement_events.len(), 2);
+        assert_eq!(placement_events.len(), 1);
         assert!(
             placement_events
                 .iter()
@@ -13478,7 +13407,7 @@ async fn reload_keeps_bind_time_placement_when_metadata_is_absent_or_corrupt() {
 }
 
 #[tokio::test]
-async fn reload_recovers_absent_or_corrupt_workspace_metadata_as_unbound() {
+async fn reload_recovers_workspace_metadata_from_durable_receipt() {
     let root = unique_test_root("app-server-workspace-reload");
     let app_cwd = root.join("app-cwd");
     let first_workspace = root.join("first-workspace");
@@ -13717,34 +13646,29 @@ streaming = false
         .iter()
         .filter_map(serde_json::Value::as_str)
         .collect::<std::collections::BTreeSet<_>>();
-    assert!(!loaded_ids.contains(absent["thread"]["id"].as_str().unwrap()));
-    assert!(!loaded_ids.contains(corrupt["thread"]["id"].as_str().unwrap()));
-    assert!(
-        !loaded_ids.contains(drifted["thread"]["id"].as_str().unwrap()),
-        "valid JSON that disagrees with the durable bind receipt must not be mounted"
-    );
-    assert!(loaded_ids.contains(valid["thread"]["id"].as_str().unwrap()));
-    assert!(
-        loaded_ids.contains(valid_fork["thread"]["id"].as_str().unwrap()),
-        "a plain fork must carry a durable workspace bind witness"
-    );
-    for thread_id in [
+    let expected_ids = [
         absent["thread"]["id"].as_str().unwrap(),
         corrupt["thread"]["id"].as_str().unwrap(),
         drifted["thread"]["id"].as_str().unwrap(),
-    ] {
-        let err = restarted
-            .dispatch_request(
-                &restarted_connection,
-                "thread/resume",
-                Some(serde_json::json!({"threadId": thread_id})),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            err.message.contains("requires a workspace binding"),
-            "unexpected reload error: {}",
-            err.message
+        valid["thread"]["id"].as_str().unwrap(),
+        valid_fork["thread"]["id"].as_str().unwrap(),
+    ];
+    assert_eq!(
+        loaded_ids,
+        expected_ids
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    for thread_id in expected_ids {
+        let handle = restarted.handle_for_thread(thread_id).await.unwrap();
+        let mounted =
+            crate::adapters::app_server::threads::thread_manifest_workspace_mount(handle.context())
+                .unwrap()
+                .expect("the durable bind receipt should restore the workspace mount");
+        assert_eq!(
+            mounted.host_path,
+            std::fs::canonicalize(&first_workspace).unwrap(),
+            "resume must not consult the replacement daemon default"
         );
     }
     let valid_reloaded = restarted
@@ -13959,17 +13883,29 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
     initialize_for_test(&connection).await;
 
     let thread_start = app
-        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .dispatch_request(
+            &connection,
+            "thread/start",
+            Some(serde_json::json!({"cwd": "resume-workspace"})),
+        )
         .await
         .unwrap();
     let thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    let lifecycle = app
+    let mut lifecycle = app
         .inner
         .metadata_store
         .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
         .await
         .unwrap()
         .expect("default manifest thread should persist lifecycle metadata");
+    lifecycle
+        .metadata
+        .remove(crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA);
+    app.inner
+        .metadata_store
+        .upsert_thread_lifecycle(lifecycle.clone())
+        .await
+        .unwrap();
     let session_store =
         verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
             .await
@@ -13977,6 +13913,10 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
     let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await.unwrap();
     let bind = event_by_kind(&events, verlet_history::EventKind::ManifestBindCompleted);
+    assert_eq!(
+        bind.payload["overridden_keys"],
+        serde_json::json!(["default_cwd"])
+    );
     let exa_binding = manifest_operation_binding_by_name(&bind.payload, "search");
     assert_eq!(exa_binding["name"].as_str(), Some("search"));
     assert_eq!(
@@ -14016,14 +13956,25 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
             .iter()
             .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
             .count(),
-        2
+        1
     );
-    assert!(resumed_events[events.len()..].iter().all(|event| {
-        !matches!(
-            event.kind,
-            verlet_history::EventKind::BindingAttached | verlet_history::EventKind::BindingDetached
+    assert_eq!(resumed_events, events, "resume must append no events");
+    let resumed_handle = app.handle_for_thread(&thread_id).await.unwrap();
+    let resumed_overrides =
+        serde_json::from_str::<crate::agent::manifest_bind::AgentManifestBindOverrides>(
+            &resumed_handle.context().metadata
+                [crate::adapters::app_server::THREAD_AGENT_RUNTIME_OVERRIDES_METADATA],
         )
-    }));
+        .unwrap();
+    assert_eq!(
+        resumed_overrides.default_cwd.as_deref(),
+        Some(
+            crate::adapters::app_server::connection::cwd_string(
+                &workspace.join("resume-workspace")
+            )
+            .as_str()
+        )
+    );
     assert_eq!(
         crate::kernel::binding_projector::fold_thread_bindings(&resumed_events)
             .active
