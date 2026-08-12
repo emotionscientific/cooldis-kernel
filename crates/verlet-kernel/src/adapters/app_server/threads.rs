@@ -1,4 +1,4 @@
-use verlet_history::SessionStore as _;
+use verlet_history::{EventStore as _, SessionStore as _};
 use verlet_metadata::provider_store::ThreadMetadataStore as _;
 
 const THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA: &str = "cooldis.remote_placement_projection";
@@ -1517,6 +1517,8 @@ pub(super) fn append_bound_agent_metadata(
             crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA.to_string(),
             instruction,
         );
+    } else {
+        metadata.remove(crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA);
     }
     metadata.insert(
         crate::adapters::app_server::THREAD_AGENT_RUNTIME_STREAMING_METADATA.to_string(),
@@ -1547,18 +1549,16 @@ pub(super) fn append_bound_agent_metadata(
             auto_at_text_bytes.to_string(),
         );
     }
-    if !bound.operation_bindings.is_empty() {
-        let encoded = serde_json::to_string(&bound.operation_bindings).map_err(|err| {
-            crate::adapters::app_server::connection::jsonrpc_error(
-                -32602,
-                format!("failed to encode manifest operation bindings: {err}"),
-            )
-        })?;
-        metadata.insert(
-            crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
-            encoded,
-        );
-    }
+    let encoded = serde_json::to_string(&bound.operation_bindings).map_err(|err| {
+        crate::adapters::app_server::connection::jsonrpc_error(
+            -32602,
+            format!("failed to encode manifest operation bindings: {err}"),
+        )
+    })?;
+    metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        encoded,
+    );
     if !bound.skill_packages.is_empty() {
         let encoded = serde_json::to_string(&bound.skill_packages).map_err(|err| {
             crate::adapters::app_server::connection::jsonrpc_error(
@@ -1669,14 +1669,9 @@ fn manifest_tool_use_system_instruction(
 fn legacy_manifest_tool_use_system_instruction(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> Option<String> {
-    let has_tool_metadata = context
-        .metadata
-        .get(crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA)
-        .is_some_and(|value| !value.trim().is_empty())
-        || context
-            .metadata
-            .get(crate::adapters::app_server::THREAD_AGENT_TOOL_UNIVERSES_METADATA)
-            .is_some_and(|value| !value.trim().is_empty());
+    let has_tool_metadata = thread_manifest_operation_bindings(context)
+        .is_ok_and(|bindings| !bindings.is_empty())
+        || thread_manifest_tool_universes(context).is_ok_and(|bindings| !bindings.is_empty());
     if !has_tool_metadata {
         return None;
     }
@@ -1998,6 +1993,59 @@ pub(super) fn thread_manifest_operation_bindings(
         })
 }
 
+pub(super) fn thread_operation_bindings_from_events(
+    events: &[verlet_history::EventRecord],
+) -> crate::kernel::runtime_host::VerletResult<Option<Vec<ThreadOperationBinding>>> {
+    if events.iter().any(|event| {
+        matches!(
+            event.kind,
+            verlet_history::EventKind::BindingAttached | verlet_history::EventKind::BindingDetached
+        )
+    }) {
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(events);
+        if let Some(message) = folded.anomaly_message() {
+            return Err(crate::kernel::runtime_host::VerletError::History(message));
+        }
+        let bindings = folded
+            .active
+            .into_iter()
+            .map(|binding| ThreadOperationBinding {
+                binding: crate::agent::manifest_bind::operation_binding_from_attached_payload(
+                    binding.payload,
+                ),
+                attach_event_id: Some(binding.attach_event_id),
+            })
+            .collect();
+        return Ok(Some(bindings));
+    }
+
+    let Some(bind_event) = events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+        .max_by_key(|event| event.sequence.get())
+    else {
+        return Ok(None);
+    };
+    let receipt = serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
+        bind_event.payload.clone(),
+    )
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "manifest.bind.completed payload is invalid: {err}"
+        ))
+    })?;
+    Ok(Some(
+        receipt
+            .operation_bindings
+            .into_iter()
+            .map(|binding| ThreadOperationBinding {
+                binding,
+                attach_event_id: None,
+            })
+            .collect(),
+    ))
+}
+
 pub(super) fn thread_manifest_workspace_mount(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<
@@ -2126,6 +2174,12 @@ struct ThreadOperationCatalog {
     /// The per-thread workspace VFS installed into catalog-loaded operations and
     /// virtual bash so filesystem surfaces do not drift into separate trees.
     workspace_vfs: std::sync::Arc<verlet_vfs::VerletVfs>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ThreadOperationBinding {
+    pub(super) binding: crate::agent::manifest_bind::AgentManifestOperationBinding,
+    pub(super) attach_event_id: Option<verlet_history::EventRecordId>,
 }
 
 #[async_trait::async_trait]
@@ -2436,11 +2490,43 @@ impl CapsuleBindingRuntimeFactory {
         Ok(files)
     }
 
+    async fn operation_bindings_for_thread(
+        &self,
+        context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
+        if let Some(session_store_path) = &self.session_store_path {
+            let store = verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
+                .await
+                .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+                .with_lease_epoch(self.lease_epoch);
+            let events = store
+                .read_events(
+                    &verlet_history::EventStreamId::for_thread(&context.coordinates),
+                    None,
+                )
+                .await
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(err.to_string())
+                })?;
+            if let Some(bindings) = thread_operation_bindings_from_events(&events)? {
+                return Ok(bindings);
+            }
+        }
+
+        Ok(thread_manifest_operation_bindings(context)?
+            .into_iter()
+            .map(|binding| ThreadOperationBinding {
+                binding,
+                attach_event_id: None,
+            })
+            .collect())
+    }
+
     async fn operation_catalog_for_thread(
         &self,
         context: &verlet_runtime_contracts::ThreadContext,
     ) -> crate::kernel::runtime_host::VerletResult<Option<ThreadOperationCatalog>> {
-        let manifest_operation_bindings = thread_manifest_operation_bindings(context)?;
+        let manifest_operation_bindings = self.operation_bindings_for_thread(context).await?;
         let workspace = thread_manifest_workspace_mount(context)?;
         if manifest_operation_bindings.is_empty() && workspace.is_none() {
             return Ok(None);
@@ -2466,7 +2552,11 @@ impl CapsuleBindingRuntimeFactory {
             verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root);
         let mut records = Vec::new();
         let mut tool_aliases = Vec::new();
-        for binding in manifest_operation_bindings {
+        for thread_binding in manifest_operation_bindings {
+            let ThreadOperationBinding {
+                binding,
+                attach_event_id,
+            } = thread_binding;
             let crate::agent::manifest_bind::AgentManifestOperationBinding {
                 name,
                 artifact_hash,
@@ -2475,13 +2565,6 @@ impl CapsuleBindingRuntimeFactory {
                 operations,
                 direct_tools,
             } = binding;
-            tool_aliases.extend(direct_tools.into_iter().map(|direct_tool| {
-                crate::agent::agent_tool_router::OperationToolAlias {
-                    tool_name: direct_tool.tool_name,
-                    registered_name: name.clone(),
-                    operation_name: direct_tool.operation,
-                }
-            }));
             let record = registry
                 .load_version_record(&name, &artifact_hash)
                 .map_err(|err| {
@@ -2490,6 +2573,41 @@ impl CapsuleBindingRuntimeFactory {
                         name, artifact_hash
                     ))
                 })?;
+            let is_kernel = matches!(
+                &record.source,
+                verlet_operations::operation_store::PublishedOperationSource::Kernel { .. }
+            );
+            let alias_attach_event_id = if is_kernel { None } else { attach_event_id };
+            tool_aliases.extend(direct_tools.into_iter().map(|direct_tool| {
+                crate::agent::agent_tool_router::OperationToolAlias {
+                    tool_name: direct_tool.tool_name,
+                    registered_name: name.clone(),
+                    operation_name: direct_tool.operation,
+                    attach_event_id: alias_attach_event_id,
+                }
+            }));
+            if !is_kernel {
+                tool_aliases.extend(
+                    record
+                        .manifest
+                        .operations
+                        .iter()
+                        .filter(|operation| {
+                            operations.is_empty() || operations.contains(&operation.name)
+                        })
+                        .map(
+                            |operation| crate::agent::agent_tool_router::OperationToolAlias {
+                                tool_name: verlet_operations::projection_tool_name(
+                                    &name,
+                                    &operation.name,
+                                ),
+                                registered_name: name.clone(),
+                                operation_name: operation.name.clone(),
+                                attach_event_id: alias_attach_event_id,
+                            },
+                        ),
+                );
+            }
             let record = if operations.is_empty() {
                 crate::operations::plugins::LocalPluginCatalogRecord::whole_record(record)
             } else {

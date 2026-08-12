@@ -632,8 +632,41 @@ async fn router_with_kernel_process_operation(
             tool_name: crate::operations::kernel_packages::PROCESS_EXEC_OPERATION.to_string(),
             registered_name: crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::PROCESS_EXEC_OPERATION.to_string(),
+            attach_event_id: None,
         },
     ])
+}
+
+#[test]
+fn router_attach_provenance_is_only_present_on_fold_derived_aliases() {
+    let attach_event_id = verlet_history::EventRecordId::from_uuid(uuid::Uuid::from_u128(42));
+    let router = crate::agent::agent_tool_router::AgentToolRouter::new(std::sync::Arc::new(
+        verlet_operations::operation_registry::OperationRegistry::new(),
+    ))
+    .with_tool_aliases([
+        crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: "bound_operation".to_string(),
+            registered_name: "bound".to_string(),
+            operation_name: "run".to_string(),
+            attach_event_id: Some(attach_event_id),
+        },
+        crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: "kernel_operation".to_string(),
+            registered_name: "kernel".to_string(),
+            operation_name: "run".to_string(),
+            attach_event_id: None,
+        },
+    ]);
+
+    assert_eq!(
+        router.attach_event_id_for_tool_name("bound_operation"),
+        Some(attach_event_id)
+    );
+    assert_eq!(
+        router.attach_event_id_for_tool_name("kernel_operation"),
+        None
+    );
+    assert_eq!(router.attach_event_id_for_tool_name("static_tool"), None);
 }
 
 async fn router_with_kernel_notify_operation() -> crate::agent::agent_tool_router::AgentToolRouter {
@@ -660,11 +693,13 @@ async fn router_with_kernel_notify_operation() -> crate::agent::agent_tool_route
             registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION
                 .to_string(),
+            attach_event_id: None,
         },
         crate::agent::agent_tool_router::OperationToolAlias {
             tool_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
             registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
+            attach_event_id: None,
         },
     ])
 }
@@ -710,6 +745,7 @@ async fn router_with_kernel_thread_operations(
                 registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE
                     .to_string(),
                 operation_name: operation.to_string(),
+                attach_event_id: None,
             },
         ),
     )
@@ -848,6 +884,7 @@ fn kernel_identity_router(
             tool_name: "identify-thread".to_string(),
             registered_name: "thread-identity".to_string(),
             operation_name: "identify-thread".to_string(),
+            attach_event_id: None,
         }])
 }
 

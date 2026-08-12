@@ -496,6 +496,11 @@ fn assert_binding_fold_matches_latest_bind(
         bind.payload.clone(),
     )
     .unwrap();
+    let bind_event_ids = events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+        .map(|event| event.id)
+        .collect::<std::collections::HashSet<_>>();
     let folded = crate::kernel::binding_projector::fold_thread_bindings(events);
 
     assert!(folded.anomalies.is_empty());
@@ -518,7 +523,10 @@ fn assert_binding_fold_matches_latest_bind(
             .iter()
             .find(|event| event.id == binding.attach_event_id)
             .expect("active binding must retain its attach event");
-        assert_eq!(event.provenance.source_event_ids, vec![bind.id]);
+        assert!(matches!(
+            event.provenance.source_event_ids.as_slice(),
+            [bind_event_id] if bind_event_ids.contains(bind_event_id)
+        ));
         assert_eq!(binding.payload.requested_by, expected_principal);
         assert_eq!(binding.payload.decided_by, expected_principal);
     }
@@ -11782,11 +11790,14 @@ streaming = false
         "gpt-test",
     );
     runtime_config.max_tokens = 128;
-    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
-        runtime_config,
-        provider_client,
-        capsule_bindings,
-    );
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            capsule_bindings,
+            None,
+            &config,
+        );
     let app =
         crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
             .await
@@ -11803,6 +11814,29 @@ streaming = false
         .await
         .unwrap();
     let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let lifecycle = app
+        .inner
+        .metadata_store
+        .get_thread_lifecycle(verlet_runtime_contracts::ThreadId::parse_str(&thread_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    app.inner
+        .supervisor
+        .shutdown_thread_at(&lifecycle.coordinates)
+        .await
+        .unwrap();
+    app.inner.state.write().await.threads.remove(&thread_id);
+    app.dispatch_request(
+        &connection,
+        "thread/resume",
+        Some(serde_json::json!({
+            "threadId": thread_id,
+            "excludeTurns": true,
+        })),
+    )
+    .await
+    .unwrap();
     app.dispatch_request(
         &connection,
         "turn/start",
@@ -12253,11 +12287,14 @@ streaming = false
         "gpt-test",
     );
     runtime_config.max_tokens = 128;
-    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
-        runtime_config,
-        provider_client,
-        capsule_bindings,
-    );
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            capsule_bindings,
+            None,
+            &config,
+        );
     let app =
         crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
             .await
@@ -12300,6 +12337,7 @@ streaming = false
         snapshot_id: bind.payload["manifest_hash"].as_str().unwrap().to_string(),
         tool_name: verlet_vbash::BASH_TOOL.to_string(),
         arguments: serde_json::json!({"command":"profile customer-1"}),
+        attach_event_id: None,
         args_fingerprint: None,
         holds: Vec::new(),
     };
@@ -12308,6 +12346,164 @@ streaming = false
         verlet_agent::manifest_schema::EffectClass::Idempotent,
         "the runtime lookup must read the class from the real top-level bind receipt shape"
     );
+    let pre_binding_event_stream = events
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event.kind,
+                verlet_history::EventKind::BindingAttached
+                    | verlet_history::EventKind::BindingDetached
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let receipt_bindings =
+        crate::adapters::app_server::threads::thread_operation_bindings_from_events(
+            &pre_binding_event_stream,
+        )
+        .unwrap()
+        .expect("a pre-EMO-584 bind receipt should remain authoritative");
+    assert_eq!(receipt_bindings.len(), 1);
+    assert_eq!(receipt_bindings[0].binding.operations, ["profile"]);
+    assert_eq!(receipt_bindings[0].attach_event_id, None);
+
+    let mut anomalous_events = events.clone();
+    anomalous_events
+        .iter_mut()
+        .find(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .unwrap()
+        .payload = serde_json::json!({"name": "missing-required-fields"});
+    let error = crate::adapters::app_server::threads::thread_operation_bindings_from_events(
+        &anomalous_events,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("binding history is anomalous"));
+
+    let mut detached_events = events.clone();
+    let mut next_sequence = detached_events.last().unwrap().sequence.get() + 1;
+    for attach_event_id in events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .map(|event| event.id)
+    {
+        let detached = verlet_history::NewEventRecord::witnessed(
+            lifecycle.coordinates.clone(),
+            verlet_history::EventKind::BindingDetached,
+            serde_json::to_value(verlet_history::BindingDetachedPayload {
+                attach_event_id,
+                requested_by: "principal:test".to_string(),
+                decided_by: "principal:test".to_string(),
+                decision_event_id: None,
+            })
+            .unwrap(),
+        );
+        detached_events.push(verlet_history::EventRecord::from_new(
+            stream_id.clone(),
+            verlet_history::EventSequence::new(next_sequence),
+            detached,
+        ));
+        next_sequence += 1;
+    }
+    let empty_fold = crate::adapters::app_server::threads::thread_operation_bindings_from_events(
+        &detached_events,
+    )
+    .unwrap()
+    .expect("binding events must remain authoritative after detaching every binding");
+    assert!(empty_fold.is_empty());
+
+    let old_analytics_attach = events
+        .iter()
+        .find(|event| {
+            event.kind == verlet_history::EventKind::BindingAttached
+                && event.payload["name"] == "analytics"
+        })
+        .unwrap();
+    let mut changed_events = events.clone();
+    let detach = verlet_history::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        verlet_history::EventKind::BindingDetached,
+        serde_json::to_value(verlet_history::BindingDetachedPayload {
+            attach_event_id: old_analytics_attach.id,
+            requested_by: "principal:test".to_string(),
+            decided_by: "principal:test".to_string(),
+            decision_event_id: None,
+        })
+        .unwrap(),
+    );
+    changed_events.push(verlet_history::EventRecord::from_new(
+        stream_id.clone(),
+        verlet_history::EventSequence::new(next_sequence),
+        detach,
+    ));
+    let mut changed_payload = serde_json::from_value::<verlet_history::BindingAttachedPayload>(
+        old_analytics_attach.payload.clone(),
+    )
+    .unwrap();
+    changed_payload.operations = vec!["summarize".to_string()];
+    let attach = verlet_history::NewEventRecord::witnessed(
+        lifecycle.coordinates.clone(),
+        verlet_history::EventKind::BindingAttached,
+        serde_json::to_value(changed_payload).unwrap(),
+    );
+    let new_analytics_attach = attach.id;
+    changed_events.push(verlet_history::EventRecord::from_new(
+        stream_id.clone(),
+        verlet_history::EventSequence::new(next_sequence + 1),
+        attach,
+    ));
+    let changed_bindings =
+        crate::adapters::app_server::threads::thread_operation_bindings_from_events(
+            &changed_events,
+        )
+        .unwrap()
+        .unwrap();
+    let changed_analytics = changed_bindings
+        .iter()
+        .find(|binding| binding.binding.name == "analytics")
+        .unwrap();
+    assert_eq!(changed_analytics.binding.operations, ["summarize"]);
+    assert_eq!(
+        changed_analytics.attach_event_id,
+        Some(new_analytics_attach)
+    );
+
+    let mut corrupted_lifecycle = lifecycle.clone();
+    let mut cached_bindings =
+        serde_json::from_str::<Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>>(
+            &corrupted_lifecycle.metadata
+                [crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA],
+        )
+        .unwrap();
+    let analytics = cached_bindings
+        .iter_mut()
+        .find(|binding| binding.name == "analytics")
+        .unwrap();
+    analytics.operations = vec!["summarize".to_string()];
+    corrupted_lifecycle.metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        serde_json::to_string(&cached_bindings).unwrap(),
+    );
+    app.inner
+        .metadata_store
+        .upsert_thread_lifecycle(corrupted_lifecycle)
+        .await
+        .unwrap();
+    app.inner
+        .supervisor
+        .shutdown_thread_at(&lifecycle.coordinates)
+        .await
+        .unwrap();
+    app.inner.state.write().await.threads.remove(&thread_id);
+    app.dispatch_request(
+        &connection,
+        "thread/resume",
+        Some(serde_json::json!({
+            "threadId": thread_id,
+            "excludeTurns": true,
+        })),
+    )
+    .await
+    .unwrap();
 
     app.dispatch_request(
         &connection,
@@ -12328,6 +12524,79 @@ streaming = false
     assert_bash_tool_describes(&requests[0], "profile");
     assert_bash_tool_omits(&requests[0], "summarize");
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn bound_agent_metadata_cache_replaces_changed_and_empty_binding_sets() {
+    let app = test_app().await;
+    let mut bound = app
+        .bind_app_server_agent_ref(
+            crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
+            &crate::agent::manifest_bind::AgentManifestModelProfileSelection::default(),
+            &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!bound.operation_bindings.is_empty());
+    let mut metadata = std::collections::BTreeMap::new();
+    crate::adapters::app_server::threads::append_bound_agent_metadata(
+        &mut metadata,
+        &bound,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let retained = bound.operation_bindings[0].clone();
+    bound.operation_bindings = vec![retained.clone()];
+    bound.bind_receipt.operation_bindings = vec![retained.clone()];
+    crate::adapters::app_server::threads::append_bound_agent_metadata(
+        &mut metadata,
+        &bound,
+        None,
+        None,
+    )
+    .unwrap();
+    let changed =
+        serde_json::from_str::<Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>>(
+            &metadata[crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA],
+        )
+        .unwrap();
+    assert_eq!(changed, [retained]);
+
+    bound.operation_bindings.clear();
+    bound.bind_receipt.operation_bindings.clear();
+    bound.bind_receipt.tool_ids.clear();
+    crate::adapters::app_server::threads::append_bound_agent_metadata(
+        &mut metadata,
+        &bound,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        metadata[crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA],
+        "[]"
+    );
+    assert!(
+        !metadata
+            .contains_key(crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA)
+    );
+    let context = verlet_runtime_contracts::ThreadContext::with_topology_and_metadata(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "empty-cache"),
+        verlet_runtime_contracts::ThreadTopology::root(),
+        metadata,
+    );
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    crate::adapters::app_server::threads::apply_manifest_runtime_metadata(&context, &mut config)
+        .unwrap();
+    assert!(config.system.is_empty());
 }
 
 #[test]
@@ -12854,8 +13123,20 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
 
 #[tokio::test]
 async fn thread_rebind_fork_rejects_active_source_thread() {
-    let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    let root = unique_test_root("rebind-fork-running-turn");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let client = std::sync::Arc::new(BlockingProviderClient::default());
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
+    let app = test_app_with_provider_root(
+        &root,
+        &workspace,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server test fixture config type
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    )
+    .await;
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -12863,13 +13144,23 @@ async fn thread_rebind_fork_rejects_active_source_thread() {
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    {
-        let mut state = app.inner.state.write().await;
-        let source = state.threads.get_mut(&source_thread_id).unwrap();
-        source.active_turn_id = Some("active-turn".to_string());
-    }
+    let turn_id =
+        start_text_turn(&app, &connection, &source_thread_id, "keep this turn bound").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.wait_for_request(),
+    )
+    .await
+    .expect("provider request did not start");
+    assert_eq!(
+        app.handle_for_thread(&source_thread_id)
+            .await
+            .unwrap()
+            .status(),
+        verlet_runtime_contracts::ThreadStatus::Running
+    );
 
-    let err = app
+    let result = app
         .dispatch_request(
             &connection,
             "thread/rebindFork",
@@ -12878,13 +13169,16 @@ async fn thread_rebind_fork_rejects_active_source_thread() {
                 "agentRef": crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
             })),
         )
-        .await
-        .unwrap_err();
+        .await;
+    client.release_request();
+    let err = result.unwrap_err();
 
     assert!(
         err.message
             .contains("requires the source thread to be idle")
     );
+    wait_for_turn_completed_notification(&mut outbound_rx, &source_thread_id, &turn_id).await;
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -13626,20 +13920,39 @@ async fn model_provider_capabilities_read_reports_bedrock_streaming() {
 async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle() {
     let registry_root = unique_test_root("capsule-global-registry");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
-    let client = std::sync::Arc::new(BashCallingCapsuleClient::new(
-        "search",
-        "search",
-        "command -v search && printf verlet | search",
-        "search:verlet",
-    ));
+    let client = std::sync::Arc::new(DirectOperationCallingClient::new("search", "search:verlet"));
     let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
-    let app = test_app_with_provider_and_capsule_bindings(
-        provider_client,
-        crate::adapters::app_server::CapsuleBindingsConfig::default()
-            .with_registry_root(&registry_root)
-            .with_global_operation_name("search"),
-    )
-    .await;
+    let app_root = unique_test_root("binding-attach-receipt");
+    let workspace = app_root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let binding_config = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&registry_root)
+        .with_global_operation_name("search");
+    let listen =
+        crate::adapters::app_server::AppServerListenAddr::Unix(app_root.join("app-server.sock"));
+    let mut config = crate::adapters::app_server::VerletAppServerConfig::local(listen, &workspace)
+        .with_capsule_bindings(binding_config.clone());
+    config.runtime_home = app_root.join("runtime");
+    config.state_home = app_root.join("state");
+    config.agent_registry_root = app_root.join("agents");
+    let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    runtime_config.max_tokens = 128;
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            binding_config,
+            None,
+            &config,
+        );
+    let app =
+        crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
+            .await
+            .unwrap();
     let mut principal = operator_principal(&app);
     principal.principal_id = crate::daemon::identity::PrincipalId::new("principal:binding-review");
     let (connection, _outbound_rx) = test_connection_for_principal(app.clone(), principal).await;
@@ -13671,6 +13984,11 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
         Some(record.active_artifact_hash.as_str())
     );
     assert_eq!(exa_binding["operations"], serde_json::json!(["search"]));
+    let original_attach_event_ids = events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::BindingAttached)
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
     assert_binding_fold_matches_latest_bind(
         &events,
         connection.resolved_principal.principal_id.as_str(),
@@ -13700,7 +14018,24 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
             .count(),
         2
     );
-    assert_binding_fold_matches_latest_bind(&resumed_events, &lifecycle.coordinates.user_id);
+    assert!(resumed_events[events.len()..].iter().all(|event| {
+        !matches!(
+            event.kind,
+            verlet_history::EventKind::BindingAttached | verlet_history::EventKind::BindingDetached
+        )
+    }));
+    assert_eq!(
+        crate::kernel::binding_projector::fold_thread_bindings(&resumed_events)
+            .active
+            .iter()
+            .map(|binding| binding.attach_event_id)
+            .collect::<Vec<_>>(),
+        original_attach_event_ids
+    );
+    assert_binding_fold_matches_latest_bind(
+        &resumed_events,
+        connection.resolved_principal.principal_id.as_str(),
+    );
     let expected_fork_bindings =
         crate::adapters::app_server::threads::thread_manifest_operation_bindings(
             app.handle_for_thread(&thread_id).await.unwrap().context(),
@@ -13773,6 +14108,26 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
     let requests = client.requests();
     assert!(tool_names(&requests[0]).contains(&"search".to_string()));
     assert_bash_tool_describes(&requests[0], "search");
+    let completed_events = session_store.read_events(&stream_id, None).await.unwrap();
+    let search_attach = completed_events
+        .iter()
+        .find(|event| {
+            event.kind == verlet_history::EventKind::BindingAttached
+                && event.payload["name"].as_str() == Some("search")
+        })
+        .expect("search should have a binding attachment");
+    let search_request = completed_events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ToolCallRequested)
+        .find_map(|event| {
+            serde_json::from_value::<crate::kernel::control_decision::ToolCallRequestedPayload>(
+                event.payload.clone(),
+            )
+            .ok()
+            .filter(|payload| payload.tool_name == "search")
+        })
+        .expect("the operation-backed search call should be witnessed");
+    assert_eq!(search_request.attach_event_id, Some(search_attach.id));
 
     let spawned = app
         .dispatch_request(
@@ -13822,6 +14177,7 @@ async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle()
         .as_slice(),
         expected_fork_bindings.as_slice()
     );
+    let _ = std::fs::remove_dir_all(app_root);
     let _ = std::fs::remove_dir_all(registry_root);
 }
 
@@ -20231,6 +20587,40 @@ struct BurstStreamClient {
 }
 
 #[derive(Default)]
+struct BlockingProviderClient {
+    request_started: tokio::sync::Notify,
+    release_request: tokio::sync::Notify,
+}
+
+impl BlockingProviderClient {
+    async fn wait_for_request(&self) {
+        self.request_started.notified().await;
+    }
+
+    fn release_request(&self) {
+        self.release_request.notify_one();
+    }
+}
+
+#[async_trait::async_trait]
+impl verlet_provider::ProviderClient for BlockingProviderClient {
+    async fn complete(
+        &self,
+        _request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        self.request_started.notify_one();
+        self.release_request.notified().await;
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "blocking request completed",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
+        })
+    }
+}
+
+#[derive(Default)]
 struct LagThenBlockStreamClient {
     request_count: std::sync::atomic::AtomicUsize,
     second_request_started: tokio::sync::Notify,
@@ -20617,6 +21007,68 @@ struct BashCallingCapsuleClient {
     expected_output: String,
 }
 
+struct DirectOperationCallingClient {
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
+    tool_name: String,
+    expected_output: String,
+}
+
+impl DirectOperationCallingClient {
+    fn new(tool_name: &str, expected_output: &str) -> Self {
+        Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+            tool_name: tool_name.to_string(),
+            expected_output: expected_output.to_string(),
+        }
+    }
+
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl verlet_provider::ProviderClient for DirectOperationCallingClient {
+    async fn complete(
+        &self,
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, verlet_history::CanonicalMessage::ToolResult { .. }));
+        if !has_tool_result {
+            assert!(tool_names(request).contains(&self.tool_name));
+            return Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
+                    "call_direct_operation_1",
+                    self.tool_name.clone(),
+                    serde_json::json!({"input": "verlet"}),
+                )],
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            });
+        }
+
+        let text = text_from_canonical_messages(&request.messages);
+        assert!(text.contains(&self.expected_output));
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "direct operation completed",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
+        })
+    }
+}
+
+impl ProviderRequestRecorder for DirectOperationCallingClient {
+    fn recorded_request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
 // lexicon-allow: capsule - existing test client name
 impl BashCallingCapsuleClient {
     fn new(
@@ -20632,10 +21084,6 @@ impl BashCallingCapsuleClient {
             command: command.to_string(),
             expected_output: expected_output.to_string(),
         }
-    }
-
-    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
-        self.requests.lock().unwrap().clone()
     }
 }
 

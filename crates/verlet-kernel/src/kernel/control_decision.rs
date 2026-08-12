@@ -12,6 +12,8 @@ pub struct ToolCallRequestedPayload {
     pub tool_name: String,
     pub arguments: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_event_id: Option<verlet_history::EventRecordId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args_fingerprint: Option<String>,
     /// Kernel-derived resource holds for this invocation. Empty when decoding
     /// events written before hold scheduling existed.
@@ -970,6 +972,7 @@ mod tests {
             .unwrap();
         assert!(legacy_request.holds.is_empty());
         assert_eq!(legacy_request.args_fingerprint, None);
+        assert_eq!(legacy_request.attach_event_id, None);
         assert!(
             crate::kernel::control_decision::tool_invocation_fingerprint_matches(
                 "snapshot-a",
@@ -1009,6 +1012,9 @@ mod tests {
                 snapshot_id: legacy_request.snapshot_id.clone(),
                 tool_name: legacy_request.tool_name.clone(),
                 arguments: legacy_request.arguments.clone(),
+                attach_event_id: Some(verlet_history::EventRecordId::from_uuid(
+                    uuid::Uuid::from_u128(42),
+                )),
                 args_fingerprint: Some(format!("sha256:{}", "a".repeat(64))),
                 holds: vec![serde_json::json!({
                     "key": {"kind": "kernel_thread", "task_name": "worker-a"},
@@ -1016,6 +1022,10 @@ mod tests {
                 })],
             })
             .unwrap();
+        assert_eq!(
+            new_request["attach_event_id"],
+            serde_json::json!(uuid::Uuid::from_u128(42).to_string())
+        );
         let decoded_by_old_reader: LegacyToolCallRequestedPayload =
             serde_json::from_value(new_request).unwrap();
         assert_eq!(decoded_by_old_reader.subject, legacy_request.subject);
@@ -1623,6 +1633,7 @@ mod tests {
                                 snapshot_id: snapshot_id.clone(),
                                 tool_name: "bash".to_string(),
                                 arguments: serde_json::json!({"cmd": "rm -rf /"}),
+                                attach_event_id: None,
                                 args_fingerprint: None,
                                 holds: Vec::new(),
                             },

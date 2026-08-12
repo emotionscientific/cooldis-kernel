@@ -91,6 +91,7 @@ pub struct OperationToolAlias {
     pub tool_name: String,
     pub registered_name: String,
     pub operation_name: String,
+    pub attach_event_id: Option<verlet_history::EventRecordId>,
 }
 
 #[async_trait::async_trait]
@@ -173,6 +174,15 @@ impl AgentToolRouter {
         &self,
     ) -> std::sync::Arc<verlet_operations::operation_registry::OperationRegistry> {
         std::sync::Arc::clone(&self.operation_registry)
+    }
+
+    pub fn attach_event_id_for_tool_name(
+        &self,
+        tool_name: &str,
+    ) -> Option<verlet_history::EventRecordId> {
+        self.tool_aliases
+            .get(tool_name)
+            .and_then(|alias| alias.attach_event_id)
     }
 
     pub async fn tool_definitions(&self) -> Vec<verlet_provider::ToolDefinition> {

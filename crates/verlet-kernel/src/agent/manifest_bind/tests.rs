@@ -793,6 +793,36 @@ fn binding_effect_class_matches_manifest_wire_values() {
     }
 }
 
+#[test]
+fn binding_attached_payload_round_trips_catalog_binding_fields() {
+    let binding = crate::agent::manifest_bind::AgentManifestOperationBinding {
+        name: "analytics".to_string(),
+        artifact_hash: "a".repeat(64),
+        effect_class: verlet_agent::manifest_schema::EffectClass::Pure,
+        attachment_config: verlet_wasm::WasmAttachmentConfig {
+            allowed_secrets: std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]),
+            allowed_private_network: std::collections::BTreeMap::from([(
+                "https://example.com".to_string(),
+                std::collections::BTreeSet::from(["GET".to_string()]),
+            )]),
+        },
+        operations: vec!["profile".to_string()],
+        direct_tools: vec![
+            crate::agent::manifest_bind::AgentManifestDirectToolBinding {
+                tool_name: "analytics_profile".to_string(),
+                operation: "profile".to_string(),
+                effect_class: verlet_agent::manifest_schema::EffectClass::Idempotent,
+            },
+        ],
+    };
+
+    let attached = crate::agent::manifest_bind::binding_attached_payload(&binding, "principal");
+    assert_eq!(
+        crate::agent::manifest_bind::operation_binding_from_attached_payload(attached),
+        binding
+    );
+}
+
 #[tokio::test]
 async fn protocol_tool_import_pin_drift_fails_bind_with_both_hashes() {
     let witnessed = witnessed_tool("verlet_mcp_echo", "string");
