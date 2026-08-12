@@ -118,8 +118,9 @@ clear error instead of pretending the turn completed normally.
 ## MCP Inputs
 
 ACP can carry MCP server configuration in `session/new`. In Verlet V1, those
-configs are compatibility inputs only. Tool authority still comes from manifest
-attachment and configured MCP source records.
+configs are compatibility inputs only. Configured MCP sources and manifest tool
+rows can propose bindings, but tool authority comes from the thread's recorded
+`binding.attached` events and their fold with later detaches.
 
 V1 should choose one of these explicit behaviors:
 

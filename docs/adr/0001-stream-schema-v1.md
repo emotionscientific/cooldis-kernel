@@ -213,8 +213,9 @@ Otherwise a new payload schema version is required.
 `cooldis.event.thread.reload.degraded/1`. It witnesses a lazy reload that
 could not recover full lifecycle identity from a pre-payload thread journal.
 Its payload records the thread id, the missing identity fields, and the
-`fabricated_root` fallback applied by the loader. Every fallback appends this
-event, so topology or agent-context loss is never silent.
+`fabricated_root` fallback applied by older loaders. Resume no longer emits
+this event: reloading a thread is a read-only fold of durable history, including
+the legacy fabricated-root compatibility lane.
 
 ### Branch Selection Authority
 

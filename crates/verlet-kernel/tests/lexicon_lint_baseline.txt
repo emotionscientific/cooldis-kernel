@@ -3,7 +3,7 @@
 crates/verlet-kernel/src/adapters/app_server/connection.rs capsule 45
 crates/verlet-kernel/src/adapters/app_server.rs capsule 25
 crates/verlet-kernel/src/adapters/app_server/tests.rs capsule 116
-crates/verlet-kernel/src/adapters/app_server/threads.rs capsule 10
+crates/verlet-kernel/src/adapters/app_server/threads.rs capsule 9
 crates/verlet-kernel/src/adapters/mcp_server.rs capsule 28
 crates/verlet-kernel/src/adapters/mcp_server/tests.rs capsule 32
 crates/verlet-kernel/src/adapters/agent_loop.rs hook 1

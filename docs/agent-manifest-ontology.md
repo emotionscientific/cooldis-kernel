@@ -2,9 +2,12 @@
 
 Status: design note for the AgentManifest epic.
 
-An agent manifest is a declarative composition of versioned, publishable
-artifacts. It should describe what an agent is allowed to be and do, while the
-thread records what actually happened.
+An agent manifest is a declarative preset composed from versioned, publishable
+artifacts. It carries non-authority payload such as model profiles, policies,
+runtime defaults, workspace requirements, and the context pipeline, plus
+proposed bindings to expand when a thread starts. The opening
+`binding.attached` events are the thread's recorded tool authority; folding
+`binding.attached` and `binding.detached` yields its current toolset.
 
 Typed V1 schema note: `crates/verlet-agent/src/manifest_schema.rs` is
 the source of truth for the shipped V1 manifest shape. The registry layer reads
@@ -15,12 +18,13 @@ Lexicon note: the default manifest is the kernel-synthesized
 `agent://verlet/default` record published at app-server startup. A thread that
 starts without an agent ref and without explicit envelope params binds that
 manifest, so thread lineage always has a manifest ref even for the plain local
-start path.
+start path. That ref records which preset was expanded; it is provenance, not a
+standing authority document.
 
 ```text
 AgentManifest
-  versioned declaration of composition, powers, context, resources, couplings,
-  reserved hooks, policies, and runtime defaults
+  versioned preset for composition, context, resources, couplings, reserved
+  hooks, policies, runtime defaults, and proposed bindings
 
 Thread
   live or persisted execution state: turns, history, event log, checkpoints,
@@ -59,8 +63,9 @@ agent publish
   emit publish receipt with resolved versions and hashes
 ```
 
-This keeps agent definitions portable, inspectable, rollbackable, and safe to
-resume after host restart.
+This keeps agent definitions portable, inspectable, and rollbackable. A running
+thread resumes after host restart from its own recorded stream and metadata; it
+does not re-resolve this document from the registry.
 
 ### Operation References
 
@@ -372,9 +377,13 @@ Hooks are host-scope debug tooling, not a manifest authority surface. The
 manifest `[hooks]` table remains reserved; runtime control that must be replayed
 or audited belongs in witnessed couplings.
 
-### Policies And Attachments
+### Policies And Attachment Inputs
 
-The authority boundary.
+The manifest carries policy and attachment configuration into bind expansion;
+the document itself is not standing authority. An operation becomes available
+only when the runtime records its `binding.attached` event, and detach/rebind
+changes availability by appending binding events whose fold defines the current
+toolset.
 
 ```text
 deny/allow rules
@@ -532,8 +541,10 @@ interpreted only against that bound manifest:
   override allowlist decides whether it may change the effective working
   directory.
 - non-empty `capsuleBindings.operationNames` is rejected. Tool/operation
-  authority comes from manifest tool rows, published operation refs, and bind
-  receipts, not start-time operation injection.
+  rows and published operation refs are bind inputs, not start-time operation
+  injection. The resulting opening `binding.attached` events establish recorded
+  tool authority; `manifest.bind.completed` remains the frozen receipt name for
+  the non-authority bind payload and compatibility history.
 
 The default manifest may contain synthesized `bash_tool` rows for daemon
 operation-binding config (`global_operation_names` and

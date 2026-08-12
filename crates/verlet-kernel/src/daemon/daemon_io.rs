@@ -1536,47 +1536,6 @@ impl VerletDaemonIoBridge {
                                 {
                                     Some(_) => continue,
                                     None => {
-                                        let payload =
-                                            serde_json::to_value(
-                                                verlet_history::ThreadReloadDegradedPayload {
-                                                    thread_id: coordinates.thread_id,
-                                                    missing: vec![
-                                                        "topology".to_string(),
-                                                        "parent_thread_id".to_string(),
-                                                        "metadata".to_string(),
-                                                    ],
-                                                    fallback: "fabricated_root".to_string(),
-                                                },
-                                            )
-                                            .map_err(
-                                                |err| {
-                                                    ThreadHandleResolutionError::LifecycleLoad(
-                                        crate::kernel::runtime_host::VerletError::History(format!(
-                                            "thread.reload.degraded payload codec failed: {err}"
-                                        )),
-                                    )
-                                                },
-                                            )?;
-                                        let stream_id =
-                                            verlet_history::EventStreamId::for_thread(coordinates);
-                                        self.supervisor
-                                            .runtime_store(&coordinates.tenant_id)
-                                            .await
-                                            .map_err(ThreadHandleResolutionError::LifecycleLoad)?
-                                            .append_events(
-                                                &stream_id,
-                                                vec![verlet_history::NewEventRecord::witnessed(
-                                                    coordinates.clone(),
-                                                    verlet_history::EventKind::ThreadReloadDegraded,
-                                                    payload,
-                                                )],
-                                            )
-                                            .await
-                                            .map_err(|err| {
-                                                ThreadHandleResolutionError::LifecycleLoad(
-                                                    crate::kernel::runtime_host::VerletError::History(err.to_string()),
-                                                )
-                                            })?;
                                         let now = now_ms();
                                         verlet_runtime_contracts::ThreadLifecycleRecord {
                                             coordinates: coordinates.clone(),
@@ -1593,12 +1552,19 @@ impl VerletDaemonIoBridge {
                                 }
                             }
                         };
-                        crate::adapters::app_server::threads::recover_unwitnessed_workspace_metadata_as_unbound(
-                            &self.supervisor,
-                            &mut lifecycle,
-                        )
-                        .await
-                        .map_err(ThreadHandleResolutionError::LifecycleLoad)?;
+                        if let Some(app_server) = &self.app_server {
+                            app_server
+                                .rehydrate_loaded_manifest_thread_metadata(&mut lifecycle)
+                                .await
+                                .map_err(ThreadHandleResolutionError::LifecycleLoad)?;
+                        } else {
+                            crate::adapters::app_server::threads::recover_unwitnessed_workspace_metadata_as_unbound(
+                                &self.supervisor,
+                                &mut lifecycle,
+                            )
+                            .await
+                            .map_err(ThreadHandleResolutionError::LifecycleLoad)?;
+                        }
                         match self.supervisor.load_thread_from_lifecycle(lifecycle).await {
                             Ok(handle) => return Ok(handle),
                             Err(crate::kernel::runtime_host::VerletError::ThreadAlreadyExists(
@@ -1632,10 +1598,9 @@ impl VerletDaemonIoBridge {
     /// may have moved).
     ///
     /// Returns `Ok(None)` when the journal predates the identity payload
-    /// and cannot supply full identity. The caller then applies the
-    /// fabricated-root fallback, and the implementation must witness that
-    /// fallback with a `thread.reload.degraded` event. Degradation is
-    /// never silent.
+    /// and cannot supply full identity. The caller then applies an in-memory
+    /// fabricated-root fallback without mutating the stream: lazy resume is
+    /// a read-only fold of durable history.
     async fn reconstruct_thread_lifecycle(
         &self,
         coordinates: &verlet_runtime_contracts::ThreadCoordinates,

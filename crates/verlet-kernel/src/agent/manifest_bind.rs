@@ -2798,9 +2798,10 @@ pub struct AgentManifestCompileReceipt {
     pub alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
 }
 
-/// Payload of the discharged `manifest.bind.completed` event: what the
-/// thread can actually do. An audit answers "what could this agent do for
-/// this run" from this receipt alone.
+/// Payload of the discharged `manifest.bind.completed` event: the resolved
+/// preset and runtime facts recorded when this bind expanded. Current tool
+/// authority comes from folding the thread's binding events; legacy streams
+/// may use the latest receipt as their compatibility catalog.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentManifestBindReceipt {
     pub ref_uri: String,
@@ -3156,7 +3157,7 @@ pub struct AgentManifestCouplingBinding {
 }
 
 impl AgentManifestCouplingBinding {
-    fn from_bound(coupling: &BoundCoupling) -> Self {
+    pub(crate) fn from_bound(coupling: &BoundCoupling) -> Self {
         let source_streams = coupling
             .source_selectors
             .iter()

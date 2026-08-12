@@ -7,9 +7,10 @@ thread state through application code, add retries, add secrets, add logs, add
 policy, deploy a service, and keep expanding the app whenever the agent needs a
 new power.
 
-A declarative agent is a definition: describe the behavior, tools, resources,
-secrets, model profiles, context strategy, approvals, and placement needs. The
-runtime can inspect that definition before it runs and enforce it while it runs.
+A declarative agent starts from a preset: describe the behavior, proposed tools
+and resources, model profiles, context strategy, approvals, and placement needs.
+The runtime inspects and expands that preset, then records the attachments that
+actually govern the running thread.
 
 Define the agent, not the app around it.
 
@@ -28,8 +29,9 @@ A Verlet agent declaration can include:
 - external connections and secrets;
 - events, receipts, versioning, rollback, and audit records.
 
-This declared shape becomes the runtime object: the thing Verlet can install,
-inspect, attach, run, resume, publish, detach, and audit.
+This declared shape is the packageable input. The thread's recorded binding
+history becomes its active toolset: the thing Verlet can inspect, run, resume,
+detach, rebind, and audit.
 
 ## Why Declaration Matters
 
