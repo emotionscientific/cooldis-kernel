@@ -12580,8 +12580,20 @@ async fn thread_rebind_fork_creates_borrowed_prefix_manifest_child() {
 
 #[tokio::test]
 async fn thread_rebind_fork_rejects_active_source_thread() {
-    let app = test_app().await;
-    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    let root = unique_test_root("rebind-fork-running-turn");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let client = std::sync::Arc::new(BlockingProviderClient::default());
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
+    let app = test_app_with_provider_root(
+        &root,
+        &workspace,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server test fixture config type
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    )
+    .await;
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
 
     let thread_start = app
@@ -12589,13 +12601,23 @@ async fn thread_rebind_fork_rejects_active_source_thread() {
         .await
         .unwrap();
     let source_thread_id = thread_start["thread"]["id"].as_str().unwrap().to_string();
-    {
-        let mut state = app.inner.state.write().await;
-        let source = state.threads.get_mut(&source_thread_id).unwrap();
-        source.active_turn_id = Some("active-turn".to_string());
-    }
+    let turn_id =
+        start_text_turn(&app, &connection, &source_thread_id, "keep this turn bound").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.wait_for_request(),
+    )
+    .await
+    .expect("provider request did not start");
+    assert_eq!(
+        app.handle_for_thread(&source_thread_id)
+            .await
+            .unwrap()
+            .status(),
+        verlet_runtime_contracts::ThreadStatus::Running
+    );
 
-    let err = app
+    let result = app
         .dispatch_request(
             &connection,
             "thread/rebindFork",
@@ -12604,13 +12626,16 @@ async fn thread_rebind_fork_rejects_active_source_thread() {
                 "agentRef": crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF,
             })),
         )
-        .await
-        .unwrap_err();
+        .await;
+    client.release_request();
+    let err = result.unwrap_err();
 
     assert!(
         err.message
             .contains("requires the source thread to be idle")
     );
+    wait_for_turn_completed_notification(&mut outbound_rx, &source_thread_id, &turn_id).await;
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -19874,6 +19899,40 @@ struct SequencedStreamCapsuleClient {
 
 struct BurstStreamClient {
     deltas: Vec<String>,
+}
+
+#[derive(Default)]
+struct BlockingProviderClient {
+    request_started: tokio::sync::Notify,
+    release_request: tokio::sync::Notify,
+}
+
+impl BlockingProviderClient {
+    async fn wait_for_request(&self) {
+        self.request_started.notified().await;
+    }
+
+    fn release_request(&self) {
+        self.release_request.notify_one();
+    }
+}
+
+#[async_trait::async_trait]
+impl verlet_provider::ProviderClient for BlockingProviderClient {
+    async fn complete(
+        &self,
+        _request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        self.request_started.notify_one();
+        self.release_request.notified().await;
+        Ok(verlet_provider::ProviderResponse {
+            content: vec![verlet_history::CanonicalContent::text(
+                "blocking request completed",
+            )],
+            usage: verlet_history::CanonicalUsage::default(),
+            stop_reason: verlet_history::CanonicalStopReason::EndTurn,
+        })
+    }
 }
 
 #[derive(Default)]
