@@ -1,4 +1,4 @@
-use verlet_history::SessionStore as _;
+use verlet_history::{EventStore as _, SessionStore as _};
 use verlet_metadata::provider_store::ThreadMetadataStore as _;
 
 const THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA: &str = "cooldis.remote_placement_projection";
@@ -1998,6 +1998,55 @@ pub(super) fn thread_manifest_operation_bindings(
         })
 }
 
+pub(super) fn thread_operation_bindings_from_events(
+    events: &[verlet_history::EventRecord],
+) -> crate::kernel::runtime_host::VerletResult<Option<Vec<ThreadOperationBinding>>> {
+    if events.iter().any(|event| {
+        matches!(
+            event.kind,
+            verlet_history::EventKind::BindingAttached | verlet_history::EventKind::BindingDetached
+        )
+    }) {
+        let bindings = crate::kernel::binding_projector::fold_thread_bindings(events)
+            .active
+            .into_iter()
+            .map(|binding| ThreadOperationBinding {
+                binding: crate::agent::manifest_bind::operation_binding_from_attached_payload(
+                    binding.payload,
+                ),
+                attach_event_id: Some(binding.attach_event_id),
+            })
+            .collect();
+        return Ok(Some(bindings));
+    }
+
+    let Some(bind_event) = events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+        .max_by_key(|event| event.sequence.get())
+    else {
+        return Ok(None);
+    };
+    let receipt = serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
+        bind_event.payload.clone(),
+    )
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "manifest.bind.completed payload is invalid: {err}"
+        ))
+    })?;
+    Ok(Some(
+        receipt
+            .operation_bindings
+            .into_iter()
+            .map(|binding| ThreadOperationBinding {
+                binding,
+                attach_event_id: None,
+            })
+            .collect(),
+    ))
+}
+
 pub(super) fn thread_manifest_workspace_mount(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<
@@ -2126,6 +2175,12 @@ struct ThreadOperationCatalog {
     /// The per-thread workspace VFS installed into catalog-loaded operations and
     /// virtual bash so filesystem surfaces do not drift into separate trees.
     workspace_vfs: std::sync::Arc<verlet_vfs::VerletVfs>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ThreadOperationBinding {
+    pub(super) binding: crate::agent::manifest_bind::AgentManifestOperationBinding,
+    pub(super) attach_event_id: Option<verlet_history::EventRecordId>,
 }
 
 #[async_trait::async_trait]
@@ -2436,11 +2491,43 @@ impl CapsuleBindingRuntimeFactory {
         Ok(files)
     }
 
+    async fn operation_bindings_for_thread(
+        &self,
+        context: &verlet_runtime_contracts::ThreadContext,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
+        if let Some(session_store_path) = &self.session_store_path {
+            let store = verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
+                .await
+                .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+                .with_lease_epoch(self.lease_epoch);
+            let events = store
+                .read_events(
+                    &verlet_history::EventStreamId::for_thread(&context.coordinates),
+                    None,
+                )
+                .await
+                .map_err(|err| {
+                    crate::kernel::runtime_host::VerletError::History(err.to_string())
+                })?;
+            if let Some(bindings) = thread_operation_bindings_from_events(&events)? {
+                return Ok(bindings);
+            }
+        }
+
+        Ok(thread_manifest_operation_bindings(context)?
+            .into_iter()
+            .map(|binding| ThreadOperationBinding {
+                binding,
+                attach_event_id: None,
+            })
+            .collect())
+    }
+
     async fn operation_catalog_for_thread(
         &self,
         context: &verlet_runtime_contracts::ThreadContext,
     ) -> crate::kernel::runtime_host::VerletResult<Option<ThreadOperationCatalog>> {
-        let manifest_operation_bindings = thread_manifest_operation_bindings(context)?;
+        let manifest_operation_bindings = self.operation_bindings_for_thread(context).await?;
         let workspace = thread_manifest_workspace_mount(context)?;
         if manifest_operation_bindings.is_empty() && workspace.is_none() {
             return Ok(None);
@@ -2466,7 +2553,11 @@ impl CapsuleBindingRuntimeFactory {
             verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root);
         let mut records = Vec::new();
         let mut tool_aliases = Vec::new();
-        for binding in manifest_operation_bindings {
+        for thread_binding in manifest_operation_bindings {
+            let ThreadOperationBinding {
+                binding,
+                attach_event_id: _,
+            } = thread_binding;
             let crate::agent::manifest_bind::AgentManifestOperationBinding {
                 name,
                 artifact_hash,

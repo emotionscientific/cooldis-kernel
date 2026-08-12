@@ -3331,6 +3331,46 @@ pub(crate) fn binding_attached_payload(
     }
 }
 
+pub(crate) fn operation_binding_from_attached_payload(
+    payload: verlet_history::BindingAttachedPayload,
+) -> AgentManifestOperationBinding {
+    fn effect_class(
+        effect_class: verlet_history::BindingEffectClass,
+    ) -> verlet_agent::manifest_schema::EffectClass {
+        match effect_class {
+            verlet_history::BindingEffectClass::Pure => {
+                verlet_agent::manifest_schema::EffectClass::Pure
+            }
+            verlet_history::BindingEffectClass::Idempotent => {
+                verlet_agent::manifest_schema::EffectClass::Idempotent
+            }
+            verlet_history::BindingEffectClass::AtMostOnce => {
+                verlet_agent::manifest_schema::EffectClass::AtMostOnce
+            }
+        }
+    }
+
+    AgentManifestOperationBinding {
+        name: payload.name,
+        artifact_hash: payload.artifact_hash,
+        effect_class: effect_class(payload.effect_class),
+        attachment_config: verlet_wasm::WasmAttachmentConfig {
+            allowed_secrets: payload.attachment_config.allowed_secrets,
+            allowed_private_network: payload.attachment_config.allowed_private_network,
+        },
+        operations: payload.operations,
+        direct_tools: payload
+            .direct_tools
+            .into_iter()
+            .map(|direct_tool| AgentManifestDirectToolBinding {
+                tool_name: direct_tool.tool_name,
+                operation: direct_tool.operation,
+                effect_class: effect_class(direct_tool.effect_class),
+            })
+            .collect(),
+    }
+}
+
 /// Apply caller overrides onto the manifest's runtime defaults, enforcing
 /// the deny-by-default allowlist. Returns the effective defaults plus the
 /// list of keys actually overridden, for the bind receipt.

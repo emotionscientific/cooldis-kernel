@@ -11917,11 +11917,14 @@ streaming = false
         "gpt-test",
     );
     runtime_config.max_tokens = 128;
-    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
-        runtime_config,
-        provider_client,
-        capsule_bindings,
-    );
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            capsule_bindings,
+            None,
+            &config,
+        );
     let app =
         crate::adapters::app_server::VerletAppServer::with_runtime_factory(config, runtime_factory)
             .await
@@ -11972,6 +11975,64 @@ streaming = false
         verlet_agent::manifest_schema::EffectClass::Idempotent,
         "the runtime lookup must read the class from the real top-level bind receipt shape"
     );
+    let pre_binding_event_stream = events
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event.kind,
+                verlet_history::EventKind::BindingAttached
+                    | verlet_history::EventKind::BindingDetached
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let receipt_bindings =
+        crate::adapters::app_server::threads::thread_operation_bindings_from_events(
+            &pre_binding_event_stream,
+        )
+        .unwrap()
+        .expect("a pre-EMO-584 bind receipt should remain authoritative");
+    assert_eq!(receipt_bindings.len(), 1);
+    assert_eq!(receipt_bindings[0].binding.operations, ["profile"]);
+    assert_eq!(receipt_bindings[0].attach_event_id, None);
+
+    let mut corrupted_lifecycle = lifecycle.clone();
+    let mut cached_bindings =
+        serde_json::from_str::<Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>>(
+            &corrupted_lifecycle.metadata
+                [crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA],
+        )
+        .unwrap();
+    let analytics = cached_bindings
+        .iter_mut()
+        .find(|binding| binding.name == "analytics")
+        .unwrap();
+    analytics.operations = vec!["summarize".to_string()];
+    corrupted_lifecycle.metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        serde_json::to_string(&cached_bindings).unwrap(),
+    );
+    app.inner
+        .metadata_store
+        .upsert_thread_lifecycle(corrupted_lifecycle)
+        .await
+        .unwrap();
+    app.inner
+        .supervisor
+        .shutdown_thread_at(&lifecycle.coordinates)
+        .await
+        .unwrap();
+    app.inner.state.write().await.threads.remove(&thread_id);
+    app.dispatch_request(
+        &connection,
+        "thread/resume",
+        Some(serde_json::json!({
+            "threadId": thread_id,
+            "excludeTurns": true,
+        })),
+    )
+    .await
+    .unwrap();
 
     app.dispatch_request(
         &connection,
