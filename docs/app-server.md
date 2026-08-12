@@ -497,6 +497,15 @@ operation is `thread/resume`. A resume request attaches to a resident thread whe
 one is already loaded, or loads the thread from durable metadata/session state
 when only the stored thread id remains.
 
+Loading a stored thread re-folds that thread's event stream. Tool catalog
+precedence is binding events, then the latest durable bind receipt, then legacy
+metadata for old streams. Workspace, placement, model selection, runtime
+overrides, and tool-universe mounting come from persisted metadata; when an old
+thread is missing a reconstructable key, the loader fills it from the durable
+bind receipt already in the stream. Resume never loads the current agent record,
+compares a manifest hash, or appends a compile, bind, attachment, or placement
+event batch.
+
 `thread/loaded/list` is introspection for currently resident runtime handles. It
 is useful for tests and clients that want to reconnect to already-loaded work,
 but it is not a durable thread index and does not imply a public
@@ -511,11 +520,11 @@ turn completion notifications.
 ## Thread Handle Dispatch
 
 `thread/spawn` accepts `{ "threadId", "taskName", "message", "agentRef"?,
-"placement"?, "workspace"?, "dispatchId"? }`. Because placement and workspace
-authority attach to a manifest bind, either override requires `agentRef`;
-supplying one without it is invalid params. The optional `dispatchId` is
-generated when omitted. A retry with the same identity folds the parent control
-stream and returns the original
+"placement"?, "workspace"?, "dispatchId"? }`. Placement and workspace
+overrides are inputs to binding a named agent, so either override requires
+`agentRef`; supplying one without it is invalid params. The optional
+`dispatchId` is generated when omitted. A retry with the same identity folds
+the parent control stream and returns the original
 `{ "handle": { "kind": "thread", "id": "..." }, "dispatchId": "..." }`
 alongside the child thread fields; it does not append another spawn request or
 start another child. The durable request continues to carry that identity in
@@ -650,15 +659,15 @@ remote child records the same bind receipt, attachments, and unchanged
 `placement.decision` in its local stream before that stream converges to the
 parent store. Without a served sync backend, `remote` retains the
 missing-capability error; `sandbox` always does.
+The opening `binding.attached` sequence is the recorded tool authority, and its
+fold with later detach/attach events is the current catalog.
 When present, the effective workspace mount is part of that same
 `manifest.bind.completed` payload and atomic append. Thread lifecycle metadata
-stores the resolved mount for factory reconstruction. Missing or corrupt
-workspace metadata, and metadata that is absent from or disagrees with the
-active durable bind receipt, recovers as unbound and cannot fall through to the
-daemon's current default. The witness check runs before runtime construction, so
-untrusted lifecycle metadata is never mounted first and re-witnessed later. A
-manifest that requires the mount consequently remains unloadable until
-explicitly rebound through a new bind path.
+stores the resolved mount for factory reconstruction. Missing, corrupt, or
+unwitnessed workspace metadata is removed before runtime construction and then
+restored from the active durable bind receipt when that receipt carries the
+mount. Recovery never falls through to the daemon's current default or a fresh
+manifest bind.
 
 ## Thinking Config
 

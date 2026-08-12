@@ -167,7 +167,10 @@ mounts, and registers the operation artifacts into an in-memory
 When an app-server has capsule bindings configured, default-manifest synthesis
 lowers configured active records into pinned manifest tool rows. Durable binding
 methods still resolve binding snapshots for management flows, but thread
-runtime authority comes from the manifest bind receipt.
+runtime authority comes from recorded `binding.attached` events, as changed by
+later `binding.detached`/`binding.attached` events. Folding that history yields
+the active toolset; the manifest and `manifest.bind.completed` receipt retain
+their preset, provenance, and compatibility roles.
 
 The path-3 development loop is:
 

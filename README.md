@@ -15,11 +15,12 @@
 Verlet Kernel is a declarative harness that grew into a complete runtime for
 agent workloads, written in Rust.
 
-You declare an agent before anything runs. A manifest names the model profile,
-tools, resources, secrets, permissions, and context policy; the kernel turns
-that declaration into governed runtime work: tool attachment, package capability
-visibility, provider access, operation dispatch, event records, cancellation,
-resume, and audit receipts.
+You declare an agent before anything runs. Its manifest is a preset: it carries
+model profiles, policies, runtime defaults, workspace requirements, and the
+context pipeline, and it proposes tools and resources for binding. When a
+thread starts, the kernel expands that preset and records the opening
+`binding.attached` events. Those recorded attachments, rather than a standing
+manifest document, establish tool authority.
 
 It serves heterogeneous workloads on one machine. Agents, workflows, and
 sub-agents run on the same execution machinery and differ only in continuation
@@ -38,6 +39,12 @@ Everything is event-sourced. Every action is an event in an append-only
 stream, and state is a fold over the stream. Durability, replay, resume,
 audit, and observability are properties of the storage model, not features
 added on top.
+
+A thread's current toolset is the fold of its `binding.attached` and
+`binding.detached` history. Resume re-folds that same stream and reconstructs
+runtime mounting configuration from persisted metadata and durable recorded
+facts. It does not re-bind the manifest or require a current registry record or
+matching manifest hash.
 
 Verlet is not an agent, a graph framework, a provider SDK, or a product app.
 Product systems configure and call Verlet. The kernel owns the runtime

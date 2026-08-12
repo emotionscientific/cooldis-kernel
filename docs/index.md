@@ -8,10 +8,12 @@ Build agents locally. Publish them to managed cloud. Install agents like
 packages. Govern them like infrastructure. Keep the agent definition portable so
 the managed platform is acceleration, not lock-in.
 
-Verlet treats an agent as a declarative unit: describe the behavior, tools,
-resources, secrets, permissions, context policy, and placement needs before the
-agent runs. The runtime turns that declaration into something it can inspect,
-attach, run, resume, publish, revoke, and audit.
+Verlet treats an agent manifest as a declarative unit and preset: describe model
+profiles, policies, runtime defaults, workspace and placement needs, context,
+and proposed tool/resource bindings before the agent runs. At start, the
+runtime expands the preset into an opening sequence of recorded attachments.
+The thread's toolset is the fold of those binding events, not a standing
+manifest document.
 
 ## Why Care
 
@@ -37,7 +39,8 @@ allowed to exercise.
 - Run the agent through a governed runtime instead of a one-off app server.
 - Inspect events, tool calls, receipts, artifacts, and the effective bind
   envelope recorded for a thread.
-- Resume work from durable records.
+- Resume work by re-folding the thread's durable records, without re-binding or
+  consulting the current agent registry.
 - Start idempotent process handles whose terminal outcomes re-enter the owning
   thread through durable ingress.
 - Place manifest-bound child threads in separate local processes through the
@@ -48,13 +51,12 @@ allowed to exercise.
 ## Declarative Agent Shape
 
 ```text
-agent declaration
-+ capability bindings
-+ resources
-+ context pipeline
-+ couplings and attachment config
-+ placement requirements
--> governed agent runtime
+manifest preset
++ model profiles, policies, runtime defaults, workspace, and context
++ proposed tools, resources, couplings, and attachment config
+-> bind expansion
+-> recorded binding.attached / binding.detached history
+-> folded toolset and governed runtime
 ```
 
 The runtime owns lifecycle, permissions, tool visibility, operation projection,
