@@ -607,11 +607,17 @@ impl CommandHookHandler {
             ))
         })?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(input.as_bytes()).await.map_err(|err| {
-                crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
-                    "failed to write hook stdin: {err}"
-                ))
-            })?;
+            // A hook may exit without reading stdin; the resulting broken pipe
+            // is not a failure. The exit status and stdout decide the outcome.
+            match stdin.write_all(input.as_bytes()).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(err) => {
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                        format!("failed to write hook stdin: {err}"),
+                    ));
+                }
+            }
         }
         let output = tokio::time::timeout(
             std::time::Duration::from_millis(self.timeout_ms),
