@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.4.0 (2026-08-13)
+
+### The binding model
+
+Tool authority is now event-sourced. This release completes the redesign
+started in v0.3.x: the grant-string layer is gone, and a thread's toolset is
+determined by its own recorded history.
+
+- Attachment is the gate. A tool is available to a thread because an
+  attach event is recorded in that thread's stream; detaching it is another
+  recorded event. There are no grant strings and no per-call
+  set-membership checks.
+- Bindings are journaled. `binding.attached` and `binding.detached` events
+  (`cooldis.events/0.4`) carry the binder's provenance and the resolved
+  principal, and they are appended in the same fenced batch as the bind
+  receipt. The record can now answer "when did this agent get this tool."
+- Toolsets derive from the stream. The catalog and the operation router are
+  views over the thread's binding history. Every `tool.call.requested`
+  receipt cites the attach event that admitted the operation.
+- Resume replays the record. Resuming a thread reconstructs its toolset and
+  runtime configuration from the thread's own stream and durable receipts.
+  It loads no registry, compares no manifest hashes, and appends no events.
+  Threads that were previously stranded at resume by a republished or
+  deleted agent record now resume and keep working, and their tool calls
+  still cite the original attach event.
+- Secret injection and private-network enforcement moved to attachment
+  configuration, where the real gate is.
+
+The agent manifest remains as a preset: a declared opening sequence of
+attach events for thread start, carrying its non-authority payload
+(model profile, runtime settings) as before. `manifest.bind.completed`
+receipts and all frozen `cooldis.*` format identifiers
+(`docs/format-ids.md`) are unchanged.
+
+### Rename compat removal
+
+The v0.3.x cooldis-to-verlet deprecation window is over. Removed:
+
+- the `cooldis` shim binary; archives and installers ship `verlet`,
+  `verlet-acp-agent`, and `verlet-mcp-server`
+- `COOLDIS_*` environment fallbacks; only canonical `VERLET_*` names are
+  read
+- `cooldis.agent-manifest` kind acceptance; the accepted kind is
+  `verlet.agent-manifest`
+- unpinned `op://cooldis-*` package aliases and `cooldis_*` MCP tool
+  aliases
+- legacy `cooldis.toml` / `cooldis.json` / `.cooldis` config and state
+  discovery
+
+Preserved forever: the frozen durable-record format identifiers
+(`cooldis.events/*`, `cooldis.event.*`, see `docs/format-ids.md`), pinned
+old-name `op://...@sha256` refs against preserved records, and every
+historical receipt. Old streams remain readable; resume works through the
+compatibility lanes for records written before the binding events existed.
+
+### Also in this release
+
+- Hooks that exit without reading stdin complete normally; the exit status
+  and stdout decide the outcome.
+- Concurrent resumes of the same thread share one runtime build.
+- The name lint tightened: allowlist entries that existed only for the
+  removed compat lanes are gone.
+
 ## v0.3.2 (2026-08-08)
 
 ### Changes
