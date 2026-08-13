@@ -97,7 +97,20 @@ async fn mcp_server_runs_prompt_and_command_through_daemon() {
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cooldis_prompt","arguments":{"message":"hello mcp"}}}"#,
         )
         .await;
-    let prompt = read_json_response(&mut lines, 2).await;
+    let legacy_prompt = read_json_response(&mut lines, 2).await;
+    assert!(
+        legacy_prompt["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown Verlet MCP tool")
+    );
+
+    send(
+        &mut write,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"verlet_prompt","arguments":{"message":"hello mcp"}}}"#,
+    )
+    .await;
+    let prompt = read_json_response(&mut lines, 3).await;
     assert_eq!(
         prompt["result"]["structuredContent"]["assistantText"],
         "local:hello mcp"

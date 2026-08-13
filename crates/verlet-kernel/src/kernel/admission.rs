@@ -30,9 +30,6 @@ pub(crate) fn app_server_surface(client_name: Option<&str>) -> &'static str {
         Some("verlet-mcp-server") => MCP_ADAPTER_SURFACE,
         Some("verlet-acp-agent") => ACP_ADAPTER_SURFACE,
         Some("verlet-debug-rpc") => DEBUG_RPC_SURFACE,
-        Some(name) if name == concat!("cool", "dis-mcp-server") => MCP_ADAPTER_SURFACE,
-        Some(name) if name == concat!("cool", "dis-acp-agent") => ACP_ADAPTER_SURFACE,
-        Some(name) if name == concat!("cool", "dis-debug-rpc") => DEBUG_RPC_SURFACE,
         _ => APP_SERVER_RPC_SURFACE,
     };
     debug_assert!(TURN_ENTRY_SURFACES.contains(&surface));
@@ -498,15 +495,15 @@ async fn fixture() {
         );
         assert_eq!(
             crate::kernel::admission::app_server_surface(Some(concat!("cool", "dis-mcp-server"))),
-            crate::kernel::admission::MCP_ADAPTER_SURFACE
+            crate::kernel::admission::APP_SERVER_RPC_SURFACE
         );
         assert_eq!(
             crate::kernel::admission::app_server_surface(Some(concat!("cool", "dis-acp-agent"))),
-            crate::kernel::admission::ACP_ADAPTER_SURFACE
+            crate::kernel::admission::APP_SERVER_RPC_SURFACE
         );
         assert_eq!(
             crate::kernel::admission::app_server_surface(Some(concat!("cool", "dis-debug-rpc"))),
-            crate::kernel::admission::DEBUG_RPC_SURFACE
+            crate::kernel::admission::APP_SERVER_RPC_SURFACE
         );
     }
 

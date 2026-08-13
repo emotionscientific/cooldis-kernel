@@ -13,14 +13,6 @@ if [[ "$soft_fd_limit" != "unlimited" && "$soft_fd_limit" -lt 8192 ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$ROOT/scripts/env-compat.sh"
-for env_name in \
-  VERLET_VERIFY_MANAGED_CARGO \
-  VERLET_VERIFY_LIVE_PLUGIN \
-  VERLET_VERIFY_LIVE_S3
-do
-  verlet_env_promote "$env_name"
-done
 
 run() {
   printf '\n==> %s\n' "$*"

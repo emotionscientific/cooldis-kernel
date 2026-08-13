@@ -2,9 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$ROOT/scripts/env-compat.sh"
-verlet_env_promote VERLET_ALLOW_PRODUCT_TERMS
-verlet_env_promote VERLET_PII_TERMS
 MODE="${1:-staged}"
 
 cd "$ROOT"

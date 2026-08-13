@@ -1,69 +1,6 @@
 #!/bin/sh
 set -eu
 
-INSTALL_SCRIPT_DIR=$(dirname "$0")
-if [ -r "$INSTALL_SCRIPT_DIR/env-compat.sh" ]; then
-  . "$INSTALL_SCRIPT_DIR/env-compat.sh"
-else
-  VERLET_ENV_WARNED=${VERLET_ENV_WARNED-}
-  verlet_env_read() {
-    canonical=$1
-    eval "canonical_is_set=\${$canonical+x}"
-    if [ "$canonical_is_set" = x ]; then
-      eval "VERLET_ENV_VALUE=\${$canonical}"
-      VERLET_ENV_IS_SET=1
-      return
-    fi
-    suffix=${canonical#VERLET_}
-    legacy="COOL""DIS_$suffix"
-    eval "legacy_is_set=\${$legacy+x}"
-    if [ "$legacy_is_set" = x ]; then
-      eval "VERLET_ENV_VALUE=\${$legacy}"
-      VERLET_ENV_IS_SET=1
-      case ":$VERLET_ENV_WARNED:" in
-        *":$legacy:"*) ;;
-        *)
-          printf 'warning: %s is deprecated; use %s (compatibility will be removed in v0.4.0)\n' \
-            "$legacy" "$canonical" >&2
-          VERLET_ENV_WARNED="${VERLET_ENV_WARNED:+$VERLET_ENV_WARNED:}$legacy"
-          ;;
-      esac
-      return
-    fi
-    VERLET_ENV_VALUE=
-    VERLET_ENV_IS_SET=0
-  }
-  verlet_env_promote() {
-    canonical=$1
-    verlet_env_read "$canonical"
-    if [ "$VERLET_ENV_IS_SET" = 1 ]; then
-      export "$canonical=$VERLET_ENV_VALUE"
-    fi
-  }
-fi
-for env_name in \
-  VERLET_REPO \
-  VERLET_VERSION \
-  VERLET_TARGET \
-  VERLET_BASE_URL \
-  VERLET_INSTALL_ROOT \
-  VERLET_BIN_DIR \
-  VERLET_MAN_DIR \
-  VERLET_ARCHIVE \
-  VERLET_CHECKSUM
-do
-  verlet_env_promote "$env_name"
-done
-
-if [ -z "${VERLET_INSTALL_ROOT+x}" ]; then
-  LEGACY_INSTALL_ROOT="$HOME/.""cool""dis"
-  if [ ! -e "$HOME/.verlet" ] && [ -d "$LEGACY_INSTALL_ROOT" ]; then
-    printf 'warning: %s is deprecated; existing installation state will continue to be used in place through v0.3.0\n' \
-      "$LEGACY_INSTALL_ROOT" >&2
-    VERLET_INSTALL_ROOT=$LEGACY_INSTALL_ROOT
-  fi
-fi
-
 REPO="${VERLET_REPO:-emotionscientific/cooldis-kernel}"
 VERSION="${VERLET_VERSION:-}"
 TARGET="${VERLET_TARGET:-}"
@@ -303,8 +240,7 @@ PACKAGE_COUNT="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | wc -l | t
 PACKAGE_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 PACKAGE_NAME="$(basename "$PACKAGE_DIR")"
 
-LEGACY_BIN="cool""dis"
-for bin in verlet "$LEGACY_BIN" verlet-acp-agent verlet-mcp-server; do
+for bin in verlet verlet-acp-agent verlet-mcp-server; do
   [ -x "$PACKAGE_DIR/$bin" ] || die "archive is missing executable $bin"
 done
 manual_payload="$PACKAGE_DIR/share/man/man1/verlet.1"
@@ -313,7 +249,7 @@ manual_payload="$PACKAGE_DIR/share/man/man1/verlet.1"
 
 VERSION_DIR="$INSTALL_ROOT/versions/$PACKAGE_NAME"
 mkdir -p "$INSTALL_ROOT/versions" "$BIN_DIR" "$MAN_DIR"
-for bin in verlet "$LEGACY_BIN" verlet-acp-agent verlet-mcp-server; do
+for bin in verlet verlet-acp-agent verlet-mcp-server; do
   require_replaceable_link "$BIN_DIR/$bin"
 done
 manual_link="$MAN_DIR/verlet.1"
@@ -326,7 +262,7 @@ mv "$VERSION_DIR.tmp" "$VERSION_DIR"
 rm -f "$INSTALL_ROOT/current"
 ln -s "$VERSION_DIR" "$INSTALL_ROOT/current"
 
-for bin in verlet "$LEGACY_BIN" verlet-acp-agent verlet-mcp-server; do
+for bin in verlet verlet-acp-agent verlet-mcp-server; do
   link="$BIN_DIR/$bin"
   if [ -e "$link" ] || [ -L "$link" ]; then
     rm -f "$link"
@@ -343,7 +279,6 @@ echo "Installed Verlet:"
 echo "  $VERSION_DIR"
 echo "Linked binaries:"
 echo "  $BIN_DIR/verlet"
-echo "  $BIN_DIR/$LEGACY_BIN (deprecated compatibility wrapper)"
 echo "  $BIN_DIR/verlet-acp-agent"
 echo "  $BIN_DIR/verlet-mcp-server"
 echo "Linked manual:"

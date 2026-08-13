@@ -220,8 +220,7 @@ pub(super) fn resolve_manifest_operation_refs(
         let Some(parsed) = parse_resolvable_operation_ref(&operation_ref.reference)? else {
             continue;
         };
-        let record_name =
-            crate::operations::kernel_packages::canonical_kernel_package_name(&parsed.record_name);
+        let record_name = parsed.record_name.as_str();
         let record = registry.load_record(record_name).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "tool {:?} operation_ref {:?} was not found in the local operation registry: {err}; seed the operation registry or fix the op:// record name",
@@ -1146,18 +1145,7 @@ pub(super) fn parse_agent_run_args(
 }
 
 pub(super) fn agent_registry_root(registry_root: Option<std::path::PathBuf>) -> std::path::PathBuf {
-    registry_root.unwrap_or_else(|| {
-        let legacy = std::path::PathBuf::from(concat!(".", "cool", "dis/agents"));
-        if std::path::Path::new(".verlet").exists() || !legacy.exists() {
-            std::path::PathBuf::from(".verlet/agents")
-        } else {
-            eprintln!(
-                "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",
-                legacy.display()
-            );
-            legacy
-        }
-    })
+    registry_root.unwrap_or_else(|| std::path::PathBuf::from(".verlet/agents"))
 }
 
 pub(super) fn agent_operations_registry_root(

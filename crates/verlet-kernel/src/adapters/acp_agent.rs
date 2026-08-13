@@ -2528,24 +2528,20 @@ mod tests {
 
     impl OpenAICompatibleLiveConfig {
         fn load() -> Result<Self, Box<dyn std::error::Error>> {
-            let base_url =
-                verlet_runtime_contracts::env_compat::var("VERLET_OPENAI_COMPATIBLE_URL")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| "https://api.example.invalid/v1".to_string());
-            let api_key =
-                verlet_runtime_contracts::env_compat::var("VERLET_OPENAI_COMPATIBLE_API_KEY")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-                    .or_else(|| {
-                        verlet_runtime_contracts::env_compat::var("OPENAI_COMPATIBLE_API_KEY")
-                            .ok()
-                            .filter(|value| !value.trim().is_empty())
-                    })
-                    .ok_or(
-                        "missing VERLET_OPENAI_COMPATIBLE_API_KEY or OPENAI_COMPATIBLE_API_KEY",
-                    )?;
-            let model = verlet_runtime_contracts::env_compat::var("VERLET_OPENAI_COMPATIBLE_MODEL")
+            let base_url = std::env::var("VERLET_OPENAI_COMPATIBLE_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "https://api.example.invalid/v1".to_string());
+            let api_key = std::env::var("VERLET_OPENAI_COMPATIBLE_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("OPENAI_COMPATIBLE_API_KEY")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .ok_or("missing VERLET_OPENAI_COMPATIBLE_API_KEY or OPENAI_COMPATIBLE_API_KEY")?;
+            let model = std::env::var("VERLET_OPENAI_COMPATIBLE_MODEL")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| {

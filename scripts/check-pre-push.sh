@@ -2,8 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$ROOT/scripts/env-compat.sh"
-verlet_env_promote VERLET_PREPUSH_DOCS
 
 run() {
   printf '\n==> %s\n' "$*"

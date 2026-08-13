@@ -188,7 +188,7 @@ where
 
     let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let no_color = verlet_runtime_contracts::env_compat::var_os("NO_COLOR").is_some();
+    let no_color = std::env::var_os("NO_COLOR").is_some();
 
     for event in session.initial_events {
         let _ = event_tx.send(event);

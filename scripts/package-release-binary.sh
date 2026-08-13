@@ -2,15 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$ROOT/scripts/env-compat.sh"
-for env_name in \
-  VERLET_RELEASE_OUT_DIR \
-  VERLET_SKIP_CONSOLE_BUILD \
-  VERLET_RELEASE_TARGET \
-  VERLET_RELEASE_VERSION
-do
-  verlet_env_promote "$env_name"
-done
 OUT_DIR="${VERLET_RELEASE_OUT_DIR:-$ROOT/dist}"
 SKIP_BUILD=0
 SKIP_CONSOLE_BUILD="${VERLET_SKIP_CONSOLE_BUILD:-0}"
@@ -25,7 +16,6 @@ Usage:
 
 The package contains the public process entrypoints:
   - verlet
-  - deprecated binary-name compatibility wrapper for v0.3.0
   - verlet-acp-agent
   - verlet-mcp-server
   - share/verlet/console static assets
@@ -130,10 +120,8 @@ if [[ -z "$TARGET_DIR" ]]; then
   exit 1
 fi
 
-LEGACY_BIN="cool""dis"
 BINS=(
   verlet
-  "$LEGACY_BIN"
   verlet-acp-agent
   verlet-mcp-server
 )
@@ -204,7 +192,6 @@ Target: $TARGET
 
 Binaries:
   verlet              Verlet CLI
-  $LEGACY_BIN              Deprecated v0.3.0 compatibility wrapper
   verlet-acp-agent    ACP stdio adapter for hosts that launch an agent process
   verlet-mcp-server   MCP stdio adapter for daemon-backed orchestration
 

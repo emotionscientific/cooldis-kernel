@@ -144,29 +144,24 @@ impl LiveS3Config {
 }
 
 fn live_s3_config(default_prefix: &str) -> LiveS3Config {
-    let bucket = verlet_runtime_contracts::env_compat::var("VERLET_S3_BUCKET")
-        .expect("VERLET_S3_BUCKET is required");
-    let region = verlet_runtime_contracts::env_compat::var("VERLET_S3_REGION")
-        .unwrap_or_else(|_| "auto".to_string());
-    let access_key_id = verlet_runtime_contracts::env_compat::var("VERLET_S3_ACCESS_KEY_ID")
-        .expect("VERLET_S3_ACCESS_KEY_ID is required");
-    let secret_access_key =
-        verlet_runtime_contracts::env_compat::var("VERLET_S3_SECRET_ACCESS_KEY")
-            .expect("VERLET_S3_SECRET_ACCESS_KEY is required");
-    let prefix = verlet_runtime_contracts::env_compat::var("VERLET_S3_PREFIX")
+    let bucket = std::env::var("VERLET_S3_BUCKET").expect("VERLET_S3_BUCKET is required");
+    let region = std::env::var("VERLET_S3_REGION").unwrap_or_else(|_| "auto".to_string());
+    let access_key_id =
+        std::env::var("VERLET_S3_ACCESS_KEY_ID").expect("VERLET_S3_ACCESS_KEY_ID is required");
+    let secret_access_key = std::env::var("VERLET_S3_SECRET_ACCESS_KEY")
+        .expect("VERLET_S3_SECRET_ACCESS_KEY is required");
+    let prefix = std::env::var("VERLET_S3_PREFIX")
         .unwrap_or_else(|_| format!("{default_prefix}/{}", uuid::Uuid::now_v7()));
 
     let mut config = verlet_vfs::S3ObjectStoreConfig::new(bucket, region)
         .with_credentials(access_key_id, secret_access_key);
-    if let Ok(endpoint) = verlet_runtime_contracts::env_compat::var("VERLET_S3_ENDPOINT") {
+    if let Ok(endpoint) = std::env::var("VERLET_S3_ENDPOINT") {
         config = config.with_endpoint(endpoint);
     }
-    if let Ok(token) = verlet_runtime_contracts::env_compat::var("VERLET_S3_SESSION_TOKEN") {
+    if let Ok(token) = std::env::var("VERLET_S3_SESSION_TOKEN") {
         config = config.with_session_token(token);
     }
-    if verlet_runtime_contracts::env_compat::var("VERLET_S3_ALLOW_HTTP")
-        .is_ok_and(|value| value == "1")
-    {
+    if std::env::var("VERLET_S3_ALLOW_HTTP").is_ok_and(|value| value == "1") {
         config = config.with_allow_http(true);
     }
 

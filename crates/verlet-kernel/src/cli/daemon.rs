@@ -750,12 +750,12 @@ pub(super) fn load_daemon_provider_config(
                 .env_file
                 .clone()
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_ENV_FILE")
+                    std::env::var("VERLET_DAEMON_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE")
+                    std::env::var("VERLET_BIFROST_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -813,12 +813,12 @@ pub(super) fn load_daemon_provider_config(
                 .env_file
                 .clone()
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_ENV_FILE")
+                    std::env::var("VERLET_DAEMON_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_ANTHROPIC_ENV_FILE")
+                    std::env::var("VERLET_ANTHROPIC_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -868,17 +868,17 @@ pub(super) fn load_daemon_provider_config(
                 .env_file
                 .clone()
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_ENV_FILE")
+                    std::env::var("VERLET_DAEMON_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_BEDROCK_ENV_FILE")
+                    std::env::var("VERLET_BEDROCK_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
+                    std::env::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -960,23 +960,21 @@ pub(super) fn load_daemon_provider_config(
                 .env_file
                 .clone()
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_ENV_FILE")
+                    std::env::var("VERLET_DAEMON_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
                     if openai_compatible {
-                        verlet_runtime_contracts::env_compat::var(
-                            "VERLET_OPENAI_COMPATIBLE_ENV_FILE",
-                        )
-                        .ok()
-                        .map(std::path::PathBuf::from)
+                        std::env::var("VERLET_OPENAI_COMPATIBLE_ENV_FILE")
+                            .ok()
+                            .map(std::path::PathBuf::from)
                     } else {
                         None
                     }
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE")
+                    std::env::var("VERLET_BIFROST_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })

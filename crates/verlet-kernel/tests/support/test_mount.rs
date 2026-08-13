@@ -376,7 +376,7 @@ pub fn fixture_path(relative: &str) -> std::path::PathBuf {
 
 pub fn assert_json_fixture(relative: &str, actual: serde_json::Value) {
     let path = fixture_path(relative);
-    if verlet_runtime_contracts::env_compat::var_os("VERLET_UPDATE_FIXTURES").is_some() {
+    if std::env::var_os("VERLET_UPDATE_FIXTURES").is_some() {
         let mut text = serde_json::to_string_pretty(&actual).unwrap();
         text.push('\n');
         std::fs::write(&path, text)

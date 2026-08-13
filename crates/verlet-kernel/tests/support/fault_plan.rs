@@ -470,7 +470,7 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(relative);
-        if verlet_runtime_contracts::env_compat::var_os("VERLET_UPDATE_FIXTURES").is_some() {
+        if std::env::var_os("VERLET_UPDATE_FIXTURES").is_some() {
             let mut text = serde_json::to_string_pretty(&actual).unwrap();
             text.push('\n');
             std::fs::write(&path, text)

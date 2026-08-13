@@ -816,7 +816,7 @@ pub fn load_verlet_daemon_config_layers(
 }
 
 pub fn default_verlet_daemon_socket_path() -> std::path::PathBuf {
-    default_daemon_socket_path_from_env(|key| verlet_runtime_contracts::env_compat::var_os(key))
+    default_daemon_socket_path_from_env(|key| std::env::var_os(key))
 }
 
 pub fn discover_verlet_daemon_config_path()
@@ -837,7 +837,7 @@ pub fn discover_verlet_project(
 
 fn discover_verlet_project_with_warning(
     start: &std::path::Path,
-    mut warn: impl FnMut(&str),
+    _warn: impl FnMut(&str),
 ) -> crate::kernel::runtime_host::VerletResult<VerletProjectDiscovery> {
     let mut start = if start.is_absolute() {
         start.to_path_buf()
@@ -865,36 +865,10 @@ fn discover_verlet_project_with_warning(
                 config_path: Some(candidate),
             });
         }
-        let candidate = dir.join(concat!("cool", "dis.toml"));
-        if candidate.is_file() {
-            let warning = format!(
-                "warning: {} is deprecated; use {} (compatibility will be removed in v0.4.0)",
-                candidate.display(),
-                dir.join("verlet.toml").display()
-            );
-            warn(&warning);
-            return Ok(VerletProjectDiscovery {
-                root: dir.to_path_buf(),
-                config_path: Some(candidate),
-            });
-        }
     }
 
     for dir in start.ancestors() {
         if dir.join(".verlet").is_dir() {
-            return Ok(VerletProjectDiscovery {
-                root: dir.to_path_buf(),
-                config_path: None,
-            });
-        }
-        let legacy = dir.join(concat!(".", "cool", "dis"));
-        if legacy.is_dir() {
-            let warning = format!(
-                "warning: {} is deprecated; keep using it for v0.3.0 or create {} for new state",
-                legacy.display(),
-                dir.join(".verlet").display()
-            );
-            warn(&warning);
             return Ok(VerletProjectDiscovery {
                 root: dir.to_path_buf(),
                 config_path: None,
@@ -1159,7 +1133,7 @@ pub fn verlet_daemon_service_install_path(
     target: VerletDaemonServiceTarget,
     label: &str,
 ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
-    let home = verlet_runtime_contracts::env_compat::var_os("HOME")
+    let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory("HOME is not set".to_string())
@@ -1175,12 +1149,10 @@ pub fn verlet_daemon_service_install_path_for_home(
     let file_name = verlet_daemon_service_file_name(target, label)?;
     let dir = match target {
         VerletDaemonServiceTarget::Launchd => home.join("Library/LaunchAgents"),
-        VerletDaemonServiceTarget::Systemd => {
-            verlet_runtime_contracts::env_compat::var_os("XDG_CONFIG_HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| home.join(".config"))
-                .join("systemd/user")
-        }
+        VerletDaemonServiceTarget::Systemd => std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+            .join("systemd/user"),
     };
     Ok(dir.join(file_name))
 }
@@ -1305,13 +1277,11 @@ fn resolve_optional_secret(
     let Some(env_name) = env_name else {
         return Ok(None);
     };
-    verlet_runtime_contracts::env_compat::var(env_name)
-        .map(Some)
-        .map_err(|err| {
-            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "failed to read {label} from env {env_name}: {err}"
-            ))
-        })
+    std::env::var(env_name).map(Some).map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to read {label} from env {env_name}: {err}"
+        ))
+    })
 }
 
 fn render_launchd_service(spec: &VerletDaemonServiceSpec) -> String {
@@ -1410,18 +1380,7 @@ fn default_sqlite_queue_path() -> std::path::PathBuf {
 }
 
 fn default_sqlite_queue_path_for_base(base: &std::path::Path) -> std::path::PathBuf {
-    let canonical = resolve_config_path(base, std::path::PathBuf::from(DEFAULT_SQLITE_QUEUE_PATH));
-    let legacy_root = base.join(concat!(".", "cool", "dis"));
-    if base.join(".verlet").exists() || !legacy_root.exists() {
-        canonical
-    } else {
-        let legacy = legacy_root.join("queue/ingress.sqlite");
-        eprintln!(
-            "warning: {} is deprecated; existing queue state will continue to be used in place through v0.3.0",
-            legacy.display()
-        );
-        legacy
-    }
+    resolve_config_path(base, std::path::PathBuf::from(DEFAULT_SQLITE_QUEUE_PATH))
 }
 
 fn unix_listen_url(path: impl AsRef<std::path::Path>) -> String {
@@ -1431,10 +1390,7 @@ fn unix_listen_url(path: impl AsRef<std::path::Path>) -> String {
 fn default_daemon_socket_path_from_env(
     get_env: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> std::path::PathBuf {
-    if let Some(path) =
-        verlet_runtime_contracts::env_compat::var_os_with("VERLET_DAEMON_SOCKET", |name| {
-            get_env(name)
-        })
+    if let Some(path) = get_env("VERLET_DAEMON_SOCKET")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
     {
@@ -1445,10 +1401,7 @@ fn default_daemon_socket_path_from_env(
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
     {
-        return existing_daemon_socket_path(
-            dir.join("verlet/verlet.sock"),
-            dir.join(concat!("cool", "dis/cool", "dis.sock")),
-        );
+        return dir.join("verlet/verlet.sock");
     }
 
     if cfg!(target_os = "macos")
@@ -1456,35 +1409,21 @@ fn default_daemon_socket_path_from_env(
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from)
     {
-        return existing_daemon_socket_path(
-            home.join("Library/Application Support/verlet/run/verlet.sock"),
-            home.join(concat!(
-                "Library/Application Support/",
-                "cool",
-                "dis/run/cool",
-                "dis.sock"
-            )),
-        );
+        return home.join("Library/Application Support/verlet/run/verlet.sock");
     }
 
     if let Some(dir) = get_env("XDG_STATE_HOME")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
     {
-        return existing_daemon_socket_path(
-            dir.join("verlet/run/verlet.sock"),
-            dir.join(concat!("cool", "dis/run/cool", "dis.sock")),
-        );
+        return dir.join("verlet/run/verlet.sock");
     }
 
     if let Some(home) = get_env("HOME")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
     {
-        return existing_daemon_socket_path(
-            home.join(".local/state/verlet/run/verlet.sock"),
-            home.join(concat!(".local/state/", "cool", "dis/run/cool", "dis.sock")),
-        );
+        return home.join(".local/state/verlet/run/verlet.sock");
     }
 
     let user = get_env("USER")
@@ -1497,31 +1436,7 @@ fn default_daemon_socket_path_from_env(
     } else {
         std::env::temp_dir()
     };
-    existing_daemon_socket_path(
-        temp_dir.join(format!("verlet-{user}/verlet.sock")),
-        temp_dir.join(format!(
-            "{}-{user}/{}.sock",
-            concat!("cool", "dis"),
-            concat!("cool", "dis")
-        )),
-    )
-}
-
-fn existing_daemon_socket_path(
-    canonical: std::path::PathBuf,
-    legacy: std::path::PathBuf,
-) -> std::path::PathBuf {
-    let canonical_root_exists = canonical.parent().is_some_and(std::path::Path::exists);
-    let legacy_root_exists = legacy.parent().is_some_and(std::path::Path::exists);
-    if canonical_root_exists || !legacy_root_exists {
-        canonical
-    } else {
-        eprintln!(
-            "warning: {} is deprecated; existing daemon state will continue to be used in place through v0.3.0",
-            legacy.display()
-        );
-        legacy
-    }
+    temp_dir.join(format!("verlet-{user}/verlet.sock"))
 }
 
 fn sanitize_socket_path_component(value: &str) -> String {

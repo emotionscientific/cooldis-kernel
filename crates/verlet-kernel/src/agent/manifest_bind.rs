@@ -2567,7 +2567,6 @@ fn verify_operation_ref_for_subject(
     operation_registry_root: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<VerifiedOperationRef> {
     let parsed = parse_operation_ref(operation_ref)?;
-    crate::operations::kernel_packages::warn_if_legacy_kernel_package_name(&parsed.name);
     let artifact_hash = parsed.artifact_hash.clone().ok_or_else(|| {
         crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "{subject_kind} {subject_id:?} operation_ref {operation_ref:?} must be content-addressed with @sha256:<hash>; for agent publish, pass --resolve-ops to pin op:// authoring refs from the operations registry"

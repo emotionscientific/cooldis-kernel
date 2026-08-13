@@ -70,8 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let krunvm_available = command_available("krunvm");
     let buildah_available = command_available("buildah");
     let private_network_probe_requested =
-        verlet_runtime_contracts::env_compat::var_os("VERLET_SANDBOX_PROBE_PRIVATE_NETWORK")
-            .is_some();
+        std::env::var_os("VERLET_SANDBOX_PROBE_PRIVATE_NETWORK").is_some();
 
     let mut unavailable_reasons = Vec::new();
     if matches!(hypervisor_backend, HypervisorBackend::Missing) {
@@ -136,11 +135,11 @@ fn command_available(name: &str) -> bool {
 }
 
 fn library_hint_present(env_var: &str, path_needle: &str, common_paths: &[&str]) -> bool {
-    verlet_runtime_contracts::env_compat::var_os(env_var).is_some()
-        || verlet_runtime_contracts::env_compat::var_os("DYLD_LIBRARY_PATH")
+    std::env::var_os(env_var).is_some()
+        || std::env::var_os("DYLD_LIBRARY_PATH")
             .map(|paths| paths.to_string_lossy().contains(path_needle))
             .unwrap_or(false)
-        || verlet_runtime_contracts::env_compat::var_os("LD_LIBRARY_PATH")
+        || std::env::var_os("LD_LIBRARY_PATH")
             .map(|paths| paths.to_string_lossy().contains(path_needle))
             .unwrap_or(false)
         || common_paths

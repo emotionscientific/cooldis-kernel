@@ -9,8 +9,6 @@ result-*
 .site/
 # Local daemon runtime state (publish records embed absolute home paths).
 **/.verlet/
-# v0.3.0 compatibility: existing state remains live in the legacy directory.
-**/.cooldis/
 _site/
 dist/
 verify-output.log

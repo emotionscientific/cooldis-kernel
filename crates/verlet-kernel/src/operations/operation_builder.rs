@@ -99,10 +99,7 @@ fn rust_wasm_cargo_command() -> std::process::Command {
         command.args(["run", "stable", "cargo"]);
         command
     } else {
-        std::process::Command::new(
-            verlet_runtime_contracts::env_compat::var("CARGO")
-                .unwrap_or_else(|_| "cargo".to_string()),
-        )
+        std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
     };
     clean_rust_wasm_cargo_env(&mut command);
     command

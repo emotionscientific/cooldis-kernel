@@ -219,10 +219,6 @@ prepare_call_environment() {
   unset SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE VERLET_REAL_CARGO VERLET_CARGO_LANE_SCRIPT
   unset VERLET_CARGO_SHIM_DIR VERLET_VERIFY_MANAGED_CARGO
   unset VERLET_CARGO_LANE_INCREMENTAL CARGO_ALIAS_ESCAPE
-  local legacy_prefix="COOL""DIS_"
-  unset "${legacy_prefix}REAL_CARGO" "${legacy_prefix}CARGO_LANE_SCRIPT"
-  unset "${legacy_prefix}CARGO_SHIM_DIR" "${legacy_prefix}VERIFY_MANAGED_CARGO"
-  unset "${legacy_prefix}CARGO_LANE_INCREMENTAL" "${legacy_prefix}CARGO_LANE_ROOT"
   unset CI
 
   export PATH="$TEST_PATH"
@@ -444,7 +440,6 @@ CONFIG
 cp "$SCRIPT_DIR/cargo-lane.sh" "$REPO/scripts/cargo-lane.sh"
 cp "$SCRIPT_DIR/check-pre-commit.sh" "$REPO/scripts/check-pre-commit.sh"
 cp "$SCRIPT_DIR/check-pre-push.sh" "$REPO/scripts/check-pre-push.sh"
-cp "$SCRIPT_DIR/env-compat.sh" "$REPO/scripts/env-compat.sh"
 cp "$SCRIPT_DIR/guard-rails.sh" "$REPO/scripts/guard-rails.sh"
 cp "$SCRIPT_DIR/test-timeout-lint.pl" "$REPO/scripts/test-timeout-lint.pl"
 cp "$SCRIPT_DIR/test-timeout-lint.sh" "$REPO/scripts/test-timeout-lint.sh"

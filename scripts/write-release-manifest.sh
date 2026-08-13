@@ -2,9 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$ROOT/scripts/env-compat.sh"
-verlet_env_promote VERLET_RELEASE_OUT_DIR
-verlet_env_promote VERLET_RELEASE_CHANNEL
 OUT_DIR="${VERLET_RELEASE_OUT_DIR:-$ROOT/dist}"
 REPO="${GITHUB_REPOSITORY:-emotionscientific/cooldis-kernel}"
 TAG="${GITHUB_REF_NAME:-}"

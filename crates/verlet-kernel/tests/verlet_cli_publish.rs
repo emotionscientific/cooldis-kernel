@@ -36,7 +36,7 @@ fn verlet_cli_tool_help_is_canonical() {
 }
 
 #[test]
-fn verlet_cli_tool_list_and_legacy_bare_lookup_use_canonical_kernel_package_names() {
+fn verlet_cli_tool_list_is_canonical_and_legacy_bare_lookup_fails() {
     let registry_root = temp_dir("canonical-kernel-package-list");
     verlet::operations::kernel_packages::ensure_verlet_threads_published(Some(&registry_root))
         .unwrap();
@@ -70,7 +70,7 @@ fn verlet_cli_tool_list_and_legacy_bare_lookup_use_canonical_kernel_package_name
         assert!(!list.contains(legacy), "tool list:\n{list}");
     }
 
-    let manual = run_verlet([
+    let manual = run_verlet_failed([
         "tool",
         "manual",
         concat!("cool", "dis-threads"),
@@ -78,7 +78,9 @@ fn verlet_cli_tool_list_and_legacy_bare_lookup_use_canonical_kernel_package_name
         "--registry-root",
         registry_root.to_str().unwrap(),
     ]);
-    assert!(manual.contains("verlet-threads thread_spawn"), "{manual}");
+    let error = stderr(&manual);
+    assert!(error.contains(concat!("cool", "dis-threads")), "{error}");
+    assert!(error.contains("failed to read operation record"), "{error}");
 }
 
 #[test]
@@ -2038,7 +2040,7 @@ operation_ref = "op://analytics/export@latest"
 }
 
 #[test]
-fn verlet_cli_agent_publish_resolve_ops_canonicalizes_legacy_kernel_package_alias() {
+fn verlet_cli_agent_publish_resolve_ops_rejects_legacy_kernel_package_alias() {
     let workspace = temp_dir("agent-resolve-legacy-kernel-package");
     let manifest_path = workspace.join("resolve-legacy.verlet.agent.toml");
     let legacy_name = concat!("cool", "dis-threads");
@@ -2067,13 +2069,13 @@ operation_ref = "op://{legacy_name}/thread_spawn"
     .unwrap();
     let registry_root = temp_dir("agent-resolve-legacy-kernel-package-agents");
     let operation_registry_root = temp_dir("agent-resolve-legacy-kernel-package-operations");
-    let record = verlet::operations::kernel_packages::ensure_verlet_threads_published(Some(
+    verlet::operations::kernel_packages::ensure_verlet_threads_published(Some(
         &operation_registry_root,
     ))
     .unwrap()
     .unwrap();
 
-    let publish = run_verlet([
+    let publish = run_verlet_failed([
         "agent",
         "publish",
         manifest_path.to_str().unwrap(),
@@ -2083,22 +2085,15 @@ operation_ref = "op://{legacy_name}/thread_spawn"
         "--operations-registry-root",
         operation_registry_root.to_str().unwrap(),
     ]);
-    let canonical_ref = format!(
-        "op://verlet-threads/thread_spawn@sha256:{}",
-        record.active_artifact_hash
-    );
-
-    assert!(publish.contains(&format!(
-        "resolved operation_ref: op://{legacy_name}/thread_spawn -> {canonical_ref}"
-    )));
+    let error = stderr(&publish);
+    assert!(error.contains(legacy_name), "{error}");
+    assert!(error.contains("not found"), "{error}");
     assert!(
         std::fs::read_to_string(&manifest_path)
             .unwrap()
-            .contains(&format!("operation_ref = \"{canonical_ref}\""))
-    );
-    assert_eq!(
-        agent_record(&registry_root, "resolve-legacy").tool_refs[0].reference,
-        canonical_ref
+            .contains(&format!(
+                "operation_ref = \"op://{legacy_name}/thread_spawn\""
+            ))
     );
 }
 

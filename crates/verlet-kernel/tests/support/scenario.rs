@@ -2720,7 +2720,7 @@ mod tests {
     }
 
     fn parse_sweep_env(name: &str, default: Option<&str>) -> u64 {
-        let value = verlet_runtime_contracts::env_compat::var(name)
+        let value = std::env::var(name)
             .ok()
             .or_else(|| default.map(str::to_owned))
             .unwrap_or_else(|| panic!("{name} is required for scenario_nightly_sweep"));
@@ -2783,9 +2783,7 @@ mod tests {
 
     fn write_sweep_receipt(receipt: &SweepReceipt) {
         let json = serde_json::to_string_pretty(receipt).expect("serialize nightly sweep receipt");
-        if let Ok(path) =
-            verlet_runtime_contracts::env_compat::var("VERLET_SCENARIO_SWEEP_RECEIPT_PATH")
-        {
+        if let Ok(path) = std::env::var("VERLET_SCENARIO_SWEEP_RECEIPT_PATH") {
             std::fs::write(&path, format!("{json}\n"))
                 .unwrap_or_else(|error| panic!("write nightly sweep receipt to {path}: {error}"));
         } else {
@@ -3189,9 +3187,8 @@ mod tests {
             crate::support::scenario::load_corpus(&crate::support::scenario::corpus_path())
                 .unwrap_or_else(|error| panic!("{error}"))
                 .len();
-        let commit_sha =
-            verlet_runtime_contracts::env_compat::var("VERLET_SCENARIO_SWEEP_COMMIT_SHA")
-                .unwrap_or_else(|_| "local".to_string());
+        let commit_sha = std::env::var("VERLET_SCENARIO_SWEEP_COMMIT_SHA")
+            .unwrap_or_else(|_| "local".to_string());
         let mut root = crate::support::fault_plan::SplitMix64::new(base_seed);
         let mut lane = root.split("scenario-nightly-v1");
         let mut tallies =

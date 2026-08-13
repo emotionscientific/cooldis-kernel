@@ -61,29 +61,25 @@ ref = "{resource_ref}"
 }
 
 #[test]
-fn legacy_manifest_kind_is_normalized_for_new_records() {
+fn legacy_manifest_kind_is_rejected_for_new_records() {
     let source = manifest_source("legacy-kind", "1.0.0", false).replace(
         "kind = \"verlet.agent-manifest\"",
         &format!("kind = \"{}\"", concat!("cool", "dis.agent-manifest")),
     );
 
-    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
-
-    assert_eq!(plan.kind, "verlet.agent-manifest");
-    assert_eq!(
-        plan.resolved_manifest["identity"]["kind"],
-        serde_json::json!("verlet.agent-manifest")
-    );
+    let err = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap_err();
+    assert!(err.to_string().contains("verlet.agent-manifest"));
 }
 
 #[test]
-fn persisted_legacy_agent_record_kind_remains_valid() {
+fn persisted_legacy_agent_record_kind_is_rejected() {
     let source = manifest_source("persisted-legacy-kind", "1.0.0", false);
     let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
     let mut record = plan.into_record(1);
     record.kind = concat!("cool", "dis.agent-manifest").to_string();
 
-    record.validate().unwrap();
+    let err = record.validate().unwrap_err();
+    assert!(err.to_string().contains("verlet.agent-manifest"));
 }
 
 fn folder_first_manifest_source(name: &str, context: &str) -> String {

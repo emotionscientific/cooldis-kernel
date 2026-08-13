@@ -125,5 +125,5 @@ fn required_arg(
 }
 
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    verlet_runtime_contracts::env_compat::var(name).map_err(|_| format!("missing {name}").into())
+    std::env::var(name).map_err(|_| format!("missing {name}").into())
 }

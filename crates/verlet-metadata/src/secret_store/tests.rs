@@ -103,3 +103,28 @@ fn secret_names_are_path_safe_but_allow_env_style_names() {
     assert!(crate::secret_store::validate_secret_name("../EXAMPLE_API_KEY").is_err());
     assert!(crate::secret_store::validate_secret_name("").is_err());
 }
+
+#[tokio::test]
+async fn secret_import_ignores_legacy_verlet_environment_name() {
+    let store = crate::secret_store::SqliteSecretStore::in_memory()
+        .await
+        .unwrap();
+    let suffix = uuid::Uuid::now_v7().simple().to_string();
+    let canonical = format!("VERLET_TEST_SECRET_{suffix}");
+    let legacy = format!("{}TEST_SECRET_{suffix}", concat!("COOL", "DIS_"));
+
+    // SAFETY: both names are unique to this test invocation, so no parallel
+    // test can read or mutate them.
+    unsafe { std::env::set_var(&legacy, "legacy-secret") };
+    let result = store
+        .import_secret_from_env("TEST_SECRET", &canonical)
+        .await;
+    // SAFETY: the variable is unique to this test invocation.
+    unsafe { std::env::remove_var(&legacy) };
+
+    assert!(matches!(
+        result,
+        Err(crate::secret_store::SecretStoreError::MissingEnv { env_name, .. })
+            if env_name == canonical
+    ));
+}

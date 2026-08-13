@@ -248,18 +248,7 @@ pub(super) fn parse_skill_import_args(
 }
 
 pub(super) fn skill_registry_root(registry_root: Option<std::path::PathBuf>) -> std::path::PathBuf {
-    registry_root.unwrap_or_else(|| {
-        let legacy = std::path::PathBuf::from(concat!(".", "cool", "dis/skills"));
-        if std::path::Path::new(".verlet").exists() || !legacy.exists() {
-            std::path::PathBuf::from(".verlet/skills")
-        } else {
-            eprintln!(
-                "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",
-                legacy.display()
-            );
-            legacy
-        }
-    })
+    registry_root.unwrap_or_else(|| std::path::PathBuf::from(".verlet/skills"))
 }
 
 pub(super) fn print_skill_help() {

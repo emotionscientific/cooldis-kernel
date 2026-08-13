@@ -28,7 +28,6 @@
 @source-pattern	cooldis-console-token[.a-z0-9_-]*	Shipped console token protocol compatibility key.
 .github/CODEOWNERS	Repository remote site or external workflow identity is out of scope for EMO-520.
 .github/ISSUE_TEMPLATE/config.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
-.gitignore	Legacy state directory remains ignored during the compatibility window.
 CHANGELOG.md	Rename and deprecation-window receipt for v0.3.0.
 RELEASE.md	Repository remote site or external workflow identity is out of scope for EMO-520.
 apps/console/src/App.svelte	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
@@ -46,7 +45,6 @@ crates/verlet-history-sqlite/tests/fixtures/rusqlite-history-stream-v0.sqlite3	F
 crates/verlet-history/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-history/src/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-io-pgqrs/src/lib.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
-crates/verlet-kernel/Cargo.toml	Deprecated main binary target remains explicitly packaged through v0.3.0.
 crates/verlet-kernel/src/adapters/agent_loop.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 crates/verlet-kernel/src/adapters/agent_loop/tests.rs	Compatibility assertion for a stable persisted storage ABI or wire identifier.
 crates/verlet-kernel/src/adapters/app_server/connection.rs	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
@@ -170,7 +168,7 @@ examples/wasm-counter-coupling/src/lib.rs	Example or package contract preserves 
 mkdocs.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
 proto/verlet.bridge.v1.proto	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 scripts/ci-receipts.sh	Shipped release receipt filenames remain historical.
-scripts/install.sh	Repository identity and one-release compatibility documentation remain load-bearing.
+scripts/install.sh	Repository remote identity remains load-bearing.
 scripts/verlet-name-allowlist.tsv	The lint's own closed list necessarily spells the frozen identifiers it permits.
 scripts/release-async.sh	Repository remote site or external workflow identity is out of scope for EMO-520.
 scripts/write-release-manifest.sh	Repository remote site or external workflow identity is out of scope for EMO-520.

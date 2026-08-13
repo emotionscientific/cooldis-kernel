@@ -647,7 +647,7 @@ fn discovers_project_root_from_nearest_config_then_dot_verlet() {
 }
 
 #[test]
-fn project_discovery_prefers_new_config_then_falls_back_to_legacy_config() {
+fn project_discovery_ignores_legacy_config() {
     let root = temp_root("project-config-compat");
     let nested = root.join("src/nested");
     let canonical = root.join("verlet.toml");
@@ -661,9 +661,9 @@ fn project_discovery_prefers_new_config_then_falls_back_to_legacy_config() {
             warnings.push(warning.to_string())
         })
         .unwrap();
-    assert_eq!(legacy_only.config_path.as_deref(), Some(legacy.as_path()));
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains(legacy.to_string_lossy().as_ref()));
+    assert_eq!(legacy_only.root, nested);
+    assert_eq!(legacy_only.config_path, None);
+    assert!(warnings.is_empty());
 
     std::fs::write(&canonical, "").unwrap();
     warnings.clear();
@@ -679,7 +679,7 @@ fn project_discovery_prefers_new_config_then_falls_back_to_legacy_config() {
 }
 
 #[test]
-fn project_discovery_nearest_legacy_config_beats_ancestor_canonical_config() {
+fn project_discovery_ignores_nearer_legacy_config() {
     let root = temp_root("project-config-nearest-legacy");
     let project = root.join("work/karl");
     let nested = project.join("src/nested");
@@ -696,19 +696,18 @@ fn project_discovery_nearest_legacy_config_beats_ancestor_canonical_config() {
         })
         .unwrap();
 
-    assert_eq!(discovered.root, project);
+    assert_eq!(discovered.root, root);
     assert_eq!(
         discovered.config_path.as_deref(),
-        Some(project_config.as_path())
+        Some(ancestor_config.as_path())
     );
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains(project_config.to_string_lossy().as_ref()));
+    assert!(warnings.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn project_discovery_nearest_legacy_state_dir_beats_ancestor_canonical_state_dir() {
+fn project_discovery_ignores_nearer_legacy_state_dir() {
     let root = temp_root("project-state-nearest-legacy");
     let project = root.join("work/karl");
     let nested = project.join("src/nested");
@@ -724,10 +723,9 @@ fn project_discovery_nearest_legacy_state_dir_beats_ancestor_canonical_state_dir
         })
         .unwrap();
 
-    assert_eq!(discovered.root, project);
+    assert_eq!(discovered.root, root);
     assert_eq!(discovered.config_path, None);
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains(project_state.to_string_lossy().as_ref()));
+    assert!(warnings.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1110,7 +1108,7 @@ fn default_daemon_socket_uses_user_state_when_runtime_dir_is_absent() {
 }
 
 #[test]
-fn default_daemon_socket_reuses_existing_legacy_runtime_directory() {
+fn default_daemon_socket_ignores_existing_legacy_runtime_directory() {
     let root = temp_root("legacy-daemon-socket");
     let legacy_dir = root.join(concat!("cool", "dis"));
     std::fs::create_dir_all(&legacy_dir).unwrap();
@@ -1120,7 +1118,7 @@ fn default_daemon_socket_reuses_existing_legacy_runtime_directory() {
         _ => None,
     });
 
-    assert_eq!(path, legacy_dir.join(concat!("cool", "dis.sock")));
+    assert_eq!(path, root.join("verlet/verlet.sock"));
     let _ = std::fs::remove_dir_all(root);
 }
 

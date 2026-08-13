@@ -17,17 +17,17 @@ fn parse_args(
     args: Vec<std::ffi::OsString>,
 ) -> verlet::kernel::runtime_host::VerletResult<verlet::adapters::acp_agent::VerletAcpAgentConfig> {
     let mut config = verlet::adapters::acp_agent::VerletAcpAgentConfig::default();
-    if let Ok(socket) = verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_SOCKET") {
+    if let Ok(socket) = std::env::var("VERLET_DAEMON_SOCKET") {
         if !socket.trim().is_empty() {
             config.daemon_socket = std::path::PathBuf::from(socket);
         }
     }
-    if let Ok(listen) = verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_LISTEN") {
+    if let Ok(listen) = std::env::var("VERLET_DAEMON_LISTEN") {
         if !listen.trim().is_empty() {
             config.daemon_socket = parse_unix_listen(&listen)?;
         }
     }
-    if let Ok(agent_ref) = verlet_runtime_contracts::env_compat::var("VERLET_ACP_AGENT_REF") {
+    if let Ok(agent_ref) = std::env::var("VERLET_ACP_AGENT_REF") {
         if !agent_ref.trim().is_empty() {
             config.agent_ref = Some(agent_ref);
         }

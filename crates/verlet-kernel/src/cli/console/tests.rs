@@ -209,7 +209,7 @@ fn console_project_storage_root_does_not_reuse_user_home() {
 }
 
 #[test]
-fn console_project_storage_reuses_existing_legacy_state_directory() {
+fn console_project_storage_ignores_existing_legacy_state_directory() {
     let root = std::env::temp_dir().join(format!("verlet-console-state-{}", uuid::Uuid::now_v7()));
     let project_root = root.join("project");
     let user_home = root.join("user");
@@ -218,7 +218,7 @@ fn console_project_storage_reuses_existing_legacy_state_directory() {
 
     assert_eq!(
         crate::cli::console::console_project_storage_root(&project_root, &user_home),
-        legacy
+        project_root.join(".verlet")
     );
 
     let _ = std::fs::remove_dir_all(root);

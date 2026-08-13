@@ -18,12 +18,12 @@ fn parse_args(
 ) -> verlet::kernel::runtime_host::VerletResult<verlet::adapters::mcp_server::VerletMcpServerConfig>
 {
     let mut config = verlet::adapters::mcp_server::VerletMcpServerConfig::default();
-    if let Ok(socket) = verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_SOCKET") {
+    if let Ok(socket) = std::env::var("VERLET_DAEMON_SOCKET") {
         if !socket.trim().is_empty() {
             config.daemon_socket = std::path::PathBuf::from(socket);
         }
     }
-    if let Ok(listen) = verlet_runtime_contracts::env_compat::var("VERLET_DAEMON_LISTEN") {
+    if let Ok(listen) = std::env::var("VERLET_DAEMON_LISTEN") {
         if !listen.trim().is_empty() {
             config.daemon_socket = parse_unix_listen(&listen)?;
         }

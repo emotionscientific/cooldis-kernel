@@ -24,7 +24,7 @@ impl Default for OperatorConnectConfig {
         // MCP, ACP, debug RPC, and other daemon clients inherit this config.
         // Managed callers provide their boundary credential via
         // VERLET_APP_SERVER_TOKEN; an explicit field value may override it.
-        let bearer_token = verlet_runtime_contracts::env_compat::var("VERLET_APP_SERVER_TOKEN")
+        let bearer_token = std::env::var("VERLET_APP_SERVER_TOKEN")
             .ok()
             .filter(|token| !token.trim().is_empty());
         Self {

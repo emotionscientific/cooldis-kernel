@@ -350,7 +350,7 @@ fn validate_host_provider(
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())
             {
-                match verlet_runtime_contracts::env_compat::var(name) {
+                match std::env::var(name) {
                     Ok(value) if !value.trim().is_empty() => {
                         provider.resolved_api_key = Some(ResolvedProviderApiKey(value));
                     }
