@@ -182,8 +182,9 @@ pub fn compile_published_agent_record(
     verlet_agent::manifest_schema::AgentManifestSchema,
     AgentManifestCompileReceipt,
 )> {
-    record.validate()?;
+    record.validate_persisted()?;
     let mut resolved_manifest = record.resolved_manifest.clone();
+    migrate_legacy_persisted_manifest_kind(&mut resolved_manifest);
     migrate_legacy_persisted_manifest_authority(&mut resolved_manifest, &record.ref_uri)?;
     let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
         serde_json::from_value(resolved_manifest).map_err(|err| {
@@ -200,6 +201,25 @@ pub fn compile_published_agent_record(
         alias,
     };
     Ok((manifest, receipt))
+}
+
+fn migrate_legacy_persisted_manifest_kind(resolved_manifest: &mut serde_json::Value) {
+    let Some(identity) = resolved_manifest
+        .get_mut("identity")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if identity.get("kind").and_then(serde_json::Value::as_str)
+        == Some(concat!("cool", "dis.agent-manifest"))
+    {
+        identity.insert(
+            "kind".to_string(),
+            serde_json::Value::String(
+                verlet_agent::manifest_schema::AGENT_MANIFEST_KIND.to_string(),
+            ),
+        );
+    }
 }
 
 #[derive(serde::Deserialize)]

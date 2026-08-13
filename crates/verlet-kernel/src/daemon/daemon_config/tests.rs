@@ -655,25 +655,13 @@ fn project_discovery_ignores_legacy_config() {
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(&legacy, "").unwrap();
 
-    let mut warnings = Vec::new();
-    let legacy_only =
-        crate::daemon::daemon_config::discover_verlet_project_with_warning(&nested, |warning| {
-            warnings.push(warning.to_string())
-        })
-        .unwrap();
+    let legacy_only = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
     assert_eq!(legacy_only.root, nested);
     assert_eq!(legacy_only.config_path, None);
-    assert!(warnings.is_empty());
 
     std::fs::write(&canonical, "").unwrap();
-    warnings.clear();
-    let both =
-        crate::daemon::daemon_config::discover_verlet_project_with_warning(&nested, |warning| {
-            warnings.push(warning.to_string())
-        })
-        .unwrap();
+    let both = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
     assert_eq!(both.config_path.as_deref(), Some(canonical.as_path()));
-    assert!(warnings.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -689,19 +677,13 @@ fn project_discovery_ignores_nearer_legacy_config() {
     std::fs::write(&ancestor_config, "").unwrap();
     std::fs::write(&project_config, "").unwrap();
 
-    let mut warnings = Vec::new();
-    let discovered =
-        crate::daemon::daemon_config::discover_verlet_project_with_warning(&nested, |warning| {
-            warnings.push(warning.to_string())
-        })
-        .unwrap();
+    let discovered = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
 
     assert_eq!(discovered.root, root);
     assert_eq!(
         discovered.config_path.as_deref(),
         Some(ancestor_config.as_path())
     );
-    assert!(warnings.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -716,16 +698,10 @@ fn project_discovery_ignores_nearer_legacy_state_dir() {
     std::fs::create_dir_all(root.join(".verlet")).unwrap();
     std::fs::create_dir_all(&project_state).unwrap();
 
-    let mut warnings = Vec::new();
-    let discovered =
-        crate::daemon::daemon_config::discover_verlet_project_with_warning(&nested, |warning| {
-            warnings.push(warning.to_string())
-        })
-        .unwrap();
+    let discovered = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
 
     assert_eq!(discovered.root, root);
     assert_eq!(discovered.config_path, None);
-    assert!(warnings.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }

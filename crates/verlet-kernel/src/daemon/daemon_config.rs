@@ -832,13 +832,6 @@ pub fn discover_verlet_daemon_config_path()
 pub fn discover_verlet_project(
     start: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<VerletProjectDiscovery> {
-    discover_verlet_project_with_warning(start, |warning| eprintln!("{warning}"))
-}
-
-fn discover_verlet_project_with_warning(
-    start: &std::path::Path,
-    _warn: impl FnMut(&str),
-) -> crate::kernel::runtime_host::VerletResult<VerletProjectDiscovery> {
     let mut start = if start.is_absolute() {
         start.to_path_buf()
     } else {

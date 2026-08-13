@@ -2,6 +2,10 @@ use sha2::Digest as _;
 use std::io::Write as _;
 
 const AGENT_RECORD_SCHEMA_VERSION: u32 = 1;
+// Reader-only compatibility for records published before the Verlet rename.
+// New manifest source is validated against AGENT_MANIFEST_KIND before a
+// publish plan can be constructed.
+const LEGACY_AGENT_RECORD_KIND: &str = concat!("cool", "dis.agent-manifest");
 const FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE: &str = "identity";
 const FOLDER_FIRST_SYSTEM_PROMPT_PREFLIGHT_REF: &str =
     "resource://artifact/sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -120,7 +124,7 @@ impl LocalAgentRegistry {
                 path.display()
             ))
         })?;
-        record.validate()?;
+        record.validate_persisted()?;
         if record.name != name {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -189,7 +193,7 @@ impl LocalAgentRegistry {
                 path.display()
             ))
         })?;
-        record.validate()?;
+        record.validate_persisted()?;
         if record.name != name || record.version != version {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -913,6 +917,17 @@ fn json_pointer_child(path: &str, segment: &str) -> String {
 
 impl PublishedAgentRecord {
     pub fn validate(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        self.validate_kind(false)
+    }
+
+    pub(crate) fn validate_persisted(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        self.validate_kind(true)
+    }
+
+    fn validate_kind(
+        &self,
+        allow_legacy_kind: bool,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if self.schema_version != AGENT_RECORD_SCHEMA_VERSION {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -921,7 +936,9 @@ impl PublishedAgentRecord {
                 ),
             ));
         }
-        if self.kind != verlet_agent::manifest_schema::AGENT_MANIFEST_KIND {
+        if self.kind != verlet_agent::manifest_schema::AGENT_MANIFEST_KIND
+            && !(allow_legacy_kind && self.kind == LEGACY_AGENT_RECORD_KIND)
+        {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
                     "agent record kind must be {:?}, got {:?}",

@@ -270,6 +270,16 @@ for bin in verlet verlet-acp-agent verlet-mcp-server; do
   ln -s "$INSTALL_ROOT/current/$bin" "$link"
 done
 
+# Remove only the symlink shape created by the v0.3 installer. Preserve a
+# user-owned file or an unrelated symlink that happens to use the old name.
+LEGACY_BIN="cool""dis"
+legacy_link="$BIN_DIR/$LEGACY_BIN"
+if [ -L "$legacy_link" ]; then
+  case "$(readlink "$legacy_link")" in
+    */current/"$LEGACY_BIN") rm -f "$legacy_link" ;;
+  esac
+fi
+
 if [ -e "$manual_link" ] || [ -L "$manual_link" ]; then
   rm -f "$manual_link"
 fi

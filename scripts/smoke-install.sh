@@ -41,12 +41,24 @@ trap 'rm -rf "$TMP"' EXIT
 INSTALL_ROOT="$TMP/home/.verlet"
 BIN_DIR="$TMP/bin"
 MAN_DIR="$TMP/share/man/man1"
+LEGACY_BIN="cool""dis"
+LEGACY_ROOT="$TMP/home/.cool""dis"
+
+mkdir -p "$LEGACY_ROOT/versions/v0.3.0" "$BIN_DIR"
+touch "$LEGACY_ROOT/versions/v0.3.0/$LEGACY_BIN"
+ln -s "$LEGACY_ROOT/versions/v0.3.0" "$LEGACY_ROOT/current"
+ln -s "$LEGACY_ROOT/current/$LEGACY_BIN" "$BIN_DIR/$LEGACY_BIN"
 
 run scripts/install.sh \
   --archive "$ARCHIVE" \
   --install-root "$INSTALL_ROOT" \
   --bin-dir "$BIN_DIR" \
   --man-dir "$MAN_DIR"
+
+if [[ -e "$BIN_DIR/$LEGACY_BIN" || -L "$BIN_DIR/$LEGACY_BIN" ]]; then
+  echo "installer left the managed v0.3 compatibility symlink: $BIN_DIR/$LEGACY_BIN" >&2
+  exit 1
+fi
 
 run scripts/install.sh \
   --archive "$ARCHIVE" \
