@@ -168,19 +168,7 @@ impl VerletAppServerConfig {
         let root = std::env::temp_dir().join(format!("verlet-app-server-{}", uuid::Uuid::now_v7()));
         let identity = crate::daemon::daemon_config::synthesized_local_daemon_identity_config();
         let cwd = cwd.into();
-        let canonical_project_root = cwd.join(".verlet");
-        let legacy_project_root = cwd.join(concat!(".", "cool", "dis"));
-        let project_storage_root = if canonical_project_root.exists()
-            || !legacy_project_root.exists()
-        {
-            std::path::PathBuf::from(".verlet")
-        } else {
-            eprintln!(
-                "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",
-                legacy_project_root.display()
-            );
-            std::path::PathBuf::from(concat!(".", "cool", "dis"))
-        };
+        let project_storage_root = std::path::PathBuf::from(".verlet");
         let mut config = Self {
             listen,
             runtime_home: root.join("runtime"),

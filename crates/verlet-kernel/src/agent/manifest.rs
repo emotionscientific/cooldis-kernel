@@ -2,30 +2,20 @@ use sha2::Digest as _;
 use std::io::Write as _;
 
 const AGENT_RECORD_SCHEMA_VERSION: u32 = 1;
+// Reader-only compatibility for records published before the Verlet rename.
+// New manifest source is validated against AGENT_MANIFEST_KIND before a
+// publish plan can be constructed.
+const LEGACY_AGENT_RECORD_KIND: &str = concat!("cool", "dis.agent-manifest");
 const FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE: &str = "identity";
 const FOLDER_FIRST_SYSTEM_PROMPT_PREFLIGHT_REF: &str =
     "resource://artifact/sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 pub fn default_operations_registry_root() -> std::path::PathBuf {
-    default_compatible_project_root().join("operations")
+    std::path::PathBuf::from(".verlet/operations")
 }
 
 pub fn default_blob_registry_root() -> std::path::PathBuf {
-    default_compatible_project_root().join("blobs")
-}
-
-fn default_compatible_project_root() -> std::path::PathBuf {
-    let canonical = std::path::PathBuf::from(".verlet");
-    let legacy = std::path::PathBuf::from(concat!(".", "cool", "dis"));
-    if canonical.exists() || !legacy.exists() {
-        canonical
-    } else {
-        eprintln!(
-            "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",
-            legacy.display()
-        );
-        legacy
-    }
+    std::path::PathBuf::from(".verlet/blobs")
 }
 
 pub fn default_blob_registry_root_for_agent_registry_root(
@@ -134,7 +124,7 @@ impl LocalAgentRegistry {
                 path.display()
             ))
         })?;
-        record.validate()?;
+        record.validate_persisted()?;
         if record.name != name {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -203,7 +193,7 @@ impl LocalAgentRegistry {
                 path.display()
             ))
         })?;
-        record.validate()?;
+        record.validate_persisted()?;
         if record.name != name || record.version != version {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -624,13 +614,7 @@ impl AgentPublishPlan {
                 "invalid agent manifest: {err}"
             ))
         })?;
-        let mut manifest = manifest_fn(&value)?;
-        if manifest.identity.kind.as_deref()
-            == Some(verlet_agent::manifest_schema::LEGACY_AGENT_MANIFEST_KIND)
-        {
-            manifest.identity.kind =
-                Some(verlet_agent::manifest_schema::AGENT_MANIFEST_KIND.to_string());
-        }
+        let manifest = manifest_fn(&value)?;
         let name =
             verlet_operations::operation_store::validate_record_name(&manifest.identity.name)?;
         let namespace = manifest
@@ -933,6 +917,17 @@ fn json_pointer_child(path: &str, segment: &str) -> String {
 
 impl PublishedAgentRecord {
     pub fn validate(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        self.validate_kind(false)
+    }
+
+    pub(crate) fn validate_persisted(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        self.validate_kind(true)
+    }
+
+    fn validate_kind(
+        &self,
+        allow_legacy_kind: bool,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if self.schema_version != AGENT_RECORD_SCHEMA_VERSION {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -942,13 +937,12 @@ impl PublishedAgentRecord {
             ));
         }
         if self.kind != verlet_agent::manifest_schema::AGENT_MANIFEST_KIND
-            && self.kind != verlet_agent::manifest_schema::LEGACY_AGENT_MANIFEST_KIND
+            && !(allow_legacy_kind && self.kind == LEGACY_AGENT_RECORD_KIND)
         {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
-                    "agent record kind must be {:?} (or deprecated {:?} through v0.3.x), got {:?}",
+                    "agent record kind must be {:?}, got {:?}",
                     verlet_agent::manifest_schema::AGENT_MANIFEST_KIND,
-                    verlet_agent::manifest_schema::LEGACY_AGENT_MANIFEST_KIND,
                     self.kind,
                 ),
             ));

@@ -290,9 +290,7 @@ fn default_manifest_tools(
     let registry = verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
     let mut records = std::collections::BTreeMap::new();
     for operation_name in &bindings.global_operation_names {
-        let canonical_name =
-            crate::operations::kernel_packages::canonical_kernel_package_name(operation_name);
-        let record = registry.load_record(canonical_name).map_err(|err| {
+        let record = registry.load_record(operation_name).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                 "default manifest global operation {operation_name:?} was not found: {err}"
             ))

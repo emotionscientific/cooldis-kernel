@@ -170,11 +170,9 @@ impl SqliteSecretStore {
     ) -> SecretStoreResult<SecretStatus> {
         let name = validate_secret_name(name.as_ref())?;
         let env_name = validate_secret_name(env_name.as_ref())?;
-        let value = verlet_runtime_contracts::env_compat::var(&env_name).map_err(|_| {
-            SecretStoreError::MissingEnv {
-                secret_name: name.clone(),
-                env_name: env_name.clone(),
-            }
+        let value = std::env::var(&env_name).map_err(|_| SecretStoreError::MissingEnv {
+            secret_name: name.clone(),
+            env_name: env_name.clone(),
         })?;
         if value.is_empty() {
             return Err(SecretStoreError::EmptyValue(name));

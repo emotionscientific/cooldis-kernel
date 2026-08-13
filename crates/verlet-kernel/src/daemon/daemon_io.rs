@@ -7983,9 +7983,7 @@ fn init_egress_state_schema(connection: &rusqlite::Connection) -> verlet_io_core
 /// binding in memory or submitting the first turn. The smoke then SIGKILLs the
 /// process. Normal daemon runs do not set the variable and return immediately.
 async fn pause_after_ingress_binding_for_restart_smoke() -> verlet_io_core::IoResult<()> {
-    let Some(marker) =
-        verlet_runtime_contracts::env_compat::var_os("VERLET_TEST_PAUSE_AFTER_INGRESS_BINDING")
-    else {
+    let Some(marker) = std::env::var_os("VERLET_TEST_PAUSE_AFTER_INGRESS_BINDING") else {
         return Ok(());
     };
     let marker = std::path::PathBuf::from(marker);

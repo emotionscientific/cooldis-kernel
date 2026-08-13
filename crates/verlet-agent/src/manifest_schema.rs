@@ -11,7 +11,6 @@
 //! plan produced from this schema is recorded there as well.
 
 pub const AGENT_MANIFEST_KIND: &str = "verlet.agent-manifest";
-pub const LEGACY_AGENT_MANIFEST_KIND: &str = concat!("cool", "dis.agent-manifest");
 
 use serde::Deserialize as _;
 
@@ -158,10 +157,9 @@ impl AgentManifestSchema {
         }
         if let Some(kind) = &self.identity.kind
             && kind != AGENT_MANIFEST_KIND
-            && kind != LEGACY_AGENT_MANIFEST_KIND
         {
             return Err(crate::VerletAgentError::RuntimeFactory(format!(
-                "agent manifest kind must be {AGENT_MANIFEST_KIND:?} (or deprecated {LEGACY_AGENT_MANIFEST_KIND:?} through v0.3.x), got {kind:?}"
+                "agent manifest kind must be {AGENT_MANIFEST_KIND:?}, got {kind:?}"
             )));
         }
         if let Some(schema_version) = self.identity.schema_version

@@ -359,16 +359,7 @@ pub(super) fn parse_secret_list_args(
 }
 
 pub(super) fn default_project_state_home() -> std::path::PathBuf {
-    let legacy = std::path::PathBuf::from(concat!(".", "cool", "dis/state"));
-    if std::path::Path::new(".verlet").exists() || !legacy.exists() {
-        std::path::PathBuf::from(".verlet/state")
-    } else {
-        eprintln!(
-            "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",
-            legacy.display()
-        );
-        legacy
-    }
+    std::path::PathBuf::from(".verlet/state")
 }
 
 pub(super) fn default_user_state_home()

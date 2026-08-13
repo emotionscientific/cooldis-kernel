@@ -301,7 +301,7 @@ allowed_secrets = ["WORKSPACE_TOKEN"]
 }
 
 #[test]
-fn agent_manifest_kind_accepts_verlet_and_legacy_forms() {
+fn agent_manifest_kind_rejects_legacy_form() {
     let canonical = valid_manifest();
     assert_eq!(
         parse(&canonical).unwrap().identity.kind.as_deref(),
@@ -312,9 +312,11 @@ fn agent_manifest_kind_accepts_verlet_and_legacy_forms() {
         "kind = \"verlet.agent-manifest\"",
         &format!("kind = \"{}\"", concat!("cool", "dis.agent-manifest")),
     );
-    assert_eq!(
-        parse(&legacy).unwrap().identity.kind.as_deref(),
-        Some(concat!("cool", "dis.agent-manifest"))
+    let err = parse(&legacy).unwrap_err();
+    assert!(err.to_string().contains("verlet.agent-manifest"));
+    assert!(
+        err.to_string()
+            .contains(concat!("cool", "dis.agent-manifest"))
     );
 
     let unsupported = canonical.replace(

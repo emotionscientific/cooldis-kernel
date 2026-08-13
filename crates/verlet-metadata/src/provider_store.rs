@@ -1018,9 +1018,7 @@ pub async fn llm_provider_auth_status(
 }
 
 fn environment_value(context: &LlmProviderAuthContext, canonical: &str) -> Option<String> {
-    verlet_runtime_contracts::env_compat::string_with(canonical, |name| {
-        context.environment.get(name).cloned()
-    })
+    context.environment.get(canonical).cloned()
 }
 
 fn credential_to_resolved_auth(

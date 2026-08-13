@@ -176,17 +176,7 @@ pub(super) fn console_project_storage_root(
     project_root: &std::path::Path,
     user_home: &std::path::Path,
 ) -> std::path::PathBuf {
-    let canonical = project_root.join(".verlet");
-    let legacy = project_root.join(concat!(".", "cool", "dis"));
-    let storage_root = if canonical.exists() || !legacy.exists() {
-        canonical
-    } else {
-        eprintln!(
-            "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",
-            legacy.display()
-        );
-        legacy
-    };
+    let storage_root = project_root.join(".verlet");
     if storage_root == user_home {
         return user_home.join("projects/home");
     }
@@ -218,27 +208,15 @@ pub(super) fn prepare_console_project_storage(
 
 pub(super) fn default_user_verlet_home()
 -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
-    if let Some(home) =
-        verlet_runtime_contracts::env_compat::var_os("VERLET_HOME").map(std::path::PathBuf::from)
-    {
+    if let Some(home) = std::env::var_os("VERLET_HOME").map(std::path::PathBuf::from) {
         return Ok(home);
     }
-    let home = verlet_runtime_contracts::env_compat::var_os("HOME")
+    let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {
             crate::cli::usage_error("HOME is not set and VERLET_HOME was not provided")
         })?;
-    let canonical = home.join(".verlet");
-    let legacy = home.join(concat!(".", "cool", "dis"));
-    if canonical.exists() || !legacy.exists() {
-        Ok(canonical)
-    } else {
-        eprintln!(
-            "warning: {} is deprecated; existing state will continue to be used in place through v0.3.0",
-            legacy.display()
-        );
-        Ok(legacy)
-    }
+    Ok(home.join(".verlet"))
 }
 
 pub(super) fn absolute_path(
@@ -262,9 +240,7 @@ pub(super) fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::p
 
 pub(super) fn resolve_console_asset_root()
 -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
-    if let Some(path) = verlet_runtime_contracts::env_compat::var_os("VERLET_CONSOLE_ASSET_DIR")
-        .map(std::path::PathBuf::from)
-    {
+    if let Some(path) = std::env::var_os("VERLET_CONSOLE_ASSET_DIR").map(std::path::PathBuf::from) {
         return console_asset_root_if_valid(path).ok_or_else(|| {
             crate::cli::usage_error(
                 "VERLET_CONSOLE_ASSET_DIR must point at a built console directory containing index.html",
@@ -872,12 +848,12 @@ pub(super) fn load_chat_provider_config(
                     )
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_CHAT_ENV_FILE")
+                    std::env::var("VERLET_CHAT_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE")
+                    std::env::var("VERLET_BIFROST_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -939,12 +915,12 @@ pub(super) fn load_chat_provider_config(
                     )
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_CHAT_ENV_FILE")
+                    std::env::var("VERLET_CHAT_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_ANTHROPIC_ENV_FILE")
+                    std::env::var("VERLET_ANTHROPIC_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -1000,17 +976,17 @@ pub(super) fn load_chat_provider_config(
                     )
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_CHAT_ENV_FILE")
+                    std::env::var("VERLET_CHAT_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_BEDROCK_ENV_FILE")
+                    std::env::var("VERLET_BEDROCK_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
+                    std::env::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -1091,23 +1067,21 @@ pub(super) fn load_chat_provider_config(
                     )
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_CHAT_ENV_FILE")
+                    std::env::var("VERLET_CHAT_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
                 .or_else(|| {
                     if openai_compatible {
-                        verlet_runtime_contracts::env_compat::var(
-                            "VERLET_OPENAI_COMPATIBLE_ENV_FILE",
-                        )
-                        .ok()
-                        .map(std::path::PathBuf::from)
+                        std::env::var("VERLET_OPENAI_COMPATIBLE_ENV_FILE")
+                            .ok()
+                            .map(std::path::PathBuf::from)
                     } else {
                         None
                     }
                 })
                 .or_else(|| {
-                    verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE")
+                    std::env::var("VERLET_BIFROST_ENV_FILE")
                         .ok()
                         .map(std::path::PathBuf::from)
                 })
@@ -1247,19 +1221,9 @@ pub(super) fn load_chat_config_file(
     let path = if let Some(path) = path {
         path
     } else {
-        let canonical = std::path::PathBuf::from("verlet.json");
-        if canonical.exists() {
-            discovered = canonical;
-        } else {
-            let legacy = std::path::PathBuf::from(concat!("cool", "dis.json"));
-            if !legacy.exists() {
-                return Ok((ChatConfigSection::default(), None));
-            }
-            eprintln!(
-                "warning: {} is deprecated; use verlet.json (compatibility will be removed in v0.4.0)",
-                legacy.display()
-            );
-            discovered = legacy;
+        discovered = std::path::PathBuf::from("verlet.json");
+        if !discovered.exists() {
+            return Ok((ChatConfigSection::default(), None));
         }
         discovered.as_path()
     };
@@ -1338,7 +1302,7 @@ pub(super) fn env_or_file(
     name: &str,
     file_env: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
-    verlet_runtime_contracts::env_compat::var(name)
+    std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| file_env.get(name).cloned())

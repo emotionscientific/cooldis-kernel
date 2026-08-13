@@ -851,10 +851,9 @@ fn unix_timestamp_ms() -> u64 {
 fn default_shell_command(shell: Option<&str>) -> tokio::process::Command {
     #[cfg(windows)]
     {
-        let comspec = shell.map(str::to_string).unwrap_or_else(|| {
-            verlet_runtime_contracts::env_compat::var("COMSPEC")
-                .unwrap_or_else(|_| "cmd.exe".to_string())
-        });
+        let comspec = shell
+            .map(str::to_string)
+            .unwrap_or_else(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()));
         let mut command = tokio::process::Command::new(comspec);
         command.arg("/C");
         command
@@ -862,10 +861,9 @@ fn default_shell_command(shell: Option<&str>) -> tokio::process::Command {
 
     #[cfg(not(windows))]
     {
-        let shell = shell.map(str::to_string).unwrap_or_else(|| {
-            verlet_runtime_contracts::env_compat::var("SHELL")
-                .unwrap_or_else(|_| "/bin/sh".to_string())
-        });
+        let shell = shell
+            .map(str::to_string)
+            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
         let mut command = tokio::process::Command::new(shell);
         command.arg("-lc");
         command

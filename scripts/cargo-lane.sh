@@ -10,16 +10,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-. "$SCRIPT_DIR/env-compat.sh"
-for env_name in \
-  VERLET_REAL_CARGO \
-  VERLET_CARGO_LANE_SCRIPT \
-  VERLET_CARGO_SHIM_DIR \
-  VERLET_CARGO_LANE_ROOT \
-  VERLET_CARGO_LANE_INCREMENTAL
-do
-  verlet_env_promote "$env_name"
-done
 
 REAL_CARGO=
 ACTIVE_CARGO_SHIM_DIR=

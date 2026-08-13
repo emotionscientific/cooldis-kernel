@@ -96,10 +96,8 @@ struct BedrockSmokeConfig {
 
 impl BedrockSmokeConfig {
     fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let env_file = verlet_runtime_contracts::env_compat::var("VERLET_BEDROCK_ENV_FILE")
-            .or_else(|_| {
-                verlet_runtime_contracts::env_compat::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
-            })
+        let env_file = std::env::var("VERLET_BEDROCK_ENV_FILE")
+            .or_else(|_| std::env::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_ENV_FILE));
         let file_env = read_env_file_if_exists(&env_file)?;
@@ -131,7 +129,7 @@ impl BedrockSmokeConfig {
 
 impl SmokeConfig {
     fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let env_file = verlet_runtime_contracts::env_compat::var("VERLET_BIFROST_ENV_FILE")
+        let env_file = std::env::var("VERLET_BIFROST_ENV_FILE")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_ENV_FILE));
         let file_env = read_env_file_if_exists(&env_file)?;
@@ -585,7 +583,7 @@ fn read_env_file_if_exists(
 }
 
 fn env_or_file(key: &str, file_env: &std::collections::HashMap<String, String>) -> Option<String> {
-    verlet_runtime_contracts::env_compat::var(key)
+    std::env::var(key)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| file_env.get(key).cloned())
@@ -594,9 +592,7 @@ fn env_or_file(key: &str, file_env: &std::collections::HashMap<String, String>) 
 
 fn env_flag(key: &str) -> bool {
     matches!(
-        verlet_runtime_contracts::env_compat::var(key)
-            .ok()
-            .as_deref(),
+        std::env::var(key).ok().as_deref(),
         Some("1" | "true" | "TRUE" | "yes" | "YES")
     )
 }

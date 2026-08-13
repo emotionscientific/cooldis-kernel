@@ -38,7 +38,7 @@ fn sigabrt_tripwire_re_signals_default_abort_in_child() {
 #[test]
 #[ignore = "spawned by sigabrt_tripwire_re_signals_default_abort_in_child"]
 fn sigabrt_tripwire_child_aborts() {
-    if verlet_runtime_contracts::env_compat::var_os("VERLET_ABORT_TRIPWIRE_CHILD").is_some() {
+    if std::env::var_os("VERLET_ABORT_TRIPWIRE_CHILD").is_some() {
         unsafe {
             libc::abort();
         }

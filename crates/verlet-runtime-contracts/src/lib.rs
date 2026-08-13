@@ -5,7 +5,6 @@
 //! history, adapter, and kernel crates can share without depending on the full
 //! kernel implementation.
 
-pub mod env_compat;
 pub mod handle;
 pub mod schema;
 

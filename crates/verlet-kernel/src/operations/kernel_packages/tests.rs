@@ -17,25 +17,6 @@ fn kernel_package_names_use_the_verlet_public_form() {
 }
 
 #[test]
-fn legacy_kernel_package_names_map_to_canonical_names() {
-    for (legacy, canonical) in [
-        (concat!("cool", "dis-threads"), "verlet-threads"),
-        (concat!("cool", "dis-schedule"), "verlet-schedule"),
-        (concat!("cool", "dis-process"), "verlet-process"),
-        (concat!("cool", "dis-notify"), "verlet-notify"),
-    ] {
-        assert_eq!(
-            crate::operations::kernel_packages::canonical_kernel_package_name(legacy),
-            canonical
-        );
-    }
-    assert_eq!(
-        crate::operations::kernel_packages::canonical_kernel_package_name("third-party"),
-        "third-party"
-    );
-}
-
-#[test]
 fn verlet_threads_package_declares_five_kernel_operations() {
     let package = crate::operations::kernel_packages::verlet_threads_kernel_package();
     let operations = package

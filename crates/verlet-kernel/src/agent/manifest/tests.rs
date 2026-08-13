@@ -61,29 +61,58 @@ ref = "{resource_ref}"
 }
 
 #[test]
-fn legacy_manifest_kind_is_normalized_for_new_records() {
+fn legacy_manifest_kind_is_rejected_for_new_records() {
     let source = manifest_source("legacy-kind", "1.0.0", false).replace(
         "kind = \"verlet.agent-manifest\"",
         &format!("kind = \"{}\"", concat!("cool", "dis.agent-manifest")),
     );
 
-    let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
-
-    assert_eq!(plan.kind, "verlet.agent-manifest");
-    assert_eq!(
-        plan.resolved_manifest["identity"]["kind"],
-        serde_json::json!("verlet.agent-manifest")
-    );
+    let err = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap_err();
+    assert!(err.to_string().contains("verlet.agent-manifest"));
 }
 
 #[test]
-fn persisted_legacy_agent_record_kind_remains_valid() {
+fn persisted_legacy_agent_record_kind_remains_readable() {
     let source = manifest_source("persisted-legacy-kind", "1.0.0", false);
     let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
     let mut record = plan.into_record(1);
     record.kind = concat!("cool", "dis.agent-manifest").to_string();
+    record.resolved_manifest["identity"]["kind"] =
+        serde_json::json!(concat!("cool", "dis.agent-manifest"));
+    let root = temp_root("persisted-legacy-kind");
+    let registry = crate::agent::manifest::LocalAgentRegistry::new(&root);
 
-    record.validate().unwrap();
+    registry.write_record_atomically(&record).unwrap();
+    registry.write_version_record_atomically(&record).unwrap();
+
+    let loaded = registry.load_record(&record.name).unwrap();
+    assert_eq!(loaded, record);
+    assert_eq!(
+        registry
+            .load_version_record(&record.name, &record.version)
+            .unwrap(),
+        record
+    );
+    let (manifest, _receipt) =
+        crate::agent::manifest_bind::compile_published_agent_record(&loaded, None).unwrap();
+    assert_eq!(
+        manifest.identity.kind.as_deref(),
+        Some(verlet_agent::manifest_schema::AGENT_MANIFEST_KIND)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn new_agent_record_validation_rejects_legacy_kind() {
+    let source = manifest_source("new-legacy-kind", "1.0.0", false);
+    let mut record = crate::agent::manifest::AgentPublishPlan::from_source(&source)
+        .unwrap()
+        .into_record(1);
+    record.kind = concat!("cool", "dis.agent-manifest").to_string();
+
+    let err = record.validate().unwrap_err();
+    assert!(err.to_string().contains("verlet.agent-manifest"));
 }
 
 fn folder_first_manifest_source(name: &str, context: &str) -> String {

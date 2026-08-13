@@ -438,7 +438,7 @@ impl Drop for DaemonChild {
 }
 
 fn daemon_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    if let Some(path) = verlet_runtime_contracts::env_compat::var_os("VERLET_DAEMON_BIN") {
+    if let Some(path) = std::env::var_os("VERLET_DAEMON_BIN") {
         return Ok(std::path::PathBuf::from(path));
     }
     let sibling = std::env::current_exe()?

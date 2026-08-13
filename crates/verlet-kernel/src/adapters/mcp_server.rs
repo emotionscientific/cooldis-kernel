@@ -167,18 +167,7 @@ impl VerletMcpServer {
     ) -> Result<serde_json::Value, McpError> {
         let params: CallToolParams = from_value(params)?;
         let arguments = params.arguments.unwrap_or_default();
-        let canonical_name = if let Some(suffix) = params.name.strip_prefix(concat!("cool", "dis_"))
-        {
-            let canonical = format!("verlet_{suffix}");
-            eprintln!(
-                "warning: MCP tool {} is deprecated; use {} (compatibility will be removed in v0.4.0)",
-                params.name, canonical
-            );
-            canonical
-        } else {
-            params.name.clone()
-        };
-        let result = match canonical_name.as_str() {
+        let result = match params.name.as_str() {
             "verlet_daemon_status" => self.tool_daemon_status().await,
             "verlet_thread_start" => self.tool_thread_start(arguments).await,
             "verlet_thread_list" => self.tool_thread_list().await,

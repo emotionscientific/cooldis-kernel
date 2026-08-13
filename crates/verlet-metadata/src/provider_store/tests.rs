@@ -642,6 +642,26 @@ async fn example_openai_compatible_record_resolves_environment_auth() {
 }
 
 #[tokio::test]
+async fn provider_auth_ignores_legacy_verlet_environment_name() {
+    let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
+        .await
+        .unwrap();
+    let provider = crate::provider_store::example_openai_compatible_record();
+    let legacy_name = concat!("COOL", "DIS_OPENAI_COMPATIBLE_API_KEY");
+    let context =
+        crate::provider_store::LlmProviderAuthContext::new().with_env(legacy_name, "legacy-key");
+
+    let status = crate::provider_store::llm_provider_auth_status(&store, &provider, &context)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        status,
+        crate::provider_store::LlmProviderAuthStatus::missing()
+    );
+}
+
+#[tokio::test]
 async fn seeding_default_providers_creates_openai_codex_but_no_openai_compatible_placeholder() {
     let store = crate::provider_store::SqliteLlmProviderStore::in_memory()
         .await
