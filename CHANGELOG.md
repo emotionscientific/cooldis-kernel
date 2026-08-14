@@ -9,10 +9,28 @@
   the current Verlet version. Persisted agent records missing current required
   fields and default-agent records in the pre-rename namespace are rejected
   with the same guidance.
-- Thread streams with manifest bind receipts but no `binding.attached` or
-  `binding.detached` events no longer derive a toolset from receipts or cached
-  metadata. Start a new thread. Streams with neither receipts nor binding
-  events still resume with an empty toolset.
+- Thread streams whose manifest bind receipts declare operation bindings but
+  have no `binding.attached` or `binding.detached` events no longer derive a
+  toolset from receipts or cached metadata. Start a new thread. Current
+  receipt-only streams that declare an empty operation toolset, and streams
+  with neither receipts nor binding events, still resume with an empty
+  toolset.
+- A persisted thread lifecycle with a completely empty event stream is
+  rejected at runtime construction with "start a new thread" guidance. Only
+  the unpersisted start boundary may build from the context binding plan;
+  injected runtime factories without a journal also use that explicit plan.
+- Invalid, unwitnessed, or mismatched persisted workspace metadata is rejected
+  instead of being stripped during daemon lazy load and resumed unbound.
+- Binding projection no longer recognizes the short-lived EMO-584 complete
+  snapshot replay shape. Attachments remain active by event id until an
+  explicit `binding.detached` event retires them.
+- Tool recovery no longer treats a missing recorded request fingerprint as a
+  wildcard match for a current fingerprint.
+- Queued ingress no longer synthesizes delivery witnesses from older dedupe
+  metadata. Unwitnessed envelopes fail validation; the current route principal
+  is still attached from the declared route identity.
+- The unused `RuntimeKernelControl::spawn_subagent` API alias was removed; use
+  the witnessed child-spawn surface.
 - The app-server no longer reconstructs a manifest tool-use instruction from
   old operation metadata.
 - Bare `tool://` agent tool refs are rejected. Use `op://` for published

@@ -183,15 +183,18 @@ pub fn compile_published_agent_record(
     AgentManifestCompileReceipt,
 )> {
     record.validate()?;
-    let persisted_error = || {
+    let persisted_error = |detail: String| {
         crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-            "agent record {} uses unsupported persisted manifest data; republish the record with the current Verlet version",
-            record.ref_uri
+            "agent record {} uses unsupported persisted manifest data: {detail}; republish the record with the current Verlet version",
+            record.ref_uri,
         ))
     };
     let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
-        serde_json::from_value(record.resolved_manifest.clone()).map_err(|_| persisted_error())?;
-    manifest.validate().map_err(|_| persisted_error())?;
+        serde_json::from_value(record.resolved_manifest.clone())
+            .map_err(|err| persisted_error(err.to_string()))?;
+    manifest
+        .validate()
+        .map_err(|err| persisted_error(err.to_string()))?;
     let receipt = AgentManifestCompileReceipt {
         ref_uri: record.ref_uri.clone(),
         manifest_hash: record.manifest_hash.clone(),
@@ -2686,6 +2689,17 @@ pub struct AgentManifestCompileReceipt {
     pub alias: Option<crate::agent::manifest::AgentAliasResolutionReceipt>,
 }
 
+pub(crate) fn decode_manifest_compile_receipt_event(
+    event: &verlet_history::EventRecord,
+) -> crate::kernel::runtime_host::VerletResult<AgentManifestCompileReceipt> {
+    serde_json::from_value(event.payload.clone()).map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "manifest.compile.completed receipt {} for thread {} is invalid: {err}",
+            event.id, event.coordinates.thread_id
+        ))
+    })
+}
+
 /// Payload of the discharged `manifest.bind.completed` event: the resolved
 /// preset and runtime facts recorded when this bind expanded. Current tool
 /// authority comes only from folding the thread's binding events.
@@ -2736,6 +2750,17 @@ pub struct AgentManifestBindReceipt {
     pub workspace: Option<AgentManifestResolvedWorkspaceMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_origin: Option<AgentManifestBindingOrigin>,
+}
+
+pub(crate) fn decode_manifest_bind_receipt_event(
+    event: &verlet_history::EventRecord,
+) -> crate::kernel::runtime_host::VerletResult<AgentManifestBindReceipt> {
+    serde_json::from_value(event.payload.clone()).map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "manifest.bind.completed receipt {} for thread {} is invalid: {err}",
+            event.id, event.coordinates.thread_id
+        ))
+    })
 }
 
 #[derive(

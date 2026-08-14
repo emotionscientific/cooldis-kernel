@@ -483,15 +483,32 @@ fn event_by_kind(
         .unwrap_or_else(|| panic!("expected {kind} event"))
 }
 
+fn bind_receipt_payload(operation_bindings: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "ref_uri": "agent://current@0.1.0",
+        "manifest_hash": "sha256:manifest",
+        "model_profile_id": "default",
+        "provider_id": "local_offline",
+        "model_id": "echo",
+        "tool_ids": [],
+        "operation_bindings": operation_bindings,
+        "effective_runtime": {},
+        "overridden_keys": []
+    })
+}
+
 #[test]
-fn receipt_only_stream_requires_a_new_thread() {
+fn receipt_only_stream_with_declared_bindings_requires_a_new_thread() {
     let coordinates =
         verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "receipt-only-stream");
     let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
     let bind_receipt = verlet_history::NewEventRecord::witnessed(
         coordinates,
         verlet_history::EventKind::ManifestBindCompleted,
-        serde_json::json!({}),
+        bind_receipt_payload(serde_json::json!([{
+            "name": "search",
+            "artifact_hash": "sha256:search"
+        }])),
     );
     let events = [verlet_history::EventRecord::from_new(
         stream_id,
@@ -499,12 +516,161 @@ fn receipt_only_stream_requires_a_new_thread() {
         bind_receipt,
     )];
 
-    assert_eq!(
+    let error =
         crate::adapters::app_server::threads::thread_operation_bindings_from_events(&events)
             .unwrap_err()
-            .to_string(),
-        "history store failed: thread predates the binding model because its stream has manifest bind receipts but no binding events; start a new thread"
+            .to_string();
+    assert!(
+        error.contains("declaring operation bindings but no binding events"),
+        "{error}"
     );
+    assert!(error.contains("start a new thread"), "{error}");
+}
+
+#[test]
+fn receipt_only_stream_with_current_empty_toolset_is_valid() {
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
+        "tenant",
+        "user",
+        "receipt-only-empty-toolset",
+    );
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let bind_receipt = verlet_history::NewEventRecord::witnessed(
+        coordinates,
+        verlet_history::EventKind::ManifestBindCompleted,
+        bind_receipt_payload(serde_json::json!([])),
+    );
+    let events = [verlet_history::EventRecord::from_new(
+        stream_id,
+        verlet_history::EventSequence::new(1),
+        bind_receipt,
+    )];
+
+    assert!(
+        crate::adapters::app_server::threads::thread_operation_bindings_from_events(&events)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn malformed_bind_receipt_error_identifies_thread_and_receipt() {
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
+        "tenant",
+        "user",
+        "malformed-bind-receipt",
+    );
+    let thread_id = coordinates.thread_id;
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let bind_receipt = verlet_history::NewEventRecord::witnessed(
+        coordinates,
+        verlet_history::EventKind::ManifestBindCompleted,
+        bind_receipt_payload(serde_json::json!([{
+            "name": "search",
+            "artifact_hash": "sha256:search",
+            "unexpected_current_field": true
+        }])),
+    );
+    let event = verlet_history::EventRecord::from_new(
+        stream_id,
+        verlet_history::EventSequence::new(1),
+        bind_receipt,
+    );
+    let event_id = event.id;
+
+    let error =
+        crate::adapters::app_server::threads::thread_operation_bindings_from_events(&[event])
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains(&thread_id.to_string()), "{error}");
+    assert!(error.contains(&event_id.to_string()), "{error}");
+    assert!(
+        error.contains("unknown field `unexpected_current_field`"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn journal_less_runtime_factory_uses_the_current_context_binding_plan() {
+    let mut context = verlet_runtime_contracts::ThreadContext::root(
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "journal-less"),
+    );
+    context.metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        serde_json::json!([{
+            "name": "search",
+            "artifact_hash": "sha256:search"
+        }])
+        .to_string(),
+    );
+
+    let bindings = crate::adapters::app_server::threads::runtime_operation_bindings_for_thread(
+        &context, None, None, 0,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].binding.name, "search");
+    assert_eq!(bindings[0].attach_event_id, None);
+}
+
+#[tokio::test]
+async fn persisted_thread_with_empty_event_stream_cannot_cross_the_start_boundary_again() {
+    let root = unique_test_root("persisted-empty-event-stream");
+    let metadata_path = root.join("metadata.sqlite3");
+    let session_path = root.join("session.sqlite3");
+    let mut context = verlet_runtime_contracts::ThreadContext::root(
+        verlet_runtime_contracts::ThreadCoordinates::new(
+            "tenant",
+            "user",
+            "persisted-empty-events",
+        ),
+    );
+    context.metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_OPERATION_BINDINGS_METADATA.to_string(),
+        "[]".to_string(),
+    );
+    context.metadata.insert(
+        crate::adapters::app_server::THREAD_AGENT_REF_METADATA.to_string(),
+        "agent://current@0.1.0".to_string(),
+    );
+    let now = crate::adapters::app_server::connection::now_ms();
+    let lifecycle = verlet_runtime_contracts::ThreadLifecycleRecord {
+        coordinates: context.coordinates.clone(),
+        parent_thread_id: None,
+        topology: verlet_runtime_contracts::ThreadTopology::root(),
+        status: verlet_runtime_contracts::ThreadLifecycleStatus::Idle,
+        latest_signal_id: None,
+        latest_checkpoint_id: None,
+        created_at_ms: now,
+        updated_at_ms: now,
+        metadata: context.metadata.clone(),
+    };
+    let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(&metadata_path)
+        .await
+        .unwrap();
+    metadata_store
+        .upsert_thread_lifecycle(lifecycle)
+        .await
+        .unwrap();
+
+    let error = crate::adapters::app_server::threads::runtime_operation_bindings_for_thread(
+        &context,
+        Some(&session_path),
+        Some(&metadata_path),
+        0,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        error.contains(&context.coordinates.thread_id.to_string()),
+        "{error}"
+    );
+    assert!(error.contains("start a new thread"), "{error}");
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -12768,12 +12934,14 @@ fn thread_manifest_operation_bindings_reject_grant_string_metadata() {
         metadata,
     );
 
-    assert_eq!(
-        crate::adapters::app_server::threads::thread_manifest_operation_bindings(&context)
-            .unwrap_err()
-            .to_string(),
-        "runtime factory failed: thread manifest operation bindings are invalid: unknown field `grants`, expected one of `name`, `artifact_hash`, `effect_class`, `attachment_config`, `operations`, `direct_tools` at line 1 column 112"
+    let error = crate::adapters::app_server::threads::thread_manifest_operation_bindings(&context)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&context.coordinates.thread_id.to_string()),
+        "{error}"
     );
+    assert!(error.contains("unknown field `grants`"), "{error}");
 }
 
 #[test]
@@ -14260,9 +14428,18 @@ async fn thread_resume_rejects_pre_binding_stream_with_old_operation_metadata() 
         )
         .await
         .unwrap_err();
-    assert_eq!(
-        error.message,
-        "history store failed: thread predates the binding model because its stream has manifest bind receipts but no binding events; start a new thread"
+    assert!(
+        error
+            .message
+            .contains("no durable manifest bind receipt matches the persisted identity"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains(&thread_id), "{}", error.message);
+    assert!(
+        error.message.contains("start a new thread"),
+        "{}",
+        error.message
     );
     assert!(client.requests().is_empty());
     let _ = std::fs::remove_dir_all(root);

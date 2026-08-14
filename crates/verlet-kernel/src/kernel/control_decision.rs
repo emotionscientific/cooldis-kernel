@@ -69,16 +69,14 @@ pub struct ToolCallCompletedPayload {
 }
 
 /// Recovery honors the effect class; a recorded outcome is reused only under
-/// a matching fingerprint within the same snapshot. A missing recorded
-/// fingerprint retains legacy request-event and call-id reuse.
+/// an exact fingerprint match within the same snapshot.
 pub(crate) fn tool_invocation_fingerprint_matches(
     recorded_snapshot_id: &str,
     recorded_fingerprint: Option<&str>,
     current_snapshot_id: &str,
     current_fingerprint: Option<&str>,
 ) -> bool {
-    recorded_snapshot_id == current_snapshot_id
-        && recorded_fingerprint.is_none_or(|recorded| Some(recorded) == current_fingerprint)
+    recorded_snapshot_id == current_snapshot_id && recorded_fingerprint == current_fingerprint
 }
 
 /// Witnessed cancellation outcome for a tool call reached by an interrupt.
@@ -466,6 +464,7 @@ pub async fn active_manifest_bind_receipt<S: verlet_history::EventStore + ?Sized
         )
         .await
         .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+    crate::adapters::app_server::threads::validate_manifest_binding_event_contract(&thread_events)?;
     let Some(event) = thread_events
         .into_iter()
         .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
@@ -473,14 +472,7 @@ pub async fn active_manifest_bind_receipt<S: verlet_history::EventStore + ?Sized
     else {
         return Ok(None);
     };
-    let receipt = serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
-        event.payload,
-    )
-    .map_err(|err| {
-        crate::kernel::runtime_host::VerletError::History(format!(
-            "manifest.bind.completed payload is invalid: {err}"
-        ))
-    })?;
+    let receipt = crate::agent::manifest_bind::decode_manifest_bind_receipt_event(&event)?;
     Ok(Some((event.id, receipt)))
 }
 
@@ -549,7 +541,8 @@ pub async fn list_pending_tool_call_suspensions<S: verlet_history::EventStore + 
                 serde_json::from_value::<ToolCallRequestedPayload>(request_event.payload.clone())
                     .map_err(|err| {
                         crate::kernel::runtime_host::VerletError::History(format!(
-                            "tool.call.requested payload is invalid: {err}"
+                            "tool.call.requested receipt {} for thread {} is invalid: {err}",
+                            request_event.id, request_event.coordinates.thread_id
                         ))
                     })
             })
@@ -561,10 +554,8 @@ pub async fn list_pending_tool_call_suspensions<S: verlet_history::EventStore + 
                     && completion.args_fingerprint == request.args_fingerprint
             })
         } else {
-            // Legacy/manual suspension facts may not identify their request in
-            // provenance. Preserve the former subject+snapshot terminal check
-            // only for that unresolved case; fingerprinted requests use the
-            // generation-aware path above.
+            // Manually witnessed suspension facts have no source request.
+            // Their current contract is subject-and-snapshot scoped.
             completions.iter().any(|completion| {
                 completion.subject == payload.subject
                     && completion.snapshot_id == payload.snapshot_id
@@ -974,7 +965,7 @@ mod tests {
         assert_eq!(legacy_request.args_fingerprint, None);
         assert_eq!(legacy_request.attach_event_id, None);
         assert!(
-            crate::kernel::control_decision::tool_invocation_fingerprint_matches(
+            !crate::kernel::control_decision::tool_invocation_fingerprint_matches(
                 "snapshot-a",
                 None,
                 "snapshot-a",
@@ -1553,7 +1544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_suspension_without_request_provenance_closes_on_subject_completion() {
+    async fn manual_suspension_without_request_provenance_closes_on_subject_completion() {
         let fixture = ToolDecisionFixture::new().await;
         fixture
             .append_control_witnessed(

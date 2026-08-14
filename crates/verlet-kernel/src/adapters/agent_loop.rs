@@ -345,7 +345,7 @@ impl AgentLoopFactory {
         self
     }
 
-    // lexicon-allow: hook - existing host debug hook API name retained for compatibility.
+    // lexicon-allow: hook - current host debug hook API name.
     pub fn with_hook_pipeline(
         mut self,
         hook_pipeline: std::sync::Arc<crate::agent::hooks::HookPipeline>,
@@ -354,7 +354,7 @@ impl AgentLoopFactory {
         self
     }
 
-    // lexicon-allow: hook - existing host debug hook configuration name retained for compatibility.
+    // lexicon-allow: hook - current host debug hook configuration name.
     pub(crate) fn with_hook_shell(mut self, hook_shell: Option<String>) -> Self {
         self.hook_shell = hook_shell;
         self
@@ -3627,6 +3627,7 @@ pub(crate) fn effect_class_for_request(
     events: &[verlet_history::EventRecord],
     request: &crate::kernel::control_decision::ToolCallRequestedPayload,
 ) -> crate::kernel::runtime_host::VerletResult<verlet_agent::manifest_schema::EffectClass> {
+    crate::adapters::app_server::threads::validate_manifest_binding_event_contract(events)?;
     let Some(event) = events.iter().rev().find(|event| {
         event.kind == verlet_history::EventKind::ManifestBindCompleted
             && event
@@ -3637,15 +3638,7 @@ pub(crate) fn effect_class_for_request(
     }) else {
         return Ok(verlet_agent::manifest_schema::EffectClass::AtMostOnce);
     };
-    let receipt = serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
-        event.payload.clone(),
-    )
-    .map_err(|err| {
-        crate::kernel::runtime_host::VerletError::History(format!(
-            "manifest.bind.completed {} payload is invalid: {err}",
-            event.id
-        ))
-    })?;
+    let receipt = crate::agent::manifest_bind::decode_manifest_bind_receipt_event(event)?;
     Ok(effect_class_from_bind_receipt(
         &receipt,
         &request.tool_name,
@@ -3741,8 +3734,8 @@ async fn apply_tool_recovery_actions(
         }
         // The canonical result is the reusable durable outcome and is appended
         // before tool.call.completed. A completion without that result is an
-        // anomalous/legacy partial record, so recovery degrades by effect class
-        // instead of entering Reuse and hard-erroring on a missing message.
+        // anomalous partial record, so recovery degrades by effect class instead
+        // of entering Reuse and hard-erroring on a missing message.
         call.recovery_action =
             tool_recovery_action(effect_class, result.is_some(), fingerprint_matches);
         call.recovery_source_event_id = result.map(|_| prior_request.id);

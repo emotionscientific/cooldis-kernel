@@ -782,7 +782,7 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
     &str,
     crate::daemon::identity::AuthorityClass,
 )] = &[
-    // Compatibility reads and local registry projections.
+    // Read methods and local registry projections.
     (
         "account/read",
         crate::daemon::identity::AuthorityClass::Interactive,
@@ -899,7 +899,7 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
         "experimentalFeature/list",
         crate::daemon::identity::AuthorityClass::Interactive,
     ),
-    // This is currently an echo-only compatibility stub. Reclassify it before
+    // This is currently an echo-only protocol stub. Reclassify it before
     // wiring the method to daemon configuration or other host state.
     (
         "experimentalFeature/enablement/set",
@@ -4169,7 +4169,10 @@ impl crate::adapters::app_server::VerletAppServer {
                 .transpose()
                 .map_err(|err| {
                     internal_error(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                        format!("source thread manifest operation witness is invalid: {err}"),
+                        format!(
+                            "source thread {} manifest operation witness is invalid: {err}",
+                            source_handle.context().coordinates.thread_id
+                        ),
                     ))
                 })?
                 .unwrap_or_default();

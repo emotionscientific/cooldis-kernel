@@ -117,7 +117,7 @@ impl StartupRecoverySweep {
             let Some(claim) = claim else {
                 // A durable request that has not been claimed is queued work,
                 // not a dead runtime. Current valid bindings always have the
-                // claim; this guard also keeps legacy/corrupt partial records
+                // claim; this guard also keeps corrupt partial records
                 // from being failed speculatively.
                 continue;
             };

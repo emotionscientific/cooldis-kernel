@@ -1558,7 +1558,7 @@ impl VerletDaemonIoBridge {
                                 .await
                                 .map_err(ThreadHandleResolutionError::LifecycleLoad)?;
                         } else {
-                            crate::adapters::app_server::threads::recover_unwitnessed_workspace_metadata_as_unbound(
+                            crate::adapters::app_server::threads::validate_loaded_manifest_thread_history(
                                 &self.supervisor,
                                 &mut lifecycle,
                             )
@@ -1597,10 +1597,10 @@ impl VerletDaemonIoBridge {
     /// re-resolved from the route's current agent alias (an `@latest` alias
     /// may have moved).
     ///
-    /// Returns `Ok(None)` when the journal predates the identity payload
-    /// and cannot supply full identity. The caller then applies an in-memory
-    /// fabricated-root fallback without mutating the stream: lazy resume is
-    /// a read-only fold of durable history.
+    /// Returns `Ok(None)` when the journal has no complete start payload. A
+    /// route-reserved root currently enters through that path and is rebuilt
+    /// in memory without mutating the stream; lazy resume remains a read-only
+    /// fold of durable history.
     async fn reconstruct_thread_lifecycle(
         &self,
         coordinates: &verlet_runtime_contracts::ThreadCoordinates,
@@ -5969,7 +5969,7 @@ impl VerletDaemonQueueWorker {
             Vec<verlet_io_core::LeasedIngressEnvelope>,
         > = std::collections::BTreeMap::new();
         for mut message in leased {
-            self.prepare_leased_envelope(&mut message.envelope);
+            self.attach_route_principal(&mut message.envelope);
             if message.envelope.require_witnessed().is_err() {
                 self.submit_leased_message(message).await?;
                 continue;
@@ -6006,11 +6006,7 @@ impl VerletDaemonQueueWorker {
         })
     }
 
-    fn prepare_leased_envelope(&self, envelope: &mut verlet_io_core::IngressEnvelope) {
-        let legacy = envelope.delivery.is_none();
-        if legacy && let Some(dedupe_key) = envelope.dedupe_key.as_ref() {
-            envelope.delivery = Some(verlet_io_core::IoDelivery::new(dedupe_key.key.clone()));
-        }
+    fn attach_route_principal(&self, envelope: &mut verlet_io_core::IngressEnvelope) {
         if envelope.principal.is_none()
             && let Some(route_id) = envelope
                 .metadata

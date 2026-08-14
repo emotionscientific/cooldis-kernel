@@ -2790,14 +2790,14 @@ fn persisted_manifest_decode_rejects_grant_string_authority_fields() {
         }
     ]);
 
-    assert_eq!(
-        crate::agent::manifest_bind::compile_published_agent_record(&record, None)
-            .unwrap_err()
-            .to_string(),
-        format!(
-            "runtime factory failed: agent record {} uses unsupported persisted manifest data; republish the record with the current Verlet version",
-            record.ref_uri
-        )
+    let error = crate::agent::manifest_bind::compile_published_agent_record(&record, None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&record.ref_uri), "{error}");
+    assert!(error.contains("unknown field `grants`"), "{error}");
+    assert!(
+        error.contains("republish the record with the current Verlet version"),
+        "{error}"
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -3874,6 +3874,59 @@ fn bind_receipt_rejects_removed_nested_grant_fields() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("unknown field"), "{error}");
+}
+
+#[test]
+fn current_nested_bind_receipt_writer_round_trips_through_strict_readers() {
+    let mut receipt =
+        serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
+            serde_json::json!({
+                "ref_uri": "agent://current@0.1.0",
+                "manifest_hash": "sha256:manifest",
+                "model_profile_id": "default",
+                "provider_id": "local_offline",
+                "model_id": "echo",
+                "tool_ids": ["search"],
+                "operation_bindings": [],
+                "effective_runtime": {},
+                "overridden_keys": []
+            }),
+        )
+        .unwrap();
+    receipt.operation_bindings = vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
+        name: "search".to_string(),
+        artifact_hash: "sha256:search".to_string(),
+        effect_class: verlet_agent::manifest_schema::EffectClass::Idempotent,
+        attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
+        operations: vec!["search".to_string()],
+        direct_tools: vec![
+            crate::agent::manifest_bind::AgentManifestDirectToolBinding {
+                tool_name: "web_search".to_string(),
+                operation: "search".to_string(),
+                effect_class: verlet_agent::manifest_schema::EffectClass::Idempotent,
+            },
+        ],
+    }];
+    receipt.couplings = vec![crate::agent::manifest_bind::AgentManifestCouplingBinding {
+        id: "controller".to_string(),
+        role: crate::agent::manifest_bind::CouplingRole::Controller,
+        trigger_kind: "tool.call.requested".to_string(),
+        trigger_match: std::collections::BTreeMap::new(),
+        source_streams: vec!["thread".to_string()],
+        source_kinds: vec!["tool.call.requested".to_string()],
+        sink_stream: "control".to_string(),
+        sink_kinds: vec!["tool.call.decision".to_string()],
+        function_ref: "op://controller/run@sha256:controller".to_string(),
+        artifact_hash: "sha256:controller".to_string(),
+        operation_name: Some("run".to_string()),
+        budget: verlet_agent::manifest_schema::AgentManifestCouplingBudget::default(),
+        config_hash: "sha256:config".to_string(),
+    }];
+
+    let written = serde_json::to_value(&receipt).unwrap();
+    let decoded: crate::agent::manifest_bind::AgentManifestBindReceipt =
+        serde_json::from_value(written).unwrap();
+    assert_eq!(decoded, receipt);
 }
 
 #[test]

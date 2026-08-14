@@ -81,113 +81,13 @@ pub(crate) fn reconcile_thread_bindings(
     }
 }
 
-#[derive(Default)]
-struct BindingBatchObservation {
-    attached_count: usize,
-    attached_bindings: Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
-    has_detach: bool,
-}
-
-fn full_reemission_bind_batches(
-    events: &[verlet_history::EventRecord],
-) -> std::collections::HashMap<verlet_history::EventRecordId, usize> {
-    let expected = events
-        .iter()
-        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
-        .filter_map(|event| {
-            let mut bindings = serde_json::from_value::<
-                Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
-            >(event.payload.get("operation_bindings")?.clone())
-            .ok()?;
-            bindings.sort();
-            Some((event.id, bindings))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut observed = std::collections::HashMap::<_, BindingBatchObservation>::new();
-    for event in events {
-        let Some(bind_event_id) = event.provenance.source_event_ids.first().copied() else {
-            continue;
-        };
-        if !expected.contains_key(&bind_event_id) {
-            continue;
-        }
-        match event.kind {
-            verlet_history::EventKind::BindingAttached => {
-                let observation = observed.entry(bind_event_id).or_default();
-                observation.attached_count += 1;
-                if let Ok(payload) = serde_json::from_value::<verlet_history::BindingAttachedPayload>(
-                    event.payload.clone(),
-                ) {
-                    observation.attached_bindings.push(
-                        crate::agent::manifest_bind::operation_binding_from_attached_payload(
-                            payload,
-                        ),
-                    );
-                }
-            }
-            verlet_history::EventKind::BindingDetached => {
-                observed.entry(bind_event_id).or_default().has_detach = true;
-            }
-            _ => {}
-        }
-    }
-
-    expected
-        .into_iter()
-        .filter_map(|(bind_event_id, expected_bindings)| {
-            let observation = observed.get(&bind_event_id);
-            let attached_count = observation.map_or(0, |batch| batch.attached_count);
-            if observation.is_some_and(|batch| batch.has_detach)
-                || attached_count != expected_bindings.len()
-            {
-                return None;
-            }
-            let mut attached_bindings = observation
-                .map(|batch| batch.attached_bindings.clone())
-                .unwrap_or_default();
-            if attached_bindings.len() != attached_count {
-                return None;
-            }
-            attached_bindings.sort();
-            (attached_bindings == expected_bindings).then_some((bind_event_id, attached_count))
-        })
-        .collect()
-}
-
 pub fn fold_thread_bindings(events: &[verlet_history::EventRecord]) -> ThreadBindingsFold {
     let mut folded = ThreadBindingsFold::default();
     let mut inactive = std::collections::HashSet::new();
-    // EMO-584 briefly wrote each bind receipt followed by a complete attached
-    // snapshot and no detaches. Only receipt-proven full snapshots retain
-    // generation semantics; every delta-era batch folds strictly by attach id.
-    let full_reemission_batches = full_reemission_bind_batches(events);
-    let mut applied_full_reemission_batches = std::collections::HashSet::new();
 
     for event in events {
         match event.kind {
-            verlet_history::EventKind::ManifestBindCompleted
-                if full_reemission_batches.get(&event.id) == Some(&0) =>
-            {
-                inactive.extend(
-                    folded
-                        .active
-                        .drain(..)
-                        .map(|binding| binding.attach_event_id),
-                );
-                applied_full_reemission_batches.insert(event.id);
-            }
             verlet_history::EventKind::BindingAttached => {
-                if let Some(bind_batch_id) = event.provenance.source_event_ids.first().copied()
-                    && full_reemission_batches.contains_key(&bind_batch_id)
-                    && applied_full_reemission_batches.insert(bind_batch_id)
-                {
-                    inactive.extend(
-                        folded
-                            .active
-                            .drain(..)
-                            .map(|binding| binding.attach_event_id),
-                    );
-                }
                 match serde_json::from_value::<verlet_history::BindingAttachedPayload>(
                     event.payload.clone(),
                 ) {
@@ -403,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_bind_batches_replace_same_operation_artifacts_in_stream_order() {
+    fn repeated_bind_batches_do_not_replace_attachments_without_detaches() {
         let first_bind = bind_event(
             1,
             900,
@@ -414,6 +314,8 @@ mod tests {
         );
         let first_search = attach_event_for_bind(2, 400, "search-tools", 900);
         let first_files = attach_event_for_bind(3, 300, "file-tools", 900);
+        let first_search_id = first_search.id;
+        let first_files_id = first_files.id;
         let second_bind = bind_event(
             4,
             901,
@@ -443,6 +345,8 @@ mod tests {
                 .map(|binding| (binding.attach_event_id, binding.payload.name.as_str()))
                 .collect::<Vec<_>>(),
             vec![
+                (first_search_id, "search-tools"),
+                (first_files_id, "file-tools"),
                 (rebound_search.id, "search-tools"),
                 (rebound_files.id, "file-tools"),
             ]
@@ -450,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn emo_584_full_reemission_fixture_folds_to_the_latest_complete_generation() {
+    fn repeated_attached_snapshots_remain_distinct_without_detach_events() {
         let first_bind = bind_event(
             1,
             900,
@@ -461,6 +365,8 @@ mod tests {
         );
         let first_search = attach_event_for_bind(2, 400, "search-tools", 900);
         let first_files = attach_event_for_bind(3, 300, "file-tools", 900);
+        let first_search_id = first_search.id;
+        let first_files_id = first_files.id;
         let second_bind = bind_event(
             4,
             901,
@@ -489,12 +395,17 @@ mod tests {
                 .iter()
                 .map(|binding| binding.attach_event_id)
                 .collect::<Vec<_>>(),
-            vec![rebound_search.id, rebound_files.id]
+            vec![
+                first_search_id,
+                first_files_id,
+                rebound_search.id,
+                rebound_files.id,
+            ]
         );
     }
 
     #[test]
-    fn add_only_delta_after_historical_generations_preserves_prior_attach_ids() {
+    fn add_only_delta_preserves_prior_attach_ids() {
         let first_bind = bind_event(
             1,
             900,
@@ -536,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn modern_changed_delta_is_not_mistaken_for_a_full_reemission() {
+    fn changed_delta_applies_detach_and_attach_by_event_id() {
         let first_bind = bind_event(
             1,
             900,
@@ -580,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn many_emo_584_full_reemissions_keep_only_the_latest_generation() {
+    fn many_attached_batches_remain_active_without_detaches() {
         let mut events = Vec::new();
         let mut sequence = 1;
         let mut expected_ids = Vec::new();
@@ -609,7 +520,7 @@ mod tests {
             let files =
                 attach_event_for_bind(sequence, 2_001 + generation * 2, &file_name, bind_id);
             sequence += 1;
-            expected_ids = vec![search.id, files.id];
+            expected_ids.extend([search.id, files.id]);
             events.extend([search, files]);
         }
 
@@ -627,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn emo_584_empty_reemission_retires_the_prior_generation() {
+    fn empty_bind_receipt_does_not_retire_an_attachment() {
         let first_bind = bind_event(
             1,
             900,
@@ -638,10 +549,11 @@ mod tests {
         let first_search = attach_event_for_bind(2, 400, "search-tools", 900);
         let empty_bind = bind_event(3, 901, serde_json::json!([]));
 
+        let first_search_id = first_search.id;
         let folded = super::fold_thread_bindings(&[first_bind, first_search, empty_bind]);
 
         assert!(folded.anomalies.is_empty());
-        assert!(folded.active.is_empty());
+        assert_eq!(folded.active[0].attach_event_id, first_search_id);
     }
 
     #[test]
@@ -749,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_attach_cannot_prove_a_full_reemission_batch() {
+    fn undecodable_attach_does_not_retire_a_prior_attachment() {
         let old_bind = bind_event(
             1,
             900,

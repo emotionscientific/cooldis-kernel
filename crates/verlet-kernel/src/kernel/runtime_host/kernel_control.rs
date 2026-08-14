@@ -240,24 +240,6 @@ impl RuntimeKernelControl {
         Ok(crate::kernel::runtime_host::RuntimeHost { inner })
     }
 
-    // lexicon-allow: subagent - public compatibility method for existing agent-process callers.
-    pub async fn spawn_subagent(
-        &self,
-        caller: &verlet_runtime_contracts::ThreadContext,
-        task_name: Option<String>,
-        input: crate::kernel::runtime_host::turn::TurnInput,
-        metadata: std::collections::BTreeMap<String, String>,
-    ) -> crate::kernel::runtime_host::VerletResult<AgentProcessSpawnReceipt> {
-        self.spawn_child_with_witness(
-            caller,
-            task_name,
-            input,
-            metadata,
-            ThreadSpawnWitness::default(),
-        )
-        .await
-    }
-
     pub async fn dispatch_thread_spawn(
         &self,
         caller: &verlet_runtime_contracts::ThreadContext,

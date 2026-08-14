@@ -249,14 +249,48 @@ async fn append_recovery_bind_receipt(
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     effect_class: verlet_agent::manifest_schema::EffectClass,
 ) {
+    append_current_bind_receipt(store, coordinates, recovery_bind_receipt(effect_class)).await;
+}
+
+async fn append_current_bind_receipt(
+    store: &dyn verlet_history::RuntimeStore,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    receipt: crate::agent::manifest_bind::AgentManifestBindReceipt,
+) {
+    let bind = verlet_history::NewEventRecord::witnessed(
+        coordinates.clone(),
+        verlet_history::EventKind::ManifestBindCompleted,
+        serde_json::to_value(&receipt).unwrap(),
+    );
+    let bindings = receipt
+        .operation_bindings
+        .iter()
+        .map(|binding| {
+            verlet_history::NewEventRecord::discharged(
+                coordinates.clone(),
+                verlet_history::EventKind::BindingAttached,
+                serde_json::to_value(crate::agent::manifest_bind::binding_attached_payload(
+                    binding,
+                    "principal:test",
+                ))
+                .unwrap(),
+                verlet_history::EventProvenance {
+                    source_streams: vec![verlet_history::EventStreamId::for_thread(coordinates)],
+                    source_event_ids: vec![bind.id],
+                    discharged_by: Some("binder:manifest".to_string()),
+                    function: Some("bind/v1".to_string()),
+                    ..verlet_history::EventProvenance::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut events = Vec::with_capacity(1 + bindings.len());
+    events.push(bind);
+    events.extend(bindings);
     store
         .append_events(
             &verlet_history::EventStreamId::for_thread(coordinates),
-            vec![verlet_history::NewEventRecord::witnessed(
-                coordinates.clone(),
-                verlet_history::EventKind::ManifestBindCompleted,
-                serde_json::to_value(recovery_bind_receipt(effect_class)).unwrap(),
-            )],
+            events,
         )
         .await
         .unwrap();
@@ -674,7 +708,7 @@ async fn completion_without_canonical_result_degrades_by_effect_class() {
 }
 
 #[tokio::test]
-async fn legacy_request_and_completion_reuse_by_request_event_and_call_id() {
+async fn fingerprintless_request_and_completion_do_not_match_current_fingerprint() {
     let store = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
     let services = crate::kernel::runtime_host::runtime_services::RuntimeServices::new(
         store.clone(),
@@ -777,10 +811,10 @@ async fn legacy_request_and_completion_reuse_by_request_event_and_call_id() {
 
     assert_eq!(
         calls[0].recovery_action,
-        crate::adapters::agent_loop::ToolRecoveryAction::Reuse
+        crate::adapters::agent_loop::ToolRecoveryAction::Reexecute
     );
-    assert_eq!(calls[0].recovery_source_event_id, Some(prior.id));
-    assert!(!calls[0].recovery_fingerprint_mismatch);
+    assert_eq!(calls[0].recovery_source_event_id, None);
+    assert!(calls[0].recovery_fingerprint_mismatch);
 }
 
 #[tokio::test]
@@ -798,17 +832,7 @@ async fn recovered_bash_rewrite_does_not_inherit_the_original_commands_lax_class
     let mut receipt = recovery_bind_receipt(verlet_agent::manifest_schema::EffectClass::Idempotent);
     receipt.operation_bindings[0].operations = vec!["safe".to_string()];
     receipt.operation_bindings[0].direct_tools.clear();
-    store
-        .append_events(
-            &verlet_history::EventStreamId::for_thread(&coordinates),
-            vec![verlet_history::NewEventRecord::witnessed(
-                coordinates.clone(),
-                verlet_history::EventKind::ManifestBindCompleted,
-                serde_json::to_value(receipt).unwrap(),
-            )],
-        )
-        .await
-        .unwrap();
+    append_current_bind_receipt(store.as_ref(), &coordinates, receipt).await;
     let arguments = serde_json::json!({"command":"safe input"});
     let request = |arguments: serde_json::Value| {
         let fingerprint =

@@ -241,7 +241,7 @@ fn default_manifest_tools(
     config: &crate::adapters::app_server::VerletAppServerConfig,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_agent::manifest_schema::AgentManifestTool>>
 {
-    // lexicon-allow: capsule - legacy config field name
+    // lexicon-allow: capsule - current config field name
     let bindings = &config.capsule_bindings;
     let mut tools = Vec::new();
     if let Some(registry_root) = bindings.registry_root.as_ref() {

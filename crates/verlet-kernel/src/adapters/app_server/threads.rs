@@ -89,10 +89,14 @@ impl crate::kernel::runtime_host::runtime_api::ThreadLifecycleSink
     }
 }
 
-pub(crate) async fn recover_unwitnessed_workspace_metadata_as_unbound(
+pub(crate) async fn validate_loaded_manifest_thread_history(
     supervisor: &crate::kernel::supervisor::VerletSupervisor,
     record: &mut verlet_runtime_contracts::ThreadLifecycleRecord,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
+    let runtime_store = supervisor
+        .runtime_store(&record.coordinates.tenant_id)
+        .await?;
+    let witnessed_receipt = resume_manifest_bind_receipt(runtime_store.as_ref(), record).await?;
     let Some(raw) = record
         .metadata
         .get(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
@@ -105,38 +109,23 @@ pub(crate) async fn recover_unwitnessed_workspace_metadata_as_unbound(
     {
         Ok(stored) => stored,
         Err(err) => {
-            eprintln!(
-                "verlet recovered invalid stored manifest workspace as unbound for thread {}: {err}",
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
+                "thread {} has invalid persisted workspace metadata: {err}; start a new thread",
                 record.coordinates.thread_id
-            );
-            record
-                .metadata
-                .remove(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA);
-            return Ok(());
+            )));
         }
     };
-    let runtime_store = supervisor
-        .runtime_store(&record.coordinates.tenant_id)
-        .await?;
-    let witnessed = match resume_manifest_bind_receipt(runtime_store.as_ref(), record).await {
-        Ok(Some(receipt)) => receipt.workspace,
-        Ok(None) => None,
-        Err(err) => {
-            eprintln!(
-                "verlet could not verify stored manifest workspace for thread {}: {err}",
-                record.coordinates.thread_id
-            );
-            None
-        }
-    };
-    if witnessed.as_ref() != Some(&stored) {
-        eprintln!(
-            "verlet recovered unwitnessed stored manifest workspace as unbound for thread {}",
+    let Some(witnessed) = witnessed_receipt.and_then(|receipt| receipt.workspace) else {
+        return Err(crate::kernel::runtime_host::VerletError::History(format!(
+            "thread {} has persisted workspace metadata but no durable workspace binding witness; start a new thread",
             record.coordinates.thread_id
-        );
-        record
-            .metadata
-            .remove(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA);
+        )));
+    };
+    if witnessed != stored {
+        return Err(crate::kernel::runtime_host::VerletError::History(format!(
+            "thread {} persisted workspace metadata disagrees with its durable binding witness; start a new thread",
+            record.coordinates.thread_id
+        )));
     }
     Ok(())
 }
@@ -184,14 +173,8 @@ fn resume_manifest_receipt_matches_metadata(
     else {
         return Ok(false);
     };
-    let compile_receipt = serde_json::from_value::<
-        crate::agent::manifest_bind::AgentManifestCompileReceipt,
-    >(compile_event.payload.clone())
-    .map_err(|err| {
-        crate::kernel::runtime_host::VerletError::History(format!(
-            "manifest.compile.completed payload is invalid: {err}"
-        ))
-    })?;
+    let compile_receipt =
+        crate::agent::manifest_bind::decode_manifest_compile_receipt_event(compile_event)?;
     Ok(&compile_receipt.source_hash == stored_source_hash)
 }
 
@@ -208,37 +191,14 @@ async fn resume_manifest_bind_receipt<S: verlet_history::EventStore + ?Sized>(
         )
         .await
         .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
-    if events
-        .iter()
-        .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
-        && !events.iter().any(|event| {
-            matches!(
-                event.kind,
-                verlet_history::EventKind::BindingAttached
-                    | verlet_history::EventKind::BindingDetached
-            )
-        })
-    {
-        return Err(crate::kernel::runtime_host::VerletError::History(
-            "thread predates the binding model because its stream has manifest bind receipts but no binding events; start a new thread"
-                .to_string(),
-        ));
-    }
+    validate_manifest_binding_event_contract(&events)?;
     let mut bind_events = events
         .iter()
         .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
         .collect::<Vec<_>>();
     bind_events.sort_by_key(|event| std::cmp::Reverse(event.sequence.get()));
     for event in &bind_events {
-        let receipt =
-            serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
-                event.payload.clone(),
-            )
-            .map_err(|err| {
-                crate::kernel::runtime_host::VerletError::History(format!(
-                    "manifest.bind.completed payload is invalid: {err}"
-                ))
-            })?;
+        let receipt = crate::agent::manifest_bind::decode_manifest_bind_receipt_event(event)?;
         if resume_manifest_receipt_matches_metadata(event, &receipt, &events, &record.metadata)? {
             return Ok(Some(receipt));
         }
@@ -247,7 +207,7 @@ async fn resume_manifest_bind_receipt<S: verlet_history::EventStore + ?Sized>(
         Ok(None)
     } else {
         Err(crate::kernel::runtime_host::VerletError::History(format!(
-            "no durable manifest bind receipt matches the persisted identity for thread {}",
+            "no durable manifest bind receipt matches the persisted identity for thread {}; start a new thread",
             record.coordinates.thread_id
         )))
     }
@@ -373,9 +333,15 @@ impl crate::adapters::app_server::VerletAppServer {
             .await?;
         let Some(receipt) = resume_manifest_bind_receipt(runtime_store.as_ref(), record).await?
         else {
-            record
+            if record
                 .metadata
-                .remove(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA);
+                .contains_key(crate::adapters::app_server::THREAD_AGENT_WORKSPACE_METADATA)
+            {
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
+                    "thread {} has persisted workspace metadata but no durable manifest bind receipt; start a new thread",
+                    record.coordinates.thread_id
+                )));
+            }
             return Ok(());
         };
         validate_resume_authority_metadata(record, &receipt)?;
@@ -1927,6 +1893,7 @@ pub(crate) async fn active_manifest_receipt_payloads(
     handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
 ) -> crate::kernel::runtime_host::VerletResult<Option<(serde_json::Value, serde_json::Value)>> {
     let events = handle.read_thread_events(None).await?;
+    validate_manifest_binding_event_contract(&events)?;
     let Some(bind) = events
         .iter()
         .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
@@ -1951,6 +1918,8 @@ pub(crate) async fn active_manifest_receipt_payloads(
                     .to_string(),
             )
         })?;
+    crate::agent::manifest_bind::decode_manifest_compile_receipt_event(compile)?;
+    crate::agent::manifest_bind::decode_manifest_bind_receipt_event(bind)?;
     Ok(Some((compile.payload.clone(), bind.payload.clone())))
 }
 
@@ -2170,14 +2139,42 @@ pub(super) fn thread_manifest_operation_bindings(
     serde_json::from_str::<Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>>(raw)
         .map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "thread manifest operation bindings are invalid: {err}"
+                "thread {} manifest operation binding metadata is invalid: {err}",
+                context.coordinates.thread_id
             ))
         })
+}
+
+pub(crate) fn validate_manifest_binding_event_contract(
+    events: &[verlet_history::EventRecord],
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    if events.iter().any(|event| {
+        matches!(
+            event.kind,
+            verlet_history::EventKind::BindingAttached | verlet_history::EventKind::BindingDetached
+        )
+    }) {
+        return Ok(());
+    }
+    for event in events
+        .iter()
+        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+    {
+        let receipt = crate::agent::manifest_bind::decode_manifest_bind_receipt_event(event)?;
+        if !receipt.operation_bindings.is_empty() {
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
+                "thread {} has manifest bind receipt {} declaring operation bindings but no binding events; start a new thread",
+                event.coordinates.thread_id, event.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn thread_operation_bindings_from_events(
     events: &[verlet_history::EventRecord],
 ) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
+    validate_manifest_binding_event_contract(events)?;
     if events.iter().any(|event| {
         matches!(
             event.kind,
@@ -2186,7 +2183,13 @@ pub(super) fn thread_operation_bindings_from_events(
     }) {
         let folded = crate::kernel::binding_projector::fold_thread_bindings(events);
         if let Some(message) = folded.anomaly_message() {
-            return Err(crate::kernel::runtime_host::VerletError::History(message));
+            let thread = events
+                .first()
+                .map(|event| event.coordinates.thread_id.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
+                "thread {thread}: {message}"
+            )));
         }
         let bindings = folded
             .active
@@ -2201,15 +2204,6 @@ pub(super) fn thread_operation_bindings_from_events(
         return Ok(bindings);
     }
 
-    if events
-        .iter()
-        .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
-    {
-        return Err(crate::kernel::runtime_host::VerletError::History(
-            "thread predates the binding model because its stream has manifest bind receipts but no binding events; start a new thread"
-                .to_string(),
-        ));
-    }
     Ok(Vec::new())
 }
 
@@ -2347,6 +2341,66 @@ struct ThreadOperationCatalog {
 pub(super) struct ThreadOperationBinding {
     pub(super) binding: crate::agent::manifest_bind::AgentManifestOperationBinding,
     pub(super) attach_event_id: Option<verlet_history::EventRecordId>,
+}
+
+fn context_operation_binding_plan(
+    context: &verlet_runtime_contracts::ThreadContext,
+) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
+    Ok(thread_manifest_operation_bindings(context)?
+        .into_iter()
+        .map(|binding| ThreadOperationBinding {
+            binding,
+            attach_event_id: None,
+        })
+        .collect())
+}
+
+pub(super) async fn runtime_operation_bindings_for_thread(
+    context: &verlet_runtime_contracts::ThreadContext,
+    session_store_path: Option<&std::path::Path>,
+    metadata_store_path: Option<&std::path::Path>,
+    lease_epoch: u64,
+) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
+    let Some(session_store_path) = session_store_path else {
+        return context_operation_binding_plan(context);
+    };
+    let store = verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
+        .await
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+        .with_lease_epoch(lease_epoch);
+    let events = store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(&context.coordinates),
+            None,
+        )
+        .await
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+    if !events.is_empty() {
+        return thread_operation_bindings_from_events(&events);
+    }
+
+    if let Some(metadata_store_path) = metadata_store_path {
+        let metadata_store =
+            verlet_metadata::provider_store::SqliteMetadataStore::open(metadata_store_path)
+                .await
+                .map_err(crate::adapters::app_server::metadata_store_error)?;
+        if metadata_store
+            .get_thread_lifecycle(context.coordinates.thread_id)
+            .await
+            .map_err(crate::adapters::app_server::metadata_store_error)?
+            .is_some()
+        {
+            return Err(crate::kernel::runtime_host::VerletError::History(format!(
+                "thread {} has persisted lifecycle metadata but an empty event stream; start a new thread",
+                context.coordinates.thread_id
+            )));
+        }
+    }
+
+    // A new runtime is constructed before its atomic start and binding event
+    // batch is appended. Only that unpersisted boundary may use the context
+    // plan; a durable lifecycle with no events is rejected above.
+    context_operation_binding_plan(context)
 }
 
 #[async_trait::async_trait]
@@ -2580,7 +2634,7 @@ impl crate::adapters::app_server::VerletAppServer {
     }
 }
 
-// lexicon-allow: capsule - existing app-server compatibility type
+// lexicon-allow: capsule - current app-server type name
 impl CapsuleBindingRuntimeFactory {
     fn thread_spawn_agent_resolver(&self) -> Option<AppServerThreadSpawnAgentResolver> {
         let agent_registry_root = self.agent_registry_root.clone()?;
@@ -2661,37 +2715,13 @@ impl CapsuleBindingRuntimeFactory {
         &self,
         context: &verlet_runtime_contracts::ThreadContext,
     ) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
-        if let Some(session_store_path) = &self.session_store_path {
-            let store = verlet_history_sqlite::SqliteSessionStore::open(session_store_path)
-                .await
-                .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
-                .with_lease_epoch(self.lease_epoch);
-            let events = store
-                .read_events(
-                    &verlet_history::EventStreamId::for_thread(&context.coordinates),
-                    None,
-                )
-                .await
-                .map_err(|err| {
-                    crate::kernel::runtime_host::VerletError::History(err.to_string())
-                })?;
-            // A new runtime is constructed before its start and binding event
-            // batch is appended. At that pre-persistence boundary the binding
-            // plan in the new context is the only input available. Every
-            // persisted or resumed stream folds binding events below.
-            if events.is_empty() {
-                return Ok(thread_manifest_operation_bindings(context)?
-                    .into_iter()
-                    .map(|binding| ThreadOperationBinding {
-                        binding,
-                        attach_event_id: None,
-                    })
-                    .collect());
-            }
-            return thread_operation_bindings_from_events(&events);
-        }
-
-        Ok(Vec::new())
+        runtime_operation_bindings_for_thread(
+            context,
+            self.session_store_path.as_deref(),
+            self.metadata_store_path.as_deref(),
+            self.lease_epoch,
+        )
+        .await
     }
 
     async fn operation_catalog_for_thread(
