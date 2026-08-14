@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "commit": "c27b79f803d1d797c10f275fac6d4eaf2f311ec9",
-  "counted_at": "2026-08-14T09:32:36Z",
-  "loc_rust": 276758,
+  "commit": "f450ded84a2f9b47a7995d26fcf3afb22bd41855",
+  "counted_at": "2026-08-14T19:20:31Z",
+  "loc_rust": 276763,
   "crates": 21,
   "tests_passed": 2367,
   "source": "ci"
