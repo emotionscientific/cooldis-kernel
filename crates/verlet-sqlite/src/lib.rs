@@ -28,7 +28,7 @@
 // every call site would put a second direct engine dependency in three crates
 // and end that ownership.
 pub use turso::{
-    params, transaction::TransactionBehavior, Connection, IntoParams, Row, Rows, Statement, Value,
+    Connection, IntoParams, Row, Rows, Statement, Value, params, transaction::TransactionBehavior,
 };
 
 /// Turso IO contracts re-exported by the engine owner for deterministic test
@@ -37,8 +37,8 @@ pub use turso::{
 pub mod io {
     pub use turso_core::io::{FileId, FileSyncType};
     pub use turso_core::{
-        Buffer, Clock, Completion, CompletionError, File, LimboError, MemoryIO, MonotonicInstant,
-        OpenFlags, WallClockInstant, IO,
+        Buffer, Clock, Completion, CompletionError, File, IO, LimboError, MemoryIO,
+        MonotonicInstant, OpenFlags, WallClockInstant,
     };
 }
 
@@ -338,10 +338,10 @@ mod tests {
                         let inner_waker = std::sync::Arc::clone(&inner_waker);
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(50));
-                            if inner_polls.load(std::sync::atomic::Ordering::SeqCst) == 1 {
-                                if let Some(waker) = inner_waker.lock().unwrap().take() {
-                                    waker.wake();
-                                }
+                            if inner_polls.load(std::sync::atomic::Ordering::SeqCst) == 1
+                                && let Some(waker) = inner_waker.lock().unwrap().take()
+                            {
+                                waker.wake();
                             }
                         })
                     };
@@ -429,9 +429,11 @@ mod tests {
         let parent = temp.path().join("must-not-exist");
         let path = parent.join(std::ffi::OsString::from_vec(vec![0xff]));
 
-        assert!(crate::Db::open(path, crate::DbConfig::default())
-            .await
-            .is_err());
+        assert!(
+            crate::Db::open(path, crate::DbConfig::default())
+                .await
+                .is_err()
+        );
         assert!(!parent.exists());
     }
 
@@ -478,10 +480,12 @@ mod tests {
             crate::table_columns(&conn, "widgets").await.unwrap(),
             vec!["id"]
         );
-        assert!(crate::table_columns(&conn, "missing_table")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            crate::table_columns(&conn, "missing_table")
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         crate::ensure_column(&conn, "widgets", "label", "label TEXT NOT NULL DEFAULT ''")
             .await
@@ -600,10 +604,11 @@ mod tests {
                 .unwrap(),
             "seed"
         );
-        assert!(conn
-            .execute("INSERT INTO records VALUES ('denied')", ())
-            .await
-            .is_err());
+        assert!(
+            conn.execute("INSERT INTO records VALUES ('denied')", ())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
