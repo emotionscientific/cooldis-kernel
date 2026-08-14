@@ -243,16 +243,19 @@ async fn mcp_prompt_lets_model_shaped_agent_see_and_call_search_shell_command() 
     let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
         .with_registry_root(&registry_root)
         .with_global_operation_name("search");
-    let runtime_factory = crate::adapters::app_server::runtime_factory_from_provider_parts(
-        runtime_config,
-        provider_client,
-        capsule_bindings.clone(),
-    );
     let mut app_config = isolated_app_config(listen.clone(), &root);
     app_config.model_provider =
         crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
     app_config.model = crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
-    app_config.capsule_bindings = capsule_bindings;
+    app_config.capsule_bindings = capsule_bindings.clone();
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            capsule_bindings,
+            None,
+            &app_config,
+        );
     let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
         app_config,
         runtime_factory,
@@ -478,18 +481,19 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
     let capsule_bindings = crate::adapters::app_server::CapsuleBindingsConfig::default()
         .with_registry_root(&registry_root)
         .with_global_operation_name("search");
-    let runtime_factory =
-        crate::adapters::app_server::runtime_factory_from_provider_parts_with_secret_resolver(
-            runtime_config,
-            provider_client,
-            capsule_bindings.clone(),
-            Some(std::sync::Arc::new(secret_store)),
-        );
     let mut app_config = isolated_app_config(listen.clone(), &root);
     app_config.model_provider =
         crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string();
     app_config.model = crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string();
-    app_config.capsule_bindings = capsule_bindings;
+    app_config.capsule_bindings = capsule_bindings.clone();
+    let runtime_factory =
+        crate::adapters::app_server::runtime_factory_from_provider_parts_with_app_paths(
+            runtime_config,
+            provider_client,
+            capsule_bindings,
+            Some(std::sync::Arc::new(secret_store)),
+            &app_config,
+        );
     let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory(
         app_config,
         runtime_factory,

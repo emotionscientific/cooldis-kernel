@@ -208,6 +208,22 @@ async fn resume_manifest_bind_receipt<S: verlet_history::EventStore + ?Sized>(
         )
         .await
         .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+    if events
+        .iter()
+        .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+        && !events.iter().any(|event| {
+            matches!(
+                event.kind,
+                verlet_history::EventKind::BindingAttached
+                    | verlet_history::EventKind::BindingDetached
+            )
+        })
+    {
+        return Err(crate::kernel::runtime_host::VerletError::History(
+            "thread predates the binding model because its stream has manifest bind receipts but no binding events; start a new thread"
+                .to_string(),
+        ));
+    }
     let mut bind_events = events
         .iter()
         .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
@@ -1847,21 +1863,6 @@ fn manifest_tool_use_system_instruction(
     ))
 }
 
-fn legacy_manifest_tool_use_system_instruction(
-    context: &verlet_runtime_contracts::ThreadContext,
-) -> Option<String> {
-    let has_tool_metadata = thread_manifest_operation_bindings(context)
-        .is_ok_and(|bindings| !bindings.is_empty())
-        || thread_manifest_tool_universes(context).is_ok_and(|bindings| !bindings.is_empty());
-    if !has_tool_metadata {
-        return None;
-    }
-    let agent_ref = context
-        .metadata
-        .get(crate::adapters::app_server::THREAD_AGENT_REF_METADATA)?;
-    Some(manifest_tool_use_instruction_text(agent_ref, None))
-}
-
 fn manifest_tool_use_instruction_text(agent_ref: &str, tool_list: Option<&str>) -> String {
     let tool_sentence = tool_list
         .map(|tools| format!("You have these Verlet tools available: {tools}. "))
@@ -2176,8 +2177,7 @@ pub(super) fn thread_manifest_operation_bindings(
 
 pub(super) fn thread_operation_bindings_from_events(
     events: &[verlet_history::EventRecord],
-    metadata: &std::collections::BTreeMap<String, String>,
-) -> crate::kernel::runtime_host::VerletResult<Option<Vec<ThreadOperationBinding>>> {
+) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
     if events.iter().any(|event| {
         matches!(
             event.kind,
@@ -2198,43 +2198,19 @@ pub(super) fn thread_operation_bindings_from_events(
                 attach_event_id: Some(binding.attach_event_id),
             })
             .collect();
-        return Ok(Some(bindings));
+        return Ok(bindings);
     }
 
-    let mut bind_events = events
+    if events
         .iter()
-        .filter(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
-        .collect::<Vec<_>>();
-    bind_events.sort_by_key(|event| std::cmp::Reverse(event.sequence.get()));
-    if bind_events.is_empty() {
-        return Ok(None);
+        .any(|event| event.kind == verlet_history::EventKind::ManifestBindCompleted)
+    {
+        return Err(crate::kernel::runtime_host::VerletError::History(
+            "thread predates the binding model because its stream has manifest bind receipts but no binding events; start a new thread"
+                .to_string(),
+        ));
     }
-    for bind_event in bind_events {
-        let receipt =
-            serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
-                bind_event.payload.clone(),
-            )
-            .map_err(|err| {
-                crate::kernel::runtime_host::VerletError::History(format!(
-                    "manifest.bind.completed payload is invalid: {err}"
-                ))
-            })?;
-        if resume_manifest_receipt_matches_metadata(bind_event, &receipt, events, metadata)? {
-            return Ok(Some(
-                receipt
-                    .operation_bindings
-                    .into_iter()
-                    .map(|binding| ThreadOperationBinding {
-                        binding,
-                        attach_event_id: None,
-                    })
-                    .collect(),
-            ));
-        }
-    }
-    Err(crate::kernel::runtime_host::VerletError::History(
-        "no durable manifest bind receipt matches the persisted thread identity".to_string(),
-    ))
+    Ok(Vec::new())
 }
 
 pub(super) fn thread_manifest_workspace_mount(
@@ -2699,20 +2675,23 @@ impl CapsuleBindingRuntimeFactory {
                 .map_err(|err| {
                     crate::kernel::runtime_host::VerletError::History(err.to_string())
                 })?;
-            if let Some(bindings) =
-                thread_operation_bindings_from_events(&events, &context.metadata)?
-            {
-                return Ok(bindings);
+            // A new runtime is constructed before its start and binding event
+            // batch is appended. At that pre-persistence boundary the binding
+            // plan in the new context is the only input available. Every
+            // persisted or resumed stream folds binding events below.
+            if events.is_empty() {
+                return Ok(thread_manifest_operation_bindings(context)?
+                    .into_iter()
+                    .map(|binding| ThreadOperationBinding {
+                        binding,
+                        attach_event_id: None,
+                    })
+                    .collect());
             }
+            return thread_operation_bindings_from_events(&events);
         }
 
-        Ok(thread_manifest_operation_bindings(context)?
-            .into_iter()
-            .map(|binding| ThreadOperationBinding {
-                binding,
-                attach_event_id: None,
-            })
-            .collect())
+        Ok(Vec::new())
     }
 
     async fn operation_catalog_for_thread(
@@ -2948,8 +2927,7 @@ pub(super) fn apply_manifest_runtime_metadata(
         .metadata
         .get(crate::adapters::app_server::THREAD_AGENT_SYSTEM_INSTRUCTION_METADATA)
         .filter(|instruction| !instruction.trim().is_empty())
-        .cloned()
-        .or_else(|| legacy_manifest_tool_use_system_instruction(context));
+        .cloned();
     if let Some(instruction) = tool_instruction {
         if !config.system.iter().any(|block| block.text == instruction) {
             config

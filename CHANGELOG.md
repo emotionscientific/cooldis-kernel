@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Compatibility paths removed
+
+- Persisted `cooldis.agent-manifest` records and manifests that still carry
+  grant-string authority payloads are rejected. Republish those records with
+  the current Verlet version. Persisted agent records missing current required
+  fields and default-agent records in the pre-rename namespace are rejected
+  with the same guidance.
+- Thread streams with manifest bind receipts but no `binding.attached` or
+  `binding.detached` events no longer derive a toolset from receipts or cached
+  metadata. Start a new thread. Streams with neither receipts nor binding
+  events still resume with an empty toolset.
+- The app-server no longer reconstructs a manifest tool-use instruction from
+  old operation metadata.
+- Bare `tool://` agent tool refs are rejected. Use `op://` for published
+  operations or `mcp://` for configured MCP sources.
+- `verlet init` and `verlet agent init` now write folder-first projects only.
+  `--out` must name a project directory.
+- The pre-rename console WebSocket token subprotocol is no longer accepted.
+- Frozen durable-record identifiers in `docs/format-ids.md` are unchanged.
+
 ## v0.4.0 (2026-08-13)
 
 ### The binding model

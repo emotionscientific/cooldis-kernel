@@ -497,14 +497,16 @@ operation is `thread/resume`. A resume request attaches to a resident thread whe
 one is already loaded, or loads the thread from durable metadata/session state
 when only the stored thread id remains.
 
-Loading a stored thread re-folds that thread's event stream. Tool catalog
-precedence is binding events, then the latest durable bind receipt, then legacy
-metadata for old streams. Workspace, placement, model selection, runtime
-overrides, and tool-universe mounting come from persisted metadata; when an old
-thread is missing a reconstructable key, the loader fills it from the durable
-bind receipt already in the stream. Resume never loads the current agent record,
-compares a manifest hash, or appends a compile, bind, attachment, or placement
-event batch.
+Loading a stored thread re-folds that thread's event stream. `binding.attached`
+and `binding.detached` events are the only tool catalog source. A stream with
+manifest bind receipts but no binding events predates the binding model and
+fails resume with guidance to start a new thread. A stream with neither bind
+receipts nor binding events has an empty toolset. Workspace, placement, model
+selection, runtime overrides, and tool-universe mounting come from persisted
+metadata; when a thread is missing a reconstructable non-authority key, the
+loader fills it from the durable bind receipt already in the stream. Resume
+never loads the current agent record, compares a manifest hash, or appends a
+compile, bind, attachment, or placement event batch.
 
 `thread/loaded/list` is introspection for currently resident runtime handles. It
 is useful for tests and clients that want to reconnect to already-loaded work,

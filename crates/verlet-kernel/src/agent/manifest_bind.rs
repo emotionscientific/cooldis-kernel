@@ -182,18 +182,16 @@ pub fn compile_published_agent_record(
     verlet_agent::manifest_schema::AgentManifestSchema,
     AgentManifestCompileReceipt,
 )> {
-    record.validate_persisted()?;
-    let mut resolved_manifest = record.resolved_manifest.clone();
-    migrate_legacy_persisted_manifest_kind(&mut resolved_manifest);
-    migrate_legacy_persisted_manifest_authority(&mut resolved_manifest, &record.ref_uri)?;
+    record.validate()?;
+    let persisted_error = || {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "agent record {} uses unsupported persisted manifest data; republish the record with the current Verlet version",
+            record.ref_uri
+        ))
+    };
     let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
-        serde_json::from_value(resolved_manifest).map_err(|err| {
-            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "failed to decode resolved agent manifest {}: {err}",
-                record.ref_uri
-            ))
-        })?;
-    manifest.validate()?;
+        serde_json::from_value(record.resolved_manifest.clone()).map_err(|_| persisted_error())?;
+    manifest.validate().map_err(|_| persisted_error())?;
     let receipt = AgentManifestCompileReceipt {
         ref_uri: record.ref_uri.clone(),
         manifest_hash: record.manifest_hash.clone(),
@@ -201,135 +199,6 @@ pub fn compile_published_agent_record(
         alias,
     };
     Ok((manifest, receipt))
-}
-
-fn migrate_legacy_persisted_manifest_kind(resolved_manifest: &mut serde_json::Value) {
-    let Some(identity) = resolved_manifest
-        .get_mut("identity")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    if identity.get("kind").and_then(serde_json::Value::as_str)
-        == Some(concat!("cool", "dis.agent-manifest"))
-    {
-        identity.insert(
-            "kind".to_string(),
-            serde_json::Value::String(
-                verlet_agent::manifest_schema::AGENT_MANIFEST_KIND.to_string(),
-            ),
-        );
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum PersistedLegacyManifestGrant {
-    Capability(String),
-    Expiring(PersistedLegacyManifestGrantExpiry),
-}
-
-impl PersistedLegacyManifestGrant {
-    fn into_capability(self) -> String {
-        match self {
-            Self::Capability(capability) => capability,
-            Self::Expiring(grant) => grant.capability,
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedLegacyManifestGrantExpiry {
-    capability: String,
-    #[serde(rename = "expires_at")]
-    _expires_at: String,
-}
-
-#[derive(serde::Deserialize)]
-enum PersistedLegacyManifestNetworkPolicy {
-    #[serde(rename = "deny")]
-    Deny,
-    #[serde(rename = "declared-origins")]
-    DeclaredOrigins,
-}
-
-/// Decode-only compatibility boundary for immutable agent records published
-/// before EMO-581. New manifest authoring still passes directly through the
-/// strict schema and rejects these removed fields.
-fn migrate_legacy_persisted_manifest_authority(
-    manifest: &mut serde_json::Value,
-    record_ref: &str,
-) -> crate::kernel::runtime_host::VerletResult<()> {
-    let decode_error = |field: &str, err: serde_json::Error| {
-        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-            "failed to decode legacy {field} in resolved agent manifest {record_ref}: {err}"
-        ))
-    };
-
-    if let Some(network) = manifest
-        .get_mut("policies")
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|policies| policies.remove("network"))
-    {
-        serde_json::from_value::<PersistedLegacyManifestNetworkPolicy>(network)
-            .map_err(|err| decode_error("policies.network", err))?;
-    }
-
-    if let Some(tools) = manifest
-        .get_mut("tools")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for (index, tool) in tools.iter_mut().enumerate() {
-            let Some(tool) = tool.as_object_mut() else {
-                continue;
-            };
-            let Some(grants) = tool.remove("grants") else {
-                continue;
-            };
-            let grants = serde_json::from_value::<Vec<PersistedLegacyManifestGrant>>(grants)
-                .map_err(|err| decode_error(&format!("tools[{index}].grants"), err))?
-                .into_iter()
-                .map(PersistedLegacyManifestGrant::into_capability)
-                .collect::<std::collections::BTreeSet<_>>();
-            if tool.contains_key("attachment")
-                || !matches!(
-                    tool.get("type").and_then(serde_json::Value::as_str),
-                    Some("bash_tool" | "direct_tool")
-                )
-            {
-                continue;
-            }
-            let attachment =
-                crate::capabilities::wasm_runner::attachment_config_from_capability_grants(&grants);
-            if !attachment.is_empty() {
-                tool.insert(
-                    "attachment".to_string(),
-                    serde_json::json!({
-                        "allowed_secrets": attachment.allowed_secrets,
-                        "allowed_private_network": attachment.allowed_private_network,
-                    }),
-                );
-            }
-        }
-    }
-
-    if let Some(couplings) = manifest
-        .get_mut("couplings")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for (index, coupling) in couplings.iter_mut().enumerate() {
-            let Some(grants) = coupling
-                .as_object_mut()
-                .and_then(|coupling| coupling.remove("grants"))
-            else {
-                continue;
-            };
-            serde_json::from_value::<Vec<PersistedLegacyManifestGrant>>(grants)
-                .map_err(|err| decode_error(&format!("couplings[{index}].grants"), err))?;
-        }
-    }
-    Ok(())
 }
 
 /// Compile and bind a published manifest against the live app-server
@@ -2819,8 +2688,7 @@ pub struct AgentManifestCompileReceipt {
 
 /// Payload of the discharged `manifest.bind.completed` event: the resolved
 /// preset and runtime facts recorded when this bind expanded. Current tool
-/// authority comes from folding the thread's binding events; legacy streams
-/// may use the latest receipt as their compatibility catalog.
+/// authority comes only from folding the thread's binding events.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AgentManifestBindReceipt {
     pub ref_uri: String,
@@ -2839,8 +2707,7 @@ pub struct AgentManifestBindReceipt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_packages: Vec<AgentManifestSkillPackageBinding>,
     /// Workspace skill entries traversed exactly once through the resolved
-    /// workspace binding. `None` means discovery was disabled or this is a
-    /// legacy receipt from before discovery witnesses existed.
+    /// workspace binding. `None` means discovery was disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_discovery: Option<AgentManifestSkillDiscovery>,
     /// Exact static context sources mounted as provider system blocks.
@@ -2859,14 +2726,12 @@ pub struct AgentManifestBindReceipt {
     /// Which override keys the caller actually exercised.
     pub overridden_keys: Vec<String>,
     /// Where this thread's runtime executes, fixed at bind time (ADR 0006).
-    /// Absent means local. Optional with a serde default so receipts
-    /// witnessed before the field existed keep decoding and folding.
+    /// Absent means local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<AgentManifestPlacementBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_origin: Option<AgentManifestBindingOrigin>,
-    /// Effective host workspace mount fixed for this bind. Optional so bind
-    /// receipts written before workspace binding existed keep decoding.
+    /// Effective host workspace mount fixed for this bind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<AgentManifestResolvedWorkspaceMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3153,8 +3018,7 @@ pub struct AgentManifestStaticContextSegment {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-/// Persisted bind receipts are forward-compatible and may still carry the
-/// removed `grants` / `grant_expiries` fields, which are intentionally ignored.
+#[serde(deny_unknown_fields)]
 pub struct AgentManifestCouplingBinding {
     pub id: String,
     pub role: CouplingRole,
@@ -3214,7 +3078,8 @@ impl AgentManifestCouplingBinding {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentManifestOperationBinding {
     pub name: String,
     pub artifact_hash: String,
@@ -3236,66 +3101,8 @@ pub struct AgentManifestOperationBinding {
     pub direct_tools: Vec<AgentManifestDirectToolBinding>,
 }
 
-/// Preserves field presence so an explicit `{}` remains default-deny instead
-/// of falling back to legacy persisted grants.
-#[derive(Default)]
-struct OptionalWasmAttachmentConfig(Option<verlet_wasm::WasmAttachmentConfig>);
-
-impl<'de> serde::Deserialize<'de> for OptionalWasmAttachmentConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        <verlet_wasm::WasmAttachmentConfig as serde::Deserialize>::deserialize(deserializer)
-            .map(|config| Self(Some(config)))
-    }
-}
-
-/// Decode-only wire for operation bindings persisted before EMO-581.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentManifestOperationBindingWire {
-    name: String,
-    artifact_hash: String,
-    #[serde(default)]
-    effect_class: verlet_agent::manifest_schema::EffectClass,
-    #[serde(default)]
-    grants: std::collections::BTreeSet<String>,
-    #[serde(default)]
-    attachment_config: OptionalWasmAttachmentConfig,
-    #[serde(default, rename = "grant_expiries")]
-    _legacy_expirations: Vec<serde_json::Value>,
-    #[serde(default)]
-    operations: Vec<String>,
-    #[serde(default)]
-    direct_tools: Vec<AgentManifestDirectToolBinding>,
-}
-
-impl<'de> serde::Deserialize<'de> for AgentManifestOperationBinding {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let binding = AgentManifestOperationBindingWire::deserialize(deserializer)?;
-        let attachment_config = binding.attachment_config.0.unwrap_or_else(|| {
-            crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
-                &binding.grants,
-            )
-        });
-        Ok(Self {
-            name: binding.name,
-            artifact_hash: binding.artifact_hash,
-            effect_class: binding.effect_class,
-            attachment_config,
-            operations: binding.operations,
-            direct_tools: binding.direct_tools,
-        })
-    }
-}
-
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
-/// Nested persisted binding receipt. Unknown historical fields, including
-/// `grant_expiries`, are ignored and never emitted by new serialization.
+#[serde(deny_unknown_fields)]
 pub struct AgentManifestDirectToolBinding {
     pub tool_name: String,
     pub operation: String,

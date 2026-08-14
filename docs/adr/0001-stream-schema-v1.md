@@ -754,6 +754,10 @@ Current V1 RC implementation status:
 - `cooldis-manifest-e2e-smoke` asserts the default V1 golden path can restart,
   resume, then export `cooldis.stream.record/1` thread records and manifest
   compile/bind receipt schemas from the same SQLite-backed thread.
+- Resume derives tool authority only by folding `binding.attached` and
+  `binding.detached` events. A stream with manifest bind receipts but no binding
+  events predates the binding model and requires a new thread. A stream with
+  neither receipts nor binding events has an empty toolset.
 - `crates/cooldis-kernel/tests/fixtures/contracts/stream_schema_v1.json` freezes
   representative compile, summary checkpoint, read-plan-set, and
   compile-after-drop-range envelopes, canonical cursors, a SQLite-local append

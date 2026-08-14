@@ -658,7 +658,7 @@ pub struct KernelThreadSpawnAgentBinding {
 pub trait KernelThreadSpawnAgentResolver: Send + Sync {
     /// Alias used when the model omits `agent_ref`. Runtime integrations with a
     /// synthesized default manifest return that alias; lower-level runtimes may
-    /// retain the unbound compatibility path by returning `None`.
+    /// remain deliberately unbound by returning `None`.
     fn default_agent_ref(
         &self,
         _caller: &verlet_runtime_contracts::ThreadContext,

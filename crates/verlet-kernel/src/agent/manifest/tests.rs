@@ -72,7 +72,7 @@ fn legacy_manifest_kind_is_rejected_for_new_records() {
 }
 
 #[test]
-fn persisted_legacy_agent_record_kind_remains_readable() {
+fn persisted_legacy_agent_record_kind_requires_republish() {
     let source = manifest_source("persisted-legacy-kind", "1.0.0", false);
     let plan = crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap();
     let mut record = plan.into_record(1);
@@ -85,19 +85,26 @@ fn persisted_legacy_agent_record_kind_remains_readable() {
     registry.write_record_atomically(&record).unwrap();
     registry.write_version_record_atomically(&record).unwrap();
 
-    let loaded = registry.load_record(&record.name).unwrap();
-    assert_eq!(loaded, record);
+    let expected = format!(
+        "runtime factory failed: agent record {} uses unsupported kind {:?}; republish the record with the current Verlet version",
+        record.ref_uri, record.kind
+    );
+    assert_eq!(
+        registry.load_record(&record.name).unwrap_err().to_string(),
+        expected
+    );
     assert_eq!(
         registry
             .load_version_record(&record.name, &record.version)
-            .unwrap(),
-        record
+            .unwrap_err()
+            .to_string(),
+        expected
     );
-    let (manifest, _receipt) =
-        crate::agent::manifest_bind::compile_published_agent_record(&loaded, None).unwrap();
     assert_eq!(
-        manifest.identity.kind.as_deref(),
-        Some(verlet_agent::manifest_schema::AGENT_MANIFEST_KIND)
+        crate::agent::manifest_bind::compile_published_agent_record(&record, None)
+            .unwrap_err()
+            .to_string(),
+        expected
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -112,7 +119,27 @@ fn new_agent_record_validation_rejects_legacy_kind() {
     record.kind = concat!("cool", "dis.agent-manifest").to_string();
 
     let err = record.validate().unwrap_err();
-    assert!(err.to_string().contains("verlet.agent-manifest"));
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "runtime factory failed: agent record {} uses unsupported kind {:?}; republish the record with the current Verlet version",
+            record.ref_uri, record.kind
+        )
+    );
+}
+
+#[test]
+fn published_record_validation_rejects_bare_tool_refs() {
+    let source = manifest_source("old-tool-ref", "1.0.0", false);
+    let mut record = crate::agent::manifest::AgentPublishPlan::from_source(&source)
+        .unwrap()
+        .into_record(1);
+    record.tool_refs[0].reference = "tool://tailcat".to_string();
+
+    assert_eq!(
+        record.validate().unwrap_err().to_string(),
+        "runtime factory failed: agent tool ref \"tool://tailcat\" must start with op:// or mcp://"
+    );
 }
 
 fn folder_first_manifest_source(name: &str, context: &str) -> String {
@@ -812,7 +839,7 @@ fn publish_preflights_latest_alias_collision_before_writing_records() {
 }
 
 #[test]
-fn legacy_records_without_resolved_refs_still_load() {
+fn records_without_resolved_refs_require_republish() {
     let registry = crate::agent::manifest::LocalAgentRegistry::new(temp_root("legacy-record"));
     let operation_root = seed_tailcat_operation_root("legacy-record-operations");
     let record = registry
@@ -831,12 +858,16 @@ fn legacy_records_without_resolved_refs_still_load() {
     json.as_object_mut().unwrap().remove("resolved_refs");
     std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
 
-    let loaded = registry.load_record("release-verifier").unwrap();
-    assert!(loaded.resolved_refs.is_empty());
+    let error = registry
+        .load_record("release-verifier")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("missing field `resolved_refs`"), "{error}");
+    assert!(error.contains("republish the record"), "{error}");
 }
 
 #[test]
-fn published_records_round_trip_authored_source_and_legacy_absence() {
+fn published_records_require_authored_source() {
     let registry = crate::agent::manifest::LocalAgentRegistry::new(temp_root("authored-source"));
     let operation_root = seed_tailcat_operation_root("authored-source-operations");
     let source = manifest_source("release-verifier", "1.0.0", false);
@@ -847,22 +878,20 @@ fn published_records_round_trip_authored_source_and_legacy_absence() {
         )
         .unwrap();
 
-    assert_eq!(record.authored_source.as_deref(), Some(source.as_str()));
+    assert_eq!(record.authored_source, source);
     assert_eq!(
         registry
             .load_record("release-verifier")
             .unwrap()
-            .authored_source
-            .as_deref(),
-        Some(source.as_str())
+            .authored_source,
+        source
     );
     assert_eq!(
         registry
             .load_version_record("release-verifier", "1.0.0")
             .unwrap()
-            .authored_source
-            .as_deref(),
-        Some(source.as_str())
+            .authored_source,
+        source
     );
 
     for path in [
@@ -877,24 +906,18 @@ fn published_records_round_trip_authored_source_and_legacy_absence() {
         std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
     }
 
-    let legacy_head = registry.load_record("release-verifier").unwrap();
-    let legacy_version = registry
+    let head_error = registry
+        .load_record("release-verifier")
+        .unwrap_err()
+        .to_string();
+    assert!(head_error.contains("missing field `authored_source`"));
+    assert!(head_error.contains("republish the record"));
+    let version_error = registry
         .load_version_record("release-verifier", "1.0.0")
-        .unwrap();
-    assert!(legacy_head.authored_source.is_none());
-    assert!(legacy_version.authored_source.is_none());
-    assert!(
-        serde_json::to_value(&legacy_head)
-            .unwrap()
-            .get("authored_source")
-            .is_none()
-    );
-    assert!(
-        serde_json::to_value(&legacy_version)
-            .unwrap()
-            .get("authored_source")
-            .is_none()
-    );
+        .unwrap_err()
+        .to_string();
+    assert!(version_error.contains("missing field `authored_source`"));
+    assert!(version_error.contains("republish the record"));
 }
 
 #[test]
@@ -921,7 +944,7 @@ fn immutable_version_record_keeps_first_authored_snapshot() {
     let version = registry
         .load_version_record("release-verifier", "1.0.0")
         .unwrap();
-    assert_eq!(version.authored_source.as_deref(), Some(original.as_str()));
+    assert_eq!(version.authored_source, original);
 
     let changed = original.replace("Checks a release branch.", "Checks every release branch.");
     let error = registry
@@ -935,9 +958,8 @@ fn immutable_version_record_keeps_first_authored_snapshot() {
         registry
             .load_version_record("release-verifier", "1.0.0")
             .unwrap()
-            .authored_source
-            .as_deref(),
-        Some(original.as_str())
+            .authored_source,
+        original
     );
 }
 
@@ -970,7 +992,6 @@ fn version_records_are_listed_by_publication_time_not_declared_version() {
             .collect::<Vec<_>>(),
         vec![100, 200, 300]
     );
-    assert!(versions.iter().all(|record| record.authored_source_present));
     let listed = serde_json::to_value(&versions).unwrap();
     assert!(listed[0].get("authored_source").is_none());
     assert!(listed[0].get("resolved_manifest").is_none());

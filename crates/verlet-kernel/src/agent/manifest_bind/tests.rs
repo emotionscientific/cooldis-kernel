@@ -2775,13 +2775,9 @@ path = "expected-skills"
 }
 
 #[test]
-fn persisted_manifest_decode_migrates_legacy_authority_fields() {
+fn persisted_manifest_decode_rejects_grant_string_authority_fields() {
     let root = temp_dir("manifest-bind-persisted-legacy-authority");
     let mut record = publish_agent_manifest(&root, &minimal_manifest("persisted_legacy_authority"));
-    record.resolved_manifest["policies"] = serde_json::json!({
-        "filesystem": "vfs",
-        "network": "declared-origins"
-    });
     record.resolved_manifest["tools"] = serde_json::json!([
         {
             "type": "bash_tool",
@@ -2789,62 +2785,20 @@ fn persisted_manifest_decode_migrates_legacy_authority_fields() {
             "command": "search",
             "operation_ref": format!("op://search@sha256:{}", "a".repeat(64)),
             "grants": [
-                "net.http.private:POST:http://127.0.0.1:9000",
-                "secret:API_TOKEN",
-                "net.http:GET:https://*",
-                {
-                    "capability": "secret:SECOND_TOKEN",
-                    "expires_at": "2025-01-01T00:00:00Z"
-                }
+                "secret:API_TOKEN"
             ]
-        },
-        {
-            "type": "protocol_tool_import",
-            "id": "docs",
-            "protocol": "mcp",
-            "server_ref": "mcp://docs",
-            "grants": ["net.localhost"]
         }
     ]);
-    record.resolved_manifest["couplings"] = serde_json::json!([{
-        "id": "legacy_projection",
-        "function_ref": format!("op://projection/run@sha256:{}", "b".repeat(64)),
-        "grants": ["stream.read:thread", "stream.write:control"],
-        "trigger": { "kind": "turn.completed" },
-        "source": {
-            "selectors": [{ "stream": "thread", "kind": "turn.completed" }]
-        },
-        "sink": { "stream": "control", "kind": "loop.completed" },
-        "budget": {},
-        "config": {}
-    }]);
 
-    let (manifest, _) =
-        crate::agent::manifest_bind::compile_published_agent_record(&record, None).unwrap();
-
-    let verlet_agent::manifest_schema::AgentManifestTool::Bash(tool) = &manifest.tools[0] else {
-        panic!("expected bash tool");
-    };
     assert_eq!(
-        tool.attachment,
-        verlet_agent::manifest_schema::AgentManifestAttachment {
-            allowed_secrets: std::collections::BTreeSet::from([
-                "API_TOKEN".to_string(),
-                "SECOND_TOKEN".to_string(),
-            ]),
-            allowed_private_network: std::collections::BTreeMap::from([(
-                "http://127.0.0.1:9000".to_string(),
-                std::collections::BTreeSet::from(["POST".to_string()]),
-            )]),
-        }
+        crate::agent::manifest_bind::compile_published_agent_record(&record, None)
+            .unwrap_err()
+            .to_string(),
+        format!(
+            "runtime factory failed: agent record {} uses unsupported persisted manifest data; republish the record with the current Verlet version",
+            record.ref_uri
+        )
     );
-    assert_eq!(
-        record.resolved_manifest["policies"]["network"], "declared-origins",
-        "persisted compatibility decoding must not mutate the immutable record"
-    );
-    assert!(record.resolved_manifest["tools"][0]["grants"].is_array());
-    assert_eq!(manifest.tools.len(), 2);
-    assert_eq!(manifest.couplings.len(), 1);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3131,7 +3085,7 @@ async fn two_segment_operation_ref_fails_closed_for_unknown_operation() {
 }
 
 #[test]
-fn legacy_attachment_config_derivation_extracts_only_live_enforcement_grants() {
+fn attachment_config_derivation_extracts_only_live_enforcement_grants() {
     let config = crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
         &std::collections::BTreeSet::from([
             "fs.read:/workspace".to_string(),
@@ -3357,58 +3311,17 @@ fn operation_binding_accumulator_merges_whole_record_order_independently() {
 }
 
 #[test]
-fn operation_binding_reads_legacy_grants_but_new_writes_drop_them() {
-    let raw = r#"[{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net.http:GET:https://example.com"]}]"#;
-    let bindings = serde_json::from_str::<
-        Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
-    >(raw)
-    .unwrap();
+fn operation_binding_rejects_legacy_grant_fields() {
+    for raw in [
+        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["secret:API_TOKEN"]}"#,
+        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grant_expiries":[{"capability":"secret:API_TOKEN","expires_at":"2025-01-01T00:00:00Z"}]}"#,
+    ] {
+        let err =
+            serde_json::from_str::<crate::agent::manifest_bind::AgentManifestOperationBinding>(raw)
+                .unwrap_err();
 
-    assert_eq!(
-        bindings,
-        vec![crate::agent::manifest_bind::AgentManifestOperationBinding {
-            name: "search".to_string(),
-            artifact_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .to_string(),
-            effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-            attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
-            operations: Vec::new(),
-            direct_tools: Vec::new(),
-        }]
-    );
-    assert_eq!(
-        serde_json::to_string(&bindings).unwrap(),
-        r#"[{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]"#
-    );
-}
-
-#[test]
-fn operation_binding_derives_attachment_config_from_legacy_metadata() {
-    let binding = serde_json::from_str::<crate::agent::manifest_bind::AgentManifestOperationBinding>(
-        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net.http.private:POST:http://127.0.0.1:9000","secret:API_TOKEN"]}"#,
-    )
-    .unwrap();
-
-    assert_eq!(
-        binding.attachment_config,
-        verlet_wasm::WasmAttachmentConfig {
-            allowed_secrets: std::collections::BTreeSet::from(["API_TOKEN".to_string()]),
-            allowed_private_network: std::collections::BTreeMap::from([(
-                "http://127.0.0.1:9000".to_string(),
-                std::collections::BTreeSet::from(["POST".to_string()]),
-            )]),
-        }
-    );
-}
-
-#[test]
-fn operation_binding_preserves_explicit_empty_attachment_config() {
-    let binding = serde_json::from_str::<crate::agent::manifest_bind::AgentManifestOperationBinding>(
-        r#"{"name":"search","artifact_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","grants":["net.http.private:POST:http://127.0.0.1:9000","secret:API_TOKEN"],"attachment_config":{}}"#,
-    )
-    .unwrap();
-
-    assert!(binding.attachment_config.is_empty());
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
 }
 
 #[test]
@@ -3830,11 +3743,9 @@ fn wat_bytes(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
-    // This is the raw wire shape written before placement, workspace, skill
-    // packages, and workspace skill discovery existed.
-    let legacy_wire = r#"{
-            "ref_uri":"cooldis://agents/karl",
+fn minimal_bind_receipt_decodes_without_optional_witnesses() {
+    let minimal_wire = r#"{
+            "ref_uri":"agent://karl@0.1.0",
             "manifest_hash":"sha256-manifest",
             "model_profile_id":"default",
             "provider_id":"anthropic",
@@ -3851,36 +3762,36 @@ fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
             },
             "overridden_keys":[]
         }"#;
-    let legacy_receipt: crate::agent::manifest_bind::AgentManifestBindReceipt =
-        serde_json::from_str(&legacy_wire).unwrap();
-    assert_eq!(legacy_receipt.placement, None);
-    assert_eq!(legacy_receipt.model_profile_origin, None);
-    assert_eq!(legacy_receipt.placement_origin, None);
-    assert_eq!(legacy_receipt.workspace, None);
-    assert_eq!(legacy_receipt.workspace_origin, None);
-    assert_eq!(legacy_receipt.skill_discovery, None);
-    assert_eq!(legacy_receipt.ref_uri, "cooldis://agents/karl");
-    assert_eq!(legacy_receipt.tool_ids, vec!["threads/spawn"]);
-    let legacy_value = serde_json::to_value(&legacy_receipt).unwrap();
-    assert!(legacy_value.get("model_profile_origin").is_none());
-    assert!(legacy_value.get("placement_origin").is_none());
-    assert!(legacy_value.get("workspace_origin").is_none());
+    let receipt: crate::agent::manifest_bind::AgentManifestBindReceipt =
+        serde_json::from_str(&minimal_wire).unwrap();
+    assert_eq!(receipt.placement, None);
+    assert_eq!(receipt.model_profile_origin, None);
+    assert_eq!(receipt.placement_origin, None);
+    assert_eq!(receipt.workspace, None);
+    assert_eq!(receipt.workspace_origin, None);
+    assert_eq!(receipt.skill_discovery, None);
+    assert_eq!(receipt.ref_uri, "agent://karl@0.1.0");
+    assert_eq!(receipt.tool_ids, vec!["threads/spawn"]);
+    let value = serde_json::to_value(&receipt).unwrap();
+    assert!(value.get("model_profile_origin").is_none());
+    assert!(value.get("placement_origin").is_none());
+    assert!(value.get("workspace_origin").is_none());
     assert!(
-        serde_json::to_value(&legacy_receipt)
+        serde_json::to_value(&receipt)
             .unwrap()
             .get("placement")
             .is_none(),
-        "absent placement must serialize to the legacy wire shape"
+        "absent placement must stay absent"
     );
     assert!(
-        serde_json::to_value(&legacy_receipt)
+        serde_json::to_value(&receipt)
             .unwrap()
             .get("workspace")
             .is_none(),
-        "absent workspace must serialize to the legacy wire shape"
+        "absent workspace must stay absent"
     );
     assert!(
-        serde_json::to_value(&legacy_receipt)
+        serde_json::to_value(&receipt)
             .unwrap()
             .get("skill_discovery")
             .is_none(),
@@ -3893,7 +3804,7 @@ fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
             executor_ref: Some("executors/pi-sandbox".to_string()),
             config: std::collections::BTreeMap::new(),
         }),
-        ..legacy_receipt
+        ..receipt
     };
     let round_tripped: crate::agent::manifest_bind::AgentManifestBindReceipt =
         serde_json::from_str(&serde_json::to_string(&placed).unwrap()).unwrap();
@@ -3901,10 +3812,10 @@ fn raw_legacy_bind_receipt_decodes_without_optional_witnesses() {
 }
 
 #[test]
-fn legacy_bind_receipt_ignores_removed_nested_grant_fields() {
-    let legacy_wire = serde_json::json!({
-        "ref_uri": "agent://legacy@0.1.0",
-        "manifest_hash": "sha256:legacy-manifest",
+fn bind_receipt_rejects_removed_nested_grant_fields() {
+    let removed_grant_wire = serde_json::json!({
+        "ref_uri": "agent://current@0.1.0",
+        "manifest_hash": "sha256:manifest",
         "model_profile_id": "default",
         "provider_id": "local_offline",
         "model_id": "echo",
@@ -3927,7 +3838,7 @@ fn legacy_bind_receipt_ignores_removed_nested_grant_fields() {
             }]
         }],
         "couplings": [{
-            "id": "legacy_controller",
+            "id": "controller",
             "role": "controller",
             "trigger_kind": "tool.call.requested",
             "source_streams": ["thread"],
@@ -3943,7 +3854,7 @@ fn legacy_bind_receipt_ignores_removed_nested_grant_fields() {
                 "expires_at": "2025-01-01T00:00:00Z"
             }],
             "budget": {},
-            "config_hash": "sha256:legacy-config"
+            "config_hash": "sha256:config"
         }],
         "granted": ["secret:API_TOKEN"],
         "grant_bindings": [{
@@ -3958,39 +3869,17 @@ fn legacy_bind_receipt_ignores_removed_nested_grant_fields() {
         "overridden_keys": []
     });
 
-    let receipt: crate::agent::manifest_bind::AgentManifestBindReceipt =
-        serde_json::from_value(legacy_wire).unwrap();
-    assert_eq!(
-        receipt.operation_bindings[0]
-            .attachment_config
-            .allowed_secrets,
-        std::collections::BTreeSet::from(["API_TOKEN".to_string()])
-    );
-    assert_eq!(receipt.operation_bindings[0].direct_tools.len(), 1);
-    assert_eq!(receipt.couplings.len(), 1);
-
-    let normalized = serde_json::to_value(receipt).unwrap();
-    assert!(normalized.get("granted").is_none());
-    assert!(normalized.get("grant_bindings").is_none());
-    assert!(normalized["operation_bindings"][0].get("grants").is_none());
-    assert!(
-        normalized["operation_bindings"][0]
-            .get("grant_expiries")
-            .is_none()
-    );
-    assert!(
-        normalized["operation_bindings"][0]["direct_tools"][0]
-            .get("grant_expiries")
-            .is_none()
-    );
-    assert!(normalized["couplings"][0].get("grants").is_none());
-    assert!(normalized["couplings"][0].get("grant_expiries").is_none());
+    let error = serde_json::from_value::<crate::agent::manifest_bind::AgentManifestBindReceipt>(
+        removed_grant_wire,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown field"), "{error}");
 }
 
 #[test]
 fn bind_receipt_placement_tolerates_future_wire_fields() {
     let future_wire = serde_json::json!({
-        "ref_uri": "cooldis://agents/karl",
+        "ref_uri": "agent://karl@0.1.0",
         "manifest_hash": "sha256-manifest",
         "model_profile_id": "default",
         "provider_id": "anthropic",

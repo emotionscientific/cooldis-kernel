@@ -3,8 +3,7 @@ pub struct WasmRuntimeFactory {
 }
 
 /// Projects the two host-enforced attachment authorities out of operation ABI
-/// capability grants. Callers at legacy decode boundaries use the same
-/// projection so old persisted authority is preserved exactly once.
+/// capability grants used by current operation packages and bind inputs.
 pub(crate) fn attachment_config_from_capability_grants(
     grants: &std::collections::BTreeSet<String>,
 ) -> verlet_wasm::WasmAttachmentConfig {

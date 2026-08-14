@@ -20,12 +20,10 @@
 @source-pattern	cooldis\.(admission|observation|orch|handle|identity|remote)[a-z0-9_.:/-]*	Frozen persisted admission, observation, placement, handle, identity, and remote IDs.
 @source-pattern	cooldis\.(blob|import-build-receipt|ingress\.v1|trace\.common/1)	Frozen blob, import, ingress, and trace format IDs.
 @source-pattern	cooldis\.(capsule_bindings\.operation_names|example\.[a-z0-9_.-]+/[0-9]+|scaffold\.[a-z0-9_.-]+/[0-9]+)	Frozen legacy config and example-fixture format IDs.
-@source-pattern	cooldis://agents/[a-z0-9_.-]+	Frozen legacy agent receipt refs.
 @source-pattern	["']cooldis\.["']	Frozen reserved schema-cohort prefix.
 @source-pattern	COOLDIS\.orch\.placement/1	Compatibility assertion for case-insensitive reserved schema cohorts.
 @source-pattern	cooldis_(app_server|coalesce_(bursts|max_batch|window_ms)|coalesced_(batch_size|source_envelope_ids)|daemon_(egress_(cursors|dead_letters(_route)?|threads(_route)?)|ingress_(bindings|ownership(_key)?))|identity_(active_bootstrap_root|auth_rejections|credentials(_principal)?|host_effects(_session)?|principals(_active_kind)?|sessions(_id|_offline)?)|ingress_dedupe(_delete_ownership)?|mandate_event_id|mcp_source_records|remote_(child_queue_cursor|turn_(id|input))|route_(agent_ref|id|policy|threading)|scheduled_for|secret_records|session_id|stream_(leases(_scope_latest)?|propagation_state|write_credentials(_lease)?)|sync_(push_rejections(_stream)?|\{\}\{\})|tenant_id|user_id)([^[:alnum:]_]|$)	Frozen persisted storage names and metadata keys.
 @source-pattern	__COOLDIS_CONSOLE_CONFIG__	Shipped embedded-console bridge key.
-@source-pattern	cooldis-console-token[.a-z0-9_-]*	Shipped console token protocol compatibility key.
 .github/CODEOWNERS	Repository remote site or external workflow identity is out of scope for EMO-520.
 .github/ISSUE_TEMPLATE/config.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
 CHANGELOG.md	Rename and deprecation-window receipt for v0.3.0.
