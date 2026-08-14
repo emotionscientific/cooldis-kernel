@@ -24,10 +24,8 @@
     };
   };
 
-  outputs =
-    inputs@{ flake-parts, ... }:
-    flake-parts.lib.mkFlake { inherit inputs; } {
-      # The four targets .github/workflows/release.yml packages.
+  outputs = inputs @ {flake-parts, ...}:
+    flake-parts.lib.mkFlake {inherit inputs;} {
       systems = [
         "x86_64-linux"
         "aarch64-linux"
