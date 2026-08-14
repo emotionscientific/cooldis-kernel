@@ -1121,7 +1121,7 @@ pub fn fold_thread_spawn_dispatch(
 /// Resolves one model-facing child `task_name` by folding the parent's durable
 /// spawn request and witnessed spawn records. A task name is reserved for the
 /// lifetime of its parent, including after the child reaches terminal state.
-/// Multiple witnessed handles for one name are legacy/corrupt ambiguity and
+/// Multiple witnessed handles for one name are corrupt ambiguity and
 /// fail closed rather than preferring a live child over a completed child.
 pub fn fold_thread_task_name_resolution(
     events: &[verlet_history::EventRecord],

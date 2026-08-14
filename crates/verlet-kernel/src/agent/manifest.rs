@@ -2,10 +2,6 @@ use sha2::Digest as _;
 use std::io::Write as _;
 
 const AGENT_RECORD_SCHEMA_VERSION: u32 = 1;
-// Reader-only compatibility for records published before the Verlet rename.
-// New manifest source is validated against AGENT_MANIFEST_KIND before a
-// publish plan can be constructed.
-const LEGACY_AGENT_RECORD_KIND: &str = concat!("cool", "dis.agent-manifest");
 const FOLDER_FIRST_SYSTEM_PROMPT_RESOURCE: &str = "identity";
 const FOLDER_FIRST_SYSTEM_PROMPT_PREFLIGHT_REF: &str =
     "resource://artifact/sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -120,11 +116,11 @@ impl LocalAgentRegistry {
         })?;
         let record: PublishedAgentRecord = serde_json::from_slice(&bytes).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "failed to decode agent record {}: {err}",
+                "failed to decode agent record {}: {err}; republish the record with the current Verlet version",
                 path.display()
             ))
         })?;
-        record.validate_persisted()?;
+        record.validate()?;
         if record.name != name {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -189,11 +185,11 @@ impl LocalAgentRegistry {
         })?;
         let record: PublishedAgentRecord = serde_json::from_slice(&bytes).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "failed to decode agent version record {}: {err}",
+                "failed to decode agent version record {}: {err}; republish the record with the current Verlet version",
                 path.display()
             ))
         })?;
-        record.validate_persisted()?;
+        record.validate()?;
         if record.name != name || record.version != version {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -282,7 +278,6 @@ impl LocalAgentRegistry {
                 source_hash: record.source_hash,
                 manifest_hash: record.manifest_hash,
                 published_at_ms: record.published_at_ms,
-                authored_source_present: record.authored_source.is_some(),
             });
         }
         records.sort_by_key(|record| record.published_at_ms);
@@ -760,7 +755,7 @@ impl AgentPublishPlan {
             namespace: self.namespace,
             version: self.version,
             description: self.description,
-            authored_source: Some(self.authored_source),
+            authored_source: self.authored_source,
             source_hash: self.source_hash,
             manifest_hash: self.manifest_hash,
             model_profile_count: self.model_profile_count,
@@ -787,17 +782,14 @@ pub struct PublishedAgentRecord {
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authored_source: Option<String>,
+    pub authored_source: String,
     pub source_hash: String,
     pub manifest_hash: String,
     pub model_profile_count: usize,
     pub tool_count: usize,
-    #[serde(default)]
     pub tool_refs: Vec<AgentToolRef>,
     pub resource_count: usize,
     /// Artifact refs resolved when the manifest was compiled.
-    #[serde(default)]
     pub resolved_refs: Vec<verlet_agent::manifest_schema::AgentManifestResolvedRef>,
     pub ref_uri: String,
     pub resolved_manifest: serde_json::Value,
@@ -810,7 +802,6 @@ pub struct AgentVersionSummary {
     pub source_hash: String,
     pub manifest_hash: String,
     pub published_at_ms: u64,
-    pub authored_source_present: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -917,17 +908,6 @@ fn json_pointer_child(path: &str, segment: &str) -> String {
 
 impl PublishedAgentRecord {
     pub fn validate(&self) -> crate::kernel::runtime_host::VerletResult<()> {
-        self.validate_kind(false)
-    }
-
-    pub(crate) fn validate_persisted(&self) -> crate::kernel::runtime_host::VerletResult<()> {
-        self.validate_kind(true)
-    }
-
-    fn validate_kind(
-        &self,
-        allow_legacy_kind: bool,
-    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if self.schema_version != AGENT_RECORD_SCHEMA_VERSION {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
@@ -936,14 +916,11 @@ impl PublishedAgentRecord {
                 ),
             ));
         }
-        if self.kind != verlet_agent::manifest_schema::AGENT_MANIFEST_KIND
-            && !(allow_legacy_kind && self.kind == LEGACY_AGENT_RECORD_KIND)
-        {
+        if self.kind != verlet_agent::manifest_schema::AGENT_MANIFEST_KIND {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
-                    "agent record kind must be {:?}, got {:?}",
-                    verlet_agent::manifest_schema::AGENT_MANIFEST_KIND,
-                    self.kind,
+                    "agent record {} uses unsupported kind {:?}; republish the record with the current Verlet version",
+                    self.ref_uri, self.kind,
                 ),
             ));
         }
@@ -1216,14 +1193,13 @@ fn parse_agent_tool_refs(
 }
 
 fn validate_tool_ref(value: &str) -> crate::kernel::runtime_host::VerletResult<()> {
-    if (value.starts_with("tool://") && value.len() > "tool://".len())
-        || (value.starts_with("op://") && value.len() > "op://".len())
+    if (value.starts_with("op://") && value.len() > "op://".len())
         || (value.starts_with("mcp://") && value.len() > "mcp://".len())
     {
         Ok(())
     } else {
         Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-            format!("agent tool ref {value:?} must start with op://, mcp://, or legacy tool://"),
+            format!("agent tool ref {value:?} must start with op:// or mcp://"),
         ))
     }
 }

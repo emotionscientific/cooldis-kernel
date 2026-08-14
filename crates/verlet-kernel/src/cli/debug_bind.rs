@@ -146,12 +146,16 @@ pub(super) async fn run_debug_bind(
     let compile: crate::agent::manifest_bind::AgentManifestCompileReceipt =
         serde_json::from_value(compile_event.payload.clone()).map_err(|err| {
             crate::cli::usage_error(format!(
-                "manifest.compile.completed payload is invalid: {err}"
+                "manifest.compile.completed receipt {} for thread {} is invalid: {err}",
+                compile_event.event_id, options.thread_id
             ))
         })?;
     let bind: crate::agent::manifest_bind::AgentManifestBindReceipt =
         serde_json::from_value(bind_event.payload.clone()).map_err(|err| {
-            crate::cli::usage_error(format!("manifest.bind.completed payload is invalid: {err}"))
+            crate::cli::usage_error(format!(
+                "manifest.bind.completed receipt {} for thread {} is invalid: {err}",
+                bind_event.event_id, options.thread_id
+            ))
         })?;
     let explanation = assemble_bind_explanation(
         &options.thread_id,

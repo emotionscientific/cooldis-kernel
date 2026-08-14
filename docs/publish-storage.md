@@ -170,7 +170,7 @@ methods still resolve binding snapshots for management flows, but thread
 runtime authority comes from recorded `binding.attached` events, as changed by
 later `binding.detached`/`binding.attached` events. Folding that history yields
 the active toolset; the manifest and `manifest.bind.completed` receipt retain
-their preset, provenance, and compatibility roles.
+their preset and provenance roles.
 
 The path-3 development loop is:
 

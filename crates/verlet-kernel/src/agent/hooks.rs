@@ -215,7 +215,7 @@ pub struct PostCompactHookOutcome {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-// lexicon-allow: hook - existing host debug hook outcome API name retained for compatibility.
+// lexicon-allow: hook - current host debug hook outcome API name.
 pub struct StopHookOutcome {
     pub records: Vec<HookRunRecord>,
     pub mutation_witnesses: Vec<HookMutationWitness>,
@@ -227,7 +227,7 @@ pub struct StopHookOutcome {
 }
 
 #[async_trait::async_trait]
-// lexicon-allow: hook - existing host debug hook trait name retained for compatibility.
+// lexicon-allow: hook - current host debug hook trait name.
 pub trait HookHandler: Send + Sync + 'static {
     fn spec(&self) -> HookHandlerSpec;
 
@@ -250,7 +250,7 @@ pub trait HookHandler: Send + Sync + 'static {
 }
 
 #[derive(Clone, Default)]
-// lexicon-allow: hook - existing host debug hook pipeline API name retained for compatibility.
+// lexicon-allow: hook - current host debug hook pipeline API name.
 pub struct HookPipeline {
     handlers: Vec<std::sync::Arc<dyn HookHandler>>,
     shell: Option<String>,
@@ -529,7 +529,7 @@ impl HookPipeline {
 }
 
 #[derive(Clone, Debug)]
-// lexicon-allow: hook - existing command hook adapter API name retained for compatibility.
+// lexicon-allow: hook - current command hook adapter API name.
 pub struct CommandHookHandler {
     spec: HookHandlerSpec,
     command: String,

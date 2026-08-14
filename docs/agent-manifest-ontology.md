@@ -544,7 +544,7 @@ interpreted only against that bound manifest:
   rows and published operation refs are bind inputs, not start-time operation
   injection. The resulting opening `binding.attached` events establish recorded
   tool authority; `manifest.bind.completed` remains the frozen receipt name for
-  the non-authority bind payload and compatibility history.
+  the non-authority bind payload and provenance history.
 
 The default manifest may contain synthesized `bash_tool` rows for daemon
 operation-binding config (`global_operation_names` and

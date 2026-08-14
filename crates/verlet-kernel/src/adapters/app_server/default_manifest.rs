@@ -10,8 +10,6 @@
 pub(super) const DEFAULT_AGENT_NAME: &str = "default";
 /// Namespace marking kernel-synthesized records (D1).
 pub(super) const DEFAULT_AGENT_NAMESPACE: &str = "verlet";
-/// Namespace used by synthesized records written before the Verlet rename.
-pub(super) const LEGACY_DEFAULT_AGENT_NAMESPACE: &str = concat!("cool", "dis");
 /// The ref a ref-less `thread/start` binds (alias resolution via `@latest`).
 pub(crate) const DEFAULT_AGENT_REF: &str = "agent://verlet/default@latest";
 const DEFAULT_MANIFEST_LOCK_ATTEMPTS: usize = 250;
@@ -243,7 +241,7 @@ fn default_manifest_tools(
     config: &crate::adapters::app_server::VerletAppServerConfig,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_agent::manifest_schema::AgentManifestTool>>
 {
-    // lexicon-allow: capsule - legacy config field name
+    // lexicon-allow: capsule - current config field name
     let bindings = &config.capsule_bindings;
     let mut tools = Vec::new();
     if let Some(registry_root) = bindings.registry_root.as_ref() {
@@ -423,15 +421,12 @@ fn ensure_default_record_identity(
     record: &crate::agent::manifest::PublishedAgentRecord,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if record.name != DEFAULT_AGENT_NAME
-        || !matches!(
-            record.namespace.as_deref(),
-            Some(DEFAULT_AGENT_NAMESPACE | LEGACY_DEFAULT_AGENT_NAMESPACE)
-        )
+        || record.namespace.as_deref() != Some(DEFAULT_AGENT_NAMESPACE)
     {
         return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
             format!(
-                "agent registry latest default record is {} in namespace {:?}, expected {}/{}",
-                record.name, record.namespace, DEFAULT_AGENT_NAMESPACE, DEFAULT_AGENT_NAME
+                "default agent record {} uses unsupported namespace {:?}; republish the record with the current Verlet version",
+                record.ref_uri, record.namespace
             ),
         ));
     }

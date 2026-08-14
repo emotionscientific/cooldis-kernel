@@ -670,24 +670,22 @@ fn verlet_cli_agent_run_uses_registry_relative_blob_root() {
 }
 
 #[test]
-fn verlet_cli_agent_init_out_toml_keeps_single_file_compatibility() {
+fn verlet_cli_agent_init_rejects_single_file_output() {
     let workspace = temp_dir("agent-init-single-file");
     let manifest_path = workspace.join("single-agent.verlet.agent.toml");
 
-    let output = run_verlet([
+    let output = run_verlet_failed([
         "agent",
         "init",
         "single-agent",
         "--out",
         manifest_path.to_str().unwrap(),
     ]);
-    assert!(output.contains(manifest_path.to_str().unwrap()));
-    assert!(manifest_path.exists());
+    assert!(stderr(&output).contains(
+        "--out must name a project directory; single-manifest file output is not supported"
+    ));
+    assert!(!manifest_path.exists());
     assert!(!workspace.join("prompts").exists());
-
-    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
-    assert!(manifest.contains("name = \"single-agent\""));
-    assert!(manifest.contains("verlet.agent-manifest"));
 }
 
 #[test]
@@ -1855,7 +1853,7 @@ model_ref = "model://example-chat-model"
             .unwrap()
             .starts_with("sha256:")
     );
-    assert_eq!(versions[0]["authored_source_present"], true);
+    assert!(versions[0].get("authored_source_present").is_none());
 
     let diff = run_verlet([
         "agent",
@@ -1903,13 +1901,20 @@ model_ref = "model://example-chat-model"
     assert!(cross_form.contains("~ /context:"));
     assert!(cross_form.contains("+ /resources/0:"));
 
-    let legacy_path = verlet::agent::manifest::LocalAgentRegistry::new(&registry_root)
+    let incomplete_path = verlet::agent::manifest::LocalAgentRegistry::new(&registry_root)
         .version_record_path("auditor", "1.0.0")
         .unwrap();
-    let mut legacy: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&legacy_path).unwrap()).unwrap();
-    legacy.as_object_mut().unwrap().remove("authored_source");
-    std::fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    let complete_record = std::fs::read(&incomplete_path).unwrap();
+    let mut incomplete: serde_json::Value = serde_json::from_slice(&complete_record).unwrap();
+    incomplete
+        .as_object_mut()
+        .unwrap()
+        .remove("authored_source");
+    std::fs::write(
+        &incomplete_path,
+        serde_json::to_vec_pretty(&incomplete).unwrap(),
+    )
+    .unwrap();
     let failed = run_verlet_failed([
         "agent",
         "diff",
@@ -1922,8 +1927,10 @@ model_ref = "model://example-chat-model"
         registry_root.to_str().unwrap(),
     ]);
     let error = stderr(&failed);
-    assert!(error.contains("auditor@1.0.0"));
-    assert!(error.contains("legacy record has no authored_source"));
+    assert!(error.contains("failed to decode agent version record"));
+    assert!(error.contains("missing field `authored_source`"));
+    assert!(error.contains("republish the record"));
+    std::fs::write(&incomplete_path, complete_record).unwrap();
 
     let missing_value = run_verlet_failed([
         "agent",

@@ -3535,8 +3535,8 @@ async fn route_agent_identity_survives_true_runtime_restart() {
 }
 
 #[tokio::test]
-async fn lazy_reload_gap_fills_legacy_start_metadata_from_receipt_without_events() {
-    let root = test_root("route-agent-restart-legacy-metadata");
+async fn lazy_reload_rebuilds_projected_start_metadata_from_receipts_without_events() {
+    let root = test_root("route-agent-restart-projected-metadata");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let operation_registry_root = root.join("operations");
@@ -3561,7 +3561,7 @@ async fn lazy_reload_gap_fills_legacy_start_metadata_from_receipt_without_events
         .bind_daemon_route_agent("agent://daemon-route-runner@latest")
         .await
         .unwrap();
-    let mut legacy_metadata = binding.metadata;
+    let mut projected_metadata = binding.metadata;
     for key in [
         "cooldis.agent.model_profile_id",
         "cooldis.agent.provider_id",
@@ -3573,16 +3573,16 @@ async fn lazy_reload_gap_fills_legacy_start_metadata_from_receipt_without_events
         "cooldis.agent.operation_bindings",
         crate::agent::manifest_bind::THREAD_AGENT_STATIC_CONTEXT_SEGMENTS_METADATA,
     ] {
-        legacy_metadata.remove(key);
+        projected_metadata.remove(key);
     }
     let first_handle = first_server
         .supervisor()
         .start_thread(crate::kernel::supervisor::ThreadStartRequest {
             tenant_id: first_server.tenant_id().to_string(),
             user_id: first_server.user_id().to_string(),
-            session_id: format!("legacy-metadata-{}", uuid::Uuid::now_v7()),
+            session_id: format!("projected-metadata-{}", uuid::Uuid::now_v7()),
             topology: verlet_runtime_contracts::ThreadTopology::root(),
-            metadata: legacy_metadata,
+            metadata: projected_metadata,
         })
         .await
         .unwrap();
@@ -3629,11 +3629,11 @@ async fn lazy_reload_gap_fills_legacy_start_metadata_from_receipt_without_events
     let reloaded = restarted
         .get_or_load_thread_handle(&coordinates)
         .await
-        .expect("legacy daemon metadata should rehydrate from durable receipts");
+        .expect("projected daemon metadata should rehydrate from durable receipts");
     assert_eq!(
         thread_events_for(&session_store_path, &coordinates).await,
         events_before_reload,
-        "legacy daemon lazy reload must append no events"
+        "daemon metadata projection rebuild must append no events"
     );
     for key in [
         "cooldis.agent.model_profile_id",
@@ -3656,8 +3656,8 @@ async fn lazy_reload_gap_fills_legacy_start_metadata_from_receipt_without_events
         .submit(
             &coordinates.tenant_id,
             coordinates.thread_id,
-            "after-legacy-reload",
-            "after legacy reload",
+            "after-projection-rebuild",
+            "after projection rebuild",
         )
         .await
         .unwrap();
@@ -3747,10 +3747,10 @@ async fn fork_child_identity_survives_true_runtime_restart() {
 }
 
 #[tokio::test]
-async fn legacy_lazy_reload_fabricates_root_without_appending_events() {
-    let root = test_root("legacy-reload-degraded");
+async fn empty_stream_lazy_load_claims_a_new_root_without_appending_events() {
+    let root = test_root("empty-stream-new-root");
     let (_server, bridge, _rx) = test_bridge_at_root(&root).await;
-    let envelope = test_envelope("legacy reload");
+    let envelope = test_envelope("new root");
     let target = bridge.resolve_target(&envelope).await.unwrap();
     let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: target.address.tenant_id,
@@ -6293,58 +6293,43 @@ async fn principal_tenant_mismatch_is_witnessed_rejected_and_completed() {
 }
 
 #[tokio::test]
-async fn legacy_leased_delivery_derivation_is_stable_across_lost_ack_redelivery() {
-    let fixture_root = test_root("queue-legacy-delivery-redelivery");
+async fn leased_envelope_without_delivery_is_witnessed_rejected_and_completed() {
+    let fixture_root = test_root("queue-missing-delivery-rejected");
     let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
     let session_store_path = server.session_store_path().to_path_buf();
     let mut envelope = with_bridge_principal(
         &bridge,
-        telegram_queue_envelope_with_update("legacy", "4703"),
+        telegram_queue_envelope_with_update("missing delivery", "4703"),
     );
     envelope.delivery = None;
-    let ingress_id = envelope.id.clone();
     let queue = std::sync::Arc::new(ScriptedIngressQueue::new(
-        "message-legacy",
+        "message-missing-delivery",
         envelope,
-        ["lost queue completion acknowledgement"],
+        std::iter::empty::<&str>(),
     ));
     let worker = crate::daemon::daemon_io::VerletDaemonQueueWorker::new(
         queue.clone(),
         bridge.clone(),
-        "worker-legacy",
+        "worker-missing-delivery",
         0,
     );
 
-    let first = worker.drain_once().await.unwrap_err();
-    assert!(
-        first
-            .to_string()
-            .contains("lost queue completion acknowledgement")
-    );
     assert_eq!(worker.drain_once().await.unwrap(), 1);
     assert!(queue.completed().await);
     assert_eq!(queue.retry_calls().await, 0);
 
     let coordinates = only_thread_coordinates(&bridge).await;
     let control = control_events_for(&session_store_path, &coordinates).await;
-    assert_eq!(
+    let claim = control
+        .iter()
+        .find(|event| event.kind == verlet_history::EventKind::IoIngressClaimed)
+        .unwrap();
+    assert_eq!(claim.payload["intent"]["outcome"], "reject");
+    assert!(claim.payload.to_string().contains("delivery is required"));
+    assert!(
         control
             .iter()
-            .filter(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
-            .count(),
-        1
-    );
-    assert!(matches!(
-        crate::daemon::daemon_io::ingress_outcome_fold(&control, &[ingress_id]).unwrap(),
-        crate::daemon::daemon_io::IngressOutcomeState::Settled { .. }
-    ));
-    let received = control
-        .iter()
-        .find(|event| event.kind == verlet_history::EventKind::IoIngressReceived)
-        .unwrap();
-    assert_eq!(
-        received.payload["dedupe_key"],
-        "telegram.bot:main:update:4703"
+            .any(|event| event.kind == verlet_history::EventKind::IoIngressSettled)
     );
     let _ = std::fs::remove_dir_all(fixture_root);
 }
@@ -9155,7 +9140,7 @@ async fn seeded_binding_unloaded_before_ingress_is_reloaded() {
 }
 
 #[tokio::test]
-async fn daemon_lazy_reload_recovers_unwitnessed_workspace_metadata_as_unbound() {
+async fn daemon_lazy_reload_rejects_unwitnessed_workspace_metadata() {
     let root = test_root("daemon-lazy-workspace-witness");
     let bridge = bridge_with_runtime_factory_at_root(
         &root,
@@ -9204,23 +9189,19 @@ async fn daemon_lazy_reload_recovers_unwitnessed_workspace_metadata_as_unbound()
         .await
         .unwrap();
 
-    let handle = bridge
-        .get_or_load_thread_handle(&coordinates)
-        .await
-        .unwrap();
-
+    let error = match bridge.get_or_load_thread_handle(&coordinates).await {
+        Ok(_) => panic!("unwitnessed persisted workspace must fail lazy load"),
+        Err(error) => error.into_inner().to_string(),
+    };
     assert!(
-        !handle
-            .context()
-            .metadata
-            .contains_key("cooldis.agent.workspace"),
-        "daemon lazy reload must not mount lifecycle workspace metadata without a bind receipt"
+        error.contains(&coordinates.thread_id.to_string()),
+        "{error}"
     );
-    bridge
-        .supervisor
-        .shutdown_thread_at(&coordinates)
-        .await
-        .unwrap();
+    assert!(
+        error.contains("no durable workspace binding witness"),
+        "{error}"
+    );
+    assert!(error.contains("start a new thread"), "{error}");
     let _ = std::fs::remove_dir_all(root);
 }
 

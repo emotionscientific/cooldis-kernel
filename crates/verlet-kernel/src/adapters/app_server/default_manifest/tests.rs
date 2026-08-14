@@ -54,7 +54,7 @@ fn synthesized_default_manifest_uses_configured_cwd_without_trailing_separator()
 }
 
 #[test]
-fn existing_legacy_default_agent_record_is_migrated_in_place() {
+fn existing_legacy_default_agent_record_requires_republish() {
     let root = std::env::temp_dir().join(format!(
         "verlet-default-manifest-legacy-{}",
         uuid::Uuid::now_v7()
@@ -70,35 +70,27 @@ fn existing_legacy_default_agent_record_is_migrated_in_place() {
             &config, false, "1.0.0",
         )
         .unwrap();
-    manifest.identity.namespace = Some(
-        crate::adapters::app_server::default_manifest::LEGACY_DEFAULT_AGENT_NAMESPACE.to_string(),
-    );
+    manifest.identity.namespace = Some(concat!("cool", "dis").to_string());
     let source =
         crate::adapters::app_server::default_manifest::default_manifest_source(&manifest).unwrap();
-    let legacy = crate::agent::manifest::LocalAgentRegistry::new(&config.agent_registry_root)
+    let old_record = crate::agent::manifest::LocalAgentRegistry::new(&config.agent_registry_root)
         .publish_plan(crate::agent::manifest::AgentPublishPlan::from_source(&source).unwrap())
         .unwrap();
     assert_eq!(
-        legacy.namespace.as_deref(),
-        Some(crate::adapters::app_server::default_manifest::LEGACY_DEFAULT_AGENT_NAMESPACE)
+        old_record.namespace.as_deref(),
+        Some(concat!("cool", "dis"))
     );
 
-    let migrated =
+    assert_eq!(
         crate::adapters::app_server::default_manifest::ensure_default_manifest_published(
             &config, false,
         )
-        .unwrap();
-    assert_eq!(
-        migrated.namespace.as_deref(),
-        Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAMESPACE)
-    );
-    assert_eq!(migrated.version, "1.0.1");
-    assert_eq!(
-        crate::agent::manifest::LocalAgentRegistry::new(&config.agent_registry_root)
-            .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
-            .unwrap()
-            .ref_uri,
-        migrated.ref_uri
+        .unwrap_err()
+        .to_string(),
+        format!(
+            "runtime factory failed: default agent record {} uses unsupported namespace {:?}; republish the record with the current Verlet version",
+            old_record.ref_uri, old_record.namespace
+        )
     );
 
     let _ = std::fs::remove_dir_all(root);

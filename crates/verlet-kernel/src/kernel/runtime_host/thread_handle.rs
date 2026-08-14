@@ -127,7 +127,8 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             .transpose()
             .map_err(|err| {
                 crate::kernel::runtime_host::VerletError::History(format!(
-                    "manifest operation binding payload codec failed: {err}"
+                    "candidate manifest bind receipt for thread {} has invalid operation bindings: {err}",
+                    coordinates.thread_id
                 ))
             })?
             .unwrap_or_default();
@@ -136,6 +137,9 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             .read_events(&stream_id, None)
             .await
             .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+        crate::adapters::app_server::threads::validate_manifest_binding_event_contract(
+            &existing_events,
+        )?;
         let expected_next_sequence = existing_events
             .last()
             .map(|event| verlet_history::EventSequence::new(event.sequence.get() + 1))

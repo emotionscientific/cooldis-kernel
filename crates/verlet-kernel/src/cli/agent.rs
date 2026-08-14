@@ -41,17 +41,16 @@ pub(super) async fn agent_init(
     let name = options
         .name
         .ok_or_else(|| crate::cli::usage_error("agent init requires <name>"))?;
-    let target = AgentInitTarget::from_options(&name, options.out_path);
-    match target {
-        AgentInitTarget::SingleFile(out_path) => {
-            write_agent_manifest_file(&name, &out_path, options.force)?;
-            println!("{}", out_path.display());
-        }
-        AgentInitTarget::ProjectDirectory(root) => {
-            write_agent_project(&name, &root, options.force)?;
-            println!("{}", root.display());
-        }
+    let root = options
+        .out_path
+        .unwrap_or_else(|| std::path::PathBuf::from(&name));
+    if root.extension().and_then(|extension| extension.to_str()) == Some("toml") {
+        return Err(crate::cli::usage_error(
+            "--out must name a project directory; single-manifest file output is not supported",
+        ));
     }
+    write_agent_project(&name, &root, options.force)?;
+    println!("{}", root.display());
     Ok(())
 }
 
@@ -542,7 +541,6 @@ pub(super) async fn agent_versions(
                     "source_hash": record.source_hash,
                     "manifest_hash": record.manifest_hash,
                     "published_at_ms": record.published_at_ms,
-                    "authored_source_present": record.authored_source_present,
                 })
             })
             .collect::<Vec<_>>();
@@ -564,13 +562,8 @@ pub(super) async fn agent_versions(
                 ))
             })?
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let authored = if !record.authored_source_present {
-            "  [no-authored-source]"
-        } else {
-            ""
-        };
         println!(
-            "{published_at:<24}  {:<16}  {}{authored}",
+            "{published_at:<24}  {:<16}  {}",
             record.version, record.manifest_hash
         );
     }
@@ -642,13 +635,7 @@ pub(super) fn manifest_diff_snapshot(
     match form {
         AgentManifestForm::Resolved => Ok(record.resolved_manifest.clone()),
         AgentManifestForm::Authored => {
-            let source = record.authored_source.as_deref().ok_or_else(|| {
-                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                    "agent record {}@{}: legacy record has no authored_source; authored-form diff is unavailable",
-                    record.name, record.version
-                ))
-            })?;
-            crate::agent::manifest::canonical_json_from_authored_source(source)
+            crate::agent::manifest::canonical_json_from_authored_source(&record.authored_source)
         }
     }
 }
@@ -743,22 +730,6 @@ pub(super) struct AgentInitArgs {
     out_path: Option<std::path::PathBuf>,
     force: bool,
     help: bool,
-}
-
-#[derive(Debug)]
-pub(super) enum AgentInitTarget {
-    SingleFile(std::path::PathBuf),
-    ProjectDirectory(std::path::PathBuf),
-}
-
-impl AgentInitTarget {
-    fn from_options(name: &str, out_path: Option<std::path::PathBuf>) -> Self {
-        match out_path {
-            Some(path) if is_agent_manifest_file_path(&path) => Self::SingleFile(path),
-            Some(path) => Self::ProjectDirectory(path),
-            None => Self::ProjectDirectory(std::path::PathBuf::from(name)),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1154,30 +1125,6 @@ pub(super) fn agent_operations_registry_root(
     registry_root.unwrap_or_else(crate::agent::manifest::default_operations_registry_root)
 }
 
-pub(super) fn is_agent_manifest_file_path(path: &std::path::Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some("toml")
-}
-
-pub(super) fn write_agent_manifest_file(
-    name: &str,
-    out_path: &std::path::Path,
-    force: bool,
-) -> crate::kernel::runtime_host::VerletResult<()> {
-    if out_path.exists() && !force {
-        return Err(crate::cli::usage_error(format!(
-            "agent manifest {} already exists; pass --force to replace it",
-            out_path.display()
-        )));
-    }
-    if let Some(parent) = out_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent).map_err(crate::cli::io_error)?;
-    }
-    std::fs::write(out_path, render_agent_manifest_template(name)?).map_err(crate::cli::io_error)
-}
-
 pub(super) fn write_agent_project(
     name: &str,
     root: &std::path::Path,
@@ -1400,7 +1347,7 @@ pub(super) fn print_agent_help() {
         "verlet agent\n\
 \n\
 Usage:\n\
-  verlet agent init <name> [--out <dir|manifest.toml>]\n\
+  verlet agent init <name> [--out <dir>]\n\
   verlet agent plan <manifest> [--registry-root .verlet/agents] [--operations-registry-root .verlet/operations]\n\
   verlet agent publish <manifest> [--registry-root .verlet/agents] [--operations-registry-root .verlet/operations]\n\
   verlet agent list [--registry-root .verlet/agents]\n\
@@ -1419,11 +1366,10 @@ pub(super) fn print_agent_init_help() {
         "verlet agent init\n\
 \n\
 Usage:\n\
-  verlet init <name> [--out <dir|manifest.toml>] [--force]\n\
-  verlet agent init <name> [--out <dir|manifest.toml>] [--force]\n\
+  verlet init <name> [--out <dir>] [--force]\n\
+  verlet agent init <name> [--out <dir>] [--force]\n\
 \n\
-Writes a folder-first Verlet agent project by default. Use --out path.toml for\n\
-the legacy single-manifest file form.\n"
+Writes a folder-first Verlet agent project. --out selects the project directory.\n"
     );
 }
 

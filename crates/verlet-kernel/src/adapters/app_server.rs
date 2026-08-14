@@ -39,7 +39,6 @@ const HTTP_UNAUTHORIZED_BODY: &str = "authentication required";
 const MAX_HTTP_REQUEST_HEADER_BYTES: usize = 8192;
 const HTTP_REQUEST_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const CONSOLE_TOKEN_PROTOCOL_PREFIX: &str = "verlet-console-token.";
-const LEGACY_CONSOLE_TOKEN_PROTOCOL_PREFIX: &str = "cooldis-console-token.";
 const DEFAULT_BLOB_REGISTRY_ROOT: &str = ".verlet/blobs";
 const CONSOLE_CREDENTIAL_ID_FILE: &str = "console-credential-id";
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
@@ -867,8 +866,8 @@ struct VerletAppServerInner {
     /// linearizable control-plane transition.
     model_mutation: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// False for injected runtime factories that do not carry the endpoint
-    /// router. Such constructions retain legacy runtime behavior and must not
-    /// report a model selection that their provider loop cannot honor.
+    /// router. Such constructions must not report a model selection that their
+    /// provider loop cannot honor.
     model_selection_enabled: bool,
     capsule_bindings: CapsuleBindingsConfig,
     agent_registry_root: std::path::PathBuf,
@@ -3459,7 +3458,6 @@ fn authorization_bearer_token(value: &str) -> Option<&str> {
 fn console_protocol_token(protocol: &str) -> Option<&str> {
     protocol
         .strip_prefix(CONSOLE_TOKEN_PROTOCOL_PREFIX)
-        .or_else(|| protocol.strip_prefix(LEGACY_CONSOLE_TOKEN_PROTOCOL_PREFIX))
         .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
 }
 

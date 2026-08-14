@@ -54,8 +54,8 @@ ingress/egress. Custom operation packages live under `operations/` and should
 be published first; then add pinned `op://...@sha256:<hash>` refs to
 `verlet.agent.toml`, or use `verlet agent publish --resolve-ops` to rewrite
 `op://name` and `op://name@latest` authoring refs to the active pinned hash
-before publishing the agent. `verlet agent init --out path.toml` keeps the old
-single-manifest file form for compatibility.
+before publishing the agent. `verlet agent init --out <dir>` selects the
+folder-first project directory. Single-manifest file output is not supported.
 
 `plan` is the dry-run boundary for agent records. It parses the source manifest,
 validates the identity envelope, resolves the canonical JSON shape, computes
@@ -143,8 +143,7 @@ for the two-lane model, no-mount rule, and durable witness semantics.
 `list` and `show` inspect published records from the local registry. `versions
 <name>` lists immutable versions by `published_at_ms`, not by the author-declared
 version string. Its text output includes an RFC3339 publication time, declared
-version, manifest hash, and `[no-authored-source]` for legacy records; `--json`
-also exposes the source hash and authored-source availability.
+version, and manifest hash; `--json` also exposes the source hash.
 
 `diff <name> --from <version>[:authored|:resolved] --to
 <version>[:authored|:resolved]` compares two immutable snapshots structurally.
@@ -153,7 +152,7 @@ manifest schema before comparison. Comparing authored and resolved forms of one
 version shows fields filled during resolution, including folder-first prompt
 lowering. Changes are JSON-pointer path ordered and reported as added, removed,
 or changed. `--json` emits the raw change list. Authored comparison fails
-explicitly when a legacy record has no retained source.
+when the retained source cannot be decoded as a current manifest.
 
 `run` starts a manifest-backed app-server thread from a published `agent://...`
 ref, sends one input turn, prints the assistant output, then prints the manifest
