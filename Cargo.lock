@@ -5878,7 +5878,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-abi"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5886,7 +5886,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-agent"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5901,7 +5901,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-chat"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crossterm",
  "futures-util",
@@ -5912,7 +5912,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-guest-sdk"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5921,7 +5921,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-guest-sdk-macros"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5930,7 +5930,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-history"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -5944,7 +5944,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-history-sqlite"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -5957,7 +5957,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-io-core"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-io-pgqrs"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5984,7 +5984,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-io-telegram"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -5997,7 +5997,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-metadata"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures-executor",
@@ -6015,7 +6015,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-operations"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -6034,7 +6034,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-process"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -6052,7 +6052,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-provider"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -6073,7 +6073,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-runtime-contracts"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6083,7 +6083,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-sqlite"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -6094,7 +6094,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-trace-ab"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-vbash"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bashkit",
@@ -6118,7 +6118,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-vfs"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bashkit",
@@ -6129,7 +6129,7 @@ dependencies = [
 
 [[package]]
 name = "verlet-wasm"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "bashkit",
  "reqwest",
