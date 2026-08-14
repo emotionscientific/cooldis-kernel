@@ -4,7 +4,7 @@ use std::io::Read as _;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn run_secret(
+pub(crate) async fn run_secret(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -46,7 +46,7 @@ pub(super) async fn run_secret(
     }
 }
 
-pub(super) async fn secret_import(
+pub(crate) async fn secret_import(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_import_args(args)?;
@@ -70,7 +70,7 @@ pub(super) async fn secret_import(
     Ok(())
 }
 
-pub(super) async fn secret_set(
+pub(crate) async fn secret_set(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_set_args(args)?;
@@ -104,7 +104,7 @@ pub(super) async fn secret_set(
     Ok(())
 }
 
-pub(super) async fn secret_list(
+pub(crate) async fn secret_list(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_list_args(args, "secret list")?;
@@ -129,7 +129,7 @@ pub(super) async fn secret_list(
     Ok(())
 }
 
-pub(super) async fn secret_status(
+pub(crate) async fn secret_status(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_name_args(args, "secret status")?;
@@ -157,7 +157,7 @@ pub(super) async fn secret_status(
     Ok(())
 }
 
-pub(super) async fn secret_delete(
+pub(crate) async fn secret_delete(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_name_args(args, "secret delete")?;
@@ -178,7 +178,7 @@ pub(super) async fn secret_delete(
 }
 
 #[derive(Debug)]
-pub(super) struct SecretImportArgs {
+pub(crate) struct SecretImportArgs {
     name: Option<String>,
     from_env: Option<String>,
     state_home: Option<std::path::PathBuf>,
@@ -186,7 +186,7 @@ pub(super) struct SecretImportArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct SecretSetArgs {
+pub(crate) struct SecretSetArgs {
     name: Option<String>,
     value_stdin: bool,
     state_home: Option<std::path::PathBuf>,
@@ -194,19 +194,19 @@ pub(super) struct SecretSetArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct SecretNameArgs {
+pub(crate) struct SecretNameArgs {
     name: Option<String>,
     state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
-pub(super) struct SecretListArgs {
+pub(crate) struct SecretListArgs {
     state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
-pub(super) fn parse_secret_import_args(
+pub(crate) fn parse_secret_import_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<SecretImportArgs> {
     let mut name = None;
@@ -252,7 +252,7 @@ pub(super) fn parse_secret_import_args(
     })
 }
 
-pub(super) fn parse_secret_set_args(
+pub(crate) fn parse_secret_set_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<SecretSetArgs> {
     let mut name = None;
@@ -293,7 +293,7 @@ pub(super) fn parse_secret_set_args(
     })
 }
 
-pub(super) fn parse_secret_name_args(
+pub(crate) fn parse_secret_name_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<SecretNameArgs> {
@@ -332,7 +332,7 @@ pub(super) fn parse_secret_name_args(
     })
 }
 
-pub(super) fn parse_secret_list_args(
+pub(crate) fn parse_secret_list_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<SecretListArgs> {
@@ -358,16 +358,16 @@ pub(super) fn parse_secret_list_args(
     Ok(SecretListArgs { state_home, help })
 }
 
-pub(super) fn default_project_state_home() -> std::path::PathBuf {
+pub(crate) fn default_project_state_home() -> std::path::PathBuf {
     std::path::PathBuf::from(".verlet/state")
 }
 
-pub(super) fn default_user_state_home()
+pub(crate) fn default_user_state_home()
 -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     Ok(crate::cli::console::default_user_verlet_home()?.join("state"))
 }
 
-pub(super) fn metadata_store_path_for_state_home(
+pub(crate) fn metadata_store_path_for_state_home(
     state_home: Option<std::path::PathBuf>,
     default_state_home: std::path::PathBuf,
 ) -> std::path::PathBuf {
@@ -376,7 +376,7 @@ pub(super) fn metadata_store_path_for_state_home(
         .join("metadata.sqlite3")
 }
 
-pub(super) async fn open_secret_store(
+pub(crate) async fn open_secret_store(
     state_home: Option<std::path::PathBuf>,
 ) -> crate::kernel::runtime_host::VerletResult<verlet_metadata::secret_store::SqliteSecretStore> {
     verlet_metadata::secret_store::SqliteSecretStore::open(metadata_store_path_for_state_home(
@@ -393,7 +393,7 @@ pub(super) async fn open_secret_store(
     })
 }
 
-pub(super) async fn open_provider_store(
+pub(crate) async fn open_provider_store(
     state_home: Option<std::path::PathBuf>,
 ) -> crate::kernel::runtime_host::VerletResult<verlet_metadata::provider_store::SqliteMetadataStore>
 {
@@ -416,7 +416,7 @@ pub(super) async fn open_provider_store(
     Ok(store)
 }
 
-pub(super) fn cross_process_database_guidance(
+pub(crate) fn cross_process_database_guidance(
     alternative: &str,
 ) -> crate::kernel::runtime_host::VerletError {
     crate::cli::usage_error(format!(
@@ -424,7 +424,7 @@ pub(super) fn cross_process_database_guidance(
     ))
 }
 
-pub(super) fn turso_cross_process_lock_error(message: &str) -> bool {
+pub(crate) fn turso_cross_process_lock_error(message: &str) -> bool {
     // turso 0.7.0-pre.18 erases LimboError::LockingError through turso::Error.
     let Some((_, engine_error)) = message.split_once("sqlite engine error: ") else {
         return false;
@@ -434,13 +434,13 @@ pub(super) fn turso_cross_process_lock_error(message: &str) -> bool {
             && engine_error.ends_with("'. File is locked by another process"))
 }
 
-pub(super) fn secret_cli_error(
+pub(crate) fn secret_cli_error(
     err: impl std::fmt::Display,
 ) -> crate::kernel::runtime_host::VerletError {
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!("secret store failed: {err}"))
 }
 
-pub(super) fn provider_cli_error(
+pub(crate) fn provider_cli_error(
     err: impl std::fmt::Display,
 ) -> crate::kernel::runtime_host::VerletError {
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
@@ -448,7 +448,7 @@ pub(super) fn provider_cli_error(
     ))
 }
 
-pub(super) fn secret_source_display(
+pub(crate) fn secret_source_display(
     status: &verlet_metadata::secret_store::SecretStatus,
 ) -> String {
     match (&status.source_kind, status.source_label.as_deref()) {
@@ -464,7 +464,7 @@ pub(super) fn secret_source_display(
     }
 }
 
-pub(super) fn trim_stdin_secret_value(mut value: String) -> String {
+pub(crate) fn trim_stdin_secret_value(mut value: String) -> String {
     if value.ends_with('\n') {
         value.pop();
         if value.ends_with('\r') {
@@ -474,7 +474,7 @@ pub(super) fn trim_stdin_secret_value(mut value: String) -> String {
     value
 }
 
-pub(super) fn print_secret_help() {
+pub(crate) fn print_secret_help() {
     println!(
         "verlet secret\n\
 \n\
@@ -490,7 +490,7 @@ redact values; tool runtimes receive only manifest-declared secret names.\n"
     );
 }
 
-pub(super) fn print_secret_import_help() {
+pub(crate) fn print_secret_import_help() {
     println!(
         "verlet secret import\n\
 \n\
@@ -502,7 +502,7 @@ stable secret name such as EXAMPLE_API_KEY.\n"
     );
 }
 
-pub(super) fn print_secret_set_help() {
+pub(crate) fn print_secret_set_help() {
     println!(
         "verlet secret set\n\
 \n\
@@ -513,7 +513,7 @@ Stores a secret value read from stdin. The stored value is never printed.\n"
     );
 }
 
-pub(super) fn print_secret_list_help() {
+pub(crate) fn print_secret_list_help() {
     println!(
         "verlet secret list\n\
 \n\
@@ -524,7 +524,7 @@ Lists configured secret refs without printing secret values.\n"
     );
 }
 
-pub(super) fn print_secret_status_help() {
+pub(crate) fn print_secret_status_help() {
     println!(
         "verlet secret status\n\
 \n\
@@ -535,7 +535,7 @@ Prints redacted metadata for one secret ref.\n"
     );
 }
 
-pub(super) fn print_secret_delete_help() {
+pub(crate) fn print_secret_delete_help() {
     println!(
         "verlet secret delete\n\
 \n\

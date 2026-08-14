@@ -1,6 +1,6 @@
 //! The `coupling` subcommand family.
 
-pub(super) async fn run_coupling(
+pub(crate) async fn run_coupling(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -36,7 +36,7 @@ pub(super) async fn run_coupling(
     }
 }
 
-pub(super) async fn coupling_init(
+pub(crate) async fn coupling_init(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_coupling_init_args(args)?;
@@ -55,7 +55,7 @@ pub(super) async fn coupling_init(
     Ok(())
 }
 
-pub(super) async fn coupling_run(
+pub(crate) async fn coupling_run(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_coupling_run_args(args)?;
@@ -92,7 +92,7 @@ pub(super) async fn coupling_run(
     Ok(())
 }
 
-pub(super) fn load_replay_coupling_set(
+pub(crate) fn load_replay_coupling_set(
     options: &CouplingRunArgs,
 ) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest_bind::BoundCouplingSet> {
     if let Some(path) = &options.coupling_file {
@@ -109,7 +109,7 @@ pub(super) fn load_replay_coupling_set(
     ))
 }
 
-pub(super) fn load_replay_coupling_set_file(
+pub(crate) fn load_replay_coupling_set_file(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest_bind::BoundCouplingSet> {
     let raw = std::fs::read_to_string(path).map_err(|err| {
@@ -139,7 +139,7 @@ pub(super) fn load_replay_coupling_set_file(
     )))
 }
 
-pub(super) fn coupling_set_from_export_bundle(
+pub(crate) fn coupling_set_from_export_bundle(
     value: &serde_json::Value,
 ) -> crate::kernel::runtime_host::VerletResult<Option<crate::agent::manifest_bind::BoundCouplingSet>>
 {
@@ -171,7 +171,7 @@ pub(super) fn coupling_set_from_export_bundle(
     Ok(None)
 }
 
-pub(super) fn select_replay_coupling(
+pub(crate) fn select_replay_coupling(
     coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
     coupling_id: &str,
 ) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest_bind::BoundCouplingSet> {
@@ -238,7 +238,7 @@ mod selection_tests {
     }
 }
 
-pub(super) async fn resolve_replay_artifact(
+pub(crate) async fn resolve_replay_artifact(
     artifact: &str,
     registry_root: Option<std::path::PathBuf>,
     coupling_set: &mut crate::agent::manifest_bind::BoundCouplingSet,
@@ -285,7 +285,7 @@ pub(super) async fn resolve_replay_artifact(
     Ok(root)
 }
 
-pub(super) fn apply_replay_operation_record(
+pub(crate) fn apply_replay_operation_record(
     coupling_set: &mut crate::agent::manifest_bind::BoundCouplingSet,
     record: &verlet_operations::operation_store::PublishedOperationRecord,
     selected_operation: Option<&str>,
@@ -308,7 +308,7 @@ pub(super) fn apply_replay_operation_record(
     Ok(())
 }
 
-pub(super) fn select_replay_operation_name(
+pub(crate) fn select_replay_operation_name(
     coupling_id: &str,
     selected_operation: Option<&str>,
     manifest: &verlet_abi::WasmOperationManifest,
@@ -329,7 +329,7 @@ pub(super) fn select_replay_operation_name(
     )))
 }
 
-pub(super) fn validate_replay_coupling_operation(
+pub(crate) fn validate_replay_coupling_operation(
     coupling_id: &str,
     operation_name: &str,
     manifest: &verlet_abi::WasmOperationManifest,
@@ -359,7 +359,7 @@ pub(super) fn validate_replay_coupling_operation(
     Ok(())
 }
 
-pub(super) async fn load_replay_recorded_events(
+pub(crate) async fn load_replay_recorded_events(
     options: &CouplingRunArgs,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
     match (&options.journal, &options.thread_id, &options.export_bundle) {
@@ -402,7 +402,7 @@ pub(super) async fn load_replay_recorded_events(
     }
 }
 
-pub(super) fn load_replay_events_from_export(
+pub(crate) fn load_replay_events_from_export(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
     let value = read_json_file(path)?;
@@ -442,7 +442,7 @@ pub(super) fn load_replay_events_from_export(
     Ok(events)
 }
 
-pub(super) fn event_record_from_export_value(
+pub(crate) fn event_record_from_export_value(
     value: serde_json::Value,
 ) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
     let envelope = serde_json::from_value::<verlet_history::StreamRecordEnvelopeV1>(value)
@@ -465,7 +465,7 @@ pub(super) fn event_record_from_export_value(
     })
 }
 
-pub(super) async fn replay_coupling_events(
+pub(crate) async fn replay_coupling_events(
     coupling_set: &crate::agent::manifest_bind::BoundCouplingSet,
     recorded_events: Vec<verlet_history::EventRecord>,
     operation_registry_root: std::path::PathBuf,
@@ -497,7 +497,7 @@ pub(super) async fn replay_coupling_events(
     Ok(aggregate)
 }
 
-pub(super) fn read_json_file(
+pub(crate) fn read_json_file(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
     let raw = std::fs::read_to_string(path).map_err(|err| {
@@ -508,7 +508,7 @@ pub(super) fn read_json_file(
     })
 }
 
-pub(super) fn parse_pinned_operation_ref(
+pub(crate) fn parse_pinned_operation_ref(
     reference: &str,
 ) -> crate::kernel::runtime_host::VerletResult<ParsedOperationRef> {
     let body = reference
@@ -543,7 +543,7 @@ pub(super) fn parse_pinned_operation_ref(
     })
 }
 
-pub(super) fn print_coupling_replay_report(report: &CouplingReplayReport) {
+pub(crate) fn print_coupling_replay_report(report: &CouplingReplayReport) {
     println!("DRY RUN ONLY: proposed coupling discharges; no stream was appended.");
     println!("mode {}", report.mode);
     println!("snapshot {}", report.snapshot_id);
@@ -581,7 +581,7 @@ pub(super) fn print_coupling_replay_report(report: &CouplingReplayReport) {
 }
 
 #[derive(Debug)]
-pub(super) struct CouplingInitArgs {
+pub(crate) struct CouplingInitArgs {
     name: Option<String>,
     out_path: Option<std::path::PathBuf>,
     force: bool,
@@ -589,7 +589,7 @@ pub(super) struct CouplingInitArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct CouplingRunArgs {
+pub(crate) struct CouplingRunArgs {
     replay: bool,
     artifact: Option<String>,
     coupling_file: Option<std::path::PathBuf>,
@@ -603,14 +603,14 @@ pub(super) struct CouplingRunArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct ParsedOperationRef {
+pub(crate) struct ParsedOperationRef {
     name: String,
     operation: Option<String>,
     artifact_hash: String,
 }
 
 #[derive(Default)]
-pub(super) struct CouplingReplayEventStore {
+pub(crate) struct CouplingReplayEventStore {
     streams: std::sync::Mutex<std::collections::BTreeMap<String, Vec<verlet_history::EventRecord>>>,
 }
 
@@ -696,7 +696,7 @@ impl verlet_history::EventStore for CouplingReplayEventStore {
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CouplingReplayReport {
+pub(crate) struct CouplingReplayReport {
     schema: &'static str,
     mode: &'static str,
     dry_run: bool,
@@ -765,7 +765,7 @@ impl CouplingReplayReport {
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CouplingReplayRunReport {
+pub(crate) struct CouplingReplayRunReport {
     coupling_id: String,
     status: String,
     scheduler_status: crate::kernel::coupling_scheduler::CouplingRunStatus,
@@ -811,7 +811,7 @@ impl CouplingReplayRunReport {
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CouplingReplayProposalEvent {
+pub(crate) struct CouplingReplayProposalEvent {
     stream: String,
     stream_id: String,
     kind: String,
@@ -819,7 +819,7 @@ pub(super) struct CouplingReplayProposalEvent {
     provenance: verlet_history::EventProvenance,
 }
 
-pub(super) fn replay_run_is_blocked(
+pub(crate) fn replay_run_is_blocked(
     run: &crate::kernel::coupling_scheduler::CouplingRunReceipt,
 ) -> bool {
     run.reason.as_deref() == Some("quota_exhausted")
@@ -829,7 +829,7 @@ pub(super) fn replay_run_is_blocked(
             .is_some_and(|reason| reason.starts_with("budget:"))
 }
 
-pub(super) fn parse_coupling_init_args(
+pub(crate) fn parse_coupling_init_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<CouplingInitArgs> {
     let mut name = None;
@@ -865,7 +865,7 @@ pub(super) fn parse_coupling_init_args(
     })
 }
 
-pub(super) fn parse_coupling_run_args(
+pub(crate) fn parse_coupling_run_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<CouplingRunArgs> {
     let mut replay = false;
@@ -953,7 +953,7 @@ pub(super) fn parse_coupling_run_args(
     })
 }
 
-pub(super) fn write_coupling_project(
+pub(crate) fn write_coupling_project(
     name: &str,
     root: &std::path::Path,
     force: bool,
@@ -1012,7 +1012,7 @@ pub(super) fn write_coupling_project(
     .map_err(crate::cli::io_error)
 }
 
-pub(super) fn render_coupling_cargo_toml(
+pub(crate) fn render_coupling_cargo_toml(
     name: &str,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
     let crate_name = coupling_crate_name(name)?;
@@ -1041,11 +1041,11 @@ panic = \"abort\"\n",
     ))
 }
 
-pub(super) fn render_coupling_lib_rs(operation_name: &str) -> String {
+pub(crate) fn render_coupling_lib_rs(operation_name: &str) -> String {
     COUPLING_LIB_RS_TEMPLATE.replace("__OPERATION_NAME__", operation_name)
 }
 
-pub(super) fn render_coupling_tool_manifest(name: &str, operation_name: &str) -> String {
+pub(crate) fn render_coupling_tool_manifest(name: &str, operation_name: &str) -> String {
     format!(
         "kind = \"cooldis.tool\"\n\
 schema_version = 0\n\
@@ -1091,7 +1091,7 @@ expect = \"fixtures/expect.discharge.json\"\n",
     )
 }
 
-pub(super) fn render_coupling_fixture_input(name: &str) -> String {
+pub(crate) fn render_coupling_fixture_input(name: &str) -> String {
     format!(
         "{{\n\
   \"abi\": \"cooldis.coupling.invocation/0.1\",\n\
@@ -1123,7 +1123,7 @@ pub(super) fn render_coupling_fixture_input(name: &str) -> String {
     )
 }
 
-pub(super) fn render_coupling_fixture_expect(name: &str) -> String {
+pub(crate) fn render_coupling_fixture_expect(name: &str) -> String {
     format!(
         "{{\n\
   \"abi\": \"cooldis.coupling.discharge/0.1\",\n\
@@ -1144,7 +1144,7 @@ pub(super) fn render_coupling_fixture_expect(name: &str) -> String {
     )
 }
 
-pub(super) fn coupling_operation_name(
+pub(crate) fn coupling_operation_name(
     name: &str,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
     let mut operation = String::new();
@@ -1167,7 +1167,7 @@ pub(super) fn coupling_operation_name(
     Ok(operation)
 }
 
-pub(super) fn coupling_crate_name(name: &str) -> crate::kernel::runtime_host::VerletResult<String> {
+pub(crate) fn coupling_crate_name(name: &str) -> crate::kernel::runtime_host::VerletResult<String> {
     let mut suffix = String::new();
     for byte in name.bytes() {
         match byte {
@@ -1186,12 +1186,12 @@ pub(super) fn coupling_crate_name(name: &str) -> crate::kernel::runtime_host::Ve
     Ok(format!("verlet-coupling-{suffix}"))
 }
 
-pub(super) fn guest_sdk_dependency_path() -> std::path::PathBuf {
+pub(crate) fn guest_sdk_dependency_path() -> std::path::PathBuf {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../verlet-guest-sdk");
     path.canonicalize().unwrap_or(path)
 }
 
-pub(super) const COUPLING_LIB_RS_TEMPLATE: &str = r#"use verlet_guest_sdk::prelude::*;
+pub(crate) const COUPLING_LIB_RS_TEMPLATE: &str = r#"use verlet_guest_sdk::prelude::*;
 use serde_json::json;
 
 #[derive(Deserialize)]
@@ -1254,7 +1254,7 @@ mod tests {
 }
 "#;
 
-pub(super) const COUPLING_INVOCATION_SCHEMA: &str = r#"{
+pub(crate) const COUPLING_INVOCATION_SCHEMA: &str = r#"{
   "type": "object",
   "required": ["abi", "trigger_event", "invocation_meta"],
   "properties": {
@@ -1271,7 +1271,7 @@ pub(super) const COUPLING_INVOCATION_SCHEMA: &str = r#"{
 }
 "#;
 
-pub(super) const COUPLING_DISCHARGE_SCHEMA: &str = r#"{
+pub(crate) const COUPLING_DISCHARGE_SCHEMA: &str = r#"{
   "type": "object",
   "required": ["abi", "events"],
   "properties": {
@@ -1285,7 +1285,7 @@ pub(super) const COUPLING_DISCHARGE_SCHEMA: &str = r#"{
 }
 "#;
 
-pub(super) fn print_coupling_help() {
+pub(crate) fn print_coupling_help() {
     println!(
         "verlet coupling\n\
 \n\
@@ -1301,7 +1301,7 @@ the source journal.\n"
     );
 }
 
-pub(super) fn print_coupling_init_help() {
+pub(crate) fn print_coupling_init_help() {
     println!(
         "verlet coupling init\n\
 \n\
@@ -1313,7 +1313,7 @@ fixtures, and one native testkit test.\n"
     );
 }
 
-pub(super) fn print_coupling_run_help() {
+pub(crate) fn print_coupling_run_help() {
     println!(
         "verlet coupling run\n\
 \n\

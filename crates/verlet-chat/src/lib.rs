@@ -5,7 +5,7 @@
 //! notifications into [`ChatEvent`]s; the UI translates keystrokes into
 //! [`Action`]s for the host to execute. Everything in between — transcript
 //! cells, composer, slash popup, layout — is a synchronous state machine
-//! ([`App`]) that tests can drive without a terminal or a runtime.
+//! ([`app::App`]) that tests can drive without a terminal or a runtime.
 //!
 //! Built on [tuika](https://github.com/everruns/tuika), pinned to an exact
 //! version in the workspace manifest: tuika is pre-1.0 and minor releases may
@@ -14,20 +14,15 @@
 //! deliberately stays close to it, so upstream improvements remain easy to
 //! diff against.
 
-mod app;
-mod cells;
-mod runner;
+pub mod app;
+pub mod cells;
+pub mod runner;
 #[cfg(test)]
 mod tests;
-mod theme;
+pub mod theme;
 mod ui;
 
-pub use app::{App, COMMANDS, SlashCommand, parse_slash_command};
-pub use cells::{Cell, ExecStatus, Tone};
-pub use runner::{RunnerError, run_ui};
-pub use theme::chat_theme;
-
-/// What the host must execute on the UI's behalf. Emitted by [`App::handle`],
+/// What the host must execute on the UI's behalf. Emitted by [`app::App::handle`],
 /// drained by the host loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {

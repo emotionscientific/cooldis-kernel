@@ -252,8 +252,8 @@ mod tests {
     #[test]
     fn empty_and_unrelated_streams_fold_to_empty() {
         assert_eq!(
-            super::fold_thread_bindings(&[]),
-            super::ThreadBindingsFold::default()
+            crate::kernel::binding_projector::fold_thread_bindings(&[]),
+            crate::kernel::binding_projector::ThreadBindingsFold::default()
         );
         let unrelated = event(
             1,
@@ -263,8 +263,8 @@ mod tests {
         );
 
         assert_eq!(
-            super::fold_thread_bindings(&[unrelated]),
-            super::ThreadBindingsFold::default()
+            crate::kernel::binding_projector::fold_thread_bindings(&[unrelated]),
+            crate::kernel::binding_projector::ThreadBindingsFold::default()
         );
     }
 
@@ -288,9 +288,12 @@ mod tests {
             reattached.clone(),
         ];
 
-        let folded = super::fold_thread_bindings(&events);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&events);
 
-        assert_eq!(folded, super::fold_thread_bindings(&events));
+        assert_eq!(
+            folded,
+            crate::kernel::binding_projector::fold_thread_bindings(&events)
+        );
         assert_eq!(folded.anomalies, Vec::new());
         assert_eq!(
             folded
@@ -328,7 +331,7 @@ mod tests {
         rebound_search.payload["artifact_hash"] = serde_json::json!("sha256:search-tools-v2");
         let rebound_files = attach_event_for_bind(6, 100, "file-tools", 901);
 
-        let folded = super::fold_thread_bindings(&[
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
             first_bind,
             first_search,
             first_files,
@@ -379,7 +382,7 @@ mod tests {
         rebound_search.payload["artifact_hash"] = serde_json::json!("sha256:search-tools-v2");
         let rebound_files = attach_event_for_bind(6, 100, "file-tools", 901);
 
-        let folded = super::fold_thread_bindings(&[
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
             first_bind,
             first_search,
             first_files,
@@ -427,7 +430,7 @@ mod tests {
         );
         let added_clock = attach_event_for_bind(5, 200, "clock-tools", 901);
 
-        let folded = super::fold_thread_bindings(&[
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
             first_bind,
             first_search.clone(),
             first_files.clone(),
@@ -470,7 +473,7 @@ mod tests {
         second_search.payload["artifact_hash"] = serde_json::json!("sha256:search-tools-v2");
         let detach_first_search = detach_event_for_bind(6, 100, first_search.id, 901);
 
-        let folded = super::fold_thread_bindings(&[
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
             first_bind,
             first_search,
             first_files.clone(),
@@ -524,7 +527,7 @@ mod tests {
             events.extend([search, files]);
         }
 
-        let folded = super::fold_thread_bindings(&events);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&events);
 
         assert!(folded.anomalies.is_empty());
         assert_eq!(
@@ -550,7 +553,11 @@ mod tests {
         let empty_bind = bind_event(3, 901, serde_json::json!([]));
 
         let first_search_id = first_search.id;
-        let folded = super::fold_thread_bindings(&[first_bind, first_search, empty_bind]);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
+            first_bind,
+            first_search,
+            empty_bind,
+        ]);
 
         assert!(folded.anomalies.is_empty());
         assert_eq!(folded.active[0].attach_event_id, first_search_id);
@@ -561,7 +568,10 @@ mod tests {
         let first = attach_event(1, 1, "search-tools");
         let second = attach_event(2, 2, "search-tools");
 
-        let folded = super::fold_thread_bindings(&[first.clone(), second.clone()]);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
+            first.clone(),
+            second.clone(),
+        ]);
 
         assert!(folded.anomalies.is_empty());
         assert_eq!(
@@ -587,7 +597,10 @@ mod tests {
         );
         second.provenance.source_event_ids = first.provenance.source_event_ids.clone();
 
-        let folded = super::fold_thread_bindings(&[first.clone(), second.clone()]);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
+            first.clone(),
+            second.clone(),
+        ]);
 
         assert!(folded.anomalies.is_empty());
         assert_eq!(
@@ -608,20 +621,24 @@ mod tests {
         let unknown_id = verlet_history::EventRecordId::from_uuid(uuid::Uuid::from_u128(99));
         let unknown = detach_event(4, 4, unknown_id);
 
-        let folded =
-            super::fold_thread_bindings(&[attached, detached, repeated.clone(), unknown.clone()]);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
+            attached,
+            detached,
+            repeated.clone(),
+            unknown.clone(),
+        ]);
 
         assert!(folded.active.is_empty());
         assert_eq!(
             folded.anomalies,
             vec![
-                super::ThreadBindingAnomaly::AlreadyDetached {
+                crate::kernel::binding_projector::ThreadBindingAnomaly::AlreadyDetached {
                     detach_event_id: repeated.id,
                     attach_event_id: verlet_history::EventRecordId::from_uuid(
                         uuid::Uuid::from_u128(1)
                     ),
                 },
-                super::ThreadBindingAnomaly::UnknownDetach {
+                crate::kernel::binding_projector::ThreadBindingAnomaly::UnknownDetach {
                     detach_event_id: unknown.id,
                     attach_event_id: unknown_id,
                 },
@@ -644,18 +661,21 @@ mod tests {
             serde_json::json!({"attach_event_id": 42}),
         );
 
-        let folded = super::fold_thread_bindings(&[bad_attach.clone(), bad_detach.clone()]);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
+            bad_attach.clone(),
+            bad_detach.clone(),
+        ]);
 
         assert!(folded.active.is_empty());
         assert_eq!(folded.anomalies.len(), 2);
         assert!(matches!(
             &folded.anomalies[0],
-            super::ThreadBindingAnomaly::UndecodableAttached { event_id, message }
+            crate::kernel::binding_projector::ThreadBindingAnomaly::UndecodableAttached { event_id, message }
                 if *event_id == bad_attach.id && !message.is_empty()
         ));
         assert!(matches!(
             &folded.anomalies[1],
-            super::ThreadBindingAnomaly::UndecodableDetached { event_id, message }
+            crate::kernel::binding_projector::ThreadBindingAnomaly::UndecodableDetached { event_id, message }
                 if *event_id == bad_detach.id && !message.is_empty()
         ));
     }
@@ -687,7 +707,12 @@ mod tests {
             uuid::Uuid::from_u128(901),
         )];
 
-        let folded = super::fold_thread_bindings(&[old_bind, old, new_bind, bad_attach.clone()]);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&[
+            old_bind,
+            old,
+            new_bind,
+            bad_attach.clone(),
+        ]);
 
         assert_eq!(
             folded
@@ -701,7 +726,7 @@ mod tests {
         );
         assert!(matches!(
             folded.anomalies.as_slice(),
-            [super::ThreadBindingAnomaly::UndecodableAttached { event_id, .. }]
+            [crate::kernel::binding_projector::ThreadBindingAnomaly::UndecodableAttached { event_id, .. }]
                 if *event_id == bad_attach.id
         ));
     }
@@ -733,7 +758,7 @@ mod tests {
             ));
         }
 
-        let folded = super::fold_thread_bindings(&events);
+        let folded = crate::kernel::binding_projector::fold_thread_bindings(&events);
 
         assert!(folded.active.is_empty());
         assert_eq!(folded.anomalies.len(), events.len());
@@ -743,7 +768,7 @@ mod tests {
                 .iter()
                 .filter(|anomaly| matches!(
                     anomaly,
-                    super::ThreadBindingAnomaly::UndecodableAttached { .. }
+                    crate::kernel::binding_projector::ThreadBindingAnomaly::UndecodableAttached { .. }
                 ))
                 .count(),
             events.len() / 2
@@ -754,7 +779,7 @@ mod tests {
                 .iter()
                 .filter(|anomaly| matches!(
                     anomaly,
-                    super::ThreadBindingAnomaly::UndecodableDetached { .. }
+                    crate::kernel::binding_projector::ThreadBindingAnomaly::UndecodableDetached { .. }
                 ))
                 .count(),
             events.len() / 2

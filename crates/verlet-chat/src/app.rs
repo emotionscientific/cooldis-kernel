@@ -2,21 +2,11 @@
 //!
 //! Ported from tuika's `codex` example (`examples/codex/app.rs`) and rewired
 //! for a real host: instead of driving a scripted agent, [`App::handle`]
-//! emits [`Action`]s for the host to execute, and the host feeds results back
+//! emits [`crate::Action`]s for the host to execute, and the host feeds results back
 //! through [`App::apply`]. Both are synchronous; every UI behavior is testable
 //! by calling them in sequence.
 
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-
-use tuika::components::MarkdownState;
-use tuika::prelude::*;
-
 pub(crate) mod setup;
-
-use crate::cells::{Cell, ExecStatus, Tone, short_id};
-use crate::{Action, ChatEvent, ModelRow, SessionMeta};
-use setup::SetupStep;
 
 /// Whether the event loop should keep running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,21 +88,21 @@ pub fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, String> 
 
 /// The composer's trigger characters: `/` opens command completion when it
 /// starts the message.
-pub(crate) fn triggers() -> [Trigger; 1] {
-    [Trigger::new('/').anchor(TriggerAnchor::BufferStart)]
+pub(crate) fn triggers() -> [tuika::components::Trigger; 1] {
+    [tuika::components::Trigger::new('/').anchor(tuika::components::TriggerAnchor::BufferStart)]
 }
 
 /// The slash-completion popup state.
 pub(crate) struct Popup {
-    pub state: SelectState,
+    pub state: tuika::components::SelectState,
 }
 
 /// The `/models` picker: a modal list over the composer. Opened by
-/// [`ChatEvent::Models`], closed by Enter (emits [`Action::SelectModel`])
+/// [`crate::ChatEvent::Models`], closed by Enter (emits [`crate::Action::SelectModel`])
 /// or Esc. While open it consumes every key event.
 pub(crate) struct ModelPicker {
-    pub rows: Vec<ModelRow>,
-    pub state: SelectState,
+    pub rows: Vec<crate::ModelRow>,
+    pub state: tuika::components::SelectState,
 }
 
 /// The whole application.
@@ -121,14 +111,14 @@ pub struct App {
     /// Milliseconds per frame, set by the runner's tick interval; the
     /// `Working (12s …)` timer counts in frames so tests stay deterministic.
     pub frame_ms: u64,
-    pub cells: Vec<Cell>,
-    pub composer: TextInputState,
-    pub scroll: ScrollState,
+    pub cells: Vec<crate::cells::Cell>,
+    pub composer: tuika::components::TextInputState,
+    pub scroll: tuika::components::ScrollState,
     pub(crate) popup: Option<Popup>,
     pub(crate) picker: Option<ModelPicker>,
-    pub(crate) setup: Option<SetupStep>,
+    pub(crate) setup: Option<crate::app::setup::SetupStep>,
     /// A model choice waiting on credentials: re-issued as
-    /// [`Action::SelectModel`] once the provider's credential lands.
+    /// [`crate::Action::SelectModel`] once the provider's credential lands.
     pub(crate) pending_selection: Option<(String, String)>,
     /// First-run gate: no configured providers yet. The footer nags until a
     /// credential lands or a model is selected.
@@ -136,7 +126,7 @@ pub struct App {
     /// Submitted keys retained until one host reply so late generic errors
     /// can be redacted after the user leaves the input step.
     pub(crate) pending_key_redactions: Vec<(String, String)>,
-    pub meta: SessionMeta,
+    pub meta: crate::SessionMeta,
     /// Turn state label for the footer: "idle", "running", "steered", ...
     pub turn_state: String,
     turn_active: bool,
@@ -155,19 +145,19 @@ pub struct App {
     pub content_h: usize,
     pub viewport_h: usize,
     /// Host work queued by `handle`; the runner drains it after every event.
-    actions: Vec<Action>,
+    actions: Vec<crate::Action>,
     quit_requested: bool,
 }
 
 impl App {
-    pub fn new(meta: SessionMeta) -> Self {
+    pub fn new(meta: crate::SessionMeta) -> Self {
         let banner = banner_cell(&meta);
         Self {
             frame: 0,
             frame_ms: 60,
             cells: vec![banner],
-            composer: TextInputState::new(),
-            scroll: ScrollState::new(),
+            composer: tuika::components::TextInputState::new(),
+            scroll: tuika::components::ScrollState::new(),
             popup: None,
             picker: None,
             setup: None,
@@ -207,14 +197,14 @@ impl App {
     }
 
     /// Host work queued since the last drain.
-    pub fn drain_actions(&mut self) -> Vec<Action> {
+    pub fn drain_actions(&mut self) -> Vec<crate::Action> {
         std::mem::take(&mut self.actions)
     }
 
     /// Where the terminal cursor belongs, given the composer's painted rect.
     /// While a modal window owns the input surface the composer is dimmed
     /// underneath it, so no terminal caret is shown.
-    pub fn cursor(&self, composer_rect: Rect) -> Option<(u16, u16)> {
+    pub fn cursor(&self, composer_rect: ratatui::layout::Rect) -> Option<(u16, u16)> {
         if composer_rect.width == 0 || self.setup_visible() || self.picker.is_some() {
             return None;
         }
@@ -237,7 +227,7 @@ impl App {
 
     /// Route one translated event. The order here *is* the focus model: the
     /// transcript's scroll keys first, then the picker, then the composer.
-    pub fn handle(&mut self, event: &Event) -> Flow {
+    pub fn handle(&mut self, event: &tuika::event::Event) -> Flow {
         let flow = self.route(event);
         if self.quit_requested {
             return Flow::Quit;
@@ -245,7 +235,7 @@ impl App {
         flow
     }
 
-    fn route(&mut self, event: &Event) -> Flow {
+    fn route(&mut self, event: &tuika::event::Event) -> Flow {
         // The setup wizard and the model picker own the whole input surface
         // while open. Keep them ahead of transcript scrolling, paste
         // handling, global controls, and slash completion so none of those
@@ -262,38 +252,38 @@ impl App {
             let _ = self.scroll.handle(event, self.content_h, self.viewport_h);
             return Flow::Continue;
         }
-        if matches!(event, Event::Paste(_)) {
+        if matches!(event, tuika::event::Event::Paste(_)) {
             let _ = self.composer.handle(event);
             self.sync_popup();
             return Flow::Continue;
         }
-        let Event::Key(key) = event else {
+        let tuika::event::Event::Key(key) = event else {
             return Flow::Continue;
         };
 
-        if key.ctrl && key.code == KeyCode::Char('c') {
+        if key.ctrl && key.code == tuika::event::KeyCode::Char('c') {
             return self.interrupt_or_quit();
         }
-        if key.ctrl && key.code == KeyCode::Char('d') && self.composer.is_empty() {
+        if key.ctrl && key.code == tuika::event::KeyCode::Char('d') && self.composer.is_empty() {
             return Flow::Quit;
         }
         if self.popup.is_some() && self.handle_popup(event, *key) {
             return Flow::Continue;
         }
-        if key.plain() && key.code == KeyCode::Esc {
+        if key.plain() && key.code == tuika::event::KeyCode::Esc {
             if self.turn_active {
-                self.actions.push(Action::Interrupt);
+                self.actions.push(crate::Action::Interrupt);
             }
             return Flow::Continue;
         }
         // `Up` on an empty composer recalls the previous prompt.
-        if key.plain() && key.code == KeyCode::Up && self.composer.is_empty() {
+        if key.plain() && key.code == tuika::event::KeyCode::Up && self.composer.is_empty() {
             self.recall();
             return Flow::Continue;
         }
 
         match self.composer.handle(event) {
-            InputOutcome::Submitted => {
+            tuika::event::InputOutcome::Submitted => {
                 let text = self.composer.text().trim().to_string();
                 self.composer.clear();
                 self.popup = None;
@@ -308,30 +298,39 @@ impl App {
     }
 
     /// Events that belong to the transcript rather than to any focused surface.
-    fn scrolling(&self, event: &Event) -> bool {
+    fn scrolling(&self, event: &tuika::event::Event) -> bool {
         match event {
-            Event::Mouse(m) => matches!(m.kind, MouseKind::ScrollUp | MouseKind::ScrollDown),
-            Event::Key(k) => k.plain() && matches!(k.code, KeyCode::PageUp | KeyCode::PageDown),
+            tuika::event::Event::Mouse(m) => matches!(
+                m.kind,
+                tuika::event::MouseKind::ScrollUp | tuika::event::MouseKind::ScrollDown
+            ),
+            tuika::event::Event::Key(k) => {
+                k.plain()
+                    && matches!(
+                        k.code,
+                        tuika::event::KeyCode::PageUp | tuika::event::KeyCode::PageDown
+                    )
+            }
             _ => false,
         }
     }
 
     fn interrupt_or_quit(&mut self) -> Flow {
         if self.turn_active {
-            self.actions.push(Action::Interrupt);
+            self.actions.push(crate::Action::Interrupt);
             return Flow::Continue;
         }
         Flow::Quit
     }
 
     /// Returns true when the popup consumed the event.
-    fn handle_popup(&mut self, event: &Event, key: Key) -> bool {
+    fn handle_popup(&mut self, event: &tuika::event::Event, key: tuika::event::Key) -> bool {
         let items = self.popup_items();
         let Some(popup) = self.popup.as_mut() else {
             return false;
         };
         // Tab completes the highlighted row in place, without running it.
-        if key.plain() && key.code == KeyCode::Tab {
+        if key.plain() && key.code == tuika::event::KeyCode::Tab {
             let completion = popup
                 .state
                 .selected()
@@ -343,7 +342,7 @@ impl App {
             return true;
         }
         match popup.state.handle(event, items.len()) {
-            InputOutcome::Submitted => {
+            tuika::event::InputOutcome::Submitted => {
                 let label = popup
                     .state
                     .selected()
@@ -362,7 +361,7 @@ impl App {
                 }
                 true
             }
-            InputOutcome::Cancelled => {
+            tuika::event::InputOutcome::Cancelled => {
                 self.popup = None;
                 true
             }
@@ -374,12 +373,12 @@ impl App {
     /// Enter selects (already-active rows just close), Esc dismisses,
     /// arrows move; anything else is swallowed so the composer underneath
     /// stays untouched.
-    fn handle_picker(&mut self, event: &Event) {
+    fn handle_picker(&mut self, event: &tuika::event::Event) {
         let Some(picker) = self.picker.as_mut() else {
             return;
         };
         match picker.state.handle(event, picker.rows.len()) {
-            InputOutcome::Submitted => {
+            tuika::event::InputOutcome::Submitted => {
                 let row = picker
                     .state
                     .selected()
@@ -391,7 +390,7 @@ impl App {
                 };
                 if row.active {
                     self.notice(
-                        Tone::Info,
+                        crate::cells::Tone::Info,
                         format!("{}/{} is already active", row.provider_id, row.model),
                         Vec::new(),
                     );
@@ -404,12 +403,12 @@ impl App {
                     self.setup_for_model(row.provider_id, row.model);
                     return;
                 }
-                self.actions.push(Action::SelectModel {
+                self.actions.push(crate::Action::SelectModel {
                     provider_id: row.provider_id,
                     model: row.model,
                 });
             }
-            InputOutcome::Cancelled => {
+            tuika::event::InputOutcome::Cancelled => {
                 self.picker = None;
             }
             _ => {}
@@ -431,7 +430,7 @@ impl App {
             }
             (None, Some(_)) => {
                 self.popup = Some(Popup {
-                    state: SelectState::new(),
+                    state: tuika::components::SelectState::new(),
                 });
             }
         }
@@ -447,15 +446,18 @@ impl App {
     }
 
     /// The composer's `/` token as a styled range, colored in the input.
-    pub fn composer_highlights(&self, theme: &Theme) -> Vec<tuika::components::TextSpan> {
+    pub fn composer_highlights(
+        &self,
+        theme: &tuika::style::Theme,
+    ) -> Vec<tuika::components::TextSpan> {
         self.composer
             .tokens(&triggers())
             .iter()
-            .map(|token: &Token| {
+            .map(|token: &tuika::components::Token| {
                 token.span(
-                    Style::default()
+                    ratatui::style::Style::default()
                         .fg(theme.accent_alt)
-                        .add_modifier(Modifier::BOLD),
+                        .add_modifier(ratatui::style::Modifier::BOLD),
                 )
             })
             .collect()
@@ -480,10 +482,10 @@ impl App {
         match parse_slash_command(text) {
             Ok(Some(command)) => self.slash(command),
             Ok(None) => {
-                self.cells.push(Cell::User(text.to_string()));
-                self.actions.push(Action::Submit(text.to_string()));
+                self.cells.push(crate::cells::Cell::User(text.to_string()));
+                self.actions.push(crate::Action::Submit(text.to_string()));
             }
-            Err(message) => self.notice(Tone::Error, message, Vec::new()),
+            Err(message) => self.notice(crate::cells::Tone::Error, message, Vec::new()),
         }
         self.follow();
     }
@@ -498,15 +500,15 @@ impl App {
                         format!("{label}{hint} — {blurb}")
                     })
                     .collect();
-                self.notice(Tone::Info, "Commands".to_string(), body);
+                self.notice(crate::cells::Tone::Info, "Commands".to_string(), body);
             }
             SlashCommand::Quit => self.quit_requested = true,
             SlashCommand::Interrupt => {
                 if self.turn_active {
-                    self.actions.push(Action::Interrupt);
+                    self.actions.push(crate::Action::Interrupt);
                 } else {
                     self.notice(
-                        Tone::Info,
+                        crate::cells::Tone::Info,
                         "no active turn to interrupt".to_string(),
                         vec![],
                     );
@@ -516,7 +518,11 @@ impl App {
                 self.cells.clear();
                 self.active_answer = None;
                 self.active_thinking = None;
-                self.notice(Tone::Info, "transcript cleared".to_string(), Vec::new());
+                self.notice(
+                    crate::cells::Tone::Info,
+                    "transcript cleared".to_string(),
+                    Vec::new(),
+                );
             }
             SlashCommand::Status => {
                 let mut rows = self.meta_rows();
@@ -524,42 +530,45 @@ impl App {
                 if self.total_tokens > 0 {
                     rows.push(("tokens".into(), self.total_tokens.to_string()));
                 }
-                self.cells.push(Cell::Config {
+                self.cells.push(crate::cells::Cell::Config {
                     title: "Session".into(),
                     rows,
                 });
             }
             SlashCommand::New => {
                 if self.ensure_idle("/new") {
-                    self.actions.push(Action::NewThread);
+                    self.actions.push(crate::Action::NewThread);
                 }
             }
-            SlashCommand::Sessions => self.actions.push(Action::ListSessions),
+            SlashCommand::Sessions => self.actions.push(crate::Action::ListSessions),
             SlashCommand::Resume(id) => {
                 if self.ensure_idle("/resume") {
-                    self.actions.push(Action::Resume(id));
+                    self.actions.push(crate::Action::Resume(id));
                 }
             }
-            SlashCommand::Rename(name) => self.actions.push(Action::Rename(name)),
+            SlashCommand::Rename(name) => self.actions.push(crate::Action::Rename(name)),
             SlashCommand::Fork => {
                 if self.ensure_idle("/fork") {
-                    self.actions.push(Action::Fork);
+                    self.actions.push(crate::Action::Fork);
                 }
             }
             SlashCommand::Compact => {
                 if self.ensure_idle("/compact") {
-                    self.actions.push(Action::Compact);
+                    self.actions.push(crate::Action::Compact);
                 }
             }
             SlashCommand::Models => {
                 if matches!(
                     self.setup,
-                    Some(SetupStep::AwaitModels { .. } | SetupStep::AwaitCatalog { .. })
+                    Some(
+                        crate::app::setup::SetupStep::AwaitModels { .. }
+                            | crate::app::setup::SetupStep::AwaitCatalog { .. }
+                    )
                 ) {
                     self.setup = None;
                     self.pending_selection = None;
                 }
-                self.actions.push(Action::ListModels);
+                self.actions.push(crate::Action::ListModels);
             }
             SlashCommand::Setup => self.open_setup_home(),
         }
@@ -568,7 +577,7 @@ impl App {
     fn ensure_idle(&mut self, command: &str) -> bool {
         if self.turn_active {
             self.notice(
-                Tone::Error,
+                crate::cells::Tone::Error,
                 format!("{command} is unavailable during an active turn; use /interrupt"),
                 Vec::new(),
             );
@@ -578,35 +587,36 @@ impl App {
     }
 
     /// Fold one host event into the transcript and status state.
-    pub fn apply(&mut self, event: ChatEvent) {
+    pub fn apply(&mut self, event: crate::ChatEvent) {
         match event {
-            ChatEvent::AnswerDelta(delta) => {
+            crate::ChatEvent::AnswerDelta(delta) => {
                 if delta.is_empty() {
                     return;
                 }
                 let index = match self.active_answer {
                     Some(index) => index,
                     None => {
-                        self.cells
-                            .push(Cell::Answer(Box::new(MarkdownState::new())));
+                        self.cells.push(crate::cells::Cell::Answer(Box::new(
+                            tuika::components::MarkdownState::new(),
+                        )));
                         let index = self.cells.len() - 1;
                         self.active_answer = Some(index);
                         index
                     }
                 };
-                if let Some(Cell::Answer(state)) = self.cells.get_mut(index) {
+                if let Some(crate::cells::Cell::Answer(state)) = self.cells.get_mut(index) {
                     state.push_str(&delta);
                 }
                 self.follow();
             }
-            ChatEvent::ThinkingDelta(delta) => {
+            crate::ChatEvent::ThinkingDelta(delta) => {
                 if delta.is_empty() {
                     return;
                 }
                 let index = match self.active_thinking {
                     Some(index) => index,
                     None => {
-                        self.cells.push(Cell::Reasoning {
+                        self.cells.push(crate::cells::Cell::Reasoning {
                             body: String::new(),
                         });
                         let index = self.cells.len() - 1;
@@ -614,48 +624,48 @@ impl App {
                         index
                     }
                 };
-                if let Some(Cell::Reasoning { body }) = self.cells.get_mut(index) {
+                if let Some(crate::cells::Cell::Reasoning { body }) = self.cells.get_mut(index) {
                     body.push_str(&delta);
                 }
                 self.follow();
             }
-            ChatEvent::ToolStarted { id, title } => {
+            crate::ChatEvent::ToolStarted { id, title } => {
                 // A tool call interleaves with the streamed answer: close the
                 // streaming cells so later deltas open fresh ones below.
                 self.active_answer = None;
                 self.active_thinking = None;
-                self.cells.push(Cell::Exec {
+                self.cells.push(crate::cells::Cell::Exec {
                     id,
                     title,
                     output: Vec::new(),
-                    status: ExecStatus::Running,
+                    status: crate::cells::ExecStatus::Running,
                 });
                 self.follow();
             }
-            ChatEvent::ToolOutputDelta { id, delta } => {
+            crate::ChatEvent::ToolOutputDelta { id, delta } => {
                 if delta.is_empty() {
                     return;
                 }
-                if let Some(Cell::Exec { output, .. }) = self.find_exec(&id) {
+                if let Some(crate::cells::Cell::Exec { output, .. }) = self.find_exec(&id) {
                     append_output_lines(output, &delta);
                 }
                 self.follow();
             }
-            ChatEvent::ToolCompleted {
+            crate::ChatEvent::ToolCompleted {
                 id,
                 success,
                 output,
             } => {
-                if let Some(Cell::Exec {
+                if let Some(crate::cells::Cell::Exec {
                     output: rows,
                     status,
                     ..
                 }) = self.find_exec(&id)
                 {
                     *status = if success {
-                        ExecStatus::Ok
+                        crate::cells::ExecStatus::Ok
                     } else {
-                        ExecStatus::Failed
+                        crate::cells::ExecStatus::Failed
                     };
                     if !output.is_empty() {
                         rows.clear();
@@ -664,27 +674,27 @@ impl App {
                 }
                 self.follow();
             }
-            ChatEvent::TurnStarted { turn_id } => {
+            crate::ChatEvent::TurnStarted { turn_id } => {
                 self.turn_active = true;
                 self.turn_started = Some(self.frame);
-                self.turn_state = format!("running {}", short_id(&turn_id));
+                self.turn_state = format!("running {}", crate::cells::short_id(&turn_id));
                 self.total_tokens = 0;
                 self.active_answer = None;
                 self.active_thinking = None;
             }
-            ChatEvent::TurnSteered => {
+            crate::ChatEvent::TurnSteered => {
                 self.turn_state = "steered".to_string();
             }
-            ChatEvent::TurnCompleted { error } => {
+            crate::ChatEvent::TurnCompleted { error } => {
                 if let Some(message) = error {
-                    self.notice(Tone::Error, message, Vec::new());
+                    self.notice(crate::cells::Tone::Error, message, Vec::new());
                 }
                 self.finish_turn();
             }
-            ChatEvent::Usage { total_tokens } => {
+            crate::ChatEvent::Usage { total_tokens } => {
                 self.total_tokens = self.total_tokens.saturating_add(total_tokens);
             }
-            ChatEvent::ThreadSwitched {
+            crate::ChatEvent::ThreadSwitched {
                 thread_id,
                 name,
                 cwd,
@@ -698,29 +708,33 @@ impl App {
                 self.finish_turn();
                 self.total_tokens = 0;
                 self.notice(
-                    Tone::Info,
-                    format!("{reason} {}", short_id(&self.meta.thread_id)),
+                    crate::cells::Tone::Info,
+                    format!("{reason} {}", crate::cells::short_id(&self.meta.thread_id)),
                     Vec::new(),
                 );
             }
-            ChatEvent::ThreadRenamed { name } => {
+            crate::ChatEvent::ThreadRenamed { name } => {
                 self.meta.thread_name = Some(name.clone());
-                self.notice(Tone::Info, format!("renamed thread {name}"), Vec::new());
+                self.notice(
+                    crate::cells::Tone::Info,
+                    format!("renamed thread {name}"),
+                    Vec::new(),
+                );
             }
-            ChatEvent::Sessions(rows) => {
-                self.cells.push(Cell::Sessions(rows));
+            crate::ChatEvent::Sessions(rows) => {
+                self.cells.push(crate::cells::Cell::Sessions(rows));
                 self.follow();
             }
-            ChatEvent::Models(rows) => {
+            crate::ChatEvent::Models(rows) => {
                 let rows = match self.setup.take() {
-                    Some(SetupStep::AwaitModels { provider_id }) => {
-                        let scoped: Vec<ModelRow> = rows
+                    Some(crate::app::setup::SetupStep::AwaitModels { provider_id }) => {
+                        let scoped: Vec<crate::ModelRow> = rows
                             .into_iter()
                             .filter(|row| row.provider_id == provider_id)
                             .collect();
                         if scoped.is_empty() {
                             self.notice(
-                                Tone::Error,
+                                crate::cells::Tone::Error,
                                 format!("no models available for {provider_id}"),
                                 Vec::new(),
                             );
@@ -740,14 +754,18 @@ impl App {
                 self.popup = None;
                 self.picker = None;
                 if rows.is_empty() {
-                    self.notice(Tone::Error, "no models available".to_string(), Vec::new());
+                    self.notice(
+                        crate::cells::Tone::Error,
+                        "no models available".to_string(),
+                        Vec::new(),
+                    );
                     return;
                 }
-                let mut state = SelectState::new();
+                let mut state = tuika::components::SelectState::new();
                 state.select(rows.iter().position(|row| row.active).or(Some(0)));
                 self.picker = Some(ModelPicker { rows, state });
             }
-            ChatEvent::ModelSelected { provider_id, model } => {
+            crate::ChatEvent::ModelSelected { provider_id, model } => {
                 self.pending_selection = None;
                 if provider_id != "local" {
                     self.needs_provider = false;
@@ -759,36 +777,40 @@ impl App {
                     Vec::new()
                 };
                 self.notice(
-                    Tone::Info,
+                    crate::cells::Tone::Info,
                     format!("model set to {provider_id}/{model}"),
                     body,
                 );
             }
-            ChatEvent::ProviderCatalog { providers } => self.apply_provider_catalog(providers),
-            ChatEvent::CustomProviderResult { provider_id, error } => {
+            crate::ChatEvent::ProviderCatalog { providers } => {
+                self.apply_provider_catalog(providers)
+            }
+            crate::ChatEvent::CustomProviderResult { provider_id, error } => {
                 self.apply_custom_provider_result(provider_id, error);
             }
-            ChatEvent::NoConfiguredProviders => self.apply_no_configured_providers(),
-            ChatEvent::LoginDeviceCode {
+            crate::ChatEvent::NoConfiguredProviders => self.apply_no_configured_providers(),
+            crate::ChatEvent::LoginDeviceCode {
                 verification_uri,
                 user_code,
             } => self.apply_device_code(verification_uri, user_code),
-            ChatEvent::CredentialResult { provider_id, error } => {
+            crate::ChatEvent::CredentialResult { provider_id, error } => {
                 self.apply_credential_result(provider_id, error);
             }
-            ChatEvent::CredentialCleared { provider_id } => {
+            crate::ChatEvent::CredentialCleared { provider_id } => {
                 self.apply_credential_cleared(provider_id);
             }
-            ChatEvent::ThreadStatus(status) => {
+            crate::ChatEvent::ThreadStatus(status) => {
                 if !self.turn_active {
                     self.turn_state = status;
                 }
             }
-            ChatEvent::Info { title, body } => self.notice(Tone::Info, title, body),
-            ChatEvent::Error { title, body } => self.apply_error(title, body),
-            ChatEvent::ResyncStarted => {
+            crate::ChatEvent::Info { title, body } => {
+                self.notice(crate::cells::Tone::Info, title, body)
+            }
+            crate::ChatEvent::Error { title, body } => self.apply_error(title, body),
+            crate::ChatEvent::ResyncStarted => {
                 self.notice(
-                    Tone::Warn,
+                    crate::cells::Tone::Warn,
                     "stream lagged; transcript tail may be incomplete".to_string(),
                     vec!["the server is rebuilding the turn".to_string()],
                 );
@@ -805,15 +827,15 @@ impl App {
     }
 
     /// The most recent exec cell with this tool-call id.
-    fn find_exec(&mut self, id: &str) -> Option<&mut Cell> {
-        self.cells
-            .iter_mut()
-            .rev()
-            .find(|cell| matches!(cell, Cell::Exec { id: cell_id, .. } if cell_id == id))
+    fn find_exec(&mut self, id: &str) -> Option<&mut crate::cells::Cell> {
+        self.cells.iter_mut().rev().find(
+            |cell| matches!(cell, crate::cells::Cell::Exec { id: cell_id, .. } if cell_id == id),
+        )
     }
 
-    fn notice(&mut self, tone: Tone, title: String, body: Vec<String>) {
-        self.cells.push(Cell::Notice { tone, title, body });
+    fn notice(&mut self, tone: crate::cells::Tone, title: String, body: Vec<String>) {
+        self.cells
+            .push(crate::cells::Cell::Notice { tone, title, body });
         self.follow();
     }
 
@@ -826,7 +848,7 @@ impl App {
                 "thread".into(),
                 format!(
                     "{} {}",
-                    short_id(&self.meta.thread_id),
+                    crate::cells::short_id(&self.meta.thread_id),
                     self.meta.thread_name.as_deref().unwrap_or("unnamed")
                 ),
             ),
@@ -842,7 +864,12 @@ impl App {
     ///
     /// Rebuilding every frame is the model working as intended: only the
     /// streaming answer holds a cache, and ratatui diffs the resulting cells.
-    pub fn transcript(&mut self, width: u16, theme: &Theme, sheet: &StyleSheet) -> Vec<Element> {
+    pub fn transcript(
+        &mut self,
+        width: u16,
+        theme: &tuika::style::Theme,
+        sheet: &tuika::style::StyleSheet,
+    ) -> Vec<tuika::view::Element> {
         self.cells
             .iter_mut()
             .map(|cell| cell.view(width, theme, sheet))
@@ -881,14 +908,14 @@ fn append_output_lines(rows: &mut Vec<String>, delta: &str) {
     }
 }
 
-fn banner_cell(meta: &SessionMeta) -> Cell {
-    Cell::Banner {
+fn banner_cell(meta: &crate::SessionMeta) -> crate::cells::Cell {
+    crate::cells::Cell::Banner {
         version: meta.version.clone(),
         rows: vec![
             ("connection".into(), meta.connection_label.clone()),
             ("directory".into(), meta.cwd.clone()),
             ("model".into(), meta.model_label.clone()),
-            ("thread".into(), short_id(&meta.thread_id)),
+            ("thread".into(), crate::cells::short_id(&meta.thread_id)),
         ],
         tips: [
             ("/help", "list the available commands"),

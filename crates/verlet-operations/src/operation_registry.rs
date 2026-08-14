@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl super::KernelOperationDispatcher for ThreadDispatcher {
+    impl crate::operation_registry::KernelOperationDispatcher for ThreadDispatcher {
         async fn invoke_kernel_operation(
             &self,
             _operation_name: &str,
@@ -629,19 +629,19 @@ mod tests {
 
     #[test]
     fn scoped_registries_isolate_concurrent_kernel_dispatch() {
-        let registry = std::sync::Arc::new(super::OperationRegistry::new());
-        block_on(
-            registry.register_kernel(super::KernelOperationRegistration::new(
+        let registry = std::sync::Arc::new(crate::operation_registry::OperationRegistry::new());
+        block_on(registry.register_kernel(
+            crate::operation_registry::KernelOperationRegistration::new(
                 "kernel-package",
                 kernel_manifest(),
-            )),
-        )
+            ),
+        ))
         .unwrap();
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let thread_a = super::ScopedOperationRegistry::new(
+        let thread_a = crate::operation_registry::ScopedOperationRegistry::new(
             std::sync::Arc::clone(&registry),
-            super::KernelDispatchOverlay::new().with_dispatcher(
+            crate::operation_registry::KernelDispatchOverlay::new().with_dispatcher(
                 "kernel-package",
                 std::sync::Arc::new(ThreadDispatcher {
                     thread_id: "thread-a",
@@ -649,9 +649,9 @@ mod tests {
                 }),
             ),
         );
-        let thread_b = super::ScopedOperationRegistry::new(
+        let thread_b = crate::operation_registry::ScopedOperationRegistry::new(
             registry,
-            super::KernelDispatchOverlay::new().with_dispatcher(
+            crate::operation_registry::KernelDispatchOverlay::new().with_dispatcher(
                 "kernel-package",
                 std::sync::Arc::new(ThreadDispatcher {
                     thread_id: "thread-b",
@@ -677,20 +677,23 @@ mod tests {
 
     #[test]
     fn scoped_registry_prefers_overlay_then_falls_back_to_registration_dispatcher() {
-        let registry = std::sync::Arc::new(super::OperationRegistry::new());
+        let registry = std::sync::Arc::new(crate::operation_registry::OperationRegistry::new());
         block_on(
             registry.register_kernel(
-                super::KernelOperationRegistration::new("kernel-package", kernel_manifest())
-                    .with_dispatcher(std::sync::Arc::new(ThreadDispatcher {
-                        thread_id: "registration",
-                        barrier: std::sync::Arc::new(std::sync::Barrier::new(1)),
-                    })),
+                crate::operation_registry::KernelOperationRegistration::new(
+                    "kernel-package",
+                    kernel_manifest(),
+                )
+                .with_dispatcher(std::sync::Arc::new(ThreadDispatcher {
+                    thread_id: "registration",
+                    barrier: std::sync::Arc::new(std::sync::Barrier::new(1)),
+                })),
             ),
         )
         .unwrap();
-        let scoped = super::ScopedOperationRegistry::new(
+        let scoped = crate::operation_registry::ScopedOperationRegistry::new(
             std::sync::Arc::clone(&registry),
-            super::KernelDispatchOverlay::new().with_dispatcher(
+            crate::operation_registry::KernelDispatchOverlay::new().with_dispatcher(
                 "kernel-package",
                 std::sync::Arc::new(ThreadDispatcher {
                     thread_id: "overlay",

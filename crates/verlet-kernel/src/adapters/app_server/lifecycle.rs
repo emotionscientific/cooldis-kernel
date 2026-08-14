@@ -152,7 +152,7 @@ fn log_task_result(result: Result<(), tokio::task::JoinError>) {
 mod tests {
     #[tokio::test]
     async fn finished_tasks_are_reaped_before_the_next_spawn() {
-        let tasks = super::InstanceTaskSet::new();
+        let tasks = crate::adapters::app_server::lifecycle::InstanceTaskSet::new();
         let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
         tasks.spawn(async move {
             let _ = finished_tx.send(());
@@ -171,7 +171,8 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_can_resume_after_the_draining_caller_is_cancelled() {
-        let tasks = std::sync::Arc::new(super::InstanceTaskSet::new());
+        let tasks =
+            std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
         let started = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let task_started = std::sync::Arc::clone(&started);
@@ -205,7 +206,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_shutdown_cancels_and_drains_every_owned_task() {
-        let tasks = std::sync::Arc::new(super::InstanceTaskSet::new());
+        let tasks =
+            std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
         let started = std::sync::Arc::new(tokio::sync::Notify::new());
         let task_started = std::sync::Arc::clone(&started);
         let cancellation = tasks.cancellation();

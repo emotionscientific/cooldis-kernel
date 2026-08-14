@@ -818,9 +818,8 @@ impl verlet_provider::ProviderClient for OpenAICodexProviderClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex};
+    // The parent module's trait imports; `as _` is the one import form kept.
+    use base64::Engine as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use verlet_metadata::provider_store::LlmProviderAuthStore as _;
     use verlet_provider::{ProviderClient as _, ProviderWireAdapter as _};
@@ -836,25 +835,25 @@ mod tests {
 
     struct FakeHttpServer {
         base_url: String,
-        requests: Arc<Mutex<Vec<String>>>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
     struct GatedFakeHttpServer {
         base_url: String,
-        requests: Arc<Mutex<Vec<String>>>,
-        request_seen: Arc<tokio::sync::Notify>,
-        release_response: Arc<tokio::sync::Notify>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        request_seen: std::sync::Arc<tokio::sync::Notify>,
+        release_response: std::sync::Arc<tokio::sync::Notify>,
         task: tokio::task::JoinHandle<()>,
     }
 
     async fn fake_http_server(responses: Vec<(u16, serde_json::Value)>) -> FakeHttpServer {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&requests);
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&requests);
         let task = tokio::spawn(async move {
-            let mut responses = VecDeque::from(responses);
+            let mut responses = std::collections::VecDeque::from(responses);
             while let Some((status, body)) = responses.pop_front() {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let request = read_http_request(&mut socket).await;
@@ -878,12 +877,12 @@ mod tests {
     async fn gated_fake_http_server(status: u16, body: serde_json::Value) -> GatedFakeHttpServer {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&requests);
-        let request_seen = Arc::new(tokio::sync::Notify::new());
-        let seen = Arc::clone(&request_seen);
-        let release_response = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::clone(&release_response);
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&requests);
+        let request_seen = std::sync::Arc::new(tokio::sync::Notify::new());
+        let seen = std::sync::Arc::clone(&request_seen);
+        let release_response = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::clone(&release_response);
         let task = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
@@ -964,7 +963,7 @@ mod tests {
 
     #[test]
     fn pkce_uses_s256_base64url_without_padding() {
-        let (verifier, challenge) = pkce_pair_from_bytes(&[7; 32]);
+        let (verifier, challenge) = crate::openai_codex::pkce_pair_from_bytes(&[7; 32]);
         assert_eq!(verifier.len(), 43);
         assert_eq!(challenge.len(), 43);
         assert!(!verifier.contains('='));
@@ -978,7 +977,7 @@ mod tests {
             "https://api.openai.com/auth": { "chatgpt_account_id": "acct-123" },
             "https://api.openai.com/profile": { "email": "user@example.com" }
         }));
-        let credential = credential_from_token_value(
+        let credential = crate::openai_codex::credential_from_token_value(
             &serde_json::json!({
                 "access_token": access,
                 "refresh_token": "refresh-secret",
@@ -1005,10 +1004,11 @@ mod tests {
         let _callback_guard = CALLBACK_TEST_GATE.lock().await;
         let token = token_response("acct-browser", "", "refresh-browser");
         let server = fake_http_server(vec![(200, token)]).await;
-        let mut endpoints = OAuthEndpoints::default();
+        let mut endpoints = crate::openai_codex::OAuthEndpoints::default();
         endpoints.authorize = format!("{}/authorize", server.base_url);
         endpoints.token = format!("{}/token", server.base_url);
-        let client = OpenAICodexOAuthClient::with_endpoints(endpoints).unwrap();
+        let client =
+            crate::openai_codex::OpenAICodexOAuthClient::with_endpoints(endpoints).unwrap();
         let login = client.begin_browser_login().await.unwrap();
         let authorization = reqwest::Url::parse(login.authorization_url()).unwrap();
         let query = authorization
@@ -1020,7 +1020,10 @@ mod tests {
             Some("S256")
         );
         assert_eq!(query.get("originator").map(String::as_str), Some("verlet"));
-        assert_eq!(query.get("scope").map(String::as_str), Some(SCOPE));
+        assert_eq!(
+            query.get("scope").map(String::as_str),
+            Some(crate::openai_codex::SCOPE)
+        );
         let state = query["state"].clone();
 
         let callback = tokio::spawn(async move {
@@ -1030,19 +1033,27 @@ mod tests {
                     "404 Not Found",
                 ),
                 (
-                    format!("{CALLBACK_PATH}?code=browser-code&state=wrong-state"),
+                    format!(
+                        "{}?code=browser-code&state=wrong-state",
+                        crate::openai_codex::CALLBACK_PATH
+                    ),
                     "400 Bad Request",
                 ),
                 (
-                    format!("{CALLBACK_PATH}?code=&state={state}"),
+                    format!("{}?code=&state={state}", crate::openai_codex::CALLBACK_PATH),
                     "400 Bad Request",
                 ),
                 (
-                    format!("{CALLBACK_PATH}?code=browser-code&state={state}"),
+                    format!(
+                        "{}?code=browser-code&state={state}",
+                        crate::openai_codex::CALLBACK_PATH
+                    ),
                     "200 OK",
                 ),
             ] {
-                let mut socket = tokio::net::TcpStream::connect(CALLBACK_ADDR).await.unwrap();
+                let mut socket = tokio::net::TcpStream::connect(crate::openai_codex::CALLBACK_ADDR)
+                    .await
+                    .unwrap();
                 let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
                 socket.write_all(request.as_bytes()).await.unwrap();
                 let mut response = Vec::new();
@@ -1072,14 +1083,20 @@ mod tests {
                     .contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback")
             );
         }
-        assert!(tokio::net::TcpStream::connect(CALLBACK_ADDR).await.is_err());
+        assert!(
+            tokio::net::TcpStream::connect(crate::openai_codex::CALLBACK_ADDR)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn browser_login_bind_failure_recommends_the_device_flow() {
         let _callback_guard = CALLBACK_TEST_GATE.lock().await;
-        let _occupied = tokio::net::TcpListener::bind(CALLBACK_ADDR).await.unwrap();
-        let client = OpenAICodexOAuthClient::new().unwrap();
+        let _occupied = tokio::net::TcpListener::bind(crate::openai_codex::CALLBACK_ADDR)
+            .await
+            .unwrap();
+        let client = crate::openai_codex::OpenAICodexOAuthClient::new().unwrap();
 
         let error = match client.begin_browser_login().await {
             Ok(_) => panic!("browser login unexpectedly bound an occupied callback port"),
@@ -1087,7 +1104,7 @@ mod tests {
         };
 
         let message = error.to_string();
-        assert!(message.contains(CALLBACK_ADDR));
+        assert!(message.contains(crate::openai_codex::CALLBACK_ADDR));
         assert!(message.contains("verlet auth login openai-codex --device"));
     }
 
@@ -1112,15 +1129,19 @@ mod tests {
             (200, token_response("acct-device", "", "refresh-device")),
         ])
         .await;
-        let mut endpoints = OAuthEndpoints::default();
+        let mut endpoints = crate::openai_codex::OAuthEndpoints::default();
         endpoints.device_user_code = format!("{}/device/usercode", server.base_url);
         endpoints.device_token = format!("{}/device/token", server.base_url);
         endpoints.token = format!("{}/oauth/token", server.base_url);
-        let mut client = OpenAICodexOAuthClient::with_endpoints(endpoints).unwrap();
+        let mut client =
+            crate::openai_codex::OpenAICodexOAuthClient::with_endpoints(endpoints).unwrap();
         client.device_poll_floor = std::time::Duration::ZERO;
         let login = client.start_device_login().await.unwrap();
         assert_eq!(login.user_code, "ABCD-EFGH");
-        assert_eq!(login.verification_uri, DEVICE_VERIFICATION_URI);
+        assert_eq!(
+            login.verification_uri,
+            crate::openai_codex::DEVICE_VERIFICATION_URI
+        );
         let credential = client.complete_device_login(login).await.unwrap();
         server.task.await.unwrap();
 
@@ -1134,7 +1155,7 @@ mod tests {
         let requests = server.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert!(requests[0].starts_with("POST /device/usercode "));
-        assert!(requests[0].contains(CLIENT_ID));
+        assert!(requests[0].contains(crate::openai_codex::CLIENT_ID));
         assert!(requests[1].starts_with("POST /device/token "));
         assert!(requests[1].contains("device-123"));
         assert!(requests[2].starts_with("POST /oauth/token "));
@@ -1163,7 +1184,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let client = OpenAICodexProviderClient::with_urls(
+        let client = crate::openai_codex::OpenAICodexProviderClient::with_urls(
             store.clone(),
             format!("{}/oauth/token", server.base_url),
             "http://unused.invalid/responses",
@@ -1194,10 +1215,22 @@ mod tests {
     #[test]
     fn refresh_window_includes_expired_and_exactly_sixty_seconds_remaining() {
         let now_ms = 1_700_000_000_000;
-        assert!(credential_needs_refresh(now_ms - 1, now_ms));
-        assert!(credential_needs_refresh(now_ms + 60_000, now_ms));
-        assert!(!credential_needs_refresh(now_ms + 60_001, now_ms));
-        assert!(credential_needs_refresh(i64::MIN, i64::MAX));
+        assert!(crate::openai_codex::credential_needs_refresh(
+            now_ms - 1,
+            now_ms
+        ));
+        assert!(crate::openai_codex::credential_needs_refresh(
+            now_ms + 60_000,
+            now_ms
+        ));
+        assert!(!crate::openai_codex::credential_needs_refresh(
+            now_ms + 60_001,
+            now_ms
+        ));
+        assert!(crate::openai_codex::credential_needs_refresh(
+            i64::MIN,
+            i64::MAX
+        ));
     }
 
     #[tokio::test]
@@ -1214,7 +1247,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let client = OpenAICodexProviderClient::with_urls(
+        let client = crate::openai_codex::OpenAICodexProviderClient::with_urls(
             store.clone(),
             format!("{}/oauth/token", server.base_url),
             "http://unused.invalid/responses",
@@ -1264,7 +1297,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let client = OpenAICodexProviderClient::with_urls(
+        let client = crate::openai_codex::OpenAICodexProviderClient::with_urls(
             store.clone(),
             format!("{}/oauth/token", server.base_url),
             "http://unused.invalid/responses",
@@ -1320,7 +1353,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let client = OpenAICodexProviderClient::with_urls(
+        let client = crate::openai_codex::OpenAICodexProviderClient::with_urls(
             store.clone(),
             format!("{}/oauth/token", server.base_url),
             "http://unused.invalid/responses",
@@ -1359,7 +1392,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let client = OpenAICodexProviderClient::with_urls(
+        let client = crate::openai_codex::OpenAICodexProviderClient::with_urls(
             store.clone(),
             format!("{}/oauth/token", server.base_url),
             "http://unused.invalid/responses",
@@ -1395,7 +1428,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let client = OpenAICodexProviderClient::with_urls(
+        let client = crate::openai_codex::OpenAICodexProviderClient::with_urls(
             store.clone(),
             format!("{}/oauth/token", server.base_url),
             "http://unused.invalid/responses",
@@ -1420,7 +1453,7 @@ mod tests {
             include_encrypted_reasoning: false,
             reasoning_summary: verlet_provider::OpenAIReasoningSummary::Auto,
         };
-        let adapter = OpenAICodexResponsesAdapter {
+        let adapter = crate::openai_codex::OpenAICodexResponsesAdapter {
             inner: inner.clone(),
         };
         let request = verlet_provider::ProviderRequest::new(
@@ -1472,7 +1505,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let client = OpenAICodexProviderClient::with_urls(
+        let client = crate::openai_codex::OpenAICodexProviderClient::with_urls(
             store,
             "http://unused.invalid/token",
             format!("{}/backend-api/codex/responses", server.base_url),

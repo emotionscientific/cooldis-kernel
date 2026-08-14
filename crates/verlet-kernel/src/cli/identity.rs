@@ -3,7 +3,7 @@
 use crate::daemon::identity::IdentityAuthority as _;
 
 /// Dispatch an offline identity-store command.
-pub(super) async fn run_identity(
+pub(crate) async fn run_identity(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -48,7 +48,7 @@ pub(super) async fn run_identity(
 }
 
 /// Declare the first operator and print its credential once.
-pub(super) async fn identity_bootstrap(
+pub(crate) async fn identity_bootstrap(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_bootstrap_args(args)?;
@@ -78,7 +78,7 @@ pub(super) async fn identity_bootstrap(
 }
 
 /// Declare an adapter principal in the offline identity store.
-pub(super) async fn identity_declare(
+pub(crate) async fn identity_declare(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_declare_args(args)?;
@@ -113,7 +113,7 @@ pub(super) async fn identity_declare(
 }
 
 /// Mint and print one credential for an active principal.
-pub(super) async fn identity_mint(
+pub(crate) async fn identity_mint(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_mint_args(args)?;
@@ -147,7 +147,7 @@ pub(super) async fn identity_mint(
 }
 
 /// Revoke one credential in the offline identity store.
-pub(super) async fn identity_revoke_credential(
+pub(crate) async fn identity_revoke_credential(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_revoke_args(args, "identity revoke-credential")?;
@@ -174,7 +174,7 @@ pub(super) async fn identity_revoke_credential(
 }
 
 /// Revoke one principal in the offline identity store.
-pub(super) async fn identity_revoke_principal(
+pub(crate) async fn identity_revoke_principal(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_revoke_args(args, "identity revoke-principal")?;
@@ -201,7 +201,7 @@ pub(super) async fn identity_revoke_principal(
 }
 
 /// Print redacted principal and credential records from the identity store.
-pub(super) async fn identity_list(
+pub(crate) async fn identity_list(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_list_args(args)?;
@@ -551,7 +551,7 @@ fn identity_cli_error(error: impl std::fmt::Display) -> crate::kernel::runtime_h
 }
 
 /// Print help for the identity subcommand family.
-pub(super) fn print_identity_help() {
+pub(crate) fn print_identity_help() {
     println!(
         "verlet identity\n\
 \n\
@@ -569,7 +569,7 @@ daemon before running these commands. Credential tokens are printed only when mi
 }
 
 /// Print help for `identity bootstrap`.
-pub(super) fn print_identity_bootstrap_help() {
+pub(crate) fn print_identity_bootstrap_help() {
     println!(
         "verlet identity bootstrap\n\
 \n\
@@ -582,7 +582,7 @@ token is shown once. Bootstrap refuses a store with an active operator.\n"
 }
 
 /// Print help for `identity declare`.
-pub(super) fn print_identity_declare_help() {
+pub(crate) fn print_identity_declare_help() {
     println!(
         "verlet identity declare\n\
 \n\
@@ -594,7 +594,7 @@ Declares an adapter principal. Member principals are reserved in v0.\n"
 }
 
 /// Print help for `identity mint`.
-pub(super) fn print_identity_mint_help() {
+pub(crate) fn print_identity_mint_help() {
     println!(
         "verlet identity mint\n\
 \n\
@@ -606,7 +606,7 @@ Mints a credential for an active principal. The credential token is shown once.\
 }
 
 /// Print help for `identity revoke-credential`.
-pub(super) fn print_identity_revoke_credential_help() {
+pub(crate) fn print_identity_revoke_credential_help() {
     println!(
         "verlet identity revoke-credential\n\
 \n\
@@ -616,7 +616,7 @@ Usage:\n\
 }
 
 /// Print help for `identity revoke-principal`.
-pub(super) fn print_identity_revoke_principal_help() {
+pub(crate) fn print_identity_revoke_principal_help() {
     println!(
         "verlet identity revoke-principal\n\
 \n\
@@ -626,7 +626,7 @@ Usage:\n\
 }
 
 /// Print help for `identity list`.
-pub(super) fn print_identity_list_help() {
+pub(crate) fn print_identity_list_help() {
     println!(
         "verlet identity list\n\
 \n\

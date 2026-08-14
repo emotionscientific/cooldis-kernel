@@ -1,7 +1,5 @@
 use base64::Engine as _;
 use futures_util::{SinkExt as _, StreamExt as _};
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 #[derive(Clone)]
@@ -28,7 +26,7 @@ async fn mock_operator_client(
     replies: Vec<MockRpcReply>,
 ) -> (
     crate::adapters::operator_client::OperatorClient<tokio::io::DuplexStream>,
-    Arc<Mutex<Vec<crate::adapters::app_server::connection::JsonRpcRequest>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<crate::adapters::app_server::connection::JsonRpcRequest>>>,
     tokio::task::JoinHandle<()>,
 ) {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
@@ -44,10 +42,10 @@ async fn mock_operator_client(
         None,
     )
     .await;
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&requests);
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = std::sync::Arc::clone(&requests);
     let task = tokio::spawn(async move {
-        let mut replies = VecDeque::from(replies);
+        let mut replies = std::collections::VecDeque::from(replies);
         while let Some(message) = server_websocket.next().await {
             let message = message.expect("mock app-server websocket read");
             let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
@@ -128,7 +126,7 @@ async fn drive_actions(
         action_tx.send(action).unwrap();
     }
     drop(action_tx);
-    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
     driver
         .drive(&mut client, action_rx, event_tx)
         .await
@@ -145,15 +143,15 @@ async fn drive_actions(
 
 struct FakeOAuthServer {
     base_url: String,
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
 async fn fake_oauth_server(responses: Vec<(u16, serde_json::Value)>) -> FakeOAuthServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&requests);
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = std::sync::Arc::clone(&requests);
     let task = tokio::spawn(async move {
         for (status, body) in responses {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -177,16 +175,16 @@ async fn fake_oauth_server(responses: Vec<(u16, serde_json::Value)>) -> FakeOAut
 
 async fn pending_oauth_server() -> (
     String,
-    Arc<Mutex<Vec<String>>>,
-    Arc<tokio::sync::Notify>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<tokio::sync::Notify>,
     tokio::task::JoinHandle<()>,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&requests);
-    let shutdown = Arc::new(tokio::sync::Notify::new());
-    let stop = Arc::clone(&shutdown);
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = std::sync::Arc::clone(&requests);
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let stop = std::sync::Arc::clone(&shutdown);
     let task = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = read_http_request(&mut socket).await;
@@ -269,20 +267,20 @@ async fn recv_event(
 #[test]
 fn parse_attach_target_accepts_unix_and_websocket() {
     assert_eq!(
-        super::parse_attach_target("unix:///tmp/sock").expect("unix target"),
-        super::ChatAttachTarget::Unix(std::path::PathBuf::from("/tmp/sock"))
+        crate::cli::chat::parse_attach_target("unix:///tmp/sock").expect("unix target"),
+        crate::cli::chat::ChatAttachTarget::Unix(std::path::PathBuf::from("/tmp/sock"))
     );
     assert_eq!(
-        super::parse_attach_target("ws://127.0.0.1:7000/rpc").expect("ws target"),
-        super::ChatAttachTarget::WebSocket("ws://127.0.0.1:7000/rpc".to_string())
+        crate::cli::chat::parse_attach_target("ws://127.0.0.1:7000/rpc").expect("ws target"),
+        crate::cli::chat::ChatAttachTarget::WebSocket("ws://127.0.0.1:7000/rpc".to_string())
     );
 }
 
 #[test]
 fn parse_attach_target_rejects_empty_and_unknown_schemes() {
-    assert!(super::parse_attach_target("unix://").is_err());
-    assert!(super::parse_attach_target("wss://host/rpc").is_err());
-    assert!(super::parse_attach_target("http://host").is_err());
+    assert!(crate::cli::chat::parse_attach_target("unix://").is_err());
+    assert!(crate::cli::chat::parse_attach_target("wss://host/rpc").is_err());
+    assert!(crate::cli::chat::parse_attach_target("http://host").is_err());
 }
 
 fn notification(
@@ -295,8 +293,8 @@ fn notification(
     }
 }
 
-fn driver() -> super::ChatDriver {
-    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+fn driver() -> crate::cli::chat::ChatDriver {
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
     driver.active_turn_id = Some("turn-1".to_string());
     driver
 }
@@ -587,7 +585,7 @@ fn turn_completed_clears_the_active_turn_and_reports_errors() {
 
 #[test]
 fn session_rows_mark_the_current_thread() {
-    let rows = super::session_rows(
+    let rows = crate::cli::chat::session_rows(
         &serde_json::json!({
             "data": [
                 {"id": "thread-1", "name": "alpha", "status": {"type": "idle"}, "preview": "  hello   world  "},
@@ -605,7 +603,7 @@ fn session_rows_mark_the_current_thread() {
 
 #[test]
 fn model_rows_preserve_coordinates_auth_and_active_selection() {
-    let rows = super::model_rows(&crate::adapters::operator_client::OperatorModelList {
+    let rows = crate::cli::chat::model_rows(&crate::adapters::operator_client::OperatorModelList {
         data: vec![crate::adapters::operator_client::OperatorModel {
             provider_id: "provider-id".to_string(),
             model: "server-model".to_string(),
@@ -668,7 +666,7 @@ fn catalog_provider_rows_map_the_typed_rpc_response() {
     >(catalog)
     .expect("catalog response must deserialize into the typed client struct");
     assert_eq!(
-        super::catalog_provider_rows(&catalog),
+        crate::cli::chat::catalog_provider_rows(&catalog),
         vec![
             verlet_chat::CatalogProviderRow {
                 provider_id: "anthropic".to_string(),
@@ -704,15 +702,16 @@ fn catalog_provider_rows_map_the_typed_rpc_response() {
 
 #[test]
 fn custom_provider_upsert_params_carry_no_key_and_mark_the_default_model() {
-    let params = super::custom_provider_upsert_params(&verlet_chat::CustomProviderSpec {
-        provider_id: "my-llm".to_string(),
-        display_name: "My LLM".to_string(),
-        api: "anthropic_messages".to_string(),
-        base_url: "https://llm.example".to_string(),
-        header: Some(("X-Team".to_string(), "research".to_string())),
-        models: vec!["model-one".to_string(), "model-two".to_string()],
-        keyless: false,
-    });
+    let params =
+        crate::cli::chat::custom_provider_upsert_params(&verlet_chat::CustomProviderSpec {
+            provider_id: "my-llm".to_string(),
+            display_name: "My LLM".to_string(),
+            api: "anthropic_messages".to_string(),
+            base_url: "https://llm.example".to_string(),
+            header: Some(("X-Team".to_string(), "research".to_string())),
+            models: vec!["model-one".to_string(), "model-two".to_string()],
+            keyless: false,
+        });
     assert_eq!(
         serde_json::to_value(&params).unwrap(),
         serde_json::json!({
@@ -736,15 +735,16 @@ fn custom_provider_upsert_params_carry_no_key_and_mark_the_default_model() {
 
 #[test]
 fn keyless_custom_provider_upsert_params_declare_auth_none_without_auth_header() {
-    let params = super::custom_provider_upsert_params(&verlet_chat::CustomProviderSpec {
-        provider_id: "local-llm".to_string(),
-        display_name: "Local LLM".to_string(),
-        api: "openai_chat_completions".to_string(),
-        base_url: "http://127.0.0.1:11434/v1".to_string(),
-        header: None,
-        models: vec!["llama-local".to_string()],
-        keyless: true,
-    });
+    let params =
+        crate::cli::chat::custom_provider_upsert_params(&verlet_chat::CustomProviderSpec {
+            provider_id: "local-llm".to_string(),
+            display_name: "Local LLM".to_string(),
+            api: "openai_chat_completions".to_string(),
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            header: None,
+            models: vec!["llama-local".to_string()],
+            keyless: true,
+        });
     assert_eq!(
         serde_json::to_value(&params).unwrap(),
         serde_json::json!({
@@ -831,7 +831,7 @@ async fn upsert_custom_provider_sends_one_upsert_and_reports_success() {
         keyless: true,
     };
     let expected_params =
-        serde_json::to_value(super::custom_provider_upsert_params(&spec)).unwrap();
+        serde_json::to_value(crate::cli::chat::custom_provider_upsert_params(&spec)).unwrap();
     let (events, requests) = drive_actions(
         vec![rpc_ok(
             "modelProvider/upsert",
@@ -1040,7 +1040,7 @@ async fn set_provider_key_maps_rpc_error_without_echoing_the_key() {
 #[test]
 fn oauth_rpc_error_redaction_removes_access_and_refresh_values() {
     assert_eq!(
-        super::redact_secret_values(
+        crate::cli::chat::redact_secret_values(
             "server echoed access-secret and refresh-secret".to_string(),
             [&"access-secret".to_string(), &"refresh-secret".to_string()],
         ),
@@ -1067,7 +1067,7 @@ async fn pending_login_aborts_its_task_when_dropped() {
         std::future::pending::<()>().await;
     });
     started_rx.await.unwrap();
-    drop(super::PendingLogin { id: 1, task });
+    drop(crate::cli::chat::PendingLogin { id: 1, task });
     tokio::time::timeout(std::time::Duration::from_secs(30), dropped_rx)
         .await
         .expect("aborted login task did not drop")
@@ -1153,7 +1153,7 @@ async fn device_login_emits_code_then_sends_oauth_credential_over_rpc() {
     .await;
     let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
     driver.oauth_client =
         crate::openai_codex::OpenAICodexOAuthClient::with_test_endpoints(&oauth.base_url).unwrap();
 
@@ -1208,7 +1208,7 @@ async fn second_start_login_while_pending_reports_error_without_spawning() {
     let (mut client, _, server) = mock_operator_client(Vec::new()).await;
     let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
     driver.oauth_client =
         crate::openai_codex::OpenAICodexOAuthClient::with_test_endpoints(&base_url).unwrap();
 
@@ -1259,8 +1259,8 @@ async fn stale_login_completion_after_cancel_is_ignored() {
     let (mut client, requests, server) = mock_operator_client(Vec::new()).await;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (login_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
-    driver.pending_login = Some(super::PendingLogin {
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
+    driver.pending_login = Some(crate::cli::chat::PendingLogin {
         id: 7,
         task: tokio::spawn(std::future::pending()),
     });
@@ -1277,7 +1277,7 @@ async fn stale_login_completion_after_cancel_is_ignored() {
         .apply_login_event(
             &mut client,
             &event_tx,
-            super::LoginTaskEvent::Finished {
+            crate::cli::chat::LoginTaskEvent::Finished {
                 id: 7,
                 provider_id: "openai-codex".to_string(),
                 result: Ok(
@@ -1304,8 +1304,8 @@ async fn set_provider_key_while_login_pending_is_rejected_without_rpc() {
     let (mut client, requests, server) = mock_operator_client(Vec::new()).await;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (login_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let mut driver = super::ChatDriver::new("thread-1".to_string()).unwrap();
-    driver.pending_login = Some(super::PendingLogin {
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
+    driver.pending_login = Some(crate::cli::chat::PendingLogin {
         id: 11,
         task: tokio::spawn(std::future::pending()),
     });
@@ -1389,9 +1389,10 @@ async fn bootstrap_without_configured_providers_emits_the_first_run_gate() {
     ])
     .await;
 
-    let session = super::bootstrap_chat_client(&mut client, "attach ws://test".to_string())
-        .await
-        .unwrap();
+    let session =
+        crate::cli::chat::bootstrap_chat_client(&mut client, "attach ws://test".to_string())
+            .await
+            .unwrap();
     assert_eq!(
         session.initial_events,
         vec![verlet_chat::ChatEvent::NoConfiguredProviders]
@@ -1427,9 +1428,10 @@ async fn bootstrap_with_a_configured_provider_skips_the_first_run_gate() {
     ])
     .await;
 
-    let session = super::bootstrap_chat_client(&mut client, "attach ws://test".to_string())
-        .await
-        .unwrap();
+    let session =
+        crate::cli::chat::bootstrap_chat_client(&mut client, "attach ws://test".to_string())
+            .await
+            .unwrap();
     assert_eq!(session.initial_events, Vec::new());
     assert_eq!(session.model_label, "anthropic/claude");
     assert_eq!(requests.lock().unwrap().len(), 3);

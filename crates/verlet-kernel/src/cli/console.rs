@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn run_console(
+pub(crate) async fn run_console(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args
@@ -64,20 +64,20 @@ pub(super) async fn run_console(
 }
 
 #[cfg(test)]
-pub(super) fn console_app_server_config(
+pub(crate) fn console_app_server_config(
     options: &ConsoleArgs,
     listen: crate::adapters::app_server::AppServerListenAddr,
 ) -> crate::kernel::runtime_host::VerletResult<crate::adapters::app_server::VerletAppServerConfig> {
     resolve_console_app_server_config(options, listen).map(|resolved| resolved.config)
 }
 
-pub(super) struct ResolvedConsoleAppServerConfig {
+pub(crate) struct ResolvedConsoleAppServerConfig {
     config: crate::adapters::app_server::VerletAppServerConfig,
     project_root: std::path::PathBuf,
     config_path: Option<std::path::PathBuf>,
 }
 
-pub(super) struct ConsoleEnvironment {
+pub(crate) struct ConsoleEnvironment {
     selected_cwd: std::path::PathBuf,
     project_root: std::path::PathBuf,
     project_storage_root: std::path::PathBuf,
@@ -85,7 +85,7 @@ pub(super) struct ConsoleEnvironment {
     config_paths: Vec<std::path::PathBuf>,
 }
 
-pub(super) fn resolve_console_app_server_config(
+pub(crate) fn resolve_console_app_server_config(
     options: &ConsoleArgs,
     listen: crate::adapters::app_server::AppServerListenAddr,
 ) -> crate::kernel::runtime_host::VerletResult<ResolvedConsoleAppServerConfig> {
@@ -144,7 +144,7 @@ pub(super) fn resolve_console_app_server_config(
     })
 }
 
-pub(super) fn resolve_console_environment(
+pub(crate) fn resolve_console_environment(
     options: &ConsoleArgs,
 ) -> crate::kernel::runtime_host::VerletResult<ConsoleEnvironment> {
     let selected_cwd = absolute_path(&options.cwd)?;
@@ -172,7 +172,7 @@ pub(super) fn resolve_console_environment(
     })
 }
 
-pub(super) fn console_project_storage_root(
+pub(crate) fn console_project_storage_root(
     project_root: &std::path::Path,
     user_home: &std::path::Path,
 ) -> std::path::PathBuf {
@@ -183,7 +183,7 @@ pub(super) fn console_project_storage_root(
     storage_root
 }
 
-pub(super) fn prepare_console_project_storage(
+pub(crate) fn prepare_console_project_storage(
     config: &crate::adapters::app_server::VerletAppServerConfig,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let mut roots = vec![
@@ -206,7 +206,7 @@ pub(super) fn prepare_console_project_storage(
     Ok(())
 }
 
-pub(super) fn default_user_verlet_home()
+pub(crate) fn default_user_verlet_home()
 -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     if let Some(home) = std::env::var_os("VERLET_HOME").map(std::path::PathBuf::from) {
         return Ok(home);
@@ -219,7 +219,7 @@ pub(super) fn default_user_verlet_home()
     Ok(home.join(".verlet"))
 }
 
-pub(super) fn absolute_path(
+pub(crate) fn absolute_path(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     if path.is_absolute() {
@@ -232,13 +232,13 @@ pub(super) fn absolute_path(
         .join(path))
 }
 
-pub(super) fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
+pub(crate) fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
     if !paths.iter().any(|existing| existing == &path) {
         paths.push(path);
     }
 }
 
-pub(super) fn resolve_console_asset_root()
+pub(crate) fn resolve_console_asset_root()
 -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("VERLET_CONSOLE_ASSET_DIR").map(std::path::PathBuf::from) {
         return console_asset_root_if_valid(path).ok_or_else(|| {
@@ -278,24 +278,24 @@ pub(super) fn resolve_console_asset_root()
         })
 }
 
-pub(super) fn exe_asset_candidate(exe: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn exe_asset_candidate(exe: &std::path::Path) -> std::path::PathBuf {
     exe.parent()
         .unwrap_or(std::path::Path::new("."))
         .join("share/verlet/console")
 }
 
-pub(super) fn console_asset_root_if_valid(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
+pub(crate) fn console_asset_root_if_valid(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
     path.join("index.html").is_file().then_some(path)
 }
 
-pub(super) fn open_browser_url(url: &str) -> crate::kernel::runtime_host::VerletResult<()> {
+pub(crate) fn open_browser_url(url: &str) -> crate::kernel::runtime_host::VerletResult<()> {
     browser_open_command(url)?
         .spawn()
         .map(|_| ())
         .map_err(|err| crate::cli::usage_error(format!("failed to open browser: {err}")))
 }
 
-pub(super) async fn open_browser_url_checked(
+pub(crate) async fn open_browser_url_checked(
     url: &str,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let command = browser_open_command(url)?;
@@ -325,7 +325,7 @@ async fn wait_for_browser_open_command(
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn browser_open_command(
+pub(crate) fn browser_open_command(
     url: &str,
 ) -> crate::kernel::runtime_host::VerletResult<std::process::Command> {
     let mut command = std::process::Command::new("open");
@@ -334,7 +334,7 @@ pub(super) fn browser_open_command(
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn browser_open_command(
+pub(crate) fn browser_open_command(
     url: &str,
 ) -> crate::kernel::runtime_host::VerletResult<std::process::Command> {
     let mut command = std::process::Command::new("xdg-open");
@@ -343,7 +343,7 @@ pub(super) fn browser_open_command(
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn browser_open_command(
+pub(crate) fn browser_open_command(
     url: &str,
 ) -> crate::kernel::runtime_host::VerletResult<std::process::Command> {
     let mut command = std::process::Command::new("cmd");
@@ -352,7 +352,7 @@ pub(super) fn browser_open_command(
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-pub(super) fn browser_open_command(
+pub(crate) fn browser_open_command(
     _url: &str,
 ) -> crate::kernel::runtime_host::VerletResult<std::process::Command> {
     Err(crate::cli::usage_error(
@@ -361,7 +361,7 @@ pub(super) fn browser_open_command(
 }
 
 #[derive(Debug)]
-pub(super) struct ConsoleArgs {
+pub(crate) struct ConsoleArgs {
     listen: std::net::SocketAddr,
     cwd: std::path::PathBuf,
     cwd_explicit: bool,
@@ -371,8 +371,8 @@ pub(super) struct ConsoleArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct ChatArgs {
-    pub(super) cwd: std::path::PathBuf,
+pub(crate) struct ChatArgs {
+    pub(crate) cwd: std::path::PathBuf,
     config_path: Option<std::path::PathBuf>,
     env_file: Option<std::path::PathBuf>,
     runtime_home: Option<std::path::PathBuf>,
@@ -384,13 +384,13 @@ pub(super) struct ChatArgs {
     model: Option<String>,
     max_tokens: Option<u32>,
     stream: Option<bool>,
-    pub(super) attach: Option<String>,
-    pub(super) prompt: Option<String>,
-    pub(super) help: bool,
+    pub(crate) attach: Option<String>,
+    pub(crate) prompt: Option<String>,
+    pub(crate) help: bool,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-pub(super) struct ChatConfigFile {
+pub(crate) struct ChatConfigFile {
     chat: Option<ChatConfigSection>,
     provider: Option<String>,
     base_url: Option<String>,
@@ -409,7 +409,7 @@ pub(super) struct ChatConfigFile {
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-pub(super) struct ChatConfigSection {
+pub(crate) struct ChatConfigSection {
     provider: Option<String>,
     base_url: Option<String>,
     api_key: Option<String>,
@@ -427,7 +427,7 @@ pub(super) struct ChatConfigSection {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum ChatProviderConfig {
+pub(crate) enum ChatProviderConfig {
     Local,
     OpenAICodex {
         model: String,
@@ -475,7 +475,7 @@ pub(super) enum ChatProviderConfig {
     },
 }
 
-pub(super) fn apply_chat_provider_config(
+pub(crate) fn apply_chat_provider_config(
     config: &mut crate::adapters::app_server::VerletAppServerConfig,
     provider: ChatProviderConfig,
 ) {
@@ -606,7 +606,7 @@ pub(super) fn apply_chat_provider_config(
     }
 }
 
-pub(super) fn parse_console_args(
+pub(crate) fn parse_console_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<ConsoleArgs> {
     let mut listen = "127.0.0.1:0"
@@ -665,7 +665,7 @@ pub(super) fn parse_console_args(
     })
 }
 
-pub(super) fn parse_chat_args(
+pub(crate) fn parse_chat_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<ChatArgs> {
     let mut cwd = std::env::current_dir().map_err(|err| {
@@ -789,7 +789,7 @@ pub(super) fn parse_chat_args(
     })
 }
 
-pub(super) fn load_chat_provider_config(
+pub(crate) fn load_chat_provider_config(
     args: &ChatArgs,
 ) -> crate::kernel::runtime_host::VerletResult<ChatProviderConfig> {
     let (mut config, config_base) = load_chat_config_file(args.config_path.as_deref())?;
@@ -1200,7 +1200,7 @@ pub(super) fn load_chat_provider_config(
     }
 }
 
-pub(super) fn load_chat_capsule_bindings_config(
+pub(crate) fn load_chat_capsule_bindings_config(
     args: &ChatArgs,
 ) -> crate::kernel::runtime_host::VerletResult<crate::adapters::app_server::CapsuleBindingsConfig> {
     let (config, config_base) = load_chat_config_file(args.config_path.as_deref())?;
@@ -1214,7 +1214,7 @@ pub(super) fn load_chat_capsule_bindings_config(
     Ok(capsule_bindings)
 }
 
-pub(super) fn load_chat_config_file(
+pub(crate) fn load_chat_config_file(
     path: Option<&std::path::Path>,
 ) -> crate::kernel::runtime_host::VerletResult<(ChatConfigSection, Option<std::path::PathBuf>)> {
     let discovered;
@@ -1258,7 +1258,7 @@ pub(super) fn load_chat_config_file(
     Ok((config, path.parent().map(|base| base.to_path_buf())))
 }
 
-pub(super) fn read_env_file_if_exists(
+pub(crate) fn read_env_file_if_exists(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<std::collections::BTreeMap<String, String>> {
     if !path.exists() {
@@ -1273,7 +1273,7 @@ pub(super) fn read_env_file_if_exists(
     Ok(parse_env_lines(&text))
 }
 
-pub(super) fn parse_env_lines(text: &str) -> std::collections::BTreeMap<String, String> {
+pub(crate) fn parse_env_lines(text: &str) -> std::collections::BTreeMap<String, String> {
     text.lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -1286,7 +1286,7 @@ pub(super) fn parse_env_lines(text: &str) -> std::collections::BTreeMap<String, 
         .collect()
 }
 
-pub(super) fn unquote_env_value(value: &str) -> String {
+pub(crate) fn unquote_env_value(value: &str) -> String {
     if value.len() >= 2 {
         let bytes = value.as_bytes();
         if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
@@ -1298,7 +1298,7 @@ pub(super) fn unquote_env_value(value: &str) -> String {
     value.to_string()
 }
 
-pub(super) fn env_or_file(
+pub(crate) fn env_or_file(
     name: &str,
     file_env: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
@@ -1308,14 +1308,14 @@ pub(super) fn env_or_file(
         .or_else(|| file_env.get(name).cloned())
 }
 
-pub(super) struct PrivateAppServer {
+pub(crate) struct PrivateAppServer {
     listen: crate::adapters::app_server::AppServerListenAddr,
     root: std::path::PathBuf,
     task: tokio::task::JoinHandle<crate::kernel::runtime_host::VerletResult<()>>,
 }
 
 impl PrivateAppServer {
-    pub(super) async fn start(
+    pub(crate) async fn start(
         options: &ChatArgs,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
         let root = std::path::PathBuf::from("/tmp")
@@ -1349,11 +1349,11 @@ impl PrivateAppServer {
         Ok(Self { listen, root, task })
     }
 
-    pub(super) fn socket_path(&self) -> &std::path::Path {
+    pub(crate) fn socket_path(&self) -> &std::path::Path {
         socket_path(&self.listen)
     }
 
-    pub(super) fn shutdown(self) {}
+    pub(crate) fn shutdown(self) {}
 }
 
 impl Drop for PrivateAppServer {
@@ -1363,7 +1363,7 @@ impl Drop for PrivateAppServer {
     }
 }
 
-pub(super) fn socket_path(
+pub(crate) fn socket_path(
     listen: &crate::adapters::app_server::AppServerListenAddr,
 ) -> &std::path::Path {
     match listen {
@@ -1374,7 +1374,7 @@ pub(super) fn socket_path(
     }
 }
 
-pub(super) async fn wait_for_private_socket(
+pub(crate) async fn wait_for_private_socket(
     path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     for _ in 0..100 {
@@ -1389,7 +1389,7 @@ pub(super) async fn wait_for_private_socket(
     )))
 }
 
-pub(super) async fn manifest_receipt_event_ids(
+pub(crate) async fn manifest_receipt_event_ids(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
 ) -> crate::kernel::runtime_host::VerletResult<(String, String)> {
@@ -1431,7 +1431,7 @@ pub(super) async fn manifest_receipt_event_ids(
     Ok((compile_id.to_string(), bind_id.to_string()))
 }
 
-pub(super) async fn run_local_app_turn(
+pub(crate) async fn run_local_app_turn(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     input: &str,
@@ -1498,7 +1498,7 @@ pub(super) async fn run_local_app_turn(
     }
 }
 
-pub(super) fn notification_matches_thread_turn(
+pub(crate) fn notification_matches_thread_turn(
     notification: &crate::adapters::app_server::connection::JsonRpcNotification,
     thread_id: &str,
     turn_id: &str,
@@ -1517,7 +1517,7 @@ pub(super) fn notification_matches_thread_turn(
             == Some(turn_id)
 }
 
-pub(super) fn notification_turn_id(
+pub(crate) fn notification_turn_id(
     notification: &crate::adapters::app_server::connection::JsonRpcNotification,
 ) -> Option<&str> {
     notification
@@ -1528,7 +1528,7 @@ pub(super) fn notification_turn_id(
         .and_then(serde_json::Value::as_str)
 }
 
-pub(super) fn notification_error_message(
+pub(crate) fn notification_error_message(
     notification: &crate::adapters::app_server::connection::JsonRpcNotification,
 ) -> String {
     notification
@@ -1541,7 +1541,7 @@ pub(super) fn notification_error_message(
         .to_string()
 }
 
-pub(super) fn print_console_help() {
+pub(crate) fn print_console_help() {
     println!(
         "verlet console\n\
 \n\
@@ -1554,7 +1554,7 @@ the UI and RPC URLs, and opens the browser unless --no-open is set.\n"
     );
 }
 
-pub(super) fn print_chat_help() {
+pub(crate) fn print_chat_help() {
     println!(
         "verlet chat\n\
 \n\

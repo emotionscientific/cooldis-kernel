@@ -34,11 +34,6 @@
 //!    never `Websocket`/`Console` — the surface names how the connection
 //!    reached the instance.
 
-use crate::adapters::app_server::VerletAppServer;
-use crate::adapters::app_server::VerletAppServerConfig;
-use crate::adapters::app_server::lifecycle::InstanceTaskSet;
-use crate::kernel::runtime_host::VerletResult;
-
 /// Host-scoped name of one hosted instance. Distinct from tenant id (an
 /// instance HAS a tenant; the host does not interpret it) and never taken
 /// from an RPC body — the routed connection is the only source.
@@ -48,7 +43,7 @@ pub struct InstanceId(String);
 impl InstanceId {
     /// Non-empty, no whitespace or control characters; used in logs and error
     /// messages, so keep it printable. Never secret material.
-    pub fn new(id: impl Into<String>) -> VerletResult<Self> {
+    pub fn new(id: impl Into<String>) -> crate::kernel::runtime_host::VerletResult<Self> {
         let id = id.into();
         if id.is_empty()
             || id
@@ -97,13 +92,15 @@ struct VerletHostInner {
     /// OUTSIDE this lock (both are slow: store opens, task drains) — the
     /// lock guards the map, not the lifecycle transitions; a per-id claim
     /// keeps concurrent start/shutdown of the same id single-file.
-    instances: tokio::sync::RwLock<std::collections::HashMap<InstanceId, VerletAppServer>>,
+    instances: tokio::sync::RwLock<
+        std::collections::HashMap<InstanceId, crate::adapters::app_server::VerletAppServer>,
+    >,
     /// Credential-digest → instance selection table (decision 1). Values
     /// are digests from `identity_token_digest`; raw tokens are never
     /// stored, logged, or printed.
     credential_routes: std::sync::Mutex<std::collections::HashMap<String, InstanceId>>,
     /// Listener + per-connection tasks (decision 2).
-    tasks: InstanceTaskSet,
+    tasks: crate::adapters::app_server::lifecycle::InstanceTaskSet,
     /// The v0 host owns exactly one listener installation for its lifetime.
     listener_installed: std::sync::atomic::AtomicBool,
     /// Per-id lifecycle serialization. Claims live for the host lifetime so
@@ -132,7 +129,7 @@ impl VerletHost {
             inner: std::sync::Arc::new(VerletHostInner {
                 instances: tokio::sync::RwLock::new(std::collections::HashMap::new()),
                 credential_routes: std::sync::Mutex::new(std::collections::HashMap::new()),
-                tasks: InstanceTaskSet::new(),
+                tasks: crate::adapters::app_server::lifecycle::InstanceTaskSet::new(),
                 listener_installed: std::sync::atomic::AtomicBool::new(false),
                 lifecycle_claims: std::sync::Mutex::new(std::collections::HashMap::new()),
                 shutdown: tokio::sync::RwLock::new(false),
@@ -141,7 +138,7 @@ impl VerletHost {
     }
 
     /// Construct and register one instance under `id`. The config must be
-    /// a hosted config ([`VerletAppServerConfig::hosted`]); root
+    /// a hosted config ([`crate::adapters::app_server::VerletAppServerConfig::hosted`]); root
     /// reservation (EMO-552) already guarantees two live instances cannot
     /// share storage, whichever host they belong to. Fails on duplicate
     /// `id`, after host shutdown, and on any constructor failure (the
@@ -149,8 +146,8 @@ impl VerletHost {
     pub async fn start_instance(
         &self,
         id: InstanceId,
-        config: VerletAppServerConfig,
-    ) -> VerletResult<()> {
+        config: crate::adapters::app_server::VerletAppServerConfig,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if *self.inner.shutdown.read().await {
             return Err(host_error("Verlet host is shut down"));
         }
@@ -167,11 +164,11 @@ impl VerletHost {
         }
         if !config.is_hosted() {
             return Err(host_error(format!(
-                "Verlet host instance {id} requires VerletAppServerConfig::hosted"
+                "Verlet host instance {id} requires crate::adapters::app_server::VerletAppServerConfig::hosted"
             )));
         }
 
-        let instance = VerletAppServer::new(config).await?;
+        let instance = crate::adapters::app_server::VerletAppServer::new(config).await?;
         self.inner.instances.write().await.insert(id, instance);
         drop(shutdown);
         Ok(())
@@ -179,12 +176,15 @@ impl VerletHost {
 
     /// Shut down and deregister one instance: drop its credential routes
     /// first (new connections stop routing to it), then
-    /// [`VerletAppServer::shutdown`] (which drains instance tasks and
+    /// [`crate::adapters::app_server::VerletAppServer::shutdown`] (which drains instance tasks and
     /// closes its dispatch gate under any live host connection), then
     /// remove it from the map, releasing its root reservation with the
     /// last handle. Replace = `shutdown_instance` + `start_instance` over
     /// the same roots. Idempotent per id; unknown ids are an error.
-    pub async fn shutdown_instance(&self, id: &InstanceId) -> VerletResult<()> {
+    pub async fn shutdown_instance(
+        &self,
+        id: &InstanceId,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         if *self.inner.shutdown.read().await {
             return Err(host_error("Verlet host is shut down"));
         }
@@ -237,8 +237,11 @@ impl VerletHost {
     /// Observe/dispatch: a handle to one hosted instance (cheap clone of
     /// its shared inner). In-process callers (the embedding orchestrator)
     /// dispatch through
-    /// [`VerletAppServer::dispatch_authenticated_json_rpc`] on it.
-    pub async fn instance(&self, id: &InstanceId) -> Option<VerletAppServer> {
+    /// [`crate::adapters::app_server::VerletAppServer::dispatch_authenticated_json_rpc`] on it.
+    pub async fn instance(
+        &self,
+        id: &InstanceId,
+    ) -> Option<crate::adapters::app_server::VerletAppServer> {
         self.inner.instances.read().await.get(id).cloned()
     }
 
@@ -302,14 +305,14 @@ impl VerletHost {
     /// Per connection: peek the HTTP request, extract the bearer token
     /// (`request_bearer_token`), digest it, select the routed instance,
     /// and hand the un-consumed stream to
-    /// [`VerletAppServer::serve_host_routed_tcp_stream`] — which
+    /// [`crate::adapters::app_server::VerletAppServer::serve_host_routed_tcp_stream`] — which
     /// authenticates against that instance's own authority and witnesses
     /// the session on `BoundarySurface::Host`. No route: refuse per
     /// decision 3 without touching any instance.
     pub async fn serve_websocket_listener(
         &self,
         listener: tokio::net::TcpListener,
-    ) -> VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.serve_websocket_listener_with_options(listener, HostListenerOptions::default())
             .await
     }
@@ -324,7 +327,7 @@ impl VerletHost {
         &self,
         listener: tokio::net::TcpListener,
         options: HostListenerOptions,
-    ) -> VerletResult<()> {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let shutdown = self.inner.shutdown.read().await;
         if *shutdown {
             return Err(host_error("Verlet host is shut down"));
@@ -390,10 +393,10 @@ impl VerletHost {
 
     /// Host shutdown: cancel + drain the listener and every connection
     /// task, then shut down every remaining instance (each per
-    /// [`VerletAppServer::shutdown`]), then clear the route table.
+    /// [`crate::adapters::app_server::VerletAppServer::shutdown`]), then clear the route table.
     /// Idempotent. Explicit shutdown is mandatory (EMO-551 policy: drop
     /// never tears down).
-    pub async fn shutdown(&self) -> VerletResult<()> {
+    pub async fn shutdown(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         let mut shutdown = self.inner.shutdown.write().await;
         *shutdown = true;
 
@@ -444,7 +447,10 @@ impl VerletHost {
         )
     }
 
-    async fn route_tcp_stream(&self, stream: tokio::net::TcpStream) -> VerletResult<()> {
+    async fn route_tcp_stream(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         let request = crate::adapters::app_server::peek_http_request(&stream).await?;
         if request.as_ref().is_some_and(is_health_check_request) {
             return respond_health_ok(stream).await;
@@ -505,7 +511,9 @@ fn is_health_check_request(request: &crate::adapters::app_server::HttpRequestHea
 /// Answer a health probe with a minimal `200 OK` (no body detail — the
 /// health endpoint discloses liveness only, never instance names or
 /// counts) and close the stream.
-async fn respond_health_ok(mut stream: tokio::net::TcpStream) -> VerletResult<()> {
+async fn respond_health_ok(
+    mut stream: tokio::net::TcpStream,
+) -> crate::kernel::runtime_host::VerletResult<()> {
     use tokio::io::AsyncWriteExt as _;
 
     crate::adapters::app_server::consume_http_request_headers(&mut stream).await?;
@@ -568,10 +576,12 @@ mod tests {
     #[test]
     fn instance_ids_reject_log_control_characters() {
         for invalid in ["", "two words", "line\nfeed", "escape\u{1b}", "nul\0byte"] {
-            assert!(super::InstanceId::new(invalid).is_err());
+            assert!(crate::adapters::host::InstanceId::new(invalid).is_err());
         }
         assert_eq!(
-            super::InstanceId::new("tenant-01").unwrap().as_str(),
+            crate::adapters::host::InstanceId::new("tenant-01")
+                .unwrap()
+                .as_str(),
             "tenant-01"
         );
     }
@@ -579,8 +589,8 @@ mod tests {
     #[tokio::test]
     async fn concurrent_starts_for_one_id_admit_exactly_one_instance() {
         let root = test_root("same-id-start");
-        let host = super::VerletHost::new();
-        let id = super::InstanceId::new("same").unwrap();
+        let host = crate::adapters::host::VerletHost::new();
+        let id = crate::adapters::host::InstanceId::new("same").unwrap();
         let first = {
             let host = host.clone();
             let id = id.clone();
@@ -605,13 +615,16 @@ mod tests {
     #[tokio::test]
     async fn shutdown_and_concurrent_start_cannot_leave_a_late_instance() {
         let root = test_root("shutdown-start-race");
-        let host = super::VerletHost::new();
+        let host = crate::adapters::host::VerletHost::new();
         let start = {
             let host = host.clone();
             let config = test_config(&root.join("instance"), "tenant", "operator");
             tokio::spawn(async move {
-                host.start_instance(super::InstanceId::new("instance").unwrap(), config)
-                    .await
+                host.start_instance(
+                    crate::adapters::host::InstanceId::new("instance").unwrap(),
+                    config,
+                )
+                .await
             })
         };
         tokio::task::yield_now().await;
@@ -623,7 +636,7 @@ mod tests {
         assert!(host.instance_ids().await.is_empty());
         assert!(
             host.start_instance(
-                super::InstanceId::new("late").unwrap(),
+                crate::adapters::host::InstanceId::new("late").unwrap(),
                 test_config(&root.join("late"), "late-tenant", "late-operator"),
             )
             .await
@@ -636,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_resumes_after_the_draining_caller_is_cancelled() {
-        let host = super::VerletHost::new();
+        let host = crate::adapters::host::VerletHost::new();
         let started = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let task_started = std::sync::Arc::clone(&started);
@@ -663,8 +676,8 @@ mod tests {
     #[tokio::test]
     async fn instance_shutdown_retires_every_route_to_that_instance() {
         let root = test_root("route-retirement");
-        let host = super::VerletHost::new();
-        let id = super::InstanceId::new("instance").unwrap();
+        let host = crate::adapters::host::VerletHost::new();
+        let id = crate::adapters::host::InstanceId::new("instance").unwrap();
         host.start_instance(
             id.clone(),
             test_config(&root.join("instance"), "tenant", "operator"),
@@ -696,7 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn listener_requires_explicit_non_loopback_opt_in() {
-        let host = super::VerletHost::new();
+        let host = crate::adapters::host::VerletHost::new();
         let guarded = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let error = host.serve_websocket_listener(guarded).await.unwrap_err();
         assert!(error.to_string().contains("is not loopback"), "{error}");
@@ -704,7 +717,7 @@ mod tests {
         let allowed = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         host.serve_websocket_listener_with_options(
             allowed,
-            super::HostListenerOptions {
+            crate::adapters::host::HostListenerOptions {
                 allow_non_loopback: true,
             },
         )
@@ -718,7 +731,7 @@ mod tests {
         use tokio::io::AsyncReadExt as _;
         use tokio::io::AsyncWriteExt as _;
 
-        let host = super::VerletHost::new();
+        let host = crate::adapters::host::VerletHost::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         host.serve_websocket_listener(listener).await.unwrap();

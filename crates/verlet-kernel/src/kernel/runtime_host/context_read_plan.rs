@@ -1,4 +1,4 @@
-pub(super) fn context_compile_payload_v1(
+pub(crate) fn context_compile_payload_v1(
     payload: serde_json::Value,
     stream_id: &verlet_history::EventStreamId,
     source_ranges: &[verlet_history::ObservationSourceRange],
@@ -22,7 +22,7 @@ pub(super) fn context_compile_payload_v1(
     serde_json::Value::Object(object)
 }
 
-pub(super) fn is_recall_context_read_plan_event(event: &verlet_history::EventRecord) -> bool {
+pub(crate) fn is_recall_context_read_plan_event(event: &verlet_history::EventRecord) -> bool {
     event.kind == verlet_history::EventKind::ContextReadPlanSet
         && event.payload.get("scope").and_then(|value| value.as_str()) == Some("thread")
         && event
@@ -32,7 +32,7 @@ pub(super) fn is_recall_context_read_plan_event(event: &verlet_history::EventRec
             == Some("context.memory")
 }
 
-pub(super) fn is_instruction_context_read_plan_event(event: &verlet_history::EventRecord) -> bool {
+pub(crate) fn is_instruction_context_read_plan_event(event: &verlet_history::EventRecord) -> bool {
     event.kind == verlet_history::EventKind::ContextReadPlanSet
         && event.payload.get("scope").and_then(|value| value.as_str()) == Some("thread")
         && event
@@ -42,7 +42,7 @@ pub(super) fn is_instruction_context_read_plan_event(event: &verlet_history::Eve
             == Some("context.instructions")
 }
 
-pub(super) fn render_recall_context(texts: &[String]) -> String {
+pub(crate) fn render_recall_context(texts: &[String]) -> String {
     let body = texts
         .iter()
         .map(|text| format!("- {}", text.trim()))
@@ -51,7 +51,7 @@ pub(super) fn render_recall_context(texts: &[String]) -> String {
     format!("<memory_context>\n{body}\n</memory_context>")
 }
 
-pub(super) fn render_instruction_context(instruction_texts: &[String]) -> String {
+pub(crate) fn render_instruction_context(instruction_texts: &[String]) -> String {
     let body = instruction_texts
         .iter()
         .map(|text| format!("- {}", text.trim()))
@@ -114,7 +114,7 @@ fn read_plan_from_cursor(sequence: verlet_history::EventSequence) -> serde_json:
     }
 }
 
-pub(super) fn context_summary_completed_payload_v1(
+pub(crate) fn context_summary_completed_payload_v1(
     summary: &str,
     source_ranges: &[verlet_history::ObservationSourceRange],
 ) -> serde_json::Value {
@@ -129,7 +129,7 @@ pub(super) fn context_summary_completed_payload_v1(
     })
 }
 
-pub(super) fn context_read_plan_set_payload_v1(
+pub(crate) fn context_read_plan_set_payload_v1(
     name: &str,
     stream_id: &verlet_history::EventStreamId,
     summary_event_id: verlet_history::EventRecordId,
@@ -197,7 +197,7 @@ fn source_ranges_json(
         .collect()
 }
 
-pub(super) async fn context_source_ranges(
+pub(crate) async fn context_source_ranges(
     store: &dyn verlet_history::RuntimeStore,
     source_cuts: &[verlet_history::SessionContextSourceCut],
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::ObservationSourceRange>> {
@@ -248,7 +248,7 @@ fn context_source_range(
     })
 }
 
-pub(super) fn session_context_source_cut_for_entries(
+pub(crate) fn session_context_source_cut_for_entries(
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     session_entries: &[verlet_history::SessionEntry],
 ) -> Vec<verlet_history::SessionContextSourceCut> {
@@ -268,7 +268,7 @@ pub(super) fn session_context_source_cut_for_entries(
     }]
 }
 
-pub(super) fn context_source_streams(
+pub(crate) fn context_source_streams(
     source_cuts: &[verlet_history::SessionContextSourceCut],
     fallback_stream_id: &verlet_history::EventStreamId,
 ) -> Vec<verlet_history::EventStreamId> {
@@ -284,7 +284,7 @@ pub(super) fn context_source_streams(
     streams
 }
 
-pub(super) fn primary_context_source_range(
+pub(crate) fn primary_context_source_range(
     stream_id: &verlet_history::EventStreamId,
     source_ranges: &[verlet_history::ObservationSourceRange],
 ) -> Option<verlet_history::ObservationSourceRange> {

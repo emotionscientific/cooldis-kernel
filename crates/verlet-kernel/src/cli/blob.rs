@@ -1,6 +1,6 @@
 //! The `blob` subcommand family.
 
-pub(super) async fn run_blob(
+pub(crate) async fn run_blob(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -34,7 +34,7 @@ pub(super) async fn run_blob(
     }
 }
 
-pub(super) async fn blob_publish(
+pub(crate) async fn blob_publish(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_blob_publish_args(args)?;
@@ -64,14 +64,14 @@ pub(super) async fn blob_publish(
 }
 
 #[derive(Debug)]
-pub(super) struct BlobPublishArgs {
+pub(crate) struct BlobPublishArgs {
     file: Option<std::path::PathBuf>,
     name: Option<String>,
     registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
-pub(super) fn parse_blob_publish_args(
+pub(crate) fn parse_blob_publish_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<BlobPublishArgs> {
     let mut file = None;
@@ -116,7 +116,7 @@ pub(super) fn parse_blob_publish_args(
     })
 }
 
-pub(super) fn print_blob_help() {
+pub(crate) fn print_blob_help() {
     println!(
         "verlet blob\n\
 \n\
@@ -129,7 +129,7 @@ folder-first prompts and other static context inputs.\n"
     );
 }
 
-pub(super) fn print_blob_publish_help() {
+pub(crate) fn print_blob_publish_help() {
     println!(
         "verlet blob publish\n\
 \n\

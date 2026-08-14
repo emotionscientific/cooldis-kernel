@@ -4,52 +4,52 @@ use verlet_metadata::provider_store::ThreadMetadataStore as _;
 const THREAD_REMOTE_PLACEMENT_PROJECTION_METADATA: &str = "cooldis.remote_placement_projection";
 
 #[derive(Default)]
-pub(super) struct AppServerState {
-    pub(super) threads: std::collections::HashMap<String, AppServerThreadState>,
+pub(crate) struct AppServerState {
+    pub(crate) threads: std::collections::HashMap<String, AppServerThreadState>,
 }
 
 #[derive(Clone)]
-pub(super) struct AppServerThreadState {
-    pub(super) thread_id: String,
-    pub(super) session_id: String,
-    pub(super) parent_thread_id: Option<String>,
-    pub(super) topology: verlet_runtime_contracts::ThreadTopology,
-    pub(super) cwd: std::path::PathBuf,
-    pub(super) model_provider: String,
-    pub(super) created_at_ms: u64,
-    pub(super) updated_at_ms: u64,
-    pub(super) status: verlet_runtime_contracts::ThreadStatus,
-    pub(super) preview: String,
-    pub(super) ephemeral: bool,
-    pub(super) name: Option<String>,
-    pub(super) thinking: Option<verlet_provider::ThinkingConfig>,
-    pub(super) turns: std::collections::BTreeMap<String, AppServerTurnState>,
-    pub(super) active_turn_id: Option<String>,
+pub(crate) struct AppServerThreadState {
+    pub(crate) thread_id: String,
+    pub(crate) session_id: String,
+    pub(crate) parent_thread_id: Option<String>,
+    pub(crate) topology: verlet_runtime_contracts::ThreadTopology,
+    pub(crate) cwd: std::path::PathBuf,
+    pub(crate) model_provider: String,
+    pub(crate) created_at_ms: u64,
+    pub(crate) updated_at_ms: u64,
+    pub(crate) status: verlet_runtime_contracts::ThreadStatus,
+    pub(crate) preview: String,
+    pub(crate) ephemeral: bool,
+    pub(crate) name: Option<String>,
+    pub(crate) thinking: Option<verlet_provider::ThinkingConfig>,
+    pub(crate) turns: std::collections::BTreeMap<String, AppServerTurnState>,
+    pub(crate) active_turn_id: Option<String>,
 }
 
 #[derive(Clone)]
-pub(super) struct AppServerTurnState {
-    pub(super) id: String,
-    pub(super) items: Vec<serde_json::Value>,
-    pub(super) status: AppServerTurnStatus,
-    pub(super) started_at_ms: u64,
-    pub(super) completed_at_ms: Option<u64>,
-    pub(super) error: Option<serde_json::Value>,
-    pub(super) assistant_item_id: String,
-    pub(super) assistant_text: String,
-    pub(super) assistant_started: bool,
-    pub(super) assistant_completed: bool,
-    pub(super) thinking_item_id: String,
-    pub(super) thinking_text: String,
-    pub(super) thinking_started: bool,
-    pub(super) thinking_completed: bool,
-    pub(super) observed_running: bool,
-    pub(super) completion_scheduled: bool,
+pub(crate) struct AppServerTurnState {
+    pub(crate) id: String,
+    pub(crate) items: Vec<serde_json::Value>,
+    pub(crate) status: AppServerTurnStatus,
+    pub(crate) started_at_ms: u64,
+    pub(crate) completed_at_ms: Option<u64>,
+    pub(crate) error: Option<serde_json::Value>,
+    pub(crate) assistant_item_id: String,
+    pub(crate) assistant_text: String,
+    pub(crate) assistant_started: bool,
+    pub(crate) assistant_completed: bool,
+    pub(crate) thinking_item_id: String,
+    pub(crate) thinking_text: String,
+    pub(crate) thinking_started: bool,
+    pub(crate) thinking_completed: bool,
+    pub(crate) observed_running: bool,
+    pub(crate) completion_scheduled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::AsRefStr, strum::Display)]
 #[strum(serialize_all = "camelCase")]
-pub(super) enum AppServerTurnStatus {
+pub(crate) enum AppServerTurnStatus {
     InProgress,
     Completed,
     Interrupted,
@@ -57,12 +57,12 @@ pub(super) enum AppServerTurnStatus {
 }
 
 #[derive(Clone)]
-pub(super) struct AppServerThreadLifecycleSink {
+pub(crate) struct AppServerThreadLifecycleSink {
     inner: std::sync::Weak<crate::adapters::app_server::VerletAppServerInner>,
 }
 
 impl AppServerThreadLifecycleSink {
-    pub(super) fn new(app: &crate::adapters::app_server::VerletAppServer) -> Self {
+    pub(crate) fn new(app: &crate::adapters::app_server::VerletAppServer) -> Self {
         Self {
             inner: std::sync::Arc::downgrade(&app.inner),
         }
@@ -502,7 +502,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(())
     }
 
-    pub(super) async fn load_threads_from_metadata(
+    pub(crate) async fn load_threads_from_metadata(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
         let records = self
@@ -557,7 +557,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(())
     }
 
-    pub(super) async fn load_thread_from_metadata(
+    pub(crate) async fn load_thread_from_metadata(
         &self,
         thread_id: &str,
         parsed: verlet_runtime_contracts::ThreadId,
@@ -681,7 +681,7 @@ impl crate::adapters::app_server::VerletAppServer {
         )
     }
 
-    pub(super) async fn bind_app_server_agent_ref(
+    pub(crate) async fn bind_app_server_agent_ref(
         &self,
         agent_ref: &str,
         model_selection: &crate::agent::manifest_bind::AgentManifestModelProfileSelection,
@@ -716,7 +716,7 @@ impl crate::adapters::app_server::VerletAppServer {
         .await
     }
 
-    pub(super) async fn thread_state_from_lifecycle(
+    pub(crate) async fn thread_state_from_lifecycle(
         &self,
         record: &verlet_runtime_contracts::ThreadLifecycleRecord,
         status: verlet_runtime_contracts::ThreadStatus,
@@ -753,7 +753,7 @@ impl crate::adapters::app_server::VerletAppServer {
     }
 
     /// Rebuild the app-server thread projection from durable session history.
-    pub(super) async fn thread_history_from_lifecycle(
+    pub(crate) async fn thread_history_from_lifecycle(
         &self,
         record: &verlet_runtime_contracts::ThreadLifecycleRecord,
     ) -> crate::kernel::runtime_host::VerletResult<(
@@ -771,7 +771,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(app_server_turns_from_session_entries(&context.entries))
     }
 
-    pub(super) async fn persist_thread_lifecycle(
+    pub(crate) async fn persist_thread_lifecycle(
         &self,
         handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
@@ -779,7 +779,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .await
     }
 
-    pub(super) async fn persist_thread_lifecycle_with_metadata(
+    pub(crate) async fn persist_thread_lifecycle_with_metadata(
         &self,
         handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
         metadata: std::collections::BTreeMap<String, String>,
@@ -790,7 +790,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(crate::adapters::app_server::connection::internal_error)
     }
 
-    pub(super) async fn persist_thread_lifecycle_record_with_metadata(
+    pub(crate) async fn persist_thread_lifecycle_record_with_metadata(
         &self,
         handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
         metadata: std::collections::BTreeMap<String, String>,
@@ -817,7 +817,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(record)
     }
 
-    pub(super) async fn register_runtime_thread(
+    pub(crate) async fn register_runtime_thread(
         &self,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -843,7 +843,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(())
     }
 
-    pub(super) fn spawn_lifecycle_persistence_watcher(
+    pub(crate) fn spawn_lifecycle_persistence_watcher(
         &self,
         thread_id: String,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
@@ -889,7 +889,7 @@ impl crate::adapters::app_server::VerletAppServer {
         });
     }
 
-    pub(super) async fn thread_json_by_id(
+    pub(crate) async fn thread_json_by_id(
         &self,
         thread_id: &str,
         include_turns: bool,
@@ -902,7 +902,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(thread_json(thread, include_turns))
     }
 
-    pub(super) async fn register_remote_thread_projection(
+    pub(crate) async fn register_remote_thread_projection(
         &self,
         parent: &crate::kernel::runtime_host::RuntimeThreadHandle,
         receipt: &crate::kernel::runtime_host::kernel_control::AgentProcessSpawnReceipt,
@@ -965,7 +965,7 @@ impl crate::adapters::app_server::VerletAppServer {
     }
 }
 
-pub(super) fn require_local_binding_surface(
+pub(crate) fn require_local_binding_surface(
     surface: &str,
     bound: &crate::agent::manifest_bind::AgentManifestBoundThread,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -988,7 +988,7 @@ pub(super) fn require_local_binding_surface(
 }
 
 impl AppServerTurnState {
-    pub(super) fn new(id: String, input: Vec<serde_json::Value>) -> Self {
+    pub(crate) fn new(id: String, input: Vec<serde_json::Value>) -> Self {
         let assistant_item_id = format!("{id}:agent-message");
         let thinking_item_id = format!("{id}:agent-thinking");
         Self {
@@ -1015,7 +1015,7 @@ impl AppServerTurnState {
         }
     }
 
-    pub(super) fn restored(id: String, started_at_ms: u64, items: Vec<serde_json::Value>) -> Self {
+    pub(crate) fn restored(id: String, started_at_ms: u64, items: Vec<serde_json::Value>) -> Self {
         let assistant_item_id = format!("{id}:agent-message");
         let thinking_item_id = format!("{id}:agent-thinking");
         Self {
@@ -1039,7 +1039,7 @@ impl AppServerTurnState {
     }
 }
 
-pub(super) fn finalize_turn_payload(
+pub(crate) fn finalize_turn_payload(
     turn: &mut AppServerTurnState,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
     let should_complete_message = turn.assistant_started && !turn.assistant_completed;
@@ -1066,7 +1066,7 @@ pub(super) fn finalize_turn_payload(
     (turn_json(turn), items)
 }
 
-pub(super) fn finalize_agent_message_item(turn: &mut AppServerTurnState) {
+pub(crate) fn finalize_agent_message_item(turn: &mut AppServerTurnState) {
     if !turn.assistant_started || turn.assistant_completed {
         return;
     }
@@ -1081,7 +1081,7 @@ pub(super) fn finalize_agent_message_item(turn: &mut AppServerTurnState) {
     turn.assistant_completed = true;
 }
 
-pub(super) fn finalize_agent_thinking_item(turn: &mut AppServerTurnState) {
+pub(crate) fn finalize_agent_thinking_item(turn: &mut AppServerTurnState) {
     if !turn.thinking_started || turn.thinking_completed {
         return;
     }
@@ -1096,11 +1096,11 @@ pub(super) fn finalize_agent_thinking_item(turn: &mut AppServerTurnState) {
     turn.thinking_completed = true;
 }
 
-pub(super) fn agent_message_item(turn: &AppServerTurnState) -> serde_json::Value {
+pub(crate) fn agent_message_item(turn: &AppServerTurnState) -> serde_json::Value {
     agent_message_item_from_text(&turn.assistant_item_id, &turn.assistant_text)
 }
 
-pub(super) fn agent_message_item_from_text(id: &str, text: &str) -> serde_json::Value {
+pub(crate) fn agent_message_item_from_text(id: &str, text: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "agentMessage",
         "id": id,
@@ -1111,11 +1111,11 @@ pub(super) fn agent_message_item_from_text(id: &str, text: &str) -> serde_json::
     })
 }
 
-pub(super) fn agent_thinking_item(turn: &AppServerTurnState) -> serde_json::Value {
+pub(crate) fn agent_thinking_item(turn: &AppServerTurnState) -> serde_json::Value {
     agent_thinking_item_from_text(&turn.thinking_item_id, &turn.thinking_text)
 }
 
-pub(super) fn agent_thinking_item_from_text(id: &str, text: &str) -> serde_json::Value {
+pub(crate) fn agent_thinking_item_from_text(id: &str, text: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "agentThinking",
         "id": id,
@@ -1126,7 +1126,7 @@ pub(super) fn agent_thinking_item_from_text(id: &str, text: &str) -> serde_json:
     })
 }
 
-pub(super) fn command_execution_item(
+pub(crate) fn command_execution_item(
     id: &str,
     command: &str,
     cwd: &std::path::Path,
@@ -1150,7 +1150,7 @@ pub(super) fn command_execution_item(
     })
 }
 
-pub(super) fn thread_json(thread: &AppServerThreadState, include_turns: bool) -> serde_json::Value {
+pub(crate) fn thread_json(thread: &AppServerThreadState, include_turns: bool) -> serde_json::Value {
     let turns = if include_turns {
         thread.turns.values().map(turn_json).collect::<Vec<_>>()
     } else {
@@ -1182,7 +1182,7 @@ pub(super) fn thread_json(thread: &AppServerThreadState, include_turns: bool) ->
     })
 }
 
-pub(super) fn turn_json(turn: &AppServerTurnState) -> serde_json::Value {
+pub(crate) fn turn_json(turn: &AppServerTurnState) -> serde_json::Value {
     let completed_at = turn.completed_at_ms.map(|ms| ms / 1000);
     let duration_ms = turn
         .completed_at_ms
@@ -1200,7 +1200,7 @@ pub(super) fn turn_json(turn: &AppServerTurnState) -> serde_json::Value {
     })
 }
 
-pub(super) fn thread_status_json(
+pub(crate) fn thread_status_json(
     status: verlet_runtime_contracts::ThreadStatus,
 ) -> serde_json::Value {
     match status {
@@ -1219,7 +1219,7 @@ pub(super) fn thread_status_json(
     }
 }
 
-pub(super) fn turn_input_from_values(
+pub(crate) fn turn_input_from_values(
     input: &[serde_json::Value],
 ) -> crate::kernel::runtime_host::turn::TurnInput {
     let mut content = Vec::new();
@@ -1256,7 +1256,7 @@ pub(super) fn turn_input_from_values(
     crate::kernel::runtime_host::turn::TurnInput::new(content)
 }
 
-pub(super) fn deserialize_optional_thinking<'de, D>(
+pub(crate) fn deserialize_optional_thinking<'de, D>(
     deserializer: D,
 ) -> Result<Option<verlet_provider::ThinkingConfig>, D::Error>
 where
@@ -1268,7 +1268,7 @@ where
         .transpose()
 }
 
-pub(super) fn thinking_from_app_server_value(
+pub(crate) fn thinking_from_app_server_value(
     value: &serde_json::Value,
 ) -> Result<verlet_provider::ThinkingConfig, String> {
     let object = value
@@ -1308,7 +1308,7 @@ pub(super) fn thinking_from_app_server_value(
     }
 }
 
-pub(super) fn app_server_thinking_json(
+pub(crate) fn app_server_thinking_json(
     thinking: &Option<verlet_provider::ThinkingConfig>,
 ) -> serde_json::Value {
     thinking
@@ -1317,7 +1317,7 @@ pub(super) fn app_server_thinking_json(
         .unwrap_or(serde_json::Value::Null)
 }
 
-pub(super) fn app_server_thinking_value(
+pub(crate) fn app_server_thinking_value(
     thinking: &verlet_provider::ThinkingConfig,
 ) -> serde_json::Value {
     match thinking {
@@ -1336,7 +1336,7 @@ pub(super) fn app_server_thinking_value(
     }
 }
 
-pub(super) fn encode_app_server_thinking(
+pub(crate) fn encode_app_server_thinking(
     thinking: &verlet_provider::ThinkingConfig,
 ) -> Result<String, crate::adapters::app_server::connection::JsonRpcErrorError> {
     serde_json::to_string(&app_server_thinking_value(thinking)).map_err(|err| {
@@ -1347,7 +1347,7 @@ pub(super) fn encode_app_server_thinking(
     })
 }
 
-pub(super) fn user_input_preview(input: &[serde_json::Value]) -> String {
+pub(crate) fn user_input_preview(input: &[serde_json::Value]) -> String {
     input
         .iter()
         .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
@@ -1355,7 +1355,7 @@ pub(super) fn user_input_preview(input: &[serde_json::Value]) -> String {
         .join("\n")
 }
 
-pub(super) fn app_server_turns_from_session_entries(
+pub(crate) fn app_server_turns_from_session_entries(
     entries: &[verlet_history::SessionEntry],
 ) -> (
     String,
@@ -1491,7 +1491,7 @@ fn restored_assistant_items_from_canonical_content(
     }
 }
 
-pub(super) fn canonical_text_content_items(
+pub(crate) fn canonical_text_content_items(
     content: &[verlet_history::CanonicalContent],
 ) -> Vec<serde_json::Value> {
     content
@@ -1507,7 +1507,7 @@ pub(super) fn canonical_text_content_items(
         .collect()
 }
 
-pub(super) fn text_content_preview(content: &[serde_json::Value]) -> String {
+pub(crate) fn text_content_preview(content: &[serde_json::Value]) -> String {
     content
         .iter()
         .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
@@ -1515,11 +1515,11 @@ pub(super) fn text_content_preview(content: &[serde_json::Value]) -> String {
         .join("\n")
 }
 
-pub(super) fn entry_created_at_ms(entry: &verlet_history::SessionEntry) -> u64 {
+pub(crate) fn entry_created_at_ms(entry: &verlet_history::SessionEntry) -> u64 {
     entry.created_at_ms.max(0) as u64
 }
 
-pub(super) fn resolve_cwd(default_cwd: &std::path::Path, cwd: Option<&str>) -> std::path::PathBuf {
+pub(crate) fn resolve_cwd(default_cwd: &std::path::Path, cwd: Option<&str>) -> std::path::PathBuf {
     match cwd {
         Some(cwd) if !cwd.trim().is_empty() => {
             let path = std::path::PathBuf::from(cwd);
@@ -1533,7 +1533,7 @@ pub(super) fn resolve_cwd(default_cwd: &std::path::Path, cwd: Option<&str>) -> s
     }
 }
 
-pub(super) fn normalize_registry_roots(
+pub(crate) fn normalize_registry_roots(
     config: &mut crate::adapters::app_server::VerletAppServerConfig,
 ) {
     let blob_registry_root_was_default = config.blob_registry_root
@@ -1553,7 +1553,7 @@ pub(super) fn normalize_registry_roots(
     }
 }
 
-pub(super) fn resolve_path_against_cwd(
+pub(crate) fn resolve_path_against_cwd(
     cwd: &std::path::Path,
     path: &std::path::Path,
 ) -> std::path::PathBuf {
@@ -1564,7 +1564,7 @@ pub(super) fn resolve_path_against_cwd(
     }
 }
 
-pub(super) fn thread_start_topology(
+pub(crate) fn thread_start_topology(
     params: &crate::adapters::app_server::connection::ThreadStartParams,
 ) -> Result<
     verlet_runtime_contracts::ThreadTopology,
@@ -1592,7 +1592,7 @@ pub(super) fn thread_start_topology(
     }
 }
 
-pub(super) fn thread_start_metadata(
+pub(crate) fn thread_start_metadata(
     params: &crate::adapters::app_server::connection::ThreadStartParams,
     cwd: &std::path::Path,
     model_provider: &str,
@@ -1608,7 +1608,7 @@ pub(super) fn thread_start_metadata(
     Ok(metadata)
 }
 
-pub(super) fn insert_app_server_thinking_metadata(
+pub(crate) fn insert_app_server_thinking_metadata(
     metadata: &mut std::collections::BTreeMap<String, String>,
     thinking: Option<&verlet_provider::ThinkingConfig>,
 ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
@@ -1621,7 +1621,7 @@ pub(super) fn insert_app_server_thinking_metadata(
     Ok(())
 }
 
-pub(super) fn append_bound_agent_metadata(
+pub(crate) fn append_bound_agent_metadata(
     metadata: &mut std::collections::BTreeMap<String, String>,
     bound: &crate::agent::manifest_bind::AgentManifestBoundThread,
     overrides: Option<&crate::agent::manifest_bind::AgentManifestBindOverrides>,
@@ -1846,7 +1846,7 @@ is present in the conversation.",
     )
 }
 
-pub(super) async fn record_bound_agent_receipts(
+pub(crate) async fn record_bound_agent_receipts(
     handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     bound: &crate::agent::manifest_bind::AgentManifestBoundThread,
     principal_id: &str,
@@ -1924,7 +1924,7 @@ pub(crate) async fn active_manifest_receipt_payloads(
 }
 
 impl crate::adapters::app_server::VerletAppServer {
-    pub(super) async fn witness_bound_agent_and_persist_lifecycle(
+    pub(crate) async fn witness_bound_agent_and_persist_lifecycle(
         &self,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         bound: crate::agent::manifest_bind::AgentManifestBoundThread,
@@ -1943,7 +1943,7 @@ impl crate::adapters::app_server::VerletAppServer {
         .await
     }
 
-    pub(super) async fn witness_manifest_payloads_and_persist_lifecycle(
+    pub(crate) async fn witness_manifest_payloads_and_persist_lifecycle(
         &self,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         compile_payload: serde_json::Value,
@@ -1969,7 +1969,7 @@ impl crate::adapters::app_server::VerletAppServer {
         .await
     }
 
-    pub(super) async fn witness_and_persist_lifecycle<F, Fut>(
+    pub(crate) async fn witness_and_persist_lifecycle<F, Fut>(
         &self,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         operation: F,
@@ -2043,7 +2043,7 @@ fn kernel_thread_spawn_agent_binding(
     })
 }
 
-pub(super) fn app_server_thread_metadata(
+pub(crate) fn app_server_thread_metadata(
     cwd: &std::path::Path,
     model_provider: &str,
     ephemeral: bool,
@@ -2051,7 +2051,7 @@ pub(super) fn app_server_thread_metadata(
     app_server_thread_metadata_with_name(cwd, model_provider, ephemeral, None)
 }
 
-pub(super) fn app_server_thread_metadata_with_name(
+pub(crate) fn app_server_thread_metadata_with_name(
     cwd: &std::path::Path,
     model_provider: &str,
     ephemeral: bool,
@@ -2079,7 +2079,7 @@ pub(super) fn app_server_thread_metadata_with_name(
     metadata
 }
 
-pub(super) fn thread_lifecycle_cwd(
+pub(crate) fn thread_lifecycle_cwd(
     record: &verlet_runtime_contracts::ThreadLifecycleRecord,
 ) -> Option<std::path::PathBuf> {
     record
@@ -2089,13 +2089,13 @@ pub(super) fn thread_lifecycle_cwd(
         .map(std::path::PathBuf::from)
 }
 
-pub(super) fn thread_lifecycle_thinking(
+pub(crate) fn thread_lifecycle_thinking(
     record: &verlet_runtime_contracts::ThreadLifecycleRecord,
 ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_provider::ThinkingConfig>> {
     thread_metadata_thinking(&record.metadata)
 }
 
-pub(super) fn thread_metadata_thinking(
+pub(crate) fn thread_metadata_thinking(
     metadata: &std::collections::BTreeMap<String, String>,
 ) -> crate::kernel::runtime_host::VerletResult<Option<verlet_provider::ThinkingConfig>> {
     metadata
@@ -2115,7 +2115,7 @@ pub(super) fn thread_metadata_thinking(
         .transpose()
 }
 
-pub(super) fn is_loadable_lifecycle_status(
+pub(crate) fn is_loadable_lifecycle_status(
     status: verlet_runtime_contracts::ThreadLifecycleStatus,
 ) -> bool {
     !matches!(
@@ -2125,7 +2125,7 @@ pub(super) fn is_loadable_lifecycle_status(
     )
 }
 
-pub(super) fn thread_manifest_operation_bindings(
+pub(crate) fn thread_manifest_operation_bindings(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<
     Vec<crate::agent::manifest_bind::AgentManifestOperationBinding>,
@@ -2171,7 +2171,7 @@ pub(crate) fn validate_manifest_binding_event_contract(
     Ok(())
 }
 
-pub(super) fn thread_operation_bindings_from_events(
+pub(crate) fn thread_operation_bindings_from_events(
     events: &[verlet_history::EventRecord],
 ) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
     validate_manifest_binding_event_contract(events)?;
@@ -2207,7 +2207,7 @@ pub(super) fn thread_operation_bindings_from_events(
     Ok(Vec::new())
 }
 
-pub(super) fn thread_manifest_workspace_mount(
+pub(crate) fn thread_manifest_workspace_mount(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<
     Option<crate::agent::manifest_bind::AgentManifestResolvedWorkspaceMount>,
@@ -2225,7 +2225,7 @@ pub(super) fn thread_manifest_workspace_mount(
         .transpose()
 }
 
-pub(super) fn thread_manifest_tool_universes(
+pub(crate) fn thread_manifest_tool_universes(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<crate::agent::tool_universe::ToolUniverseBinding>>
 {
@@ -2248,7 +2248,7 @@ pub(super) fn thread_manifest_tool_universes(
     Ok(bindings)
 }
 
-pub(super) fn thread_manifest_skill_packages(
+pub(crate) fn thread_manifest_skill_packages(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<
     Vec<crate::agent::manifest_bind::AgentManifestSkillPackageBinding>,
@@ -2270,7 +2270,7 @@ pub(super) fn thread_manifest_skill_packages(
     Ok(bindings)
 }
 
-pub(super) fn thread_manifest_skill_discovery(
+pub(crate) fn thread_manifest_skill_discovery(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<
     Option<crate::agent::manifest_bind::AgentManifestSkillDiscovery>,
@@ -2288,7 +2288,7 @@ pub(super) fn thread_manifest_skill_discovery(
         .transpose()
 }
 
-pub(super) fn thread_manifest_skill_context_segments(
+pub(crate) fn thread_manifest_skill_context_segments(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<
     Vec<crate::agent::manifest_bind::AgentManifestStaticContextSegment>,
@@ -2306,27 +2306,27 @@ pub(super) fn thread_manifest_skill_context_segments(
     })
 }
 
-pub(super) struct CapsuleBindingRuntimeFactory {
-    pub(super) config: crate::adapters::agent_loop::AgentLoopConfig,
-    pub(super) client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
-    pub(super) capsule_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
-    pub(super) secret_resolver:
+pub(crate) struct CapsuleBindingRuntimeFactory {
+    pub(crate) config: crate::adapters::agent_loop::AgentLoopConfig,
+    pub(crate) client: std::sync::Arc<dyn verlet_provider::ProviderClient>,
+    pub(crate) capsule_bindings: crate::adapters::app_server::CapsuleBindingsConfig,
+    pub(crate) secret_resolver:
         Option<std::sync::Arc<dyn verlet_metadata::secret_store::SecretResolver>>,
-    pub(super) metadata_store_path: Option<std::path::PathBuf>,
-    pub(super) secret_store_path: Option<std::path::PathBuf>,
-    pub(super) session_store_path: Option<std::path::PathBuf>,
-    pub(super) lease_epoch: u64,
-    pub(super) agent_registry_root: Option<std::path::PathBuf>,
-    pub(super) blob_registry_root: Option<std::path::PathBuf>,
-    pub(super) skill_registry_root: Option<std::path::PathBuf>,
-    pub(super) cwd: Option<std::path::PathBuf>,
-    pub(super) hook_shell: Option<String>,
-    pub(super) turn_endpoint_router:
+    pub(crate) metadata_store_path: Option<std::path::PathBuf>,
+    pub(crate) secret_store_path: Option<std::path::PathBuf>,
+    pub(crate) session_store_path: Option<std::path::PathBuf>,
+    pub(crate) lease_epoch: u64,
+    pub(crate) agent_registry_root: Option<std::path::PathBuf>,
+    pub(crate) blob_registry_root: Option<std::path::PathBuf>,
+    pub(crate) skill_registry_root: Option<std::path::PathBuf>,
+    pub(crate) cwd: Option<std::path::PathBuf>,
+    pub(crate) hook_shell: Option<String>,
+    pub(crate) turn_endpoint_router:
         Option<std::sync::Arc<dyn crate::adapters::agent_loop::TurnEndpointRouter>>,
-    pub(super) default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
-    pub(super) default_workspace:
+    pub(crate) default_placement: crate::agent::manifest_bind::AgentManifestPlacementBinding,
+    pub(crate) default_workspace:
         Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
-    pub(super) remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) remote_event_store_served: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct ThreadOperationCatalog {
@@ -2338,9 +2338,9 @@ struct ThreadOperationCatalog {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ThreadOperationBinding {
-    pub(super) binding: crate::agent::manifest_bind::AgentManifestOperationBinding,
-    pub(super) attach_event_id: Option<verlet_history::EventRecordId>,
+pub(crate) struct ThreadOperationBinding {
+    pub(crate) binding: crate::agent::manifest_bind::AgentManifestOperationBinding,
+    pub(crate) attach_event_id: Option<verlet_history::EventRecordId>,
 }
 
 fn context_operation_binding_plan(
@@ -2355,7 +2355,7 @@ fn context_operation_binding_plan(
         .collect())
 }
 
-pub(super) async fn runtime_operation_bindings_for_thread(
+pub(crate) async fn runtime_operation_bindings_for_thread(
     context: &verlet_runtime_contracts::ThreadContext,
     session_store_path: Option<&std::path::Path>,
     metadata_store_path: Option<&std::path::Path>,
@@ -2477,7 +2477,7 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
 }
 
 #[derive(Clone)]
-pub(super) struct AppServerThreadSpawnAgentResolver {
+pub(crate) struct AppServerThreadSpawnAgentResolver {
     agent_registry_root: std::path::PathBuf,
     operation_registry_root: Option<std::path::PathBuf>,
     blob_registry_root: Option<std::path::PathBuf>,
@@ -2609,7 +2609,7 @@ impl AppServerThreadSpawnAgentResolver {
 }
 
 impl crate::adapters::app_server::VerletAppServer {
-    pub(super) async fn app_server_thread_spawn_agent_resolver(
+    pub(crate) async fn app_server_thread_spawn_agent_resolver(
         &self,
         placement_override: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
         workspace_override: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
@@ -2934,7 +2934,7 @@ fn provider_surface_for_runtime_config(
     .with_supports_streaming(supports_streaming)
 }
 
-pub(super) fn apply_manifest_runtime_metadata(
+pub(crate) fn apply_manifest_runtime_metadata(
     context: &verlet_runtime_contracts::ThreadContext,
     config: &mut crate::adapters::agent_loop::AgentLoopConfig,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -2978,7 +2978,7 @@ pub(super) fn apply_manifest_runtime_metadata(
     Ok(())
 }
 
-pub(super) fn manifest_compaction_policy(
+pub(crate) fn manifest_compaction_policy(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<Option<crate::kernel::compaction::CompactionPolicy>>
 {
@@ -2996,7 +2996,7 @@ pub(super) fn manifest_compaction_policy(
         .transpose()
 }
 
-pub(super) async fn operation_registry_capability_grants(
+pub(crate) async fn operation_registry_capability_grants(
     registry: &verlet_operations::operation_registry::OperationRegistry,
 ) -> std::collections::BTreeSet<String> {
     registry

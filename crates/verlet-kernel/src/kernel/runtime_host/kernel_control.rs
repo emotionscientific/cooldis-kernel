@@ -4,7 +4,7 @@ pub struct RuntimeKernelControl {
 }
 
 impl RuntimeKernelControl {
-    pub(super) fn new(
+    pub(crate) fn new(
         inner: std::sync::Weak<crate::kernel::runtime_host::RuntimeHostInner>,
     ) -> Self {
         Self { inner }

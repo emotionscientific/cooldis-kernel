@@ -140,7 +140,7 @@ impl std::fmt::Debug for ResolvedProviderApiKey {
 }
 
 /// Route `verlet host <subcommand>`.
-pub(super) async fn run_host(
+pub(crate) async fn run_host(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -167,7 +167,7 @@ pub(super) async fn run_host(
 /// ids), then wait for SIGTERM/SIGINT and run
 /// [`crate::adapters::host::VerletHost::shutdown`]. Exit is non-zero on
 /// any boot or shutdown error.
-pub(super) async fn host_run(
+pub(crate) async fn host_run(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args
@@ -731,7 +731,7 @@ async fn shutdown_io_tasks(tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
 }
 
 /// Print help for `verlet host`.
-pub(super) fn print_host_help() {
+pub(crate) fn print_host_help() {
     println!(
         "verlet host\n\
          \n\
@@ -750,7 +750,7 @@ pub(super) fn print_host_help() {
 }
 
 /// Print help for `verlet host run`.
-pub(super) fn print_host_run_help() {
+pub(crate) fn print_host_run_help() {
     println!(
         "verlet host run\n\
          \n\

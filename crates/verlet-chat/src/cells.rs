@@ -6,15 +6,8 @@
 //! the session banner and `/status` are bordered panels, laid out rather than
 //! drawn as glyphs in strings. So a cell renders to an `Element`, not to
 //! lines, and the transcript is an `ItemScroll` over those elements. A
-//! streamed answer keeps a [`MarkdownState`] so only its in-flight tail
-//! re-parses.
-
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-
-use tuika::components::MarkdownState;
-use tuika::components::text::wrap_lines;
-use tuika::prelude::*;
+//! streamed answer keeps a [`tuika::components::MarkdownState`] so only its
+//! in-flight tail re-parses.
 
 /// Rows of tool output kept inline before the middle is elided.
 const MAX_OUTPUT_ROWS: usize = 6;
@@ -64,7 +57,7 @@ pub enum Cell {
     ///
     /// Boxed because `MarkdownState` carries the parse/flatten caches and
     /// would otherwise dominate the size of every other variant.
-    Answer(Box<MarkdownState>),
+    Answer(Box<tuika::components::MarkdownState>),
     /// A local notice: interruptions, errors, slash-command acknowledgements.
     Notice {
         tone: Tone,
@@ -77,7 +70,12 @@ pub enum Cell {
 
 impl Cell {
     /// Render this cell as a transcript item, laid out to `width`.
-    pub fn view(&mut self, width: u16, theme: &Theme, sheet: &StyleSheet) -> Element {
+    pub fn view(
+        &mut self,
+        width: u16,
+        theme: &tuika::style::Theme,
+        sheet: &tuika::style::StyleSheet,
+    ) -> tuika::view::Element {
         match self {
             Cell::Banner {
                 version,
@@ -85,12 +83,19 @@ impl Cell {
                 tips,
             } => banner(version, rows, tips, theme),
             Cell::Config { title, rows } => config(title, rows, theme),
-            other => element(Text::new(other.lines(width, theme, sheet))),
+            other => tuika::view::element(tuika::components::Text::new(
+                other.lines(width, theme, sheet),
+            )),
         }
     }
 
     /// Render a line-shaped cell to transcript rows, wrapped to `width`.
-    fn lines(&mut self, width: u16, theme: &Theme, sheet: &StyleSheet) -> Vec<Line<'static>> {
+    fn lines(
+        &mut self,
+        width: u16,
+        theme: &tuika::style::Theme,
+        sheet: &tuika::style::StyleSheet,
+    ) -> Vec<ratatui::text::Line<'static>> {
         match self {
             Cell::User(text) => user(text, width, theme),
             Cell::Reasoning { body } => reasoning(body, width, theme),
@@ -111,54 +116,76 @@ impl Cell {
 
 /// Wrap `child` so it takes only the width it measures, instead of stretching
 /// to the transcript's.
-fn shrink_to_fit(child: Element) -> Element {
-    element(Flex::column().align(Align::Start).auto(child))
+fn shrink_to_fit(child: tuika::view::Element) -> tuika::view::Element {
+    tuika::view::element(
+        tuika::components::Flex::column()
+            .align(tuika::layout::Align::Start)
+            .auto(child),
+    )
 }
 
 /// `• ` — the marker in front of every reported event.
-fn bullet(theme: &Theme) -> Span<'static> {
-    Span::styled("• ", Style::default().fg(theme.accent))
+fn bullet(theme: &tuika::style::Theme) -> ratatui::text::Span<'static> {
+    ratatui::text::Span::styled("• ", ratatui::style::Style::default().fg(theme.accent))
 }
 
 /// A cell header: the bullet plus a bold title and optional trailing detail.
-fn header(title: &str, detail: Option<Span<'static>>, theme: &Theme) -> Line<'static> {
+fn header(
+    title: &str,
+    detail: Option<ratatui::text::Span<'static>>,
+    theme: &tuika::style::Theme,
+) -> ratatui::text::Line<'static> {
     let mut spans = vec![
         bullet(theme),
-        Span::styled(
+        ratatui::text::Span::styled(
             title.to_string(),
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ratatui::style::Style::default()
+                .fg(theme.text)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ];
     spans.extend(detail);
-    Line::from(spans)
+    ratatui::text::Line::from(spans)
 }
 
 /// Indent detail rows under a header: `  └ ` on the first, `    ` on the rest.
-fn detail(rows: Vec<Line<'static>>, theme: &Theme) -> Vec<Line<'static>> {
+fn detail(
+    rows: Vec<ratatui::text::Line<'static>>,
+    theme: &tuika::style::Theme,
+) -> Vec<ratatui::text::Line<'static>> {
     rows.into_iter()
         .enumerate()
         .map(|(i, line)| {
             let lead = if i == 0 { "  └ " } else { "    " };
-            let mut spans = vec![Span::styled(lead, Style::default().fg(theme.dim))];
+            let mut spans = vec![ratatui::text::Span::styled(
+                lead,
+                ratatui::style::Style::default().fg(theme.dim),
+            )];
             spans.extend(line.spans);
-            Line::from(spans)
+            ratatui::text::Line::from(spans)
         })
         .collect()
 }
 
 /// Prefix every row with `pad` columns of blank.
-fn indent(rows: Vec<Line<'static>>, pad: usize) -> Vec<Line<'static>> {
+fn indent(
+    rows: Vec<ratatui::text::Line<'static>>,
+    pad: usize,
+) -> Vec<ratatui::text::Line<'static>> {
     rows.into_iter()
         .map(|line| {
-            let mut spans = vec![Span::raw(" ".repeat(pad))];
+            let mut spans = vec![ratatui::text::Span::raw(" ".repeat(pad))];
             spans.extend(line.spans);
-            Line::from(spans)
+            ratatui::text::Line::from(spans)
         })
         .collect()
 }
 
 /// `label:` / `value` rows, aligned on the widest label.
-fn kv_rows(rows: &[(String, String)], theme: &Theme) -> Vec<Line<'static>> {
+fn kv_rows(
+    rows: &[(String, String)],
+    theme: &tuika::style::Theme,
+) -> Vec<ratatui::text::Line<'static>> {
     let pad = rows
         .iter()
         .map(|(k, _)| k.chars().count())
@@ -166,12 +193,15 @@ fn kv_rows(rows: &[(String, String)], theme: &Theme) -> Vec<Line<'static>> {
         .unwrap_or(0);
     rows.iter()
         .map(|(k, v)| {
-            Line::from(vec![
-                Span::styled(
+            ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
                     format!("{k}:{:width$} ", "", width = pad - k.chars().count()),
                     theme.muted_style(),
                 ),
-                Span::styled(v.clone(), Style::default().fg(theme.text)),
+                ratatui::text::Span::styled(
+                    v.clone(),
+                    ratatui::style::Style::default().fg(theme.text),
+                ),
             ])
         })
         .collect()
@@ -181,21 +211,23 @@ fn banner(
     version: &str,
     rows: &[(String, String)],
     tips: &[(String, String)],
-    theme: &Theme,
-) -> Element {
-    let mut panel = vec![Line::from(vec![
-        Span::styled(
+    theme: &tuika::style::Theme,
+) -> tuika::view::Element {
+    let mut panel = vec![ratatui::text::Line::from(vec![
+        ratatui::text::Span::styled(
             ">_ ",
-            Style::default()
+            ratatui::style::Style::default()
                 .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+                .add_modifier(ratatui::style::Modifier::BOLD),
         ),
-        Span::styled(
+        ratatui::text::Span::styled(
             format!("Verlet chat (v{version})"),
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ratatui::style::Style::default()
+                .fg(theme.text)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ])];
-    panel.push(Line::default());
+    panel.push(ratatui::text::Line::default());
     panel.extend(kv_rows(rows, theme));
 
     let pad = tips
@@ -204,74 +236,99 @@ fn banner(
         .max()
         .unwrap_or(0);
     let mut tip_rows = vec![
-        Line::default(),
-        Line::from(Span::styled(
+        ratatui::text::Line::default(),
+        ratatui::text::Line::from(ratatui::text::Span::styled(
             "Describe a task, or try one of these commands:",
             theme.muted_style(),
         )),
-        Line::default(),
+        ratatui::text::Line::default(),
     ];
     tip_rows.extend(tips.iter().map(|(cmd, blurb)| {
-        Line::from(vec![
-            Span::styled(
+        ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(
                 format!("{cmd}{:width$}  ", "", width = pad - cmd.chars().count()),
-                Style::default().fg(theme.accent_alt),
+                ratatui::style::Style::default().fg(theme.accent_alt),
             ),
-            Span::styled(blurb.clone(), theme.muted_style()),
+            ratatui::text::Span::styled(blurb.clone(), theme.muted_style()),
         ])
     }));
 
-    element(
-        Flex::column()
-            .auto(shrink_to_fit(element(
-                Boxed::new(element(Text::new(panel)))
-                    .border(BorderStyle::Rounded)
-                    .border_color(theme.border)
-                    .padding(Padding::symmetric(1, 0)),
+    tuika::view::element(
+        tuika::components::Flex::column()
+            .auto(shrink_to_fit(tuika::view::element(
+                tuika::components::Boxed::new(tuika::view::element(tuika::components::Text::new(
+                    panel,
+                )))
+                .border(tuika::style::BorderStyle::Rounded)
+                .border_color(theme.border)
+                .padding(tuika::geometry::Padding::symmetric(1, 0)),
             )))
-            .auto(element(Text::new(tip_rows))),
+            .auto(tuika::view::element(tuika::components::Text::new(tip_rows))),
     )
 }
 
-fn config(title: &str, rows: &[(String, String)], theme: &Theme) -> Element {
-    let panel = Boxed::new(element(Text::new(kv_rows(rows, theme))))
-        .title(Line::from(Span::styled(
-            format!(" {title} "),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )))
-        .border(BorderStyle::Rounded)
-        .border_color(theme.border)
-        .padding(Padding::symmetric(1, 0));
-    shrink_to_fit(element(panel))
+fn config(
+    title: &str,
+    rows: &[(String, String)],
+    theme: &tuika::style::Theme,
+) -> tuika::view::Element {
+    let panel = tuika::components::Boxed::new(tuika::view::element(tuika::components::Text::new(
+        kv_rows(rows, theme),
+    )))
+    .title(ratatui::text::Line::from(ratatui::text::Span::styled(
+        format!(" {title} "),
+        ratatui::style::Style::default()
+            .fg(theme.accent)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    )))
+    .border(tuika::style::BorderStyle::Rounded)
+    .border_color(theme.border)
+    .padding(tuika::geometry::Padding::symmetric(1, 0));
+    shrink_to_fit(tuika::view::element(panel))
 }
 
-fn user(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let body: Vec<Line<'static>> = text
+fn user(text: &str, width: u16, theme: &tuika::style::Theme) -> Vec<ratatui::text::Line<'static>> {
+    let body: Vec<ratatui::text::Line<'static>> = text
         .lines()
-        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(theme.text))))
+        .map(|l| {
+            ratatui::text::Line::from(ratatui::text::Span::styled(
+                l.to_string(),
+                ratatui::style::Style::default().fg(theme.text),
+            ))
+        })
         .collect();
-    wrap_lines(&body, width.saturating_sub(2))
+    tuika::components::text::wrap_lines(&body, width.saturating_sub(2))
         .into_iter()
         .enumerate()
         .map(|(i, line)| {
             let lead = if i == 0 { "› " } else { "  " };
-            let mut spans = vec![Span::styled(lead, Style::default().fg(theme.accent_alt))];
+            let mut spans = vec![ratatui::text::Span::styled(
+                lead,
+                ratatui::style::Style::default().fg(theme.accent_alt),
+            )];
             spans.extend(line.spans);
-            Line::from(spans)
+            ratatui::text::Line::from(spans)
         })
         .collect()
 }
 
-fn reasoning(body: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let style = theme.muted_style().add_modifier(Modifier::ITALIC);
-    let rows: Vec<Line<'static>> = body
+fn reasoning(
+    body: &str,
+    width: u16,
+    theme: &tuika::style::Theme,
+) -> Vec<ratatui::text::Line<'static>> {
+    let style = theme
+        .muted_style()
+        .add_modifier(ratatui::style::Modifier::ITALIC);
+    let rows: Vec<ratatui::text::Line<'static>> = body
         .split('\n')
-        .map(|l| Line::from(Span::styled(l.to_string(), style)))
+        .map(|l| ratatui::text::Line::from(ratatui::text::Span::styled(l.to_string(), style)))
         .collect();
     let mut out = vec![header("Thinking", None, theme)];
-    out.extend(indent(wrap_lines(&rows, width.saturating_sub(2)), 2));
+    out.extend(indent(
+        tuika::components::text::wrap_lines(&rows, width.saturating_sub(2)),
+        2,
+    ));
     out
 }
 
@@ -280,22 +337,24 @@ fn exec(
     output: &[String],
     status: ExecStatus,
     width: u16,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+    theme: &tuika::style::Theme,
+) -> Vec<ratatui::text::Line<'static>> {
     let trailing = match status {
         ExecStatus::Running => None,
         ExecStatus::Ok => None,
-        ExecStatus::Failed => Some(Span::styled(
+        ExecStatus::Failed => Some(ratatui::text::Span::styled(
             "  (failed)".to_string(),
-            Style::default().fg(theme.accent),
+            ratatui::style::Style::default().fg(theme.accent),
         )),
     };
-    let mut out = vec![Line::from({
+    let mut out = vec![ratatui::text::Line::from({
         let mut spans = vec![
             bullet(theme),
-            Span::styled(
+            ratatui::text::Span::styled(
                 title.to_string(),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ratatui::style::Style::default()
+                    .fg(theme.text)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
             ),
         ];
         spans.extend(trailing);
@@ -306,17 +365,22 @@ fn exec(
     // being clipped at the viewport edge.
     let source = output
         .iter()
-        .map(|line| Line::from(Span::styled(line.clone(), theme.muted_style())))
+        .map(|line| {
+            ratatui::text::Line::from(ratatui::text::Span::styled(
+                line.clone(),
+                theme.muted_style(),
+            ))
+        })
         .collect::<Vec<_>>();
-    let wrapped = wrap_lines(&source, width.saturating_sub(4));
-    let mut rows: Vec<Line<'static>> = Vec::new();
+    let wrapped = tuika::components::text::wrap_lines(&source, width.saturating_sub(4));
+    let mut rows: Vec<ratatui::text::Line<'static>> = Vec::new();
     if wrapped.len() > MAX_OUTPUT_ROWS {
         let head = MAX_OUTPUT_ROWS / 2;
         let tail = wrapped.len() - (MAX_OUTPUT_ROWS - head);
         rows.extend_from_slice(&wrapped[..head]);
-        rows.push(Line::from(Span::styled(
+        rows.push(ratatui::text::Line::from(ratatui::text::Span::styled(
             format!("… +{} lines", tail - head),
-            Style::default().fg(theme.dim),
+            ratatui::style::Style::default().fg(theme.dim),
         )));
         rows.extend_from_slice(&wrapped[tail..]);
     } else {
@@ -327,18 +391,18 @@ fn exec(
 }
 
 fn answer(
-    state: &mut MarkdownState,
+    state: &mut tuika::components::MarkdownState,
     width: u16,
-    theme: &Theme,
-    sheet: &StyleSheet,
-) -> Vec<Line<'static>> {
+    theme: &tuika::style::Theme,
+    sheet: &tuika::style::StyleSheet,
+) -> Vec<ratatui::text::Line<'static>> {
     // The markdown is wrapped two columns narrow so the bullet gutter fits.
     let body = state
         .lines(
             width.saturating_sub(2),
             theme,
             sheet,
-            CodeHighlighter::Plain,
+            tuika::highlight::CodeHighlighter::Plain,
         )
         .to_vec();
     indent(body, 2)
@@ -351,7 +415,7 @@ fn answer(
             // Replace the first row's indent with the bullet.
             let mut spans = vec![bullet(theme)];
             spans.extend(line.spans.into_iter().skip(1));
-            Line::from(spans)
+            ratatui::text::Line::from(spans)
         })
         .collect()
 }
@@ -361,33 +425,43 @@ fn notice(
     title: &str,
     body: &[String],
     width: u16,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+    theme: &tuika::style::Theme,
+) -> Vec<ratatui::text::Line<'static>> {
     let (glyph, color) = match tone {
         Tone::Info => ("• ", theme.accent),
         Tone::Warn => ("⚠ ", theme.accent_alt),
         Tone::Error => ("✗ ", theme.accent),
     };
-    let mut out = vec![Line::from(vec![
-        Span::styled(glyph, Style::default().fg(color)),
-        Span::styled(
+    let mut out = vec![ratatui::text::Line::from(vec![
+        ratatui::text::Span::styled(glyph, ratatui::style::Style::default().fg(color)),
+        ratatui::text::Span::styled(
             title.to_string(),
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ratatui::style::Style::default()
+                .fg(theme.text)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ])];
-    let rows: Vec<Line<'static>> = body
+    let rows: Vec<ratatui::text::Line<'static>> = body
         .iter()
-        .map(|l| Line::from(Span::styled(l.clone(), theme.muted_style())))
+        .map(|l| {
+            ratatui::text::Line::from(ratatui::text::Span::styled(l.clone(), theme.muted_style()))
+        })
         .collect();
-    out.extend(indent(wrap_lines(&rows, width.saturating_sub(2)), 2));
+    out.extend(indent(
+        tuika::components::text::wrap_lines(&rows, width.saturating_sub(2)),
+        2,
+    ));
     out
 }
 
-fn sessions(rows: &[crate::SessionRow], theme: &Theme) -> Vec<Line<'static>> {
+fn sessions(
+    rows: &[crate::SessionRow],
+    theme: &tuika::style::Theme,
+) -> Vec<ratatui::text::Line<'static>> {
     let mut out = vec![header("Sessions", None, theme)];
     if rows.is_empty() {
         out.extend(detail(
-            vec![Line::from(Span::styled(
+            vec![ratatui::text::Line::from(ratatui::text::Span::styled(
                 "no sessions".to_string(),
                 theme.muted_style(),
             ))],
@@ -400,21 +474,27 @@ fn sessions(rows: &[crate::SessionRow], theme: &Theme) -> Vec<Line<'static>> {
         .map(|row| {
             let marker = if row.current { "* " } else { "  " };
             let mut spans = vec![
-                Span::styled(marker.to_string(), Style::default().fg(theme.accent)),
-                Span::styled(
-                    format!("{} ", short_id(&row.id)),
-                    Style::default().fg(theme.accent_alt),
+                ratatui::text::Span::styled(
+                    marker.to_string(),
+                    ratatui::style::Style::default().fg(theme.accent),
                 ),
-                Span::styled(format!("{} ", row.name), Style::default().fg(theme.text)),
-                Span::styled(format!("[{}]", row.status), theme.muted_style()),
+                ratatui::text::Span::styled(
+                    format!("{} ", short_id(&row.id)),
+                    ratatui::style::Style::default().fg(theme.accent_alt),
+                ),
+                ratatui::text::Span::styled(
+                    format!("{} ", row.name),
+                    ratatui::style::Style::default().fg(theme.text),
+                ),
+                ratatui::text::Span::styled(format!("[{}]", row.status), theme.muted_style()),
             ];
             if !row.preview.is_empty() {
-                spans.push(Span::styled(
+                spans.push(ratatui::text::Span::styled(
                     format!(" - {}", row.preview),
-                    Style::default().fg(theme.dim),
+                    ratatui::style::Style::default().fg(theme.dim),
                 ));
             }
-            Line::from(spans)
+            ratatui::text::Line::from(spans)
         })
         .collect();
     out.extend(detail(body, theme));

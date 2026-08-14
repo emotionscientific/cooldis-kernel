@@ -5,7 +5,7 @@ use chrono::TimeZone as _;
 mod tests;
 
 #[derive(Debug)]
-pub(super) struct DebugBindArgs {
+pub(crate) struct DebugBindArgs {
     thread_id: String,
     json: bool,
     journal: Option<std::path::PathBuf>,
@@ -127,7 +127,7 @@ struct RecordedReceiptEvent {
     payload: serde_json::Value,
 }
 
-pub(super) async fn run_debug_bind(
+pub(crate) async fn run_debug_bind(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args
@@ -175,7 +175,7 @@ pub(super) async fn run_debug_bind(
     Ok(())
 }
 
-pub(super) fn parse_debug_bind_args(
+pub(crate) fn parse_debug_bind_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<DebugBindArgs> {
     let mut endpoint = crate::cli::debug_rpc::DebugRpcEndpointArgs {
@@ -781,7 +781,7 @@ fn binding_origin_text(
     }
 }
 
-pub(super) fn print_debug_bind_help() {
+pub(crate) fn print_debug_bind_help() {
     println!(
         "verlet debug bind\n\
 \n\

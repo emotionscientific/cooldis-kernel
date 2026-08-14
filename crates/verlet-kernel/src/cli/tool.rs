@@ -5,7 +5,7 @@ use std::io::Write as _;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn tool_manual(
+pub(crate) async fn tool_manual(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_manual_args(args)?;
@@ -31,7 +31,7 @@ pub(super) async fn tool_manual(
     Ok(())
 }
 
-pub(super) async fn run_tool(
+pub(crate) async fn run_tool(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -75,7 +75,7 @@ pub(super) async fn run_tool(
     }
 }
 
-pub(super) async fn tool_build(
+pub(crate) async fn tool_build(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_build_args(args)?;
@@ -138,7 +138,7 @@ pub(super) async fn tool_build(
     Ok(())
 }
 
-pub(super) async fn tool_list(
+pub(crate) async fn tool_list(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_registry_args(args, "tool list")?;
@@ -175,7 +175,7 @@ pub(super) async fn tool_list(
     Ok(())
 }
 
-pub(super) async fn tool_publish(
+pub(crate) async fn tool_publish(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_publish_args(args)?;
@@ -212,7 +212,7 @@ pub(super) async fn tool_publish(
     ))
 }
 
-pub(super) fn manuals_for_record(
+pub(crate) fn manuals_for_record(
     record: &verlet_operations::operation_store::PublishedOperationRecord,
     operation: Option<&str>,
 ) -> crate::kernel::runtime_host::VerletResult<
@@ -295,7 +295,7 @@ pub(super) fn manuals_for_record(
     Ok(manuals)
 }
 
-pub(super) fn cli_manual_exit_status() -> Vec<verlet_operations::tool_package::ToolManualExitStatus>
+pub(crate) fn cli_manual_exit_status() -> Vec<verlet_operations::tool_package::ToolManualExitStatus>
 {
     vec![
         verlet_operations::tool_package::ToolManualExitStatus {
@@ -321,7 +321,7 @@ pub(super) fn cli_manual_exit_status() -> Vec<verlet_operations::tool_package::T
     ]
 }
 
-pub(super) fn print_manuals(manuals: &[verlet_operations::tool_package::ToolOperationManual]) {
+pub(crate) fn print_manuals(manuals: &[verlet_operations::tool_package::ToolOperationManual]) {
     for (index, manual) in manuals.iter().enumerate() {
         if index > 0 {
             println!();
@@ -370,12 +370,12 @@ pub(super) fn print_manuals(manuals: &[verlet_operations::tool_package::ToolOper
     }
 }
 
-pub(super) fn compact_json(value: &serde_json::Value) -> String {
+pub(crate) fn compact_json(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
 
 #[derive(Debug)]
-pub(super) struct BuiltToolPackage {
+pub(crate) struct BuiltToolPackage {
     package: verlet_operations::tool_package::ToolPackageSource,
     artifact_path: std::path::PathBuf,
     source: verlet_operations::operation_store::PublishedOperationSource,
@@ -384,7 +384,7 @@ pub(super) struct BuiltToolPackage {
     receipt: verlet_operations::tool_package::ToolBuildReceipt,
 }
 
-pub(super) async fn build_tool_package(
+pub(crate) async fn build_tool_package(
     package_path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<BuiltToolPackage> {
     let package = verlet_operations::tool_package::ToolPackageSource::load(package_path)?;
@@ -423,7 +423,7 @@ pub(super) async fn build_tool_package(
     })
 }
 
-pub(super) fn reject_user_kernel_tool_package(
+pub(crate) fn reject_user_kernel_tool_package(
     package: &verlet_operations::tool_package::ToolPackageSource,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if package.manifest.runtime.kind == "kernel" {
@@ -434,7 +434,7 @@ pub(super) fn reject_user_kernel_tool_package(
     Ok(())
 }
 
-pub(super) fn build_tool_package_artifact(
+pub(crate) fn build_tool_package_artifact(
     package: &verlet_operations::tool_package::ToolPackageSource,
 ) -> crate::kernel::runtime_host::VerletResult<(
     std::path::PathBuf,
@@ -473,7 +473,7 @@ pub(super) fn build_tool_package_artifact(
     }
 }
 
-pub(super) fn package_capability_requests(
+pub(crate) fn package_capability_requests(
     package: &verlet_operations::tool_package::ToolPackageSource,
 ) -> std::collections::BTreeSet<String> {
     package
@@ -484,7 +484,7 @@ pub(super) fn package_capability_requests(
         .collect()
 }
 
-pub(super) async fn run_tool_package_fixtures(
+pub(crate) async fn run_tool_package_fixtures(
     package: &verlet_operations::tool_package::ToolPackageSource,
     artifact_path: &std::path::Path,
     interface: &verlet_operations::tool_package::ToolInterfaceContract,
@@ -547,7 +547,7 @@ pub(super) async fn run_tool_package_fixtures(
 }
 
 /// Builds the read-only VFS mount available while package fixtures run.
-pub(super) fn package_fixture_vfs(
+pub(crate) fn package_fixture_vfs(
     package: &verlet_operations::tool_package::ToolPackageSource,
 ) -> crate::kernel::runtime_host::VerletResult<std::sync::Arc<verlet_vfs::VerletVfs>> {
     let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
@@ -574,7 +574,7 @@ pub(super) fn package_fixture_vfs(
     Ok(vfs)
 }
 
-pub(super) fn fixture_output_matches(expected: &[u8], actual: &[u8]) -> bool {
+pub(crate) fn fixture_output_matches(expected: &[u8], actual: &[u8]) -> bool {
     match (
         serde_json::from_slice::<serde_json::Value>(expected),
         serde_json::from_slice::<serde_json::Value>(actual),
@@ -584,7 +584,7 @@ pub(super) fn fixture_output_matches(expected: &[u8], actual: &[u8]) -> bool {
     }
 }
 
-pub(super) fn size_limit(
+pub(crate) fn size_limit(
     label: &str,
     value: u64,
 ) -> crate::kernel::runtime_host::VerletResult<usize> {
@@ -595,7 +595,7 @@ pub(super) fn size_limit(
     })
 }
 
-pub(super) fn print_tool_package_build(build: &BuiltToolPackage) {
+pub(crate) fn print_tool_package_build(build: &BuiltToolPackage) {
     println!("tool package {}", build.package.manifest.identity.name);
     println!("receipt tool_build_v0");
     println!("runtime {}", build.package.manifest.runtime.kind);
@@ -629,7 +629,7 @@ pub(super) fn print_tool_package_build(build: &BuiltToolPackage) {
     }
 }
 
-pub(super) fn reject_package_build_overrides(
+pub(crate) fn reject_package_build_overrides(
     options: &BuildArgs,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if options.name.is_some()
@@ -645,7 +645,7 @@ pub(super) fn reject_package_build_overrides(
     Ok(())
 }
 
-pub(super) fn reject_package_publish_overrides(
+pub(crate) fn reject_package_publish_overrides(
     options: &PublishArgs,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if options.name.is_some()
@@ -665,7 +665,7 @@ pub(super) fn reject_package_publish_overrides(
     Ok(())
 }
 
-pub(super) async fn tool_run(
+pub(crate) async fn tool_run(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_run_args(args)?;
@@ -798,7 +798,7 @@ pub(super) async fn tool_run(
     Ok(())
 }
 
-pub(super) async fn tool_source(
+pub(crate) async fn tool_source(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -840,7 +840,7 @@ pub(super) async fn tool_source(
     }
 }
 
-pub(super) async fn tool_source_add(
+pub(crate) async fn tool_source_add(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_add_args(args)?;
@@ -885,7 +885,7 @@ pub(super) async fn tool_source_add(
     Ok(())
 }
 
-pub(super) async fn tool_source_discover(
+pub(crate) async fn tool_source_discover(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_name_args(args, "tool source discover")?;
@@ -916,7 +916,7 @@ pub(super) async fn tool_source_discover(
     Ok(())
 }
 
-pub(super) async fn tool_source_list(
+pub(crate) async fn tool_source_list(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_list_args(args, "tool source list")?;
@@ -959,7 +959,7 @@ pub(super) async fn tool_source_list(
     Ok(())
 }
 
-pub(super) async fn tool_source_show(
+pub(crate) async fn tool_source_show(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_show_args(args)?;
@@ -1000,7 +1000,7 @@ pub(super) async fn tool_source_show(
     Ok(())
 }
 
-pub(super) async fn tool_source_remove(
+pub(crate) async fn tool_source_remove(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_name_args(args, "tool source remove")?;
@@ -1021,7 +1021,7 @@ pub(super) async fn tool_source_remove(
 }
 
 #[derive(Debug)]
-pub(super) struct BuildArgs {
+pub(crate) struct BuildArgs {
     name: Option<String>,
     module_path: Option<std::path::PathBuf>,
     package_path: Option<std::path::PathBuf>,
@@ -1031,7 +1031,7 @@ pub(super) struct BuildArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct PublishArgs {
+pub(crate) struct PublishArgs {
     name: Option<String>,
     module_path: Option<std::path::PathBuf>,
     bin_path: Option<std::path::PathBuf>,
@@ -1046,13 +1046,13 @@ pub(super) struct PublishArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct ToolRegistryArgs {
+pub(crate) struct ToolRegistryArgs {
     registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
-pub(super) struct RunArgs {
+pub(crate) struct RunArgs {
     registered_name: Option<String>,
     module_path: Option<std::path::PathBuf>,
     bin_path: Option<std::path::PathBuf>,
@@ -1067,7 +1067,7 @@ pub(super) struct RunArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct ToolManualArgs {
+pub(crate) struct ToolManualArgs {
     tool_name: Option<String>,
     operation: Option<String>,
     registry_root: Option<std::path::PathBuf>,
@@ -1076,7 +1076,7 @@ pub(super) struct ToolManualArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct ToolSourceAddArgs {
+pub(crate) struct ToolSourceAddArgs {
     name: Option<String>,
     kind: Option<crate::adapters::mcp_client::McpRemoteTransport>,
     url: Option<String>,
@@ -1090,21 +1090,21 @@ pub(super) struct ToolSourceAddArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct ToolSourceNameArgs {
+pub(crate) struct ToolSourceNameArgs {
     name: Option<String>,
     state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
-pub(super) struct ToolSourceListArgs {
+pub(crate) struct ToolSourceListArgs {
     state_home: Option<std::path::PathBuf>,
     json: bool,
     help: bool,
 }
 
 #[derive(Debug)]
-pub(super) struct ToolSourceShowArgs {
+pub(crate) struct ToolSourceShowArgs {
     name: Option<String>,
     state_home: Option<std::path::PathBuf>,
     json: bool,
@@ -1112,13 +1112,13 @@ pub(super) struct ToolSourceShowArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct MountArg {
+pub(crate) struct MountArg {
     guest_path: std::path::PathBuf,
     host_path: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-pub(super) struct ToolConfigFile {
+pub(crate) struct ToolConfigFile {
     name: Option<String>,
     module_path: Option<std::path::PathBuf>,
     bin_path: Option<std::path::PathBuf>,
@@ -1129,13 +1129,13 @@ pub(super) struct ToolConfigFile {
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-pub(super) struct ToolConversionConfig {
+pub(crate) struct ToolConversionConfig {
     upstream_url: Option<String>,
     upstream_rev: Option<String>,
     upstream_crate: Option<String>,
 }
 
-pub(super) fn parse_build_args(
+pub(crate) fn parse_build_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<BuildArgs> {
     let mut name = None;
@@ -1184,7 +1184,7 @@ pub(super) fn parse_build_args(
     })
 }
 
-pub(super) fn parse_publish_args(
+pub(crate) fn parse_publish_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<PublishArgs> {
     let mut name = None;
@@ -1259,7 +1259,7 @@ pub(super) fn parse_publish_args(
     })
 }
 
-pub(super) fn parse_tool_registry_args(
+pub(crate) fn parse_tool_registry_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<ToolRegistryArgs> {
@@ -1285,7 +1285,7 @@ pub(super) fn parse_tool_registry_args(
     })
 }
 
-pub(super) fn parse_run_args(
+pub(crate) fn parse_run_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<RunArgs> {
     let mut module_path = None;
@@ -1364,7 +1364,7 @@ pub(super) fn parse_run_args(
     })
 }
 
-pub(super) fn parse_tool_manual_args(
+pub(crate) fn parse_tool_manual_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<ToolManualArgs> {
     let mut registry_root = None;
@@ -1401,7 +1401,7 @@ pub(super) fn parse_tool_manual_args(
     })
 }
 
-pub(super) fn parse_tool_source_add_args(
+pub(crate) fn parse_tool_source_add_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<ToolSourceAddArgs> {
     let mut name = None;
@@ -1482,7 +1482,7 @@ pub(super) fn parse_tool_source_add_args(
     })
 }
 
-pub(super) fn parse_tool_source_name_args(
+pub(crate) fn parse_tool_source_name_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<ToolSourceNameArgs> {
@@ -1516,7 +1516,7 @@ pub(super) fn parse_tool_source_name_args(
     })
 }
 
-pub(super) fn parse_tool_source_list_args(
+pub(crate) fn parse_tool_source_list_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<ToolSourceListArgs> {
@@ -1543,7 +1543,7 @@ pub(super) fn parse_tool_source_list_args(
     })
 }
 
-pub(super) fn parse_tool_source_show_args(
+pub(crate) fn parse_tool_source_show_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<ToolSourceShowArgs> {
     let mut name = None;
@@ -1579,7 +1579,7 @@ pub(super) fn parse_tool_source_show_args(
     })
 }
 
-pub(super) fn required_path_value(
+pub(crate) fn required_path_value(
     iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
 ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
@@ -1588,7 +1588,7 @@ pub(super) fn required_path_value(
         .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))
 }
 
-pub(super) fn required_string_value(
+pub(crate) fn required_string_value(
     iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
@@ -1597,7 +1597,7 @@ pub(super) fn required_string_value(
         .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))
 }
 
-pub(super) fn parse_mount_arg(value: &str) -> crate::kernel::runtime_host::VerletResult<MountArg> {
+pub(crate) fn parse_mount_arg(value: &str) -> crate::kernel::runtime_host::VerletResult<MountArg> {
     let Some((guest_path, host_path)) = value.split_once('=') else {
         return Err(crate::cli::usage_error(
             "--mount must use /guest/path=/host/path",
@@ -1615,7 +1615,7 @@ pub(super) fn parse_mount_arg(value: &str) -> crate::kernel::runtime_host::Verle
     })
 }
 
-pub(super) fn parse_header_arg(
+pub(crate) fn parse_header_arg(
     value: &str,
 ) -> crate::kernel::runtime_host::VerletResult<(String, String)> {
     let Some((name, header_value)) = value.split_once('=') else {
@@ -1627,7 +1627,7 @@ pub(super) fn parse_header_arg(
     Ok((name.trim().to_string(), header_value.to_string()))
 }
 
-pub(super) fn parse_u64_arg(
+pub(crate) fn parse_u64_arg(
     flag: &str,
     value: &str,
 ) -> crate::kernel::runtime_host::VerletResult<u64> {
@@ -1636,7 +1636,7 @@ pub(super) fn parse_u64_arg(
         .map_err(|_| crate::cli::usage_error(format!("{flag} must be a positive integer")))
 }
 
-pub(super) fn parse_metadata_arg(
+pub(crate) fn parse_metadata_arg(
     value: &str,
 ) -> crate::kernel::runtime_host::VerletResult<(String, serde_json::Value)> {
     let Some((key, raw_value)) = value.split_once('=') else {
@@ -1650,11 +1650,11 @@ pub(super) fn parse_metadata_arg(
     Ok((key.to_string(), value))
 }
 
-pub(super) fn default_registry_root() -> std::path::PathBuf {
+pub(crate) fn default_registry_root() -> std::path::PathBuf {
     crate::agent::manifest::default_operations_registry_root()
 }
 
-pub(super) async fn open_mcp_source_registry(
+pub(crate) async fn open_mcp_source_registry(
     state_home: Option<std::path::PathBuf>,
 ) -> crate::kernel::runtime_host::VerletResult<crate::adapters::mcp_client::SqliteMcpSourceRegistry>
 {
@@ -1676,7 +1676,7 @@ pub(super) async fn open_mcp_source_registry(
     })
 }
 
-pub(super) fn load_tool_config(
+pub(crate) fn load_tool_config(
     path: Option<&std::path::Path>,
 ) -> crate::kernel::runtime_host::VerletResult<ToolConfigFile> {
     let discovered;
@@ -1707,7 +1707,7 @@ pub(super) fn load_tool_config(
 }
 
 #[derive(Debug)]
-pub(super) struct ToolConversionAudit {
+pub(crate) struct ToolConversionAudit {
     manifest_path: std::path::PathBuf,
     crate_name: String,
     issues: Vec<String>,
@@ -1740,7 +1740,7 @@ impl ToolConversionAudit {
     }
 }
 
-pub(super) fn audit_strict_stateless_conversion(
+pub(crate) fn audit_strict_stateless_conversion(
     module_path: &std::path::Path,
     conversion: Option<&ToolConversionConfig>,
 ) -> crate::kernel::runtime_host::VerletResult<ToolConversionAudit> {
@@ -1790,7 +1790,7 @@ pub(super) fn audit_strict_stateless_conversion(
     })
 }
 
-pub(super) fn resolve_cargo_manifest_path(
+pub(crate) fn resolve_cargo_manifest_path(
     module_path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     let path = if module_path.file_name() == Some(std::ffi::OsStr::new("Cargo.toml")) {
@@ -1806,7 +1806,7 @@ pub(super) fn resolve_cargo_manifest_path(
     Ok(path)
 }
 
-pub(super) fn collect_cargo_dependency_names(
+pub(crate) fn collect_cargo_dependency_names(
     manifest: &toml::Value,
 ) -> std::collections::BTreeSet<String> {
     let mut dependencies = std::collections::BTreeSet::new();
@@ -1823,7 +1823,7 @@ pub(super) fn collect_cargo_dependency_names(
     dependencies
 }
 
-pub(super) fn collect_dependency_table(
+pub(crate) fn collect_dependency_table(
     value: Option<&toml::Value>,
     dependencies: &mut std::collections::BTreeSet<String>,
 ) {
@@ -1833,20 +1833,20 @@ pub(super) fn collect_dependency_table(
     dependencies.extend(table.keys().cloned());
 }
 
-pub(super) fn strict_conversion_denied_dependencies() -> std::collections::BTreeSet<&'static str> {
+pub(crate) fn strict_conversion_denied_dependencies() -> std::collections::BTreeSet<&'static str> {
     ["git2", "heed", "libc", "memmap2", "notify", "rayon"]
         .into_iter()
         .collect()
 }
 
-pub(super) fn json_label(value: &impl serde::Serialize) -> String {
+pub(crate) fn json_label(value: &impl serde::Serialize) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-pub(super) fn relativize_config_paths(config: &mut ToolConfigFile, base: &std::path::Path) {
+pub(crate) fn relativize_config_paths(config: &mut ToolConfigFile, base: &std::path::Path) {
     if let Some(path) = config.module_path.take() {
         config.module_path = Some(resolve_config_path(base, path));
     }
@@ -1858,7 +1858,7 @@ pub(super) fn relativize_config_paths(config: &mut ToolConfigFile, base: &std::p
     }
 }
 
-pub(super) fn resolve_config_path(
+pub(crate) fn resolve_config_path(
     base: &std::path::Path,
     path: std::path::PathBuf,
 ) -> std::path::PathBuf {
@@ -1869,7 +1869,7 @@ pub(super) fn resolve_config_path(
     }
 }
 
-pub(super) async fn validate_wasm_artifact(
+pub(crate) async fn validate_wasm_artifact(
     artifact_path: std::path::PathBuf,
     capability_grants: std::collections::BTreeSet<String>,
 ) -> crate::kernel::runtime_host::VerletResult<verlet_abi::WasmOperationManifest> {
@@ -1880,7 +1880,7 @@ pub(super) async fn validate_wasm_artifact(
     factory.validate_operation_artifact().await
 }
 
-pub(super) async fn load_vfs(
+pub(crate) async fn load_vfs(
     mounts: Vec<MountArg>,
 ) -> crate::kernel::runtime_host::VerletResult<std::sync::Arc<verlet_vfs::VerletVfs>> {
     let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
@@ -1914,7 +1914,7 @@ pub(super) async fn load_vfs(
     Ok(vfs)
 }
 
-pub(super) fn print_tool_help() {
+pub(crate) fn print_tool_help() {
     println!(
         "verlet tool\n\
 \n\
@@ -1939,7 +1939,7 @@ virtual-bash commands, HTTP routes, MCP exports, or other runtime surfaces.\n"
     );
 }
 
-pub(super) fn print_tool_source_help() {
+pub(crate) fn print_tool_source_help() {
     println!(
         "verlet tool source\n\
 \n\
@@ -1959,7 +1959,7 @@ external MCP client use Verlet, run the local Verlet MCP stdio adapter.\n"
     );
 }
 
-pub(super) fn print_tool_source_add_help() {
+pub(crate) fn print_tool_source_add_help() {
     println!(
         "verlet tool source add\n\
 \n\
@@ -1970,7 +1970,7 @@ Adds or updates a remote MCP tool source without discovering tools yet.\n"
     );
 }
 
-pub(super) fn print_tool_source_discover_help() {
+pub(crate) fn print_tool_source_discover_help() {
     println!(
         "verlet tool source discover\n\
 \n\
@@ -1982,7 +1982,7 @@ tool definitions in the local metadata DB.\n"
     );
 }
 
-pub(super) fn print_tool_source_list_help() {
+pub(crate) fn print_tool_source_list_help() {
     println!(
         "verlet tool source list\n\
 \n\
@@ -1993,7 +1993,7 @@ Lists registered remote MCP tool sources with redacted auth metadata.\n"
     );
 }
 
-pub(super) fn print_tool_source_show_help() {
+pub(crate) fn print_tool_source_show_help() {
     println!(
         "verlet tool source show\n\
 \n\
@@ -2004,7 +2004,7 @@ Shows one remote MCP source and its latest discovered tool snapshot.\n"
     );
 }
 
-pub(super) fn print_tool_source_remove_help() {
+pub(crate) fn print_tool_source_remove_help() {
     println!(
         "verlet tool source remove\n\
 \n\
@@ -2015,7 +2015,7 @@ Removes a remote MCP source record from the local metadata DB.\n"
     );
 }
 
-pub(super) fn print_tool_build_help() {
+pub(crate) fn print_tool_build_help() {
     println!(
         "verlet tool build\n\
 \n\
@@ -2030,7 +2030,7 @@ fixtures when present, print a build receipt, and write nothing to the registry.
     );
 }
 
-pub(super) fn print_tool_list_help() {
+pub(crate) fn print_tool_list_help() {
     println!(
         "verlet tool list\n\
 \n\
@@ -2041,7 +2041,7 @@ Lists published operation records and their active artifact hashes.\n"
     );
 }
 
-pub(super) fn print_tool_publish_help() {
+pub(crate) fn print_tool_publish_help() {
     println!(
         "verlet tool publish\n\
 \n\
@@ -2054,7 +2054,7 @@ before the published tool can become visible through agent attachments.\n"
     );
 }
 
-pub(super) fn print_tool_run_help() {
+pub(crate) fn print_tool_run_help() {
     println!(
         "verlet tool run\n\
 \n\
@@ -2067,7 +2067,7 @@ Runs an operation from source, a Wasm artifact, or a published tool record.\n"
     );
 }
 
-pub(super) fn print_tool_manual_help() {
+pub(crate) fn print_tool_manual_help() {
     println!(
         "verlet tool manual\n\
 \n\

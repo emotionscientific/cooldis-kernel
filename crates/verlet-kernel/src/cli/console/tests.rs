@@ -4,7 +4,7 @@ async fn checked_browser_open_reports_a_launcher_failure() {
     let mut command = std::process::Command::new("sh");
     command.args(["-c", "exit 7"]);
 
-    let error = super::wait_for_browser_open_command(command)
+    let error = crate::cli::console::wait_for_browser_open_command(command)
         .await
         .unwrap_err();
 

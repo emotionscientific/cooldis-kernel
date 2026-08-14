@@ -9,27 +9,27 @@ use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 use verlet_metadata::provider_store::ThreadMetadataStore as _;
 
 #[derive(Clone)]
-pub(super) struct ConnectionState {
-    pub(super) app: crate::adapters::app_server::VerletAppServer,
-    pub(super) resolved_principal: crate::daemon::identity::ResolvedPrincipal,
-    pub(super) witnessed_session_id: String,
-    pub(super) boundary_surface: crate::daemon::identity::BoundarySurface,
-    pub(super) outbound: tokio::sync::mpsc::UnboundedSender<JsonRpcMessage>,
-    pub(super) handshake: std::sync::Arc<tokio::sync::Mutex<HandshakeState>>,
-    pub(super) opt_out_notifications:
+pub(crate) struct ConnectionState {
+    pub(crate) app: crate::adapters::app_server::VerletAppServer,
+    pub(crate) resolved_principal: crate::daemon::identity::ResolvedPrincipal,
+    pub(crate) witnessed_session_id: String,
+    pub(crate) boundary_surface: crate::daemon::identity::BoundarySurface,
+    pub(crate) outbound: tokio::sync::mpsc::UnboundedSender<JsonRpcMessage>,
+    pub(crate) handshake: std::sync::Arc<tokio::sync::Mutex<HandshakeState>>,
+    pub(crate) opt_out_notifications:
         std::sync::Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
-    pub(super) subscriptions:
+    pub(crate) subscriptions:
         std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, u64>>>,
-    pub(super) fs_watches:
+    pub(crate) fs_watches:
         std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>>,
 }
 
 #[derive(Default)]
-pub(super) struct HandshakeState {
-    pub(super) initialize_seen: bool,
-    pub(super) initialized_seen: bool,
-    pub(super) client_name: Option<String>,
-    pub(super) client_version: Option<String>,
+pub(crate) struct HandshakeState {
+    pub(crate) initialize_seen: bool,
+    pub(crate) initialized_seen: bool,
+    pub(crate) client_name: Option<String>,
+    pub(crate) client_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -96,606 +96,606 @@ pub struct JsonRpcErrorError {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct InitializeParams {
-    pub(super) client_info: ClientInfo,
+pub(crate) struct InitializeParams {
+    pub(crate) client_info: ClientInfo,
     #[serde(default)]
-    pub(super) capabilities: Option<InitializeCapabilities>,
+    pub(crate) capabilities: Option<InitializeCapabilities>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct ClientInfo {
-    pub(super) name: String,
+pub(crate) struct ClientInfo {
+    pub(crate) name: String,
     #[serde(default)]
-    pub(super) title: Option<String>,
-    pub(super) version: String,
+    pub(crate) title: Option<String>,
+    pub(crate) version: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct InitializeCapabilities {
+pub(crate) struct InitializeCapabilities {
     #[serde(default)]
-    pub(super) experimental_api: bool,
+    pub(crate) experimental_api: bool,
     #[serde(default)]
-    pub(super) request_attestation: bool,
+    pub(crate) request_attestation: bool,
     #[serde(default)]
-    pub(super) opt_out_notification_methods: Option<Vec<String>>,
+    pub(crate) opt_out_notification_methods: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadStartParams {
+pub(crate) struct ThreadStartParams {
     #[serde(default)]
-    pub(super) model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(default)]
-    pub(super) model_provider: Option<String>,
+    pub(crate) model_provider: Option<String>,
     #[serde(default)]
-    pub(super) service_tier: Option<String>,
+    pub(crate) service_tier: Option<String>,
     #[serde(default)]
-    pub(super) cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub(super) ephemeral: Option<bool>,
+    pub(crate) ephemeral: Option<bool>,
     #[serde(default)]
-    pub(super) parent_thread_id: Option<String>,
+    pub(crate) parent_thread_id: Option<String>,
     #[serde(default)]
-    pub(super) topology: Option<verlet_runtime_contracts::ThreadTopology>,
+    pub(crate) topology: Option<verlet_runtime_contracts::ThreadTopology>,
     #[serde(default)]
-    pub(super) capsule_bindings: Option<ThreadCapsuleBindingsParams>,
+    pub(crate) capsule_bindings: Option<ThreadCapsuleBindingsParams>,
     #[serde(default)]
-    pub(super) agent_ref: Option<String>,
+    pub(crate) agent_ref: Option<String>,
     #[serde(default)]
-    pub(super) runtime_overrides: Option<crate::agent::manifest_bind::AgentManifestBindOverrides>,
+    pub(crate) runtime_overrides: Option<crate::agent::manifest_bind::AgentManifestBindOverrides>,
     #[serde(default)]
-    pub(super) placement: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
+    pub(crate) placement: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
     #[serde(default)]
-    pub(super) workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    pub(crate) workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
     #[serde(
         default,
         deserialize_with = "crate::adapters::app_server::threads::deserialize_optional_thinking"
     )]
-    pub(super) thinking: Option<verlet_provider::ThinkingConfig>,
+    pub(crate) thinking: Option<verlet_provider::ThinkingConfig>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadSpawnParams {
-    pub(super) thread_id: String,
-    pub(super) task_name: String,
-    pub(super) message: String,
+pub(crate) struct ThreadSpawnParams {
+    pub(crate) thread_id: String,
+    pub(crate) task_name: String,
+    pub(crate) message: String,
     #[serde(default)]
-    pub(super) agent_ref: Option<String>,
+    pub(crate) agent_ref: Option<String>,
     #[serde(default)]
-    pub(super) placement: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
+    pub(crate) placement: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
     #[serde(default)]
-    pub(super) workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    pub(crate) workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
     #[serde(default)]
-    pub(super) dispatch_id: Option<String>,
+    pub(crate) dispatch_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadSubmitParams {
-    pub(super) thread_id: String,
-    pub(super) message: String,
+pub(crate) struct ThreadSubmitParams {
+    pub(crate) thread_id: String,
+    pub(crate) message: String,
     #[serde(default)]
-    pub(super) dispatch_id: Option<String>,
+    pub(crate) dispatch_id: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadCapsuleBindingsParams {
+pub(crate) struct ThreadCapsuleBindingsParams {
     #[serde(default)]
-    pub(super) operation_names: Vec<String>,
+    pub(crate) operation_names: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CapsuleBindingSetParams {
-    pub(super) scope: verlet_operations::operation_store::CapsuleBindingScope,
-    pub(super) operation_name: String,
+pub(crate) struct CapsuleBindingSetParams {
+    pub(crate) scope: verlet_operations::operation_store::CapsuleBindingScope,
+    pub(crate) operation_name: String,
     #[serde(default)]
-    pub(super) artifact_hash: Option<String>,
+    pub(crate) artifact_hash: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CapsuleBindingOperationParams {
-    pub(super) scope: verlet_operations::operation_store::CapsuleBindingScope,
-    pub(super) operation_name: String,
+pub(crate) struct CapsuleBindingOperationParams {
+    pub(crate) scope: verlet_operations::operation_store::CapsuleBindingScope,
+    pub(crate) operation_name: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CapsuleBindingListParams {
-    pub(super) scope: verlet_operations::operation_store::CapsuleBindingScope,
+pub(crate) struct CapsuleBindingListParams {
+    pub(crate) scope: verlet_operations::operation_store::CapsuleBindingScope,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CapsuleBindingResolveParams {
+pub(crate) struct CapsuleBindingResolveParams {
     #[serde(default)]
-    pub(super) tenant_id: Option<String>,
+    pub(crate) tenant_id: Option<String>,
     #[serde(default)]
-    pub(super) thread_id: Option<String>,
+    pub(crate) thread_id: Option<String>,
     #[serde(default)]
-    pub(super) operation_names: Vec<String>,
+    pub(crate) operation_names: Vec<String>,
     #[serde(default)]
-    pub(super) load_all_active_when_unbound: Option<bool>,
+    pub(crate) load_all_active_when_unbound: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct AgentReadParams {
+pub(crate) struct AgentReadParams {
     #[serde(rename = "ref")]
-    pub(super) ref_uri: String,
+    pub(crate) ref_uri: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct AgentDraftParams {
+pub(crate) struct AgentDraftParams {
     #[serde(default)]
-    pub(super) source: Option<String>,
+    pub(crate) source: Option<String>,
     #[serde(default)]
-    pub(super) manifest: Option<serde_json::Value>,
+    pub(crate) manifest: Option<serde_json::Value>,
     #[serde(default)]
-    pub(super) base_ref: Option<String>,
+    pub(crate) base_ref: Option<String>,
     #[serde(default)]
-    pub(super) base_manifest_hash: Option<String>,
+    pub(crate) base_manifest_hash: Option<String>,
     #[serde(default)]
-    pub(super) expected_latest_version: Option<String>,
+    pub(crate) expected_latest_version: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderReadParams {
-    pub(super) provider_id: String,
+pub(crate) struct ModelProviderReadParams {
+    pub(crate) provider_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelSelectParams {
-    pub(super) provider_id: String,
-    pub(super) model: String,
+pub(crate) struct ModelSelectParams {
+    pub(crate) provider_id: String,
+    pub(crate) model: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderUpsertParams {
-    pub(super) provider: ModelProviderUpsertRecord,
+pub(crate) struct ModelProviderUpsertParams {
+    pub(crate) provider: ModelProviderUpsertRecord,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderDeleteParams {
-    pub(super) provider_id: String,
+pub(crate) struct ModelProviderDeleteParams {
+    pub(crate) provider_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderUpsertRecord {
-    pub(super) provider_id: String,
-    pub(super) api: serde_json::Value,
-    pub(super) base_url: String,
+pub(crate) struct ModelProviderUpsertRecord {
+    pub(crate) provider_id: String,
+    pub(crate) api: serde_json::Value,
+    pub(crate) base_url: String,
     #[serde(default)]
-    pub(super) display_name: Option<String>,
+    pub(crate) display_name: Option<String>,
     #[serde(default)]
-    pub(super) auth: verlet_metadata::provider_store::LlmProviderAuthConfig,
+    pub(crate) auth: verlet_metadata::provider_store::LlmProviderAuthConfig,
     #[serde(default)]
-    pub(super) headers:
+    pub(crate) headers:
         std::collections::BTreeMap<String, verlet_metadata::provider_store::LlmProviderConfigValue>,
     #[serde(default)]
-    pub(super) auth_header: bool,
+    pub(crate) auth_header: bool,
     #[serde(default)]
-    pub(super) models: Vec<ModelProviderModelUpsertRecord>,
+    pub(crate) models: Vec<ModelProviderModelUpsertRecord>,
     #[serde(default)]
-    pub(super) metadata: std::collections::BTreeMap<String, String>,
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderModelUpsertRecord {
-    pub(super) model_id: String,
+pub(crate) struct ModelProviderModelUpsertRecord {
+    pub(crate) model_id: String,
     #[serde(default)]
-    pub(super) display_name: Option<String>,
+    pub(crate) display_name: Option<String>,
     #[serde(default)]
-    pub(super) api: Option<serde_json::Value>,
+    pub(crate) api: Option<serde_json::Value>,
     #[serde(default)]
-    pub(super) base_url: Option<String>,
+    pub(crate) base_url: Option<String>,
     #[serde(default)]
-    pub(super) context_window_tokens: Option<u64>,
+    pub(crate) context_window_tokens: Option<u64>,
     #[serde(default)]
-    pub(super) max_output_tokens: Option<u32>,
+    pub(crate) max_output_tokens: Option<u32>,
     #[serde(default)]
-    pub(super) input_modalities: Vec<verlet_metadata::provider_store::LlmProviderInputModality>,
+    pub(crate) input_modalities: Vec<verlet_metadata::provider_store::LlmProviderInputModality>,
     #[serde(default)]
-    pub(super) headers:
+    pub(crate) headers:
         std::collections::BTreeMap<String, verlet_metadata::provider_store::LlmProviderConfigValue>,
     #[serde(default)]
-    pub(super) metadata: std::collections::BTreeMap<String, String>,
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderAuthStatusParams {
+pub(crate) struct ModelProviderAuthStatusParams {
     #[serde(default)]
-    pub(super) provider_id: Option<String>,
+    pub(crate) provider_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderAuthSetParams {
-    pub(super) provider_id: String,
-    pub(super) api_key: String,
+pub(crate) struct ModelProviderAuthSetParams {
+    pub(crate) provider_id: String,
+    pub(crate) api_key: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderAuthSetOAuthParams {
-    pub(super) provider_id: String,
-    pub(super) access: String,
-    pub(super) refresh: String,
-    pub(super) expires_at_ms: i64,
+pub(crate) struct ModelProviderAuthSetOAuthParams {
+    pub(crate) provider_id: String,
+    pub(crate) access: String,
+    pub(crate) refresh: String,
+    pub(crate) expires_at_ms: i64,
     #[serde(default)]
-    pub(super) account_id: Option<String>,
+    pub(crate) account_id: Option<String>,
     #[serde(default)]
-    pub(super) email: Option<String>,
+    pub(crate) email: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModelProviderAuthDeleteParams {
-    pub(super) provider_id: String,
+pub(crate) struct ModelProviderAuthDeleteParams {
+    pub(crate) provider_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct MandateStartParams {
-    pub(super) thread_id: String,
-    pub(super) schedule: crate::kernel::control_decision::MandateSchedulePayload,
+pub(crate) struct MandateStartParams {
+    pub(crate) thread_id: String,
+    pub(crate) schedule: crate::kernel::control_decision::MandateSchedulePayload,
     #[serde(default)]
-    pub(super) max_occurrences: Option<u32>,
+    pub(crate) max_occurrences: Option<u32>,
     #[serde(default)]
-    pub(super) catch_up: Option<crate::kernel::control_decision::MandateCatchUpPolicy>,
+    pub(crate) catch_up: Option<crate::kernel::control_decision::MandateCatchUpPolicy>,
     #[serde(default)]
-    pub(super) input_template: Option<String>,
+    pub(crate) input_template: Option<String>,
     #[serde(default)]
-    pub(super) expires_at: Option<String>,
+    pub(crate) expires_at: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct MandateRevokeParams {
-    pub(super) thread_id: String,
-    pub(super) mandate_event_id: String,
+pub(crate) struct MandateRevokeParams {
+    pub(crate) thread_id: String,
+    pub(crate) mandate_event_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct MandateListParams {
-    pub(super) thread_id: String,
+pub(crate) struct MandateListParams {
+    pub(crate) thread_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct McpSourceReadParams {
-    pub(super) name: String,
+pub(crate) struct McpSourceReadParams {
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct McpSourceUpsertParams {
-    pub(super) name: String,
+pub(crate) struct McpSourceUpsertParams {
+    pub(crate) name: String,
     #[serde(default)]
-    pub(super) transport: Option<String>,
+    pub(crate) transport: Option<String>,
     #[serde(default)]
-    pub(super) kind: Option<String>,
-    pub(super) url: String,
+    pub(crate) kind: Option<String>,
+    pub(crate) url: String,
     #[serde(default)]
-    pub(super) bearer_secret: Option<String>,
+    pub(crate) bearer_secret: Option<String>,
     #[serde(default)]
-    pub(super) bearer_token: Option<String>,
+    pub(crate) bearer_token: Option<String>,
     #[serde(default)]
-    pub(super) headers: Vec<McpSourceHeaderParam>,
+    pub(crate) headers: Vec<McpSourceHeaderParam>,
     #[serde(default)]
-    pub(super) include_tools: Vec<String>,
+    pub(crate) include_tools: Vec<String>,
     #[serde(default)]
-    pub(super) timeout_ms: Option<u64>,
+    pub(crate) timeout_ms: Option<u64>,
     #[serde(default)]
-    pub(super) max_output_bytes: Option<u64>,
+    pub(crate) max_output_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct McpSourceHeaderParam {
-    pub(super) name: String,
-    pub(super) value: String,
+pub(crate) struct McpSourceHeaderParam {
+    pub(crate) name: String,
+    pub(crate) value: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct McpSourceTestToolParams {
-    pub(super) name: String,
-    pub(super) tool: String,
+pub(crate) struct McpSourceTestToolParams {
+    pub(crate) name: String,
+    pub(crate) tool: String,
     #[serde(default)]
-    pub(super) arguments: serde_json::Value,
+    pub(crate) arguments: serde_json::Value,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct McpSourceManifestPatchParams {
-    pub(super) name: String,
+pub(crate) struct McpSourceManifestPatchParams {
+    pub(crate) name: String,
     #[serde(default)]
-    pub(super) import_id: Option<String>,
+    pub(crate) import_id: Option<String>,
     #[serde(default)]
-    pub(super) agent_ref: Option<String>,
+    pub(crate) agent_ref: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadForkParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadForkParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub(super) checkpoint_id: Option<String>,
+    pub(crate) checkpoint_id: Option<String>,
     #[serde(default)]
-    pub(super) model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(default)]
-    pub(super) model_provider: Option<String>,
+    pub(crate) model_provider: Option<String>,
     #[serde(default)]
-    pub(super) service_tier: Option<String>,
+    pub(crate) service_tier: Option<String>,
     #[serde(default)]
-    pub(super) cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub(super) ephemeral: bool,
+    pub(crate) ephemeral: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadRebindForkParams {
-    pub(super) thread_id: String,
-    pub(super) agent_ref: String,
+pub(crate) struct ThreadRebindForkParams {
+    pub(crate) thread_id: String,
+    pub(crate) agent_ref: String,
     #[serde(default)]
-    pub(super) checkpoint_id: Option<String>,
+    pub(crate) checkpoint_id: Option<String>,
     #[serde(default)]
-    pub(super) model_profile_id: Option<String>,
+    pub(crate) model_profile_id: Option<String>,
     #[serde(default)]
-    pub(super) runtime_overrides: Option<crate::agent::manifest_bind::AgentManifestBindOverrides>,
+    pub(crate) runtime_overrides: Option<crate::agent::manifest_bind::AgentManifestBindOverrides>,
     #[serde(default)]
-    pub(super) placement: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
+    pub(crate) placement: Option<crate::agent::manifest_bind::AgentManifestPlacementBinding>,
     #[serde(default)]
-    pub(super) workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    pub(crate) workspace: Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
     #[serde(default)]
-    pub(super) reason: verlet_history::ThreadForkReason,
+    pub(crate) reason: verlet_history::ThreadForkReason,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadResumeParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadResumeParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub(super) model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(default)]
-    pub(super) model_provider: Option<String>,
+    pub(crate) model_provider: Option<String>,
     #[serde(default)]
-    pub(super) service_tier: Option<String>,
+    pub(crate) service_tier: Option<String>,
     #[serde(default)]
-    pub(super) cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub(super) exclude_turns: bool,
+    pub(crate) exclude_turns: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct TurnStartParams {
-    pub(super) thread_id: String,
-    pub(super) input: Vec<serde_json::Value>,
+pub(crate) struct TurnStartParams {
+    pub(crate) thread_id: String,
+    pub(crate) input: Vec<serde_json::Value>,
     #[serde(default)]
-    pub(super) cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub(super) model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(
         default,
         deserialize_with = "crate::adapters::app_server::threads::deserialize_optional_thinking"
     )]
-    pub(super) thinking: Option<verlet_provider::ThinkingConfig>,
+    pub(crate) thinking: Option<verlet_provider::ThinkingConfig>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct TurnSteerParams {
-    pub(super) thread_id: String,
-    pub(super) input: Vec<serde_json::Value>,
-    pub(super) expected_turn_id: String,
+pub(crate) struct TurnSteerParams {
+    pub(crate) thread_id: String,
+    pub(crate) input: Vec<serde_json::Value>,
+    pub(crate) expected_turn_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct TurnInterruptParams {
-    pub(super) thread_id: String,
-    pub(super) turn_id: String,
+pub(crate) struct TurnInterruptParams {
+    pub(crate) thread_id: String,
+    pub(crate) turn_id: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadReadParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadReadParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub(super) include_turns: Option<bool>,
+    pub(crate) include_turns: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadEventsListParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadEventsListParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub(super) stream: Option<String>,
+    pub(crate) stream: Option<String>,
     #[serde(default)]
-    pub(super) cursor: Option<String>,
+    pub(crate) cursor: Option<String>,
     #[serde(default)]
-    pub(super) stream_cursor: Option<verlet_history::StreamCursorV1>,
+    pub(crate) stream_cursor: Option<verlet_history::StreamCursorV1>,
     #[serde(default)]
-    pub(super) limit: Option<usize>,
+    pub(crate) limit: Option<usize>,
     #[serde(default)]
-    pub(super) kinds: Vec<String>,
+    pub(crate) kinds: Vec<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadControlListParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadControlListParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub(super) limit: Option<usize>,
+    pub(crate) limit: Option<usize>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadDebugExportParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadDebugExportParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub(super) streams: Vec<String>,
+    pub(crate) streams: Vec<String>,
     #[serde(default)]
-    pub(super) include_thread: Option<bool>,
+    pub(crate) include_thread: Option<bool>,
     #[serde(default)]
-    pub(super) max_events_per_stream: Option<usize>,
+    pub(crate) max_events_per_stream: Option<usize>,
     #[serde(default)]
-    pub(super) redact: Option<bool>,
+    pub(crate) redact: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadUnsubscribeParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadUnsubscribeParams {
+    pub(crate) thread_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadSetNameParams {
-    pub(super) thread_id: String,
-    pub(super) name: String,
+pub(crate) struct ThreadSetNameParams {
+    pub(crate) thread_id: String,
+    pub(crate) name: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadMetadataUpdateParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadMetadataUpdateParams {
+    pub(crate) thread_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadCompactStartParams {
-    pub(super) thread_id: String,
+pub(crate) struct ThreadCompactStartParams {
+    pub(crate) thread_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ThreadShellCommandParams {
-    pub(super) thread_id: String,
-    pub(super) command: String,
+pub(crate) struct ThreadShellCommandParams {
+    pub(crate) thread_id: String,
+    pub(crate) command: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ConfigReadParams {
+pub(crate) struct ConfigReadParams {
     #[serde(default)]
-    pub(super) include_layers: bool,
+    pub(crate) include_layers: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsReadFileParams {
-    pub(super) path: std::path::PathBuf,
+pub(crate) struct FsReadFileParams {
+    pub(crate) path: std::path::PathBuf,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsWriteFileParams {
-    pub(super) path: std::path::PathBuf,
-    pub(super) data_base64: String,
+pub(crate) struct FsWriteFileParams {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) data_base64: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsCreateDirectoryParams {
-    pub(super) path: std::path::PathBuf,
+pub(crate) struct FsCreateDirectoryParams {
+    pub(crate) path: std::path::PathBuf,
     #[serde(default)]
-    pub(super) recursive: Option<bool>,
+    pub(crate) recursive: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsGetMetadataParams {
-    pub(super) path: std::path::PathBuf,
+pub(crate) struct FsGetMetadataParams {
+    pub(crate) path: std::path::PathBuf,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsReadDirectoryParams {
-    pub(super) path: std::path::PathBuf,
+pub(crate) struct FsReadDirectoryParams {
+    pub(crate) path: std::path::PathBuf,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsRemoveParams {
-    pub(super) path: std::path::PathBuf,
+pub(crate) struct FsRemoveParams {
+    pub(crate) path: std::path::PathBuf,
     #[serde(default)]
-    pub(super) recursive: Option<bool>,
+    pub(crate) recursive: Option<bool>,
     #[serde(default)]
-    pub(super) force: Option<bool>,
+    pub(crate) force: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsCopyParams {
-    pub(super) source_path: std::path::PathBuf,
-    pub(super) destination_path: std::path::PathBuf,
+pub(crate) struct FsCopyParams {
+    pub(crate) source_path: std::path::PathBuf,
+    pub(crate) destination_path: std::path::PathBuf,
     #[serde(default)]
-    pub(super) recursive: bool,
+    pub(crate) recursive: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsWatchParams {
-    pub(super) watch_id: String,
-    pub(super) path: std::path::PathBuf,
+pub(crate) struct FsWatchParams {
+    pub(crate) watch_id: String,
+    pub(crate) path: std::path::PathBuf,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FsUnwatchParams {
-    pub(super) watch_id: String,
+pub(crate) struct FsUnwatchParams {
+    pub(crate) watch_id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CommandExecParams {
+pub(crate) struct CommandExecParams {
     #[serde(default)]
-    pub(super) command: Vec<String>,
+    pub(crate) command: Vec<String>,
     #[serde(default)]
-    pub(super) process_id: Option<String>,
+    pub(crate) process_id: Option<String>,
     #[serde(default)]
-    pub(super) tty: bool,
+    pub(crate) tty: bool,
     #[serde(default)]
-    pub(super) stream_stdin: bool,
+    pub(crate) stream_stdin: bool,
     #[serde(default)]
-    pub(super) stream_stdout_stderr: bool,
+    pub(crate) stream_stdout_stderr: bool,
     #[serde(default)]
-    pub(super) output_bytes_cap: Option<usize>,
+    pub(crate) output_bytes_cap: Option<usize>,
     #[serde(default)]
-    pub(super) disable_output_cap: bool,
+    pub(crate) disable_output_cap: bool,
     #[serde(default)]
-    pub(super) disable_timeout: bool,
+    pub(crate) disable_timeout: bool,
     #[serde(default)]
-    pub(super) timeout_ms: Option<u64>,
+    pub(crate) timeout_ms: Option<u64>,
     #[serde(default)]
-    pub(super) yield_time_ms: Option<u64>,
+    pub(crate) yield_time_ms: Option<u64>,
     #[serde(default)]
-    pub(super) cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub(super) env: Option<std::collections::HashMap<String, Option<String>>>,
+    pub(crate) env: Option<std::collections::HashMap<String, Option<String>>>,
     #[serde(default)]
-    pub(super) dispatch_id: Option<String>,
+    pub(crate) dispatch_id: Option<String>,
     /// Consumer of a handle-returning streaming execution. Buffered
     /// command/exec does not create a handle and does not require this field.
     #[serde(default)]
-    pub(super) thread_id: Option<String>,
+    pub(crate) thread_id: Option<String>,
 }
 
 #[derive(
@@ -703,7 +703,7 @@ pub(super) struct CommandExecParams {
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
-pub(super) enum ApprovalResolveDecision {
+pub(crate) enum ApprovalResolveDecision {
     Approved,
     Denied,
 }
@@ -716,69 +716,69 @@ impl ApprovalResolveDecision {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ApprovalResolveParams {
-    pub(super) thread_id: String,
-    pub(super) approval_id: String,
-    pub(super) decision: ApprovalResolveDecision,
+pub(crate) struct ApprovalResolveParams {
+    pub(crate) thread_id: String,
+    pub(crate) approval_id: String,
+    pub(crate) decision: ApprovalResolveDecision,
     #[serde(default)]
-    pub(super) reason: Option<String>,
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CommandExecProcessParams {
-    pub(super) process_id: String,
+pub(crate) struct CommandExecProcessParams {
+    pub(crate) process_id: String,
     #[serde(default)]
-    pub(super) yield_time_ms: Option<u64>,
+    pub(crate) yield_time_ms: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CommandExecWriteParams {
-    pub(super) process_id: String,
-    pub(super) delta_base64: String,
+pub(crate) struct CommandExecWriteParams {
+    pub(crate) process_id: String,
+    pub(crate) delta_base64: String,
     #[serde(default)]
-    pub(super) yield_time_ms: Option<u64>,
+    pub(crate) yield_time_ms: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CommandExecTerminateParams {
-    pub(super) process_id: String,
+pub(crate) struct CommandExecTerminateParams {
+    pub(crate) process_id: String,
     #[serde(default)]
-    pub(super) reason: Option<String>,
+    pub(crate) reason: Option<String>,
     #[serde(default)]
-    pub(super) yield_time_ms: Option<u64>,
+    pub(crate) yield_time_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ExperimentalFeatureEnablementSetParams {
+pub(crate) struct ExperimentalFeatureEnablementSetParams {
     #[serde(default)]
-    pub(super) enablement: std::collections::BTreeMap<String, bool>,
+    pub(crate) enablement: std::collections::BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct GetAuthStatusParams {
+pub(crate) struct GetAuthStatusParams {
     #[serde(default)]
-    pub(super) include_token: Option<bool>,
+    pub(crate) include_token: Option<bool>,
     #[serde(default)]
-    pub(super) refresh_token: Option<bool>,
+    pub(crate) refresh_token: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct GetConversationSummaryParams {
+pub(crate) struct GetConversationSummaryParams {
     #[serde(default)]
-    pub(super) conversation_id: Option<String>,
+    pub(crate) conversation_id: Option<String>,
     #[serde(default)]
-    pub(super) rollout_path: Option<String>,
+    pub(crate) rollout_path: Option<String>,
 }
 
 const METHOD_NOT_AUTHORIZED_CODE: i64 = -32003;
 
-pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
+pub(crate) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
     &str,
     crate::daemon::identity::AuthorityClass,
 )] = &[
@@ -1113,7 +1113,7 @@ pub(super) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
     ),
 ];
 
-pub(super) const HOST_EFFECT_METHODS: &[&str] = &[
+pub(crate) const HOST_EFFECT_METHODS: &[&str] = &[
     // Local registry mutations.
     "capsule/binding/set",    // lexicon-allow: capsule - existing RPC method.
     "capsule/binding/delete", // lexicon-allow: capsule - existing RPC method.
@@ -1182,7 +1182,7 @@ impl crate::adapters::app_server::VerletAppServer {
         .await
     }
 
-    pub(super) async fn authenticated_json_rpc_request(
+    pub(crate) async fn authenticated_json_rpc_request(
         &self,
         resolved_principal: crate::daemon::identity::ResolvedPrincipal,
         surface: crate::daemon::identity::BoundarySurface,
@@ -1265,7 +1265,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }
     }
 
-    pub(super) async fn handle_websocket<S>(
+    pub(crate) async fn handle_websocket<S>(
         &self,
         websocket: tokio_tungstenite::WebSocketStream<S>,
         resolved_principal: crate::daemon::identity::ResolvedPrincipal,
@@ -1386,7 +1386,7 @@ impl crate::adapters::app_server::VerletAppServer {
         finish_websocket_session(read_result, close_result)
     }
 
-    pub(super) async fn handle_request(
+    pub(crate) async fn handle_request(
         &self,
         connection: &ConnectionState,
         request: JsonRpcRequest,
@@ -1434,7 +1434,7 @@ impl crate::adapters::app_server::VerletAppServer {
         let _ = connection.outbound.send(message);
     }
 
-    pub(super) async fn dispatch_request(
+    pub(crate) async fn dispatch_request(
         &self,
         connection: &ConnectionState,
         method: &str,
@@ -1877,13 +1877,13 @@ impl crate::adapters::app_server::VerletAppServer {
         }
     }
 
-    pub(super) async fn mcp_server_status_list(
+    pub(crate) async fn mcp_server_status_list(
         &self,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         self.mcp_source_list().await
     }
 
-    pub(super) async fn mcp_source_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
+    pub(crate) async fn mcp_source_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
         let registry = crate::adapters::mcp_client::SqliteMcpSourceRegistry::open_async(
             &self.inner.metadata_store_path,
         )
@@ -1899,7 +1899,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "nextCursor": null }))
     }
 
-    pub(super) async fn mcp_source_read(
+    pub(crate) async fn mcp_source_read(
         &self,
         params: McpSourceReadParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -1912,7 +1912,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "source": record.redacted_json() }))
     }
 
-    pub(super) async fn mcp_source_upsert(
+    pub(crate) async fn mcp_source_upsert(
         &self,
         params: McpSourceUpsertParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -1981,7 +1981,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "source": record.redacted_json() }))
     }
 
-    pub(super) async fn mcp_source_discover(
+    pub(crate) async fn mcp_source_discover(
         &self,
         params: McpSourceReadParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2005,7 +2005,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "source": record.redacted_json() }))
     }
 
-    pub(super) async fn mcp_source_delete(
+    pub(crate) async fn mcp_source_delete(
         &self,
         params: McpSourceReadParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2018,7 +2018,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "deleted": deleted }))
     }
 
-    pub(super) async fn mcp_source_test_tool(
+    pub(crate) async fn mcp_source_test_tool(
         &self,
         params: McpSourceTestToolParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2072,7 +2072,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }
     }
 
-    pub(super) async fn mcp_source_manifest_patch(
+    pub(crate) async fn mcp_source_manifest_patch(
         &self,
         params: McpSourceManifestPatchParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2176,7 +2176,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(|err| internal_error(crate::adapters::app_server::secret_store_error(err)))
     }
 
-    pub(super) fn agent_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
+    pub(crate) fn agent_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
         let registry = self.inner.agent_registry();
         let data = registry
             .list_records()
@@ -2187,7 +2187,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "cursor": null }))
     }
 
-    pub(super) fn agent_read(
+    pub(crate) fn agent_read(
         &self,
         params: AgentReadParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2205,7 +2205,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(value)
     }
 
-    pub(super) fn agent_plan(
+    pub(crate) fn agent_plan(
         &self,
         params: AgentDraftParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2224,7 +2224,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) fn agent_publish(
+    pub(crate) fn agent_publish(
         &self,
         params: AgentDraftParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2260,7 +2260,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .unwrap_or_else(crate::agent::manifest::default_operations_registry_root)
     }
 
-    pub(super) async fn model_provider_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
+    pub(crate) async fn model_provider_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
         let mut providers = self
             .inner
             .metadata_store
@@ -2280,7 +2280,7 @@ impl crate::adapters::app_server::VerletAppServer {
     /// `modelProvider/catalog` (EMO-574): read-only merge of the models.dev
     /// provider catalog with provider-store state for the chat setup wizard.
     /// It never writes provider records or credentials.
-    pub(super) async fn model_provider_catalog(
+    pub(crate) async fn model_provider_catalog(
         &self,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let catalog_providers = self.inner.model_catalog.providers();
@@ -2435,7 +2435,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "providers": rows }))
     }
 
-    pub(super) async fn model_provider_read(
+    pub(crate) async fn model_provider_read(
         &self,
         params: ModelProviderReadParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2443,7 +2443,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "provider": self.model_provider_json(&provider).await? }))
     }
 
-    pub(super) async fn model_provider_upsert(
+    pub(crate) async fn model_provider_upsert(
         &self,
         params: ModelProviderUpsertParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2466,7 +2466,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "provider": self.model_provider_json(&provider).await? }))
     }
 
-    pub(super) async fn model_provider_delete(
+    pub(crate) async fn model_provider_delete(
         &self,
         params: ModelProviderDeleteParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2522,7 +2522,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "deleted": true, "providerId": provider_id }))
     }
 
-    pub(super) async fn model_provider_auth_status(
+    pub(crate) async fn model_provider_auth_status(
         &self,
         params: ModelProviderAuthStatusParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2583,7 +2583,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "auth": auth, "data": data, "nextCursor": null }))
     }
 
-    pub(super) async fn model_provider_auth_set(
+    pub(crate) async fn model_provider_auth_set(
         &self,
         params: ModelProviderAuthSetParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2675,7 +2675,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "auth": self.model_provider_auth_json(&provider).await? }))
     }
 
-    pub(super) async fn model_provider_auth_set_oauth(
+    pub(crate) async fn model_provider_auth_set_oauth(
         &self,
         params: ModelProviderAuthSetOAuthParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2748,7 +2748,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "auth": self.model_provider_auth_json(&provider).await? }))
     }
 
-    pub(super) async fn model_provider_auth_delete(
+    pub(crate) async fn model_provider_auth_delete(
         &self,
         params: ModelProviderAuthDeleteParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3037,7 +3037,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) fn operation_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
+    pub(crate) fn operation_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
         let Some(registry_root) = self.inner.capsule_bindings.registry_root.as_deref() else {
             return Ok(serde_json::json!({ "data": [], "cursor": null }));
         };
@@ -3073,7 +3073,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(lifecycle)
     }
 
-    pub(super) async fn thread_events_list(
+    pub(crate) async fn thread_events_list(
         &self,
         params: ThreadEventsListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3143,7 +3143,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "cursor": cursor, "streamCursor": stream_cursor }))
     }
 
-    pub(super) async fn thread_couplings_list(
+    pub(crate) async fn thread_couplings_list(
         &self,
         params: ThreadControlListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3188,7 +3188,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn thread_approvals_list(
+    pub(crate) async fn thread_approvals_list(
         &self,
         params: ThreadControlListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3217,7 +3217,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "nextCursor": null }))
     }
 
-    pub(super) async fn thread_waiting_list(
+    pub(crate) async fn thread_waiting_list(
         &self,
         params: ThreadControlListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3325,7 +3325,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "nextCursor": null }))
     }
 
-    pub(super) async fn approval_resolve(
+    pub(crate) async fn approval_resolve(
         &self,
         params: ApprovalResolveParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3422,7 +3422,7 @@ impl crate::adapters::app_server::VerletAppServer {
         ))
     }
 
-    pub(super) async fn mandate_start(
+    pub(crate) async fn mandate_start(
         &self,
         params: MandateStartParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3460,7 +3460,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn mandate_revoke(
+    pub(crate) async fn mandate_revoke(
         &self,
         params: MandateRevokeParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3493,7 +3493,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn mandate_list(
+    pub(crate) async fn mandate_list(
         &self,
         params: MandateListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3516,7 +3516,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "nextCursor": null }))
     }
 
-    pub(super) async fn thread_debug_export(
+    pub(crate) async fn thread_debug_export(
         &self,
         params: ThreadDebugExportParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -3663,7 +3663,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(bundle)
     }
 
-    pub(super) async fn bind_thread_start_agent(
+    pub(crate) async fn bind_thread_start_agent(
         &self,
         agent_ref: &str,
         params: &ThreadStartParams,
@@ -3689,7 +3689,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(bound)
     }
 
-    pub(super) async fn bind_rebind_fork_agent(
+    pub(crate) async fn bind_rebind_fork_agent(
         &self,
         agent_ref: &str,
         model_profile_id: Option<&str>,
@@ -3719,7 +3719,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(bound)
     }
 
-    pub(super) async fn agent_manifest_provider_surface(
+    pub(crate) async fn agent_manifest_provider_surface(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::agent::manifest_bind::AgentManifestProviderSurface,
@@ -3734,7 +3734,7 @@ impl crate::adapters::app_server::VerletAppServer {
         .await
     }
 
-    pub(super) async fn configured_mcp_server_refs(
+    pub(crate) async fn configured_mcp_server_refs(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<std::collections::BTreeSet<String>> {
         let registry = crate::adapters::mcp_client::SqliteMcpSourceRegistry::open_async(
@@ -3753,7 +3753,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .collect())
     }
 
-    pub(super) async fn tool_universe_discoverer(
+    pub(crate) async fn tool_universe_discoverer(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<
         crate::adapters::mcp_client::McpToolUniverseDiscoverer,
@@ -3774,7 +3774,7 @@ impl crate::adapters::app_server::VerletAppServer {
         ))
     }
 
-    pub(super) async fn thread_start(
+    pub(crate) async fn thread_start(
         &self,
         connection: &ConnectionState,
         mut params: ThreadStartParams,
@@ -3903,7 +3903,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn thread_start_session_id(
+    pub(crate) async fn thread_start_session_id(
         &self,
         topology: &verlet_runtime_contracts::ThreadTopology,
     ) -> Result<String, JsonRpcErrorError> {
@@ -3939,7 +3939,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(session_id.unwrap_or_else(|| format!("app-server-session-{}", uuid::Uuid::now_v7())))
     }
 
-    pub(super) async fn thread_resume(
+    pub(crate) async fn thread_resume(
         &self,
         connection: &ConnectionState,
         params: ThreadResumeParams,
@@ -4024,7 +4024,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn thread_fork(
+    pub(crate) async fn thread_fork(
         &self,
         connection: &ConnectionState,
         params: ThreadForkParams,
@@ -4411,7 +4411,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn thread_rebind_fork(
+    pub(crate) async fn thread_rebind_fork(
         &self,
         connection: &ConnectionState,
         params: ThreadRebindForkParams,
@@ -4634,7 +4634,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn thread_compact_start(
+    pub(crate) async fn thread_compact_start(
         &self,
         params: ThreadCompactStartParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -4648,7 +4648,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({}))
     }
 
-    pub(super) async fn thread_shell_command(
+    pub(crate) async fn thread_shell_command(
         &self,
         connection: &ConnectionState,
         params: ThreadShellCommandParams,
@@ -4790,7 +4790,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(internal_error)
     }
 
-    pub(super) async fn thread_spawn(
+    pub(crate) async fn thread_spawn(
         &self,
         connection: &ConnectionState,
         params: ThreadSpawnParams,
@@ -4868,7 +4868,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn thread_submit(
+    pub(crate) async fn thread_submit(
         &self,
         params: ThreadSubmitParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -4913,7 +4913,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn turn_start(
+    pub(crate) async fn turn_start(
         &self,
         connection: &ConnectionState,
         params: TurnStartParams,
@@ -4992,7 +4992,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "turn": turn }))
     }
 
-    pub(super) async fn turn_steer(
+    pub(crate) async fn turn_steer(
         &self,
         params: TurnSteerParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5028,7 +5028,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "turnId": params.expected_turn_id }))
     }
 
-    pub(super) async fn turn_interrupt(
+    pub(crate) async fn turn_interrupt(
         &self,
         params: TurnInterruptParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5051,7 +5051,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({}))
     }
 
-    pub(super) fn capsule_registry_root(&self) -> Result<&std::path::Path, JsonRpcErrorError> {
+    pub(crate) fn capsule_registry_root(&self) -> Result<&std::path::Path, JsonRpcErrorError> {
         self.inner
             .capsule_bindings
             .registry_root
@@ -5059,7 +5059,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .ok_or_else(|| jsonrpc_error(-32602, "capsule bindings require a registry root"))
     }
 
-    pub(super) fn capsule_binding_set(
+    pub(crate) fn capsule_binding_set(
         &self,
         params: CapsuleBindingSetParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5084,7 +5084,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "binding": binding }))
     }
 
-    pub(super) fn capsule_binding_delete(
+    pub(crate) fn capsule_binding_delete(
         &self,
         params: CapsuleBindingOperationParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5099,7 +5099,7 @@ impl crate::adapters::app_server::VerletAppServer {
     }
 
     // lexicon-allow: capsule - existing app-server capsule-binding RPC contract
-    pub(super) fn capsule_binding_list(
+    pub(crate) fn capsule_binding_list(
         &self,
         // lexicon-allow: capsule - existing app-server capsule-binding RPC contract
         params: CapsuleBindingListParams,
@@ -5118,7 +5118,7 @@ impl crate::adapters::app_server::VerletAppServer {
     }
 
     // lexicon-allow: capsule - existing app-server capsule-binding surface; line shifted by repo-wide path qualification
-    pub(super) fn capsule_binding_resolve(
+    pub(crate) fn capsule_binding_resolve(
         &self,
         // lexicon-allow: capsule - existing app-server capsule-binding surface; line shifted by repo-wide path qualification
         params: CapsuleBindingResolveParams,
@@ -5184,7 +5184,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(())
     }
 
-    pub(super) async fn command_exec(
+    pub(crate) async fn command_exec(
         &self,
         params: CommandExecParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5359,7 +5359,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(value)
     }
 
-    pub(super) async fn command_exec_write(
+    pub(crate) async fn command_exec_write(
         &self,
         params: CommandExecWriteParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5387,7 +5387,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(command_process_snapshot_json(&outcome.snapshot))
     }
 
-    pub(super) async fn command_exec_terminate(
+    pub(crate) async fn command_exec_terminate(
         &self,
         params: CommandExecTerminateParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5409,7 +5409,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(command_process_snapshot_json(&outcome.snapshot))
     }
 
-    pub(super) fn command_exec_resize(
+    pub(crate) fn command_exec_resize(
         &self,
         params: CommandExecProcessParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5441,7 +5441,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .map_err(internal_error)
     }
 
-    pub(super) async fn get_conversation_summary(
+    pub(crate) async fn get_conversation_summary(
         &self,
         params: GetConversationSummaryParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5473,7 +5473,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn fs_read_file(
+    pub(crate) async fn fs_read_file(
         &self,
         params: FsReadFileParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5484,7 +5484,7 @@ impl crate::adapters::app_server::VerletAppServer {
         )
     }
 
-    pub(super) async fn fs_write_file(
+    pub(crate) async fn fs_write_file(
         &self,
         params: FsWriteFileParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5501,7 +5501,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({}))
     }
 
-    pub(super) async fn fs_create_directory(
+    pub(crate) async fn fs_create_directory(
         &self,
         params: FsCreateDirectoryParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5515,7 +5515,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({}))
     }
 
-    pub(super) async fn fs_get_metadata(
+    pub(crate) async fn fs_get_metadata(
         &self,
         params: FsGetMetadataParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5531,7 +5531,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn fs_read_directory(
+    pub(crate) async fn fs_read_directory(
         &self,
         params: FsReadDirectoryParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5554,7 +5554,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "entries": values }))
     }
 
-    pub(super) async fn fs_remove(
+    pub(crate) async fn fs_remove(
         &self,
         params: FsRemoveParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5576,7 +5576,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({}))
     }
 
-    pub(super) async fn fs_copy(
+    pub(crate) async fn fs_copy(
         &self,
         params: FsCopyParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5603,7 +5603,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({}))
     }
 
-    pub(super) async fn coordinates_for_thread(
+    pub(crate) async fn coordinates_for_thread(
         &self,
         thread_id: &str,
     ) -> Result<verlet_runtime_contracts::ThreadCoordinates, JsonRpcErrorError> {
@@ -5616,7 +5616,7 @@ impl crate::adapters::app_server::VerletAppServer {
     }
 
     /// Return a resident runtime handle, loading persisted lifecycle state when needed.
-    pub(super) async fn handle_for_thread(
+    pub(crate) async fn handle_for_thread(
         &self,
         thread_id: &str,
     ) -> Result<crate::kernel::runtime_host::RuntimeThreadHandle, JsonRpcErrorError> {
@@ -5643,7 +5643,7 @@ impl crate::adapters::app_server::VerletAppServer {
     /// providers return invalid-params errors naming the problem and change
     /// nothing. The response echoes the new active selection as
     /// `{ "active": { "providerId": ..., "model": ... } }`.
-    pub(super) async fn model_select(
+    pub(crate) async fn model_select(
         &self,
         params: ModelSelectParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -5772,7 +5772,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    pub(super) async fn model_list_json(
+    pub(crate) async fn model_list_json(
         &self,
     ) -> Result<Vec<serde_json::Value>, JsonRpcErrorError> {
         let mut providers = self
@@ -5994,7 +5994,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .collect())
     }
 
-    pub(super) async fn model_provider_capabilities_json(&self) -> serde_json::Value {
+    pub(crate) async fn model_provider_capabilities_json(&self) -> serde_json::Value {
         let active = self.inner.active_model.read().await.clone();
         let supports_streaming =
             crate::adapters::app_server::agent_manifest_provider_surface_from_parts(
@@ -6014,7 +6014,7 @@ impl crate::adapters::app_server::VerletAppServer {
         })
     }
 
-    pub(super) fn config_json(&self) -> serde_json::Value {
+    pub(crate) fn config_json(&self) -> serde_json::Value {
         serde_json::json!({
             "cwd": cwd_string(&self.inner.cwd),
             "model": self.inner.model,
@@ -6045,7 +6045,7 @@ impl crate::adapters::app_server::VerletAppServer {
     }
 }
 
-pub(super) fn finish_websocket_session(
+pub(crate) fn finish_websocket_session(
     read_result: crate::kernel::runtime_host::VerletResult<()>,
     close_result: crate::kernel::runtime_host::VerletResult<()>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -6063,7 +6063,7 @@ pub(super) fn finish_websocket_session(
 }
 
 impl ConnectionState {
-    pub(super) async fn handle_initialize(
+    pub(crate) async fn handle_initialize(
         &self,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -6101,20 +6101,20 @@ impl ConnectionState {
         }))
     }
 
-    pub(super) async fn initialize_seen(&self) -> bool {
+    pub(crate) async fn initialize_seen(&self) -> bool {
         self.handshake.lock().await.initialize_seen
     }
 
-    pub(super) async fn admission_surface(&self) -> &'static str {
+    pub(crate) async fn admission_surface(&self) -> &'static str {
         let handshake = self.handshake.lock().await;
         crate::kernel::admission::app_server_surface(handshake.client_name.as_deref())
     }
 
-    pub(super) async fn mark_initialized(&self) {
+    pub(crate) async fn mark_initialized(&self) {
         self.handshake.lock().await.initialized_seen = true;
     }
 
-    pub(super) async fn notify(&self, method: &str, params: serde_json::Value) {
+    pub(crate) async fn notify(&self, method: &str, params: serde_json::Value) {
         if self.opt_out_notifications.read().await.contains(method) {
             return;
         }
@@ -6126,7 +6126,7 @@ impl ConnectionState {
             }));
     }
 
-    pub(super) async fn subscribe_thread(
+    pub(crate) async fn subscribe_thread(
         &self,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
     ) {
@@ -6146,7 +6146,7 @@ impl ConnectionState {
             .insert(thread_id, subscriber_id);
     }
 
-    pub(super) async fn unsubscribe(&self, thread_id: &str) {
+    pub(crate) async fn unsubscribe(&self, thread_id: &str) {
         if let Some(subscriber_id) = self.subscriptions.lock().await.remove(thread_id) {
             self.app
                 .unsubscribe_thread_connection(thread_id, subscriber_id)
@@ -6154,7 +6154,7 @@ impl ConnectionState {
         }
     }
 
-    pub(super) async fn abort_subscriptions(&self) {
+    pub(crate) async fn abort_subscriptions(&self) {
         let subscriptions = std::mem::take(&mut *self.subscriptions.lock().await);
         for (thread_id, subscriber_id) in subscriptions {
             self.app
@@ -6163,7 +6163,7 @@ impl ConnectionState {
         }
     }
 
-    pub(super) async fn fs_watch(
+    pub(crate) async fn fs_watch(
         &self,
         params: FsWatchParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -6178,7 +6178,7 @@ impl ConnectionState {
         Ok(serde_json::json!({ "path": cwd_string(&canonical) }))
     }
 
-    pub(super) async fn fs_unwatch(
+    pub(crate) async fn fs_unwatch(
         &self,
         params: FsUnwatchParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -6187,7 +6187,7 @@ impl ConnectionState {
     }
 }
 
-pub(super) async fn handle_inbound_text(
+pub(crate) async fn handle_inbound_text(
     connection: &ConnectionState,
     text: &str,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -6210,7 +6210,7 @@ pub(super) async fn handle_inbound_text(
     Ok(())
 }
 
-pub(super) fn empty_rate_limits() -> serde_json::Value {
+pub(crate) fn empty_rate_limits() -> serde_json::Value {
     serde_json::json!({
         "limitId": null,
         "limitName": null,
@@ -6226,7 +6226,7 @@ pub(super) fn empty_rate_limits() -> serde_json::Value {
     })
 }
 
-pub(super) fn turn_error(message: String, code: Option<String>) -> serde_json::Value {
+pub(crate) fn turn_error(message: String, code: Option<String>) -> serde_json::Value {
     let _ = code;
     serde_json::json!({
         "message": message,
@@ -6235,7 +6235,7 @@ pub(super) fn turn_error(message: String, code: Option<String>) -> serde_json::V
     })
 }
 
-pub(super) fn parse_params<T>(params: Option<serde_json::Value>) -> Result<T, JsonRpcErrorError>
+pub(crate) fn parse_params<T>(params: Option<serde_json::Value>) -> Result<T, JsonRpcErrorError>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -6247,7 +6247,7 @@ where
         .map_err(|err| jsonrpc_error(-32602, format!("invalid params: {err}")))
 }
 
-pub(super) fn jsonrpc_error(code: i64, message: impl Into<String>) -> JsonRpcErrorError {
+pub(crate) fn jsonrpc_error(code: i64, message: impl Into<String>) -> JsonRpcErrorError {
     JsonRpcErrorError {
         code,
         data: None,
@@ -6255,15 +6255,15 @@ pub(super) fn jsonrpc_error(code: i64, message: impl Into<String>) -> JsonRpcErr
     }
 }
 
-pub(super) fn internal_error(err: crate::kernel::runtime_host::VerletError) -> JsonRpcErrorError {
+pub(crate) fn internal_error(err: crate::kernel::runtime_host::VerletError) -> JsonRpcErrorError {
     jsonrpc_error(-32000, err.to_string())
 }
 
-pub(super) fn json_codec_error(err: serde_json::Error) -> JsonRpcErrorError {
+pub(crate) fn json_codec_error(err: serde_json::Error) -> JsonRpcErrorError {
     jsonrpc_error(-32000, format!("JSON codec failed: {err}"))
 }
 
-pub(super) fn jsonrpc_error_to_runtime_factory(
+pub(crate) fn jsonrpc_error_to_runtime_factory(
     err: JsonRpcErrorError,
 ) -> crate::kernel::runtime_host::VerletError {
     crate::kernel::runtime_host::VerletError::RuntimeFactory(
@@ -6274,7 +6274,7 @@ pub(super) fn jsonrpc_error_to_runtime_factory(
     )
 }
 
-pub(super) fn fs_error(err: std::io::Error) -> JsonRpcErrorError {
+pub(crate) fn fs_error(err: std::io::Error) -> JsonRpcErrorError {
     if err.kind() == std::io::ErrorKind::InvalidInput {
         jsonrpc_error(-32602, err.to_string())
     } else {
@@ -6282,17 +6282,17 @@ pub(super) fn fs_error(err: std::io::Error) -> JsonRpcErrorError {
     }
 }
 
-pub(super) fn command_exec_io_error(err: std::io::Error) -> JsonRpcErrorError {
+pub(crate) fn command_exec_io_error(err: std::io::Error) -> JsonRpcErrorError {
     jsonrpc_error(-32000, format!("command/exec failed: {err}"))
 }
 
-pub(super) fn command_exec_process_error(
+pub(crate) fn command_exec_process_error(
     err: verlet_process::VerletProcessError,
 ) -> JsonRpcErrorError {
     jsonrpc_error(-32000, format!("command/exec failed: {err}"))
 }
 
-pub(super) fn parse_command_process_id(
+pub(crate) fn parse_command_process_id(
     process_id: &str,
 ) -> Result<verlet_process::process::VerletProcessId, JsonRpcErrorError> {
     process_id.parse().map_err(|err| {
@@ -6303,11 +6303,11 @@ pub(super) fn parse_command_process_id(
     })
 }
 
-pub(super) fn command_yield_time(yield_time_ms: Option<u64>) -> std::time::Duration {
+pub(crate) fn command_yield_time(yield_time_ms: Option<u64>) -> std::time::Duration {
     std::time::Duration::from_millis(yield_time_ms.unwrap_or(10_000).min(30_000))
 }
 
-pub(super) fn command_process_output_cap(params: &CommandExecParams) -> usize {
+pub(crate) fn command_process_output_cap(params: &CommandExecParams) -> usize {
     if params.disable_output_cap {
         usize::MAX
     } else {
@@ -6317,11 +6317,11 @@ pub(super) fn command_process_output_cap(params: &CommandExecParams) -> usize {
     }
 }
 
-pub(super) fn command_visible_output_cap(params: &CommandExecParams) -> usize {
+pub(crate) fn command_visible_output_cap(params: &CommandExecParams) -> usize {
     command_process_output_cap(params)
 }
 
-pub(super) fn command_process_snapshot_json(
+pub(crate) fn command_process_snapshot_json(
     snapshot: &verlet_process::live::AsyncProcessSnapshot,
 ) -> serde_json::Value {
     let status: &str = snapshot.status.as_ref();
@@ -6340,33 +6340,33 @@ pub(super) fn command_process_snapshot_json(
     })
 }
 
-pub(super) fn mcp_source_param_error(err: impl std::fmt::Display) -> JsonRpcErrorError {
+pub(crate) fn mcp_source_param_error(err: impl std::fmt::Display) -> JsonRpcErrorError {
     jsonrpc_error(-32602, err.to_string())
 }
 
-pub(super) fn mcp_source_not_found(name: &str) -> JsonRpcErrorError {
+pub(crate) fn mcp_source_not_found(name: &str) -> JsonRpcErrorError {
     jsonrpc_error(-32602, format!("MCP source {name:?} was not found"))
 }
 
-pub(super) fn thread_not_found(thread_id: &str) -> JsonRpcErrorError {
+pub(crate) fn thread_not_found(thread_id: &str) -> JsonRpcErrorError {
     jsonrpc_error(-32001, format!("thread not found: {thread_id}"))
 }
 
-pub(super) fn unknown_agent_ref(
+pub(crate) fn unknown_agent_ref(
     agent_ref: &str,
     err: crate::kernel::runtime_host::VerletError,
 ) -> JsonRpcErrorError {
     jsonrpc_error(-32602, format!("unknown agent ref {agent_ref:?}: {err}"))
 }
 
-pub(super) fn malformed_agent_ref(
+pub(crate) fn malformed_agent_ref(
     agent_ref: &str,
     err: crate::kernel::runtime_host::VerletError,
 ) -> JsonRpcErrorError {
     jsonrpc_error(-32602, format!("malformed agent ref {agent_ref:?}: {err}"))
 }
 
-pub(super) fn thread_start_bind_error(
+pub(crate) fn thread_start_bind_error(
     err: crate::kernel::runtime_host::VerletError,
 ) -> JsonRpcErrorError {
     match &err {
@@ -6379,7 +6379,7 @@ pub(super) fn thread_start_bind_error(
     }
 }
 
-pub(super) fn lower_thread_start_cwd_override(
+pub(crate) fn lower_thread_start_cwd_override(
     params: &mut ThreadStartParams,
     base_cwd: &std::path::Path,
 ) -> Result<(), JsonRpcErrorError> {
@@ -6414,7 +6414,7 @@ pub(super) fn lower_thread_start_cwd_override(
     Ok(())
 }
 
-pub(super) fn thread_start_default_agent_ref(params: &ThreadStartParams) -> Option<&'static str> {
+pub(crate) fn thread_start_default_agent_ref(params: &ThreadStartParams) -> Option<&'static str> {
     if params.agent_ref.is_none() {
         Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
     } else {
@@ -6422,11 +6422,11 @@ pub(super) fn thread_start_default_agent_ref(params: &ThreadStartParams) -> Opti
     }
 }
 
-pub(super) fn malformed_thread_events_cursor() -> JsonRpcErrorError {
+pub(crate) fn malformed_thread_events_cursor() -> JsonRpcErrorError {
     jsonrpc_error(-32602, "malformed thread/events/list cursor")
 }
 
-pub(super) fn thread_events_cursor_history_error(
+pub(crate) fn thread_events_cursor_history_error(
     err: verlet_history::HistoryError,
 ) -> JsonRpcErrorError {
     match err {
@@ -6447,14 +6447,14 @@ pub(super) fn thread_events_cursor_history_error(
     }
 }
 
-pub(super) fn malformed_thread_events_stream(stream: &str) -> JsonRpcErrorError {
+pub(crate) fn malformed_thread_events_stream(stream: &str) -> JsonRpcErrorError {
     jsonrpc_error(
         -32602,
         format!("thread/events/list stream {stream:?} must be thread, control, or derived:<name>"),
     )
 }
 
-pub(super) fn thread_events_stream_id(
+pub(crate) fn thread_events_stream_id(
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     stream: &str,
 ) -> Result<verlet_history::EventStreamId, JsonRpcErrorError> {
@@ -6478,7 +6478,7 @@ pub(super) fn thread_events_stream_id(
     )))
 }
 
-pub(super) fn rpc_ingress_received_record(
+pub(crate) fn rpc_ingress_received_record(
     coordinates: verlet_runtime_contracts::ThreadCoordinates,
     payload: verlet_history::IoIngressReceivedPayload,
     principal: &verlet_io_core::IoPrincipal,
@@ -6511,7 +6511,7 @@ pub(super) fn rpc_ingress_received_record(
     ))
 }
 
-pub(super) fn absolute_path(
+pub(crate) fn absolute_path(
     path: std::path::PathBuf,
 ) -> Result<std::path::PathBuf, JsonRpcErrorError> {
     if path.is_absolute() {
@@ -6524,7 +6524,7 @@ pub(super) fn absolute_path(
     }
 }
 
-pub(super) fn cwd_string(path: &std::path::Path) -> String {
+pub(crate) fn cwd_string(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
@@ -6543,7 +6543,7 @@ fn thread_source_cut_json(
     })
 }
 
-pub(super) fn thread_fork_reason_string(
+pub(crate) fn thread_fork_reason_string(
     reason: &verlet_history::ThreadForkReason,
 ) -> Result<String, JsonRpcErrorError> {
     let value = serde_json::to_value(reason).map_err(|err| {
@@ -6792,7 +6792,7 @@ fn bump_agent_version(version: &str) -> String {
     format!("{version}.1")
 }
 
-pub(super) fn agent_list_entry(
+pub(crate) fn agent_list_entry(
     registry: &crate::agent::manifest::LocalAgentRegistry,
     record: &crate::agent::manifest::PublishedAgentRecord,
 ) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -6847,7 +6847,7 @@ pub(super) fn agent_list_entry(
     Ok(entry)
 }
 
-pub(super) fn agent_aliases(
+pub(crate) fn agent_aliases(
     registry: &crate::agent::manifest::LocalAgentRegistry,
     name: &str,
 ) -> Result<Vec<serde_json::Value>, JsonRpcErrorError> {
@@ -6895,7 +6895,7 @@ pub(super) fn agent_aliases(
     Ok(aliases)
 }
 
-pub(super) fn operation_list_entry(
+pub(crate) fn operation_list_entry(
     record: &verlet_operations::operation_store::PublishedOperationRecord,
 ) -> Result<serde_json::Value, JsonRpcErrorError> {
     Ok(serde_json::json!({
@@ -6912,7 +6912,7 @@ pub(super) fn operation_list_entry(
     }))
 }
 
-pub(super) fn operation_summary(
+pub(crate) fn operation_summary(
     record: &verlet_operations::operation_store::PublishedOperationRecord,
 ) -> Option<String> {
     record.interface.as_ref().and_then(|interface| {
@@ -6929,7 +6929,7 @@ pub(super) fn operation_summary(
     })
 }
 
-pub(super) fn configured_model_json(
+pub(crate) fn configured_model_json(
     provider_id: &str,
     model_id: &str,
     display_name: String,
@@ -6959,7 +6959,7 @@ pub(super) fn configured_model_json(
     })
 }
 
-pub(super) fn catalog_provider_display_name(
+pub(crate) fn catalog_provider_display_name(
     provider: &verlet_metadata::provider_store::LlmProviderRecord,
 ) -> String {
     provider
@@ -7066,7 +7066,7 @@ fn missing_model_provider_auth_message(
     }
 }
 
-pub(super) fn model_provider_record_from_rpc(
+pub(crate) fn model_provider_record_from_rpc(
     provider: ModelProviderUpsertRecord,
 ) -> Result<verlet_metadata::provider_store::LlmProviderRecord, JsonRpcErrorError> {
     validate_model_provider_auth_config(&provider.auth)?;
@@ -7353,7 +7353,7 @@ fn model_provider_catalog_models(
     }
 }
 
-pub(super) fn thread_event_record_json(
+pub(crate) fn thread_event_record_json(
     record: &verlet_history::EventRecord,
 ) -> Result<serde_json::Value, JsonRpcErrorError> {
     let envelope = record.to_stream_record_v1();
@@ -7371,7 +7371,7 @@ pub(super) fn thread_event_record_json(
     Ok(value)
 }
 
-pub(super) fn coupling_binding_json(
+pub(crate) fn coupling_binding_json(
     binding: &crate::agent::manifest_bind::AgentManifestCouplingBinding,
 ) -> serde_json::Value {
     let role: &str = binding.role.as_ref();
@@ -7395,7 +7395,7 @@ pub(super) fn coupling_binding_json(
     })
 }
 
-pub(super) fn existing_approval_resolution<'a>(
+pub(crate) fn existing_approval_resolution<'a>(
     events: &'a [verlet_history::EventRecord],
     approval_id: &str,
 ) -> Result<
@@ -7424,11 +7424,11 @@ pub(super) fn existing_approval_resolution<'a>(
     Ok(None)
 }
 
-pub(super) fn approval_decision_from_bool(approved: bool) -> &'static str {
+pub(crate) fn approval_decision_from_bool(approved: bool) -> &'static str {
     if approved { "approved" } else { "denied" }
 }
 
-pub(super) fn approval_resolution_json(
+pub(crate) fn approval_resolution_json(
     status: &str,
     decision: ApprovalResolveDecision,
     record: &verlet_history::EventRecord,
@@ -7449,7 +7449,7 @@ pub(super) fn approval_resolution_json(
     })
 }
 
-pub(super) fn active_mandate_json(
+pub(crate) fn active_mandate_json(
     mandate: &crate::kernel::mandate_lifecycle::ActiveMandate,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -7471,7 +7471,7 @@ pub(super) fn active_mandate_json(
     })
 }
 
-pub(super) fn mandate_jsonrpc_error(
+pub(crate) fn mandate_jsonrpc_error(
     err: crate::kernel::runtime_host::VerletError,
 ) -> JsonRpcErrorError {
     match err {
@@ -7482,7 +7482,7 @@ pub(super) fn mandate_jsonrpc_error(
     }
 }
 
-pub(super) fn pending_tool_approval_json(
+pub(crate) fn pending_tool_approval_json(
     suspension: &crate::kernel::control_decision::PendingToolCallSuspension,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -7499,7 +7499,7 @@ pub(super) fn pending_tool_approval_json(
     })
 }
 
-pub(super) fn pending_tool_waiting_json(
+pub(crate) fn pending_tool_waiting_json(
     suspension: &crate::kernel::control_decision::PendingToolCallSuspension,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -7516,7 +7516,7 @@ pub(super) fn pending_tool_waiting_json(
     })
 }
 
-pub(super) fn turn_waiting_json(record: &verlet_history::EventRecord) -> serde_json::Value {
+pub(crate) fn turn_waiting_json(record: &verlet_history::EventRecord) -> serde_json::Value {
     let subject = record.payload.get("subject");
     let call_id = subject
         .and_then(|subject| subject.get("call_id"))
@@ -7545,11 +7545,11 @@ pub(super) fn turn_waiting_json(record: &verlet_history::EventRecord) -> serde_j
     })
 }
 
-pub(super) fn debug_export_ack_classes() -> Vec<&'static str> {
+pub(crate) fn debug_export_ack_classes() -> Vec<&'static str> {
     vec!["local_committed", "query_projected"]
 }
 
-pub(super) fn debug_export_receipt_json(record: &verlet_history::EventRecord) -> serde_json::Value {
+pub(crate) fn debug_export_receipt_json(record: &verlet_history::EventRecord) -> serde_json::Value {
     let kind: &str = record.kind.as_ref();
     let origin: &str = record.origin.as_ref();
     serde_json::json!({
@@ -7563,7 +7563,7 @@ pub(super) fn debug_export_receipt_json(record: &verlet_history::EventRecord) ->
     })
 }
 
-pub(super) fn redact_debug_export_value_with_evidence(
+pub(crate) fn redact_debug_export_value_with_evidence(
     value: &mut serde_json::Value,
     redacted_keys: &mut std::collections::BTreeSet<String>,
 ) {
@@ -7587,7 +7587,7 @@ pub(super) fn redact_debug_export_value_with_evidence(
     }
 }
 
-pub(super) fn debug_export_redacts_key(key: &str) -> bool {
+pub(crate) fn debug_export_redacts_key(key: &str) -> bool {
     let normalized = key
         .chars()
         .filter(|ch| *ch != '_' && *ch != '-')
@@ -7601,14 +7601,14 @@ pub(super) fn debug_export_redacts_key(key: &str) -> bool {
         || normalized.contains("bearer")
 }
 
-pub(super) fn encode_thread_events_cursor(sequence: i64) -> Result<String, JsonRpcErrorError> {
+pub(crate) fn encode_thread_events_cursor(sequence: i64) -> Result<String, JsonRpcErrorError> {
     if sequence < 1 {
         return Err(malformed_thread_events_cursor());
     }
     Ok(base64::engine::general_purpose::STANDARD.encode(format!("v1:{sequence}")))
 }
 
-pub(super) fn decode_thread_events_cursor(
+pub(crate) fn decode_thread_events_cursor(
     cursor: &str,
 ) -> Result<verlet_history::EventSequence, JsonRpcErrorError> {
     let bytes = base64::engine::general_purpose::STANDARD
@@ -7627,20 +7627,20 @@ pub(super) fn decode_thread_events_cursor(
     Ok(verlet_history::EventSequence::new(sequence))
 }
 
-pub(super) fn metadata_time_ms(time: Option<std::time::SystemTime>) -> u64 {
+pub(crate) fn metadata_time_ms(time: Option<std::time::SystemTime>) -> u64 {
     time.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
 }
 
-pub(super) fn cap_output(mut output: Vec<u8>, cap: Option<usize>) -> Vec<u8> {
+pub(crate) fn cap_output(mut output: Vec<u8>, cap: Option<usize>) -> Vec<u8> {
     if let Some(cap) = cap {
         output.truncate(cap);
     }
     output
 }
 
-pub(super) fn copy_path(
+pub(crate) fn copy_path(
     source: &std::path::Path,
     destination: &std::path::Path,
     recursive: bool,
@@ -7668,7 +7668,7 @@ pub(super) fn copy_path(
     Ok(())
 }
 
-pub(super) fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

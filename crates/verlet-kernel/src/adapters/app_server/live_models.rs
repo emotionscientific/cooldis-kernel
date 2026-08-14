@@ -100,7 +100,7 @@ impl LiveModelCache {
 
     pub(crate) fn entries_and_refresh(
         self: &std::sync::Arc<Self>,
-        tasks: &std::sync::Arc<super::lifecycle::InstanceTaskSet>,
+        tasks: &std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
         provider: &verlet_metadata::provider_store::LlmProviderRecord,
         credential: RefreshCredential,
     ) -> Vec<LiveModel> {
@@ -553,7 +553,10 @@ mod tests {
             .expect("model-list request channel closed")
     }
 
-    async fn wait_until_idle(cache: &super::LiveModelCache, provider_id: &str) {
+    async fn wait_until_idle(
+        cache: &crate::adapters::app_server::live_models::LiveModelCache,
+        provider_id: &str,
+    ) {
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while cache.is_refreshing_for_test(provider_id) {
                 tokio::task::yield_now().await;
@@ -576,9 +579,11 @@ mod tests {
         )
         .with_auth_header(true);
 
-        let models = super::fetch_models(
+        let models = crate::adapters::app_server::live_models::fetch_models(
             &provider,
-            &super::RefreshCredential::ApiKey("anthropic-secret".to_string()),
+            &crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+                "anthropic-secret".to_string(),
+            ),
             std::time::Duration::from_secs(2),
         )
         .await
@@ -610,9 +615,11 @@ mod tests {
         )
         .with_auth_header(true);
 
-        let error = super::fetch_models(
+        let error = crate::adapters::app_server::live_models::fetch_models(
             &provider,
-            &super::RefreshCredential::ApiKey("credential-secret".to_string()),
+            &crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+                "credential-secret".to_string(),
+            ),
             std::time::Duration::from_secs(2),
         )
         .await
@@ -640,10 +647,13 @@ mod tests {
             format!("{}/v1", server.base_url),
         )
         .with_auth_header(true);
-        let cache = std::sync::Arc::new(super::LiveModelCache::new());
+        let cache =
+            std::sync::Arc::new(crate::adapters::app_server::live_models::LiveModelCache::new());
         let tasks =
             std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
-        let credential = super::RefreshCredential::ApiKey("fixture-key".to_string());
+        let credential = crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+            "fixture-key".to_string(),
+        );
 
         for _ in 0..16 {
             assert!(
@@ -678,20 +688,26 @@ mod tests {
             format!("{}/v1", server.base_url),
         )
         .with_auth_header(true);
-        let cache = std::sync::Arc::new(super::LiveModelCache::new());
+        let cache =
+            std::sync::Arc::new(crate::adapters::app_server::live_models::LiveModelCache::new());
         cache.seed_for_test(
             &provider,
-            &super::RefreshCredential::ApiKey("fixture-key".to_string()),
-            vec![super::LiveModel {
+            &crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+                "fixture-key".to_string(),
+            ),
+            vec![crate::adapters::app_server::live_models::LiveModel {
                 provider_id: provider.provider_id.clone(),
                 model_id: "stale-model".to_string(),
                 display_name: "Stale Model".to_string(),
             }],
-            super::REFRESH_INTERVAL + std::time::Duration::from_secs(1),
+            crate::adapters::app_server::live_models::REFRESH_INTERVAL
+                + std::time::Duration::from_secs(1),
         );
         let tasks =
             std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
-        let credential = super::RefreshCredential::ApiKey("fixture-key".to_string());
+        let credential = crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+            "fixture-key".to_string(),
+        );
 
         for _ in 0..16 {
             let models = cache.entries_and_refresh(&tasks, &provider, credential.clone());
@@ -725,10 +741,13 @@ mod tests {
             format!("{}/v1", server.base_url),
         )
         .with_auth_header(true);
-        let cache = std::sync::Arc::new(super::LiveModelCache::new());
+        let cache =
+            std::sync::Arc::new(crate::adapters::app_server::live_models::LiveModelCache::new());
         let tasks =
             std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
-        let credential = super::RefreshCredential::ApiKey("fixture-key".to_string());
+        let credential = crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+            "fixture-key".to_string(),
+        );
 
         cache.entries_and_refresh(&tasks, &provider, credential.clone());
         let _request = next_request(&mut server).await;
@@ -759,14 +778,17 @@ mod tests {
             format!("{}/v1", server.base_url),
         )
         .with_auth_header(true);
-        let cache = std::sync::Arc::new(super::LiveModelCache::new());
+        let cache =
+            std::sync::Arc::new(crate::adapters::app_server::live_models::LiveModelCache::new());
         let tasks =
             std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
 
         cache.entries_and_refresh(
             &tasks,
             &provider,
-            super::RefreshCredential::ApiKey("fixture-key".to_string()),
+            crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+                "fixture-key".to_string(),
+            ),
         );
         let _request = next_request(&mut server).await;
         assert!(cache.is_refreshing_for_test("cancelled-refresh-fixture"));
@@ -789,14 +811,17 @@ mod tests {
             format!("{}/v1", server.base_url),
         )
         .with_auth_header(true);
-        let cache = std::sync::Arc::new(super::LiveModelCache::new());
+        let cache =
+            std::sync::Arc::new(crate::adapters::app_server::live_models::LiveModelCache::new());
         let tasks =
             std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
 
         cache.entries_and_refresh(
             &tasks,
             &provider,
-            super::RefreshCredential::ApiKey("old-account-key".to_string()),
+            crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+                "old-account-key".to_string(),
+            ),
         );
         let _request = next_request(&mut server).await;
         wait_until_idle(&cache, "credential-change-fixture").await;
@@ -804,7 +829,9 @@ mod tests {
             cache.entries_and_refresh(
                 &tasks,
                 &provider,
-                super::RefreshCredential::ApiKey("old-account-key".to_string()),
+                crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+                    "old-account-key".to_string()
+                ),
             )[0]
             .model_id,
             "old-account-model"
@@ -813,7 +840,9 @@ mod tests {
         let after_change = cache.entries_and_refresh(
             &tasks,
             &provider,
-            super::RefreshCredential::ApiKey("new-account-key".to_string()),
+            crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+                "new-account-key".to_string(),
+            ),
         );
         assert!(
             after_change.is_empty(),
@@ -824,7 +853,9 @@ mod tests {
         let models = cache.entries_and_refresh(
             &tasks,
             &provider,
-            super::RefreshCredential::ApiKey("new-account-key".to_string()),
+            crate::adapters::app_server::live_models::RefreshCredential::ApiKey(
+                "new-account-key".to_string(),
+            ),
         );
         assert_eq!(models[0].model_id, "new-account-model");
         tasks.shutdown().await;
