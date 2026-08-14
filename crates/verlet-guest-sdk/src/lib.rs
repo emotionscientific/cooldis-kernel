@@ -10,6 +10,15 @@
 mod contract;
 pub mod testkit;
 
+// The re-exports below are a deliberate exception to the workspace's
+// no-`pub use` rule, on the same footing as the engine re-exports in
+// `verlet-sqlite`. This crate is the guest-authoring facade: a guest crate
+// names `verlet_guest_sdk` and nothing else, so the attribute macros must
+// reach it from here rather than through a second direct dependency on
+// `verlet-guest-sdk-macros`. The `prelude` glob is likewise part of the
+// published surface — the scaffold emitted by `verlet coupling init` opens
+// with `use verlet_guest_sdk::prelude::*;` — so both are public API for
+// crates outside this repo, not internal convenience.
 pub use contract::{CouplingContext, Discharge, GuestError, OperationContext};
 pub use verlet_guest_sdk_macros::{coupling, operation};
 

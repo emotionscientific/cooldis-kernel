@@ -15,7 +15,7 @@ pub enum LoopContinuationReceipt {
     },
 }
 
-pub(super) async fn latest_turn_continue_request(
+pub(crate) async fn latest_turn_continue_request(
     store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     loop_id: &str,
@@ -60,7 +60,7 @@ pub(super) async fn latest_turn_continue_request(
     Ok(latest.map(|(_, event, payload)| (event, payload)))
 }
 
-pub(super) async fn existing_continuation_receipt(
+pub(crate) async fn existing_continuation_receipt(
     store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     subject: &crate::kernel::control_decision::TurnContinuationSubject,
@@ -128,7 +128,7 @@ pub(super) async fn existing_continuation_receipt(
     Ok(latest.map(|(_, receipt)| receipt))
 }
 
-pub(super) async fn append_continuation_accepted_event(
+pub(crate) async fn append_continuation_accepted_event(
     store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     subject: &crate::kernel::control_decision::TurnContinuationSubject,
@@ -157,7 +157,7 @@ pub(super) async fn append_continuation_accepted_event(
     .await
 }
 
-pub(super) async fn append_continuation_rejected_event(
+pub(crate) async fn append_continuation_rejected_event(
     store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     subject: &crate::kernel::control_decision::TurnContinuationSubject,
@@ -221,7 +221,7 @@ async fn append_control_discharge(
         })
 }
 
-pub(super) async fn append_loop_turn_submitted_event(
+pub(crate) async fn append_loop_turn_submitted_event(
     store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     next_turn_id: &str,
@@ -263,7 +263,7 @@ pub(super) async fn append_loop_turn_submitted_event(
         })
 }
 
-pub(super) async fn turn_submitted_event(
+pub(crate) async fn turn_submitted_event(
     store: &dyn verlet_history::RuntimeStore,
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     turn_id: &str,
@@ -288,7 +288,7 @@ pub(super) async fn turn_submitted_event(
         .max_by_key(|event| event.sequence.get()))
 }
 
-pub(super) async fn decide_continuation(
+pub(crate) async fn decide_continuation(
     store: &dyn verlet_history::RuntimeStore,
     request: crate::kernel::control_decision::TurnContinuationDecisionRequest,
 ) -> crate::kernel::runtime_host::VerletResult<

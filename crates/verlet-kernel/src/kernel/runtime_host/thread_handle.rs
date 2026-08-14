@@ -433,7 +433,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
     /// publishes lifecycle side effects. Only the append is retried: an
     /// unrelated history-shaped factory or lifecycle error must not re-enter
     /// the whole child start.
-    pub(super) async fn record_thread_start_identity_with_reconciliation(
+    pub(crate) async fn record_thread_start_identity_with_reconciliation(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
         let mut first_error = None;
@@ -605,7 +605,7 @@ impl crate::kernel::runtime_host::RuntimeThreadHandle {
             .map_err(|_| crate::kernel::runtime_host::VerletError::ThreadClosed(thread_id))
     }
 
-    pub(super) fn try_reserve_command(
+    pub(crate) fn try_reserve_command(
         &self,
     ) -> Result<
         tokio::sync::mpsc::Permit<'_, crate::kernel::runtime_host::runtime_api::ThreadCommand>,

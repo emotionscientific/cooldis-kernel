@@ -1,23 +1,13 @@
 //! The async event loop: terminal in, actions out, host events folded back.
 //!
-//! The host owns the [`App`] and the channels; this loop owns the terminal.
-//! It multiplexes three sources — terminal input, host [`ChatEvent`]s, and an
-//! animation tick — and redraws after each. The tick only runs while a turn
-//! is in flight (the spinner and elapsed timer are the only animated parts),
-//! so an idle chat performs no timer-driven redraws and otherwise wakes for
-//! input or host events only.
-
-use std::io;
+//! The host owns the [`crate::app::App`] and the channels; this loop owns the
+//! terminal. It multiplexes three sources — terminal input, host
+//! [`crate::ChatEvent`]s, and an animation tick — and redraws after each. The
+//! tick only runs while a turn is in flight (the spinner and elapsed timer are
+//! the only animated parts), so an idle chat performs no timer-driven redraws
+//! and otherwise wakes for input or host events only.
 
 use futures_util::StreamExt as _;
-use ratatui::backend::CrosstermBackend;
-use ratatui::{Terminal, TerminalOptions, Viewport};
-
-use tuika::probe::RectProbe;
-use tuika::{StyleSheet, TerminalSession, paint, translate_event};
-
-use crate::app::{App, Flow};
-use crate::{Action, ChatEvent, theme};
 
 /// Frame budget for the animation tick, and the clock `Working (12s …)`
 /// counts in.
@@ -35,37 +25,37 @@ impl std::fmt::Display for RunnerError {
 
 impl std::error::Error for RunnerError {}
 
-impl From<io::Error> for RunnerError {
-    fn from(err: io::Error) -> Self {
+impl From<std::io::Error> for RunnerError {
+    fn from(err: std::io::Error) -> Self {
         RunnerError(format!("terminal failure: {err}"))
     }
 }
 
 /// Run the chat UI until the user quits or the host closes the event channel.
 ///
-/// The host executes the [`Action`]s it receives and reports outcomes as
-/// [`ChatEvent`]s; this function never blocks on the host — a slow RPC just
-/// means the working row keeps spinning.
+/// The host executes the [`crate::Action`]s it receives and reports outcomes
+/// as [`crate::ChatEvent`]s; this function never blocks on the host — a slow
+/// RPC just means the working row keeps spinning.
 pub async fn run_ui(
-    app: &mut App,
+    app: &mut crate::app::App,
     no_color: bool,
-    actions: tokio::sync::mpsc::UnboundedSender<Action>,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<ChatEvent>,
+    actions: tokio::sync::mpsc::UnboundedSender<crate::Action>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<crate::ChatEvent>,
 ) -> Result<(), RunnerError> {
-    let theme = theme::chat_theme(no_color);
-    let sheet = StyleSheet::from_theme(&theme);
-    let probe = RectProbe::new();
+    let theme = crate::theme::chat_theme(no_color);
+    let sheet = tuika::style::StyleSheet::from_theme(&theme);
+    let probe = tuika::probe::RectProbe::new();
     app.frame_ms = FRAME_MS;
 
-    let _session = TerminalSession::enter()?;
-    crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste)?;
+    let _session = tuika::host::TerminalSession::enter()?;
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     // Restore on every exit path; TerminalSession's own Drop handles the rest.
     let _paste_guard = PasteGuard;
 
-    let mut terminal = Terminal::with_options(
-        CrosstermBackend::new(io::stdout()),
-        TerminalOptions {
-            viewport: Viewport::Fullscreen,
+    let mut terminal = ratatui::Terminal::with_options(
+        ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fullscreen,
         },
     )?;
     let mut input = crossterm::event::EventStream::new();
@@ -81,7 +71,7 @@ pub async fn run_ui(
         terminal.draw(|f| {
             let area = f.area();
             let scene = crate::ui::build(app, area, &theme, &sheet, &probe);
-            paint(f.buffer_mut(), area, &theme, &scene, &[]);
+            tuika::host::paint(f.buffer_mut(), area, &theme, &scene, &[]);
             // The composer's rect is only known after layout; the probe
             // reports where it landed, and the real terminal caret goes there.
             if let Some(pos) = app.cursor(probe.rect()) {
@@ -93,8 +83,8 @@ pub async fn run_ui(
             maybe_event = input.next() => {
                 match maybe_event {
                     Some(Ok(raw)) => {
-                        if let Some(event) = translate_event(raw)
-                            && app.handle(&event) == Flow::Quit
+                        if let Some(event) = tuika::host::translate_event(raw)
+                            && app.handle(&event) == crate::app::Flow::Quit
                         {
                             break;
                         }
@@ -138,6 +128,6 @@ struct PasteGuard;
 
 impl Drop for PasteGuard {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     }
 }

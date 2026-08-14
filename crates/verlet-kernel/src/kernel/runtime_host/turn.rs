@@ -154,7 +154,7 @@ enum TurnWatchdogPhase {
 /// Enqueueing another turn cannot start, replace, or retire this token. The
 /// token becomes active at the canonical runtime turn-entry boundary and
 /// finishes when the corresponding input leaves the runtime.
-pub(super) struct TurnWatchdogToken {
+pub(crate) struct TurnWatchdogToken {
     id: u64,
     lease: std::sync::Arc<TurnWatchdogLease>,
 }
@@ -169,7 +169,7 @@ struct TurnWatchdogState {
 }
 
 impl TurnWatchdogToken {
-    pub(super) fn new(id: u64) -> (Self, TurnWatchdogHandle) {
+    pub(crate) fn new(id: u64) -> (Self, TurnWatchdogHandle) {
         let (phase, phase_rx) = tokio::sync::watch::channel(TurnWatchdogPhase::Pending);
         let state = std::sync::Arc::new(TurnWatchdogState {
             phase: std::sync::atomic::AtomicU8::new(TurnWatchdogPhase::Pending as u8),
@@ -247,18 +247,18 @@ impl Drop for TurnWatchdogLease {
     }
 }
 
-pub(super) struct TurnWatchdogHandle {
+pub(crate) struct TurnWatchdogHandle {
     id: u64,
     state: std::sync::Arc<TurnWatchdogState>,
     phase: tokio::sync::watch::Receiver<TurnWatchdogPhase>,
 }
 
 impl TurnWatchdogHandle {
-    pub(super) fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> u64 {
         self.id
     }
 
-    pub(super) async fn wait_until_started(&mut self) -> bool {
+    pub(crate) async fn wait_until_started(&mut self) -> bool {
         loop {
             match *self.phase.borrow() {
                 TurnWatchdogPhase::Pending => {}
@@ -271,7 +271,7 @@ impl TurnWatchdogHandle {
         }
     }
 
-    pub(super) fn try_timeout(&self) -> bool {
+    pub(crate) fn try_timeout(&self) -> bool {
         if self
             .state
             .phase
@@ -290,7 +290,7 @@ impl TurnWatchdogHandle {
         }
     }
 
-    pub(super) fn is_timed_out(&self) -> bool {
+    pub(crate) fn is_timed_out(&self) -> bool {
         self.state.phase.load(std::sync::atomic::Ordering::SeqCst)
             == TurnWatchdogPhase::TimedOut as u8
     }
@@ -399,13 +399,13 @@ impl TurnInput {
         }
     }
 
-    pub(super) fn set_turn_watchdog(&mut self, turn_watchdog: TurnWatchdogToken) {
+    pub(crate) fn set_turn_watchdog(&mut self, turn_watchdog: TurnWatchdogToken) {
         self.runtime_state
             .get_or_insert_with(Default::default)
             .turn_watchdog = Some(turn_watchdog);
     }
 
-    pub(super) fn set_pending_input_permit(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
+    pub(crate) fn set_pending_input_permit(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
         self.runtime_state
             .get_or_insert_with(Default::default)
             .pending_input_permit = Some(PendingInputPermitToken::new(permit));
@@ -418,7 +418,7 @@ impl TurnInput {
             .map(|watchdog| watchdog.id)
     }
 
-    pub(super) fn start_turn_watchdog(&self) {
+    pub(crate) fn start_turn_watchdog(&self) {
         let Some(runtime_state) = &self.runtime_state else {
             return;
         };

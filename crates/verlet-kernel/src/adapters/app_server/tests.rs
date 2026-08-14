@@ -361,10 +361,10 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
     ];
 
     let dispatch_source = include_str!("connection.rs")
-        .split_once("pub(super) async fn dispatch_request")
+        .split_once("pub(crate) async fn dispatch_request")
         .expect("dispatch_request source")
         .1
-        .split_once("pub(super) async fn mcp_server_status_list")
+        .split_once("pub(crate) async fn mcp_server_status_list")
         .expect("method following dispatch_request")
         .0;
     let dispatch_methods = dispatch_source
@@ -10367,9 +10367,10 @@ async fn stale_daemon_stream_append_returns_distinct_rehome_error_before_sequenc
     let (connection, _outbound_rx) = test_connection(app.clone()).await;
     initialize_for_test(&connection).await;
     let stream_id = verlet_history::EventStreamId::new("client:orch:stale-lease");
-    let namespace =
-        uuid::Uuid::parse_str(super::orchestrator_boundary::CLIENT_STREAM_THREAD_NAMESPACE)
-            .unwrap();
+    let namespace = uuid::Uuid::parse_str(
+        crate::adapters::app_server::orchestrator_boundary::CLIENT_STREAM_THREAD_NAMESPACE,
+    )
+    .unwrap();
     let coordinates = verlet_runtime_contracts::ThreadCoordinates {
         tenant_id: app.tenant_id().to_string(),
         user_id: connection.resolved_principal.principal_id.to_string(),

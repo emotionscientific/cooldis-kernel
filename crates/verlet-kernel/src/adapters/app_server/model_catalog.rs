@@ -277,15 +277,18 @@ fn jittered_retry_delays() -> Vec<std::time::Duration> {
     ]
 }
 
+// Mirrors its only call site, which is `#[cfg(not(test))]`: catalog refresh is
+// never started from a test build, where the `_with_env` seam is driven instead.
+#[cfg(not(test))]
 pub(crate) fn spawn_runtime_refresh(
-    tasks: &std::sync::Arc<super::lifecycle::InstanceTaskSet>,
+    tasks: &std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
     user_state_home: std::path::PathBuf,
 ) -> bool {
     spawn_runtime_refresh_with_env(tasks, user_state_home, |name| std::env::var(name))
 }
 
 fn spawn_runtime_refresh_with_env(
-    tasks: &std::sync::Arc<super::lifecycle::InstanceTaskSet>,
+    tasks: &std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
     user_state_home: std::path::PathBuf,
     read_env: impl FnOnce(&str) -> Result<String, std::env::VarError>,
 ) -> bool {
@@ -297,7 +300,7 @@ fn spawn_runtime_refresh_with_env(
 }
 
 fn spawn_runtime_refresh_with_options(
-    tasks: &std::sync::Arc<super::lifecycle::InstanceTaskSet>,
+    tasks: &std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
     options: CatalogRefreshOptions,
 ) -> bool {
     // Abandonment is safe: awaits only cover network/sleep work, while every
@@ -965,7 +968,7 @@ fn replace_file(temporary: &std::path::Path, path: &std::path::Path) -> std::io:
 ///
 /// Auth status and the active flag are not part of the entry: the RPC layer
 /// annotates them per request from the provider store and the live
-/// [`super::ActiveModelSelection`].
+/// [`crate::adapters::app_server::ActiveModelSelection`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ModelCatalogEntry {
     pub(crate) provider_id: String,
@@ -1007,14 +1010,14 @@ impl ModelCatalogSource for StaticModelCatalog {
 
 #[cfg(test)]
 mod tests {
-    use super::ModelCatalogSource as _;
+    use crate::adapters::app_server::model_catalog::ModelCatalogSource as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     const FIRST_CHECK_SECS: u64 = 1_800_000_000;
 
     #[test]
     fn checked_in_snapshot_parses_and_carries_the_full_schema() {
-        let snapshot = super::built_in_snapshot();
+        let snapshot = crate::adapters::app_server::model_catalog::built_in_snapshot();
 
         assert!(!snapshot.models.is_empty());
         assert!(snapshot.providers.len() > 100);
@@ -1035,8 +1038,14 @@ mod tests {
             .find(|provider| provider.provider_id == "anthropic")
             .unwrap();
         assert_eq!(anthropic.base_url, "https://api.anthropic.com");
-        assert_eq!(anthropic.api, super::CATALOG_API_ANTHROPIC_MESSAGES);
-        assert_eq!(anthropic.auth_kind, super::CATALOG_AUTH_KIND_API_KEY);
+        assert_eq!(
+            anthropic.api,
+            crate::adapters::app_server::model_catalog::CATALOG_API_ANTHROPIC_MESSAGES
+        );
+        assert_eq!(
+            anthropic.auth_kind,
+            crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_API_KEY
+        );
         assert!(
             anthropic
                 .env_vars
@@ -1048,7 +1057,10 @@ mod tests {
             .find(|provider| provider.provider_id == "openai")
             .unwrap();
         assert_eq!(openai.base_url, "https://api.openai.com/v1");
-        assert_eq!(openai.api, super::CATALOG_API_OPENAI_CHAT_COMPLETIONS);
+        assert_eq!(
+            openai.api,
+            crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_CHAT_COMPLETIONS
+        );
         let codex = snapshot
             .providers
             .iter()
@@ -1058,13 +1070,20 @@ mod tests {
             codex.base_url,
             verlet_metadata::provider_store::OPENAI_CODEX_RESPONSES_URL
         );
-        assert_eq!(codex.api, super::CATALOG_API_OPENAI_RESPONSES);
-        assert_eq!(codex.auth_kind, super::CATALOG_AUTH_KIND_OAUTH);
+        assert_eq!(
+            codex.api,
+            crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_RESPONSES
+        );
+        assert_eq!(
+            codex.auth_kind,
+            crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_OAUTH
+        );
         assert!(
-            snapshot
-                .providers
-                .iter()
-                .all(|provider| super::valid_catalog_base_url(&provider.base_url)),
+            snapshot.providers.iter().all(|provider| {
+                crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                    &provider.base_url,
+                )
+            }),
             "the checked-in snapshot must not carry unusable or cleartext base URLs"
         );
         assert!(snapshot.models.iter().any(|model| {
@@ -1086,7 +1105,9 @@ mod tests {
             "verlet-model-catalog-offline-{}",
             uuid::Uuid::now_v7()
         ));
-        let offline_entries = super::MergedModelCatalog::new(offline_home).entries();
+        let offline_entries =
+            crate::adapters::app_server::model_catalog::MergedModelCatalog::new(offline_home)
+                .entries();
         assert_eq!(
             offline_entries.len(),
             snapshot
@@ -1107,8 +1128,10 @@ mod tests {
 
     #[test]
     fn models_dev_normalization_drops_unknown_fields_and_curates_codex_provider() {
-        let snapshot = super::normalize_models_dev_json(raw_models_dev_fixture().as_bytes())
-            .expect("fixture must normalize");
+        let snapshot = crate::adapters::app_server::model_catalog::normalize_models_dev_json(
+            raw_models_dev_fixture().as_bytes(),
+        )
+        .expect("fixture must normalize");
 
         assert_eq!(snapshot.models.len(), 9);
         assert!(snapshot.models.iter().any(|model| {
@@ -1156,8 +1179,10 @@ mod tests {
 
     #[test]
     fn models_dev_normalization_derives_the_full_provider_set() {
-        let snapshot = super::normalize_models_dev_json(raw_models_dev_fixture().as_bytes())
-            .expect("fixture must normalize");
+        let snapshot = crate::adapters::app_server::model_catalog::normalize_models_dev_json(
+            raw_models_dev_fixture().as_bytes(),
+        )
+        .expect("fixture must normalize");
         let provider = |id: &str| {
             snapshot
                 .providers
@@ -1168,8 +1193,14 @@ mod tests {
         let anthropic = provider("anthropic").expect("override row for anthropic");
         assert_eq!(anthropic.display_name, "Anthropic");
         assert_eq!(anthropic.base_url, "https://api.anthropic.com");
-        assert_eq!(anthropic.api, super::CATALOG_API_ANTHROPIC_MESSAGES);
-        assert_eq!(anthropic.auth_kind, super::CATALOG_AUTH_KIND_API_KEY);
+        assert_eq!(
+            anthropic.api,
+            crate::adapters::app_server::model_catalog::CATALOG_API_ANTHROPIC_MESSAGES
+        );
+        assert_eq!(
+            anthropic.auth_kind,
+            crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_API_KEY
+        );
         assert_eq!(anthropic.env_vars, vec!["ANTHROPIC_API_KEY".to_string()]);
         assert_eq!(
             anthropic.doc_url.as_deref(),
@@ -1177,17 +1208,26 @@ mod tests {
         );
         let openai = provider("openai").expect("override row for openai");
         assert_eq!(openai.base_url, "https://api.openai.com/v1");
-        assert_eq!(openai.api, super::CATALOG_API_OPENAI_CHAT_COMPLETIONS);
+        assert_eq!(
+            openai.api,
+            crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_CHAT_COMPLETIONS
+        );
         let compat = provider("compat-fixture").expect("derived openai-compatible row");
         assert_eq!(compat.base_url, "https://compat.example.invalid/v1");
-        assert_eq!(compat.api, super::CATALOG_API_OPENAI_CHAT_COMPLETIONS);
+        assert_eq!(
+            compat.api,
+            crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_CHAT_COMPLETIONS
+        );
         let anthropic_compat =
             provider("anthropic-compat-fixture").expect("derived anthropic-sdk row");
         assert_eq!(
             anthropic_compat.base_url,
             "https://anthropic-compat.example.invalid/v1"
         );
-        assert_eq!(anthropic_compat.api, super::CATALOG_API_ANTHROPIC_MESSAGES);
+        assert_eq!(
+            anthropic_compat.api,
+            crate::adapters::app_server::model_catalog::CATALOG_API_ANTHROPIC_MESSAGES
+        );
         assert_eq!(anthropic_compat.display_name, "anthropic-compat-fixture");
         let deepseek = provider("deepseek").expect("override row for deepseek");
         assert_eq!(
@@ -1195,7 +1235,10 @@ mod tests {
             "the curated override must win over the upstream api URL"
         );
         let codex = provider("openai-codex").expect("static openai-codex row");
-        assert_eq!(codex.auth_kind, super::CATALOG_AUTH_KIND_OAUTH);
+        assert_eq!(
+            codex.auth_kind,
+            crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_OAUTH
+        );
         assert!(
             provider("google").is_none(),
             "unsupported API families must be skipped"
@@ -1225,28 +1268,64 @@ mod tests {
 
     #[test]
     fn base_url_validation_requires_https_or_loopback_http() {
-        assert!(super::valid_catalog_base_url("https://api.example.com/v1"));
-        assert!(super::valid_catalog_base_url("http://localhost:1234/v1"));
-        assert!(super::valid_catalog_base_url("http://127.0.0.1/v1"));
-        assert!(super::valid_catalog_base_url("http://[::1]:8080/v1"));
-        assert!(!super::valid_catalog_base_url(
-            "http://cleartext.example.invalid/v1"
-        ));
-        assert!(!super::valid_catalog_base_url("${GATEWAY_BASE_URL}/v1"));
-        assert!(!super::valid_catalog_base_url("https://${HOST}/v1"));
-        assert!(!super::valid_catalog_base_url("ftp://example.com"));
-        assert!(!super::valid_catalog_base_url("https://"));
-        assert!(!super::valid_catalog_base_url("api.example.com/v1"));
+        assert!(
+            crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "https://api.example.com/v1"
+            )
+        );
+        assert!(
+            crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "http://localhost:1234/v1"
+            )
+        );
+        assert!(
+            crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "http://127.0.0.1/v1"
+            )
+        );
+        assert!(
+            crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "http://[::1]:8080/v1"
+            )
+        );
+        assert!(
+            !crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "http://cleartext.example.invalid/v1"
+            )
+        );
+        assert!(
+            !crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "${GATEWAY_BASE_URL}/v1"
+            )
+        );
+        assert!(
+            !crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "https://${HOST}/v1"
+            )
+        );
+        assert!(
+            !crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "ftp://example.com"
+            )
+        );
+        assert!(!crate::adapters::app_server::model_catalog::valid_catalog_base_url("https://"));
+        assert!(
+            !crate::adapters::app_server::model_catalog::valid_catalog_base_url(
+                "api.example.com/v1"
+            )
+        );
     }
 
     #[test]
     fn built_in_snapshot_keeps_every_provider_override_pinned() {
-        let providers = super::built_in_snapshot()
+        let providers = crate::adapters::app_server::model_catalog::built_in_snapshot()
             .providers
             .iter()
             .map(|provider| (provider.provider_id.as_str(), provider))
             .collect::<std::collections::BTreeMap<_, _>>();
-        for (provider_id, base_url, api) in super::PROVIDER_OVERRIDES {
+        for (provider_id, base_url, api) in
+            crate::adapters::app_server::model_catalog::PROVIDER_OVERRIDES
+        {
             let provider = providers
                 .get(provider_id)
                 .unwrap_or_else(|| panic!("built-in snapshot omitted override {provider_id}"));
@@ -1259,18 +1338,28 @@ mod tests {
     fn snapshot_rendering_is_byte_stable() {
         // Regeneration determinism: the same upstream bytes must produce the
         // same snapshot bytes, and re-rendering a parsed snapshot must too.
-        let first = super::render_snapshot_json(
-            &super::normalize_models_dev_json(raw_models_dev_fixture().as_bytes()).unwrap(),
+        let first = crate::adapters::app_server::model_catalog::render_snapshot_json(
+            &crate::adapters::app_server::model_catalog::normalize_models_dev_json(
+                raw_models_dev_fixture().as_bytes(),
+            )
+            .unwrap(),
         )
         .unwrap();
-        let second = super::render_snapshot_json(
-            &super::normalize_models_dev_json(raw_models_dev_fixture().as_bytes()).unwrap(),
+        let second = crate::adapters::app_server::model_catalog::render_snapshot_json(
+            &crate::adapters::app_server::model_catalog::normalize_models_dev_json(
+                raw_models_dev_fixture().as_bytes(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(first, second);
-        let reparsed: super::ModelCatalogSnapshot = serde_json::from_slice(&first).unwrap();
+        let reparsed: crate::adapters::app_server::model_catalog::ModelCatalogSnapshot =
+            serde_json::from_slice(&first).unwrap();
         assert_eq!(
-            super::render_snapshot_json(&super::sanitize_snapshot(reparsed)).unwrap(),
+            crate::adapters::app_server::model_catalog::render_snapshot_json(
+                &crate::adapters::app_server::model_catalog::sanitize_snapshot(reparsed)
+            )
+            .unwrap(),
             first
         );
     }
@@ -1286,45 +1375,51 @@ mod tests {
             .expect("VERLET_MODEL_CATALOG_REGEN_OUTPUT must point at the snapshot to write");
         let bytes = std::fs::read(&input).expect("regeneration input must be readable");
         let mut snapshot =
-            super::normalize_models_dev_json(&bytes).expect("upstream payload must normalize");
+            crate::adapters::app_server::model_catalog::normalize_models_dev_json(&bytes)
+                .expect("upstream payload must normalize");
         snapshot.comment = Some(
             "Generated by scripts/update-model-catalog.sh from models.dev; do not edit by hand."
                 .to_string(),
         );
-        std::fs::write(&output, super::render_snapshot_json(&snapshot).unwrap())
-            .expect("regeneration output must be writable");
+        std::fs::write(
+            &output,
+            crate::adapters::app_server::model_catalog::render_snapshot_json(&snapshot).unwrap(),
+        )
+        .expect("regeneration output must be writable");
     }
 
     #[test]
     fn sanitization_normalizes_strings_limits_and_prices() {
-        let snapshot = super::sanitize_snapshot(super::ModelCatalogSnapshot {
-            comment: None,
-            providers: Vec::new(),
-            models: vec![
-                super::ModelCatalogModel {
-                    provider_id: " openai ".to_string(),
-                    model_id: " gpt-test ".to_string(),
-                    display_name: "   ".to_string(),
-                    context_window: Some(0),
-                    max_output_tokens: Some(42),
-                    input_price: Some(-1.0),
-                    output_price: Some(2.5),
-                    reasoning: false,
-                    deprecated: false,
-                },
-                super::ModelCatalogModel {
-                    provider_id: "openai-codex".to_string(),
-                    model_id: "gpt-uncurated".to_string(),
-                    display_name: "Must be dropped".to_string(),
-                    context_window: None,
-                    max_output_tokens: None,
-                    input_price: None,
-                    output_price: None,
-                    reasoning: false,
-                    deprecated: false,
-                },
-            ],
-        });
+        let snapshot = crate::adapters::app_server::model_catalog::sanitize_snapshot(
+            crate::adapters::app_server::model_catalog::ModelCatalogSnapshot {
+                comment: None,
+                providers: Vec::new(),
+                models: vec![
+                    crate::adapters::app_server::model_catalog::ModelCatalogModel {
+                        provider_id: " openai ".to_string(),
+                        model_id: " gpt-test ".to_string(),
+                        display_name: "   ".to_string(),
+                        context_window: Some(0),
+                        max_output_tokens: Some(42),
+                        input_price: Some(-1.0),
+                        output_price: Some(2.5),
+                        reasoning: false,
+                        deprecated: false,
+                    },
+                    crate::adapters::app_server::model_catalog::ModelCatalogModel {
+                        provider_id: "openai-codex".to_string(),
+                        model_id: "gpt-uncurated".to_string(),
+                        display_name: "Must be dropped".to_string(),
+                        context_window: None,
+                        max_output_tokens: None,
+                        input_price: None,
+                        output_price: None,
+                        reasoning: false,
+                        deprecated: false,
+                    },
+                ],
+            },
+        );
 
         assert_eq!(snapshot.models.len(), 1);
         let model = &snapshot.models[0];
@@ -1340,19 +1435,19 @@ mod tests {
     #[test]
     fn empty_and_garbage_upstream_payloads_are_rejected() {
         assert!(matches!(
-            super::normalize_models_dev_json(b"{}"),
-            Err(super::CatalogRefreshError::EmptyCatalog)
+            crate::adapters::app_server::model_catalog::normalize_models_dev_json(b"{}"),
+            Err(crate::adapters::app_server::model_catalog::CatalogRefreshError::EmptyCatalog)
         ));
         assert!(matches!(
-            super::normalize_models_dev_json(b"not json"),
-            Err(super::CatalogRefreshError::Json(_))
+            crate::adapters::app_server::model_catalog::normalize_models_dev_json(b"not json"),
+            Err(crate::adapters::app_server::model_catalog::CatalogRefreshError::Json(_))
         ));
     }
 
     #[test]
     fn cached_remote_overlays_builtin_by_provider_and_model() {
         let state_home = test_state_home("overlay");
-        let built_in = super::built_in_snapshot();
+        let built_in = crate::adapters::app_server::model_catalog::built_in_snapshot();
         let built_in_provider = built_in
             .providers
             .iter()
@@ -1363,24 +1458,24 @@ mod tests {
             .iter()
             .find(|model| model.provider_id == "anthropic")
             .unwrap();
-        let cached = super::ModelCatalogSnapshot {
+        let cached = crate::adapters::app_server::model_catalog::ModelCatalogSnapshot {
             comment: None,
             providers: vec![
-                super::ModelCatalogProvider {
+                crate::adapters::app_server::model_catalog::ModelCatalogProvider {
                     provider_id: "anthropic".to_string(),
                     display_name: "Remote Anthropic".to_string(),
                     base_url: "https://credential-redirect.example.invalid".to_string(),
-                    api: super::CATALOG_API_OPENAI_RESPONSES.to_string(),
-                    auth_kind: super::CATALOG_AUTH_KIND_OAUTH.to_string(),
+                    api: crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_RESPONSES.to_string(),
+                    auth_kind: crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_OAUTH.to_string(),
                     env_vars: vec!["REMOTE_ANTHROPIC_API_KEY".to_string()],
                     doc_url: Some("https://remote-docs.example.invalid".to_string()),
                 },
-                super::ModelCatalogProvider {
+                crate::adapters::app_server::model_catalog::ModelCatalogProvider {
                     provider_id: "remote-only-provider".to_string(),
                     display_name: "Remote Only Provider".to_string(),
                     base_url: "https://remote-only.example.invalid/v1".to_string(),
-                    api: super::CATALOG_API_OPENAI_CHAT_COMPLETIONS.to_string(),
-                    auth_kind: super::CATALOG_AUTH_KIND_API_KEY.to_string(),
+                    api: crate::adapters::app_server::model_catalog::CATALOG_API_OPENAI_CHAT_COMPLETIONS.to_string(),
+                    auth_kind: crate::adapters::app_server::model_catalog::CATALOG_AUTH_KIND_API_KEY.to_string(),
                     env_vars: vec!["REMOTE_ONLY_API_KEY".to_string()],
                     doc_url: None,
                 },
@@ -1392,7 +1487,7 @@ mod tests {
                     .clone(),
             ],
             models: vec![
-                super::ModelCatalogModel {
+                crate::adapters::app_server::model_catalog::ModelCatalogModel {
                     provider_id: target.provider_id.clone(),
                     model_id: target.model_id.clone(),
                     display_name: "Remote replacement".to_string(),
@@ -1403,7 +1498,7 @@ mod tests {
                     reasoning: true,
                     deprecated: false,
                 },
-                super::ModelCatalogModel {
+                crate::adapters::app_server::model_catalog::ModelCatalogModel {
                     provider_id: "openai".to_string(),
                     model_id: "remote-only".to_string(),
                     display_name: "Remote only".to_string(),
@@ -1416,9 +1511,11 @@ mod tests {
                 },
             ],
         };
-        super::write_catalog_cache(&state_home, &cached).unwrap();
+        crate::adapters::app_server::model_catalog::write_catalog_cache(&state_home, &cached)
+            .unwrap();
 
-        let catalog = super::MergedModelCatalog::new(&state_home);
+        let catalog =
+            crate::adapters::app_server::model_catalog::MergedModelCatalog::new(&state_home);
         let providers = catalog.providers();
         let provider = providers
             .iter()
@@ -1478,15 +1575,22 @@ mod tests {
                 "deprecated": false
             }]
         });
-        std::fs::create_dir_all(state_home.join(super::CATALOG_CACHE_DIR)).unwrap();
+        std::fs::create_dir_all(
+            state_home.join(crate::adapters::app_server::model_catalog::CATALOG_CACHE_DIR),
+        )
+        .unwrap();
         std::fs::write(
-            super::catalog_cache_path(&state_home),
+            crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home),
             old_format.to_string(),
         )
         .unwrap();
 
-        let catalog = super::MergedModelCatalog::new(&state_home);
-        assert_eq!(catalog.providers(), super::built_in_snapshot().providers);
+        let catalog =
+            crate::adapters::app_server::model_catalog::MergedModelCatalog::new(&state_home);
+        assert_eq!(
+            catalog.providers(),
+            crate::adapters::app_server::model_catalog::built_in_snapshot().providers
+        );
         assert!(catalog.entries().iter().any(
             |entry| entry.provider_id == "legacy-provider" && entry.model_id == "legacy-model"
         ));
@@ -1506,8 +1610,8 @@ mod tests {
         .await;
         let expected_url = server.url.clone();
         let mut options =
-            super::CatalogRefreshOptions::for_runtime_with_env(state_home.clone(), move |name| {
-                assert_eq!(name, super::MODEL_CATALOG_URL_ENV);
+            crate::adapters::app_server::model_catalog::CatalogRefreshOptions::for_runtime_with_env(state_home.clone(), move |name| {
+                assert_eq!(name, crate::adapters::app_server::model_catalog::MODEL_CATALOG_URL_ENV);
                 Ok(expected_url)
             })
             .expect("fixture URL enables refresh");
@@ -1516,36 +1620,53 @@ mod tests {
         assert_eq!(options.url, server.url);
 
         assert_eq!(
-            super::refresh_catalog(&options).await.unwrap(),
-            super::CatalogRefreshOutcome::Updated
+            crate::adapters::app_server::model_catalog::refresh_catalog(&options)
+                .await
+                .unwrap(),
+            crate::adapters::app_server::model_catalog::CatalogRefreshOutcome::Updated
         );
-        let original_cache = std::fs::read(super::catalog_cache_path(&state_home)).unwrap();
-        let original_modified = std::fs::metadata(super::catalog_cache_path(&state_home))
-            .unwrap()
-            .modified()
-            .unwrap();
+        let original_cache = std::fs::read(
+            crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home),
+        )
+        .unwrap();
+        let original_modified = std::fs::metadata(
+            crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home),
+        )
+        .unwrap()
+        .modified()
+        .unwrap();
 
         options.now_unix_secs = FIRST_CHECK_SECS + 60;
         assert_eq!(
-            super::refresh_catalog(&options).await.unwrap(),
-            super::CatalogRefreshOutcome::SkippedFresh
+            crate::adapters::app_server::model_catalog::refresh_catalog(&options)
+                .await
+                .unwrap(),
+            crate::adapters::app_server::model_catalog::CatalogRefreshOutcome::SkippedFresh
         );
 
-        options.now_unix_secs = FIRST_CHECK_SECS + super::REFRESH_INTERVAL_SECS;
+        options.now_unix_secs =
+            FIRST_CHECK_SECS + crate::adapters::app_server::model_catalog::REFRESH_INTERVAL_SECS;
         assert_eq!(
-            super::refresh_catalog(&options).await.unwrap(),
-            super::CatalogRefreshOutcome::NotModified
+            crate::adapters::app_server::model_catalog::refresh_catalog(&options)
+                .await
+                .unwrap(),
+            crate::adapters::app_server::model_catalog::CatalogRefreshOutcome::NotModified
         );
         assert_eq!(
-            std::fs::read(super::catalog_cache_path(&state_home)).unwrap(),
+            std::fs::read(
+                crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home)
+            )
+            .unwrap(),
             original_cache,
             "304 must not rewrite the catalog cache"
         );
         assert_eq!(
-            std::fs::metadata(super::catalog_cache_path(&state_home))
-                .unwrap()
-                .modified()
-                .unwrap(),
+            std::fs::metadata(
+                crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home)
+            )
+            .unwrap()
+            .modified()
+            .unwrap(),
             original_modified,
             "304 must leave catalog cache metadata untouched"
         );
@@ -1554,7 +1675,9 @@ mod tests {
         assert_eq!(requests.len(), 2, "fresh refresh state must skip the GET");
         assert!(requests[1].contains("if-none-match: \"catalog-v1\""));
         assert!(requests[1].contains("if-modified-since: sun, 09 aug 2026 20:00:00 gmt"));
-        let state = super::read_refresh_state(&state_home).unwrap().unwrap();
+        let state = crate::adapters::app_server::model_catalog::read_refresh_state(&state_home)
+            .unwrap()
+            .unwrap();
         assert_eq!(state.checked_at_unix_secs, options.now_unix_secs);
 
         remove_test_state_home(&state_home);
@@ -1563,10 +1686,11 @@ mod tests {
     #[tokio::test]
     async fn refresh_does_not_send_validators_without_a_usable_cache() {
         let state_home = test_state_home("validator-without-cache");
-        super::write_refresh_state(
+        crate::adapters::app_server::model_catalog::write_refresh_state(
             &state_home,
-            &super::CatalogRefreshState {
-                checked_at_unix_secs: FIRST_CHECK_SECS - super::REFRESH_INTERVAL_SECS,
+            &crate::adapters::app_server::model_catalog::CatalogRefreshState {
+                checked_at_unix_secs: FIRST_CHECK_SECS
+                    - crate::adapters::app_server::model_catalog::REFRESH_INTERVAL_SECS,
                 etag: Some("\"orphaned-etag\"".to_string()),
                 last_modified: Some("Sun, 09 Aug 2026 20:00:00 GMT".to_string()),
             },
@@ -1574,21 +1698,25 @@ mod tests {
         .unwrap();
         let server =
             FixtureServer::start(vec![FixtureResponse::ok(raw_models_dev_fixture())]).await;
-        let options = super::CatalogRefreshOptions::for_test(
+        let options = crate::adapters::app_server::model_catalog::CatalogRefreshOptions::for_test(
             state_home.clone(),
             server.url.clone(),
             FIRST_CHECK_SECS,
         );
 
         assert_eq!(
-            super::refresh_catalog(&options).await.unwrap(),
-            super::CatalogRefreshOutcome::Updated
+            crate::adapters::app_server::model_catalog::refresh_catalog(&options)
+                .await
+                .unwrap(),
+            crate::adapters::app_server::model_catalog::CatalogRefreshOutcome::Updated
         );
         let requests = server.finish().await;
         assert_eq!(requests.len(), 1);
         assert!(!requests[0].contains("if-none-match:"));
         assert!(!requests[0].contains("if-modified-since:"));
-        assert!(super::catalog_cache_path(&state_home).is_file());
+        assert!(
+            crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home).is_file()
+        );
 
         remove_test_state_home(&state_home);
     }
@@ -1602,19 +1730,24 @@ mod tests {
             FixtureResponse::ok(raw_models_dev_fixture()),
         ])
         .await;
-        let mut options = super::CatalogRefreshOptions::for_test(
-            state_home.clone(),
-            server.url.clone(),
-            FIRST_CHECK_SECS,
-        );
+        let mut options =
+            crate::adapters::app_server::model_catalog::CatalogRefreshOptions::for_test(
+                state_home.clone(),
+                server.url.clone(),
+                FIRST_CHECK_SECS,
+            );
         options.retry_delays = vec![std::time::Duration::ZERO, std::time::Duration::ZERO];
 
         assert_eq!(
-            super::refresh_catalog(&options).await.unwrap(),
-            super::CatalogRefreshOutcome::Updated
+            crate::adapters::app_server::model_catalog::refresh_catalog(&options)
+                .await
+                .unwrap(),
+            crate::adapters::app_server::model_catalog::CatalogRefreshOutcome::Updated
         );
         assert_eq!(server.finish().await.len(), 3);
-        assert!(super::catalog_cache_path(&state_home).is_file());
+        assert!(
+            crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home).is_file()
+        );
 
         remove_test_state_home(&state_home);
     }
@@ -1623,19 +1756,26 @@ mod tests {
     async fn fetch_rejects_oversized_responses_before_reading_the_body() {
         let state_home = test_state_home("oversized");
         let server = FixtureServer::start(vec![
-            FixtureResponse::ok(String::new()).with_declared_length(super::MAX_REMOTE_BYTES + 1),
+            FixtureResponse::ok(String::new()).with_declared_length(
+                crate::adapters::app_server::model_catalog::MAX_REMOTE_BYTES + 1,
+            ),
         ])
         .await;
-        let mut options = super::CatalogRefreshOptions::for_test(
-            state_home.clone(),
-            server.url.clone(),
-            FIRST_CHECK_SECS,
-        );
+        let mut options =
+            crate::adapters::app_server::model_catalog::CatalogRefreshOptions::for_test(
+                state_home.clone(),
+                server.url.clone(),
+                FIRST_CHECK_SECS,
+            );
         options.retry_delays.clear();
 
         assert!(matches!(
-            super::fetch_catalog(&options, &super::CatalogRefreshState::default()).await,
-            Err(super::CatalogRefreshError::ResponseTooLarge)
+            crate::adapters::app_server::model_catalog::fetch_catalog(
+                &options,
+                &crate::adapters::app_server::model_catalog::CatalogRefreshState::default()
+            )
+            .await,
+            Err(crate::adapters::app_server::model_catalog::CatalogRefreshError::ResponseTooLarge)
         ));
         assert_eq!(server.finish().await.len(), 1);
 
@@ -1646,17 +1786,23 @@ mod tests {
     async fn fetch_does_not_retry_non_retryable_http_statuses() {
         let state_home = test_state_home("http-status");
         let server = FixtureServer::start(vec![FixtureResponse::status("400 Bad Request")]).await;
-        let options = super::CatalogRefreshOptions::for_test(
+        let options = crate::adapters::app_server::model_catalog::CatalogRefreshOptions::for_test(
             state_home.clone(),
             server.url.clone(),
             FIRST_CHECK_SECS,
         );
 
         assert!(matches!(
-            super::fetch_catalog(&options, &super::CatalogRefreshState::default()).await,
-            Err(super::CatalogRefreshError::HttpStatus(
-                reqwest::StatusCode::BAD_REQUEST
-            ))
+            crate::adapters::app_server::model_catalog::fetch_catalog(
+                &options,
+                &crate::adapters::app_server::model_catalog::CatalogRefreshState::default()
+            )
+            .await,
+            Err(
+                crate::adapters::app_server::model_catalog::CatalogRefreshError::HttpStatus(
+                    reqwest::StatusCode::BAD_REQUEST
+                )
+            )
         ));
         assert_eq!(server.finish().await.len(), 1);
 
@@ -1673,13 +1819,21 @@ mod tests {
             std::future::pending::<()>().await;
         });
         let mut options =
-            super::CatalogRefreshOptions::for_test(state_home.clone(), url, FIRST_CHECK_SECS);
+            crate::adapters::app_server::model_catalog::CatalogRefreshOptions::for_test(
+                state_home.clone(),
+                url,
+                FIRST_CHECK_SECS,
+            );
         options.request_timeout = std::time::Duration::from_millis(50);
         options.retry_delays.clear();
 
         assert!(matches!(
-            super::fetch_catalog(&options, &super::CatalogRefreshState::default()).await,
-            Err(super::CatalogRefreshError::Request)
+            crate::adapters::app_server::model_catalog::fetch_catalog(
+                &options,
+                &crate::adapters::app_server::model_catalog::CatalogRefreshState::default()
+            )
+            .await,
+            Err(crate::adapters::app_server::model_catalog::CatalogRefreshError::Request)
         ));
 
         server.abort();
@@ -1690,56 +1844,72 @@ mod tests {
     #[tokio::test]
     async fn failed_refresh_keeps_cached_remote_available_and_records_the_attempt() {
         let state_home = test_state_home("fallback");
-        let cached = super::ModelCatalogSnapshot {
+        let cached = crate::adapters::app_server::model_catalog::ModelCatalogSnapshot {
             comment: None,
             providers: Vec::new(),
-            models: vec![super::ModelCatalogModel {
-                provider_id: "openai".to_string(),
-                model_id: "cached-model".to_string(),
-                display_name: "Cached model".to_string(),
-                context_window: Some(1_024),
-                max_output_tokens: Some(128),
-                input_price: Some(1.0),
-                output_price: Some(2.0),
-                reasoning: false,
-                deprecated: false,
-            }],
+            models: vec![
+                crate::adapters::app_server::model_catalog::ModelCatalogModel {
+                    provider_id: "openai".to_string(),
+                    model_id: "cached-model".to_string(),
+                    display_name: "Cached model".to_string(),
+                    context_window: Some(1_024),
+                    max_output_tokens: Some(128),
+                    input_price: Some(1.0),
+                    output_price: Some(2.0),
+                    reasoning: false,
+                    deprecated: false,
+                },
+            ],
         };
-        super::write_catalog_cache(&state_home, &cached).unwrap();
-        let cache_before = std::fs::read(super::catalog_cache_path(&state_home)).unwrap();
+        crate::adapters::app_server::model_catalog::write_catalog_cache(&state_home, &cached)
+            .unwrap();
+        let cache_before = std::fs::read(
+            crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home),
+        )
+        .unwrap();
         let server = FixtureServer::start(vec![
             FixtureResponse::status("500 Internal Server Error"),
             FixtureResponse::status("500 Internal Server Error"),
             FixtureResponse::status("500 Internal Server Error"),
         ])
         .await;
-        let mut options = super::CatalogRefreshOptions::for_test(
-            state_home.clone(),
-            server.url.clone(),
-            FIRST_CHECK_SECS,
-        );
+        let mut options =
+            crate::adapters::app_server::model_catalog::CatalogRefreshOptions::for_test(
+                state_home.clone(),
+                server.url.clone(),
+                FIRST_CHECK_SECS,
+            );
         options.retry_delays = vec![std::time::Duration::ZERO, std::time::Duration::ZERO];
 
-        assert!(super::refresh_catalog(&options).await.is_err());
+        assert!(
+            crate::adapters::app_server::model_catalog::refresh_catalog(&options)
+                .await
+                .is_err()
+        );
         assert_eq!(server.finish().await.len(), 3);
         options.now_unix_secs = FIRST_CHECK_SECS + 60;
         assert_eq!(
-            super::refresh_catalog(&options).await.unwrap(),
-            super::CatalogRefreshOutcome::SkippedFresh,
+            crate::adapters::app_server::model_catalog::refresh_catalog(&options)
+                .await
+                .unwrap(),
+            crate::adapters::app_server::model_catalog::CatalogRefreshOutcome::SkippedFresh,
             "a failed attempt must still enforce the 24-hour cap"
         );
         assert_eq!(
-            std::fs::read(super::catalog_cache_path(&state_home)).unwrap(),
+            std::fs::read(
+                crate::adapters::app_server::model_catalog::catalog_cache_path(&state_home)
+            )
+            .unwrap(),
             cache_before
         );
         assert!(
-            super::MergedModelCatalog::new(&state_home)
+            crate::adapters::app_server::model_catalog::MergedModelCatalog::new(&state_home)
                 .full_entries()
                 .iter()
                 .any(|model| model.model_id == "cached-model")
         );
         assert_eq!(
-            super::read_refresh_state(&state_home)
+            crate::adapters::app_server::model_catalog::read_refresh_state(&state_home)
                 .unwrap()
                 .unwrap()
                 .checked_at_unix_secs,
@@ -1752,29 +1922,46 @@ mod tests {
     #[test]
     fn empty_runtime_url_disables_refresh_scheduling() {
         let state_home = test_state_home("disabled");
-        let tasks = std::sync::Arc::new(super::super::lifecycle::InstanceTaskSet::new());
+        let tasks =
+            std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
 
-        let scheduled = super::spawn_runtime_refresh_with_env(&tasks, state_home.clone(), |name| {
-            assert_eq!(name, super::MODEL_CATALOG_URL_ENV);
-            Ok(" \t ".to_string())
-        });
+        let scheduled = crate::adapters::app_server::model_catalog::spawn_runtime_refresh_with_env(
+            &tasks,
+            state_home.clone(),
+            |name| {
+                assert_eq!(
+                    name,
+                    crate::adapters::app_server::model_catalog::MODEL_CATALOG_URL_ENV
+                );
+                Ok(" \t ".to_string())
+            },
+        );
 
         assert!(!scheduled);
         assert_eq!(tasks.task_count(), 0);
-        assert!(!state_home.join(super::CATALOG_CACHE_DIR).exists());
+        assert!(
+            !state_home
+                .join(crate::adapters::app_server::model_catalog::CATALOG_CACHE_DIR)
+                .exists()
+        );
         remove_test_state_home(&state_home);
     }
 
     #[test]
     fn non_unicode_runtime_url_disables_refresh_scheduling() {
         let state_home = test_state_home("non-unicode-url");
-        let tasks = std::sync::Arc::new(super::super::lifecycle::InstanceTaskSet::new());
+        let tasks =
+            std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
 
-        let scheduled = super::spawn_runtime_refresh_with_env(&tasks, state_home.clone(), |_| {
-            Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
-                "configured-but-invalid",
-            )))
-        });
+        let scheduled = crate::adapters::app_server::model_catalog::spawn_runtime_refresh_with_env(
+            &tasks,
+            state_home.clone(),
+            |_| {
+                Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                    "configured-but-invalid",
+                )))
+            },
+        );
 
         assert!(!scheduled);
         assert_eq!(tasks.task_count(), 0);
@@ -1792,12 +1979,21 @@ mod tests {
             let _ = accepted_tx.send(());
             std::future::pending::<()>().await;
         });
-        let tasks = std::sync::Arc::new(super::super::lifecycle::InstanceTaskSet::new());
+        let tasks =
+            std::sync::Arc::new(crate::adapters::app_server::lifecycle::InstanceTaskSet::new());
         let mut options =
-            super::CatalogRefreshOptions::for_test(state_home.clone(), url, FIRST_CHECK_SECS);
+            crate::adapters::app_server::model_catalog::CatalogRefreshOptions::for_test(
+                state_home.clone(),
+                url,
+                FIRST_CHECK_SECS,
+            );
         options.request_timeout = std::time::Duration::from_secs(30);
 
-        assert!(super::spawn_runtime_refresh_with_options(&tasks, options));
+        assert!(
+            crate::adapters::app_server::model_catalog::spawn_runtime_refresh_with_options(
+                &tasks, options
+            )
+        );
         accepted_rx.await.unwrap();
         // tight-timeout: cancellation must not wait for the pending HTTP timeout
         tokio::time::timeout(std::time::Duration::from_secs(1), tasks.shutdown())
@@ -1806,7 +2002,11 @@ mod tests {
 
         server.abort();
         let _ = server.await;
-        assert!(!state_home.join(super::CATALOG_CACHE_DIR).exists());
+        assert!(
+            !state_home
+                .join(crate::adapters::app_server::model_catalog::CATALOG_CACHE_DIR)
+                .exists()
+        );
         remove_test_state_home(&state_home);
     }
 
@@ -1816,12 +2016,18 @@ mod tests {
         let target = state_home.join("target.json");
         std::fs::write(&target, b"old contents").unwrap();
 
-        super::atomic_write(&target, b"new contents").unwrap();
+        crate::adapters::app_server::model_catalog::atomic_write(&target, b"new contents").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
 
         let directory_target = state_home.join("directory-target");
         std::fs::create_dir(&directory_target).unwrap();
-        assert!(super::atomic_write(&directory_target, b"cannot replace a directory").is_err());
+        assert!(
+            crate::adapters::app_server::model_catalog::atomic_write(
+                &directory_target,
+                b"cannot replace a directory"
+            )
+            .is_err()
+        );
         let leftovers = std::fs::read_dir(&state_home)
             .unwrap()
             .filter_map(Result::ok)

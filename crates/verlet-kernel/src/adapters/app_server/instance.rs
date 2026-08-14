@@ -58,7 +58,7 @@ pub struct InstanceRootReservation {
 }
 
 impl InstanceRootReservation {
-    pub(super) fn canonical_roots(&self) -> &[std::path::PathBuf] {
+    pub(crate) fn canonical_roots(&self) -> &[std::path::PathBuf] {
         &self.canonical_roots
     }
 }
@@ -243,7 +243,7 @@ impl InstanceEnvironment {
         }
     }
 
-    pub(super) fn validate_hosted(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+    pub(crate) fn validate_hosted(&self) -> crate::kernel::runtime_host::VerletResult<()> {
         if matches!(&self.provider_auth, ProviderAuthSource::ProcessEnvironment) {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 "hosted instance provider auth must be injected".to_string(),

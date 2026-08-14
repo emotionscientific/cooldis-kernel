@@ -2491,7 +2491,7 @@ fn validate_catalog_codex_responses_url(
     ))
 }
 
-pub(super) fn merged_catalog_headers(
+pub(crate) fn merged_catalog_headers(
     provider: &verlet_metadata::provider_store::LlmProviderRecord,
     model_record: Option<&verlet_metadata::provider_store::LlmProviderModelRecord>,
 ) -> std::collections::BTreeMap<String, verlet_metadata::provider_store::LlmProviderConfigValue> {

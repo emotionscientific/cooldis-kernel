@@ -5,25 +5,8 @@
 //! screen is one column. The transcript grows; everything below it is
 //! measured first and pinned — the composer never moves, and new output
 //! pushes the history up instead of the input down. The setup window and the
-//! model picker render as a centered [`Dialog`] overlay that dims the base
+//! model picker render as a centered [`tuika::components::Dialog`] overlay that dims the base
 //! tree underneath.
-
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-
-use tuika::components::Dialog;
-use tuika::prelude::*;
-use tuika::probe::RectProbe;
-
-use crate::app::App;
-use crate::app::setup::{
-    API_FAMILIES, CUSTOM_FIELD_ORDER, CustomBusy, CustomField, CustomForm, HOME_ACTIONS, SetupStep,
-    catalog_status, filtered_catalog, oauth_options, overview_rows, overview_status,
-    provider_menu_options,
-};
-use crate::cells::short_id;
-use crate::{CatalogProviderRow, LoginMethod};
 
 /// Columns of blank kept down each side of the UI.
 pub const GUTTER: u16 = 1;
@@ -40,16 +23,16 @@ const MODAL_WIDTH: u16 = 72;
 /// Columns a select list spends on its `› ` selection marker.
 const SELECT_MARKER_W: u16 = 2;
 
-/// Build the frame. Takes `&mut App` because the transcript's streaming
+/// Build the frame. Takes `&mut crate::app::App` because the transcript's streaming
 /// markdown re-renders through its own cache, and because the scroll offset
 /// is reconciled against this frame's geometry.
 pub fn build(
-    app: &mut App,
-    area: Rect,
-    theme: &Theme,
-    sheet: &StyleSheet,
-    probe: &RectProbe,
-) -> Scene {
+    app: &mut crate::app::App,
+    area: ratatui::layout::Rect,
+    theme: &tuika::style::Theme,
+    sheet: &tuika::style::StyleSheet,
+    probe: &tuika::probe::RectProbe,
+) -> tuika::scene::Scene {
     let width = area.width.saturating_sub(GUTTER * 2);
 
     // Measure the pinned bottom stack first; the transcript takes what is left.
@@ -74,17 +57,20 @@ pub fn build(
     // them — same width, same scrollbar setting — so the offset can't drift
     // from the paint.
     let items = app.transcript(width, theme, sheet);
-    let ctx = RenderCtx::new(theme).with_sheet(*sheet);
-    app.content_h = ItemScroll::measure_height(&items, width, TRANSCRIPT_GAP, true, &ctx);
+    let ctx = tuika::view::RenderCtx::new(theme).with_sheet(*sheet);
+    app.content_h =
+        tuika::components::ItemScroll::measure_height(&items, width, TRANSCRIPT_GAP, true, &ctx);
     app.viewport_h = transcript_h as usize;
     app.scroll.clamp(app.content_h, app.viewport_h);
 
-    let mut root = Flex::column()
-        .padding(Padding::symmetric(GUTTER, 0))
-        .background(Style::default().bg(theme.background))
+    let mut root = tuika::components::Flex::column()
+        .padding(tuika::geometry::Padding::symmetric(GUTTER, 0))
+        .background(ratatui::style::Style::default().bg(theme.background))
         .grow(
             1,
-            element(ItemScroll::new(items, &app.scroll).gap(TRANSCRIPT_GAP)),
+            tuika::view::element(
+                tuika::components::ItemScroll::new(items, &app.scroll).gap(TRANSCRIPT_GAP),
+            ),
         );
     if working_h > 0 {
         root = root.fixed(working_h, working(app, theme));
@@ -95,7 +81,7 @@ pub fn build(
     root = root.fixed(body_h, composer(app, theme, probe));
     root = root.fixed(1, footer(app, theme));
 
-    let mut scene = Scene::new(element(root));
+    let mut scene = tuika::scene::Scene::new(tuika::view::element(root));
     if let Some(dialog) = modal(app, area, theme) {
         scene = scene.dialog(dialog);
     }
@@ -104,13 +90,15 @@ pub fn build(
 
 /// `⠹ Working (12s • Esc to interrupt)` — the row shown under the transcript
 /// while a turn is in flight.
-fn working(app: &App, theme: &Theme) -> Element {
-    let label = Line::from(vec![
-        Span::styled(
+fn working(app: &crate::app::App, theme: &tuika::style::Theme) -> tuika::view::Element {
+    let label = ratatui::text::Line::from(vec![
+        ratatui::text::Span::styled(
             "Working",
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ratatui::style::Style::default()
+                .fg(theme.text)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         ),
-        Span::styled(
+        ratatui::text::Span::styled(
             // While the picker or the setup window is open it owns Esc
             // (dismiss, not interrupt), so the interrupt hint would lie.
             if app.picker.is_some() || app.setup_visible() {
@@ -121,59 +109,72 @@ fn working(app: &App, theme: &Theme) -> Element {
             theme.muted_style(),
         ),
     ]);
-    let row = view! {
+    let row = tuika::view! {
         row(gap = 1) {
-            fixed(1) { node(Spinner::new(app.frame).color(theme.accent)) }
-            grow(1) { node(Text::new(vec![label])) }
+            fixed(1) { node(tuika::components::Spinner::new(app.frame).color(theme.accent)) }
+            grow(1) { node(tuika::components::Text::new(vec![label])) }
         }
     };
-    element(Flex::column().fixed(1, element(Spacer)).fixed(1, row))
+    tuika::view::element(
+        tuika::components::Flex::column()
+            .fixed(1, tuika::view::element(tuika::components::Spacer))
+            .fixed(1, row),
+    )
 }
 
 /// The slash-command completion picker.
-fn popup(app: &App, items: &[(String, String)], theme: &Theme) -> Element {
+fn popup(
+    app: &crate::app::App,
+    items: &[(String, String)],
+    theme: &tuika::style::Theme,
+) -> tuika::view::Element {
     let pad = items
         .iter()
         .map(|(label, _)| label.chars().count())
         .max()
         .unwrap_or(0);
-    let rows: Vec<Line<'static>> = items
+    let rows: Vec<ratatui::text::Line<'static>> = items
         .iter()
         .map(|(label, blurb)| {
-            Line::from(vec![
-                Span::styled(
+            ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
                     format!(
                         "{label}{:width$}  ",
                         "",
                         width = pad - label.chars().count()
                     ),
-                    Style::default().fg(theme.accent_alt),
+                    ratatui::style::Style::default().fg(theme.accent_alt),
                 ),
-                Span::styled(blurb.clone(), theme.muted_style()),
+                ratatui::text::Span::styled(blurb.clone(), theme.muted_style()),
             ])
         })
         .collect();
     let Some(state) = app.popup.as_ref().map(|popup| popup.state) else {
-        return element(Spacer);
+        return tuika::view::element(tuika::components::Spacer);
     };
-    let list = SelectList::new(rows, &state).viewport(MAX_POPUP_ROWS as u16);
-    element(
-        Flex::column()
-            .fixed(1, element(Spacer))
-            .grow(1, element(list)),
+    let list = tuika::components::SelectList::new(rows, &state).viewport(MAX_POPUP_ROWS as u16);
+    tuika::view::element(
+        tuika::components::Flex::column()
+            .fixed(1, tuika::view::element(tuika::components::Spacer))
+            .grow(1, tuika::view::element(list)),
     )
 }
 
 /// The modal window, when one is open: the setup screens or the model
 /// picker, composed as a centered dialog over the dimmed base tree.
-fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
+fn modal(
+    app: &crate::app::App,
+    area: ratatui::layout::Rect,
+    theme: &tuika::style::Theme,
+) -> Option<tuika::components::Dialog> {
     let width = MODAL_WIDTH.min(area.width.saturating_sub(4)).max(24);
     let content_w = width.saturating_sub(4);
-    let (title, content, content_h, hints): (String, Element, u16, Vec<(&str, &str)>) =
+    let (title, content, content_h, hints): (String, tuika::view::Element, u16, Vec<(&str, &str)>) =
         if let Some(step) = app.setup.as_ref() {
             match step {
-                SetupStep::AwaitCatalog { .. } | SetupStep::AwaitModels { .. } => return None,
-                SetupStep::Home { rows, state } => {
+                crate::app::setup::SetupStep::AwaitCatalog { .. }
+                | crate::app::setup::SetupStep::AwaitModels { .. } => return None,
+                crate::app::setup::SetupStep::Home { rows, state } => {
                     let (content, rows_h) = setup_home(rows, state, theme, content_w);
                     (
                         "Providers".to_string(),
@@ -182,7 +183,7 @@ fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
                         vec![("↑↓", "move"), ("⏎", "select"), ("esc", "close")],
                     )
                 }
-                SetupStep::ProviderMenu {
+                crate::app::setup::SetupStep::ProviderMenu {
                     provider,
                     state,
                     busy,
@@ -198,7 +199,7 @@ fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
                         vec![("↑↓", "move"), ("⏎", "select"), ("esc", "back")],
                     )
                 }
-                SetupStep::Catalog {
+                crate::app::setup::SetupStep::Catalog {
                     rows,
                     filter,
                     state,
@@ -211,7 +212,7 @@ fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
                         vec![("type", "search"), ("⏎", "select"), ("esc", "back")],
                     )
                 }
-                SetupStep::Credential {
+                crate::app::setup::SetupStep::Credential {
                     provider,
                     state,
                     error,
@@ -225,7 +226,7 @@ fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
                         vec![("↑↓", "move"), ("⏎", "select"), ("esc", "back")],
                     )
                 }
-                SetupStep::KeyInput {
+                crate::app::setup::SetupStep::KeyInput {
                     provider,
                     value,
                     busy,
@@ -241,7 +242,7 @@ fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
                         vec![("⏎", "save"), ("esc", "back")],
                     )
                 }
-                SetupStep::LoginWait {
+                crate::app::setup::SetupStep::LoginWait {
                     provider,
                     method,
                     device_code,
@@ -256,7 +257,7 @@ fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
                         vec![("esc", "cancel")],
                     )
                 }
-                SetupStep::CustomForm {
+                crate::app::setup::SetupStep::CustomForm {
                     form, busy, error, ..
                 } => {
                     let (content, rows_h) =
@@ -285,10 +286,10 @@ fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
         } else {
             return None;
         };
-    // Dialog chrome: border rows (2) + actions row.
+    // tuika::components::Dialog chrome: border rows (2) + actions row.
     let height = (content_h + 3).min(area.height.saturating_sub(2));
     Some(
-        Dialog::new(title, content)
+        tuika::components::Dialog::new(title, content)
             .size(width, height)
             .key_hints(hints)
             .dim_backdrop(true),
@@ -297,13 +298,13 @@ fn modal(app: &App, area: Rect, theme: &Theme) -> Option<Dialog> {
 
 /// The provider overview: configured providers plus the two entry actions.
 fn setup_home(
-    rows: &[CatalogProviderRow],
-    state: &SelectState,
-    theme: &Theme,
+    rows: &[crate::CatalogProviderRow],
+    state: &tuika::components::SelectState,
+    theme: &tuika::style::Theme,
     width: u16,
-) -> (Element, u16) {
-    let overview = overview_rows(rows);
-    let total_rows = overview.len() + HOME_ACTIONS.len();
+) -> (tuika::view::Element, u16) {
+    let overview = crate::app::setup::overview_rows(rows);
+    let total_rows = overview.len() + crate::app::setup::HOME_ACTIONS.len();
     let scrollbar_w = u16::from(total_rows > MAX_MODAL_ROWS);
     let usable = width
         .saturating_sub(SELECT_MARKER_W)
@@ -313,130 +314,142 @@ fn setup_home(
         .iter()
         .map(|row| tuika::width::str_cols(&row.display_name))
         .chain(
-            HOME_ACTIONS
+            crate::app::setup::HOME_ACTIONS
                 .iter()
                 .map(|(label, _)| tuika::width::str_cols(label)),
         )
         .max()
         .unwrap_or(0);
     let name_w = max_name_w.min(usable.saturating_sub(max_suffix_w.saturating_add(2)) / 2);
-    let mut lines: Vec<Line<'static>> = overview
+    let mut lines: Vec<ratatui::text::Line<'static>> = overview
         .iter()
         .map(|row| {
             let name = fit_columns(&row.display_name, name_w);
             let name_pad = name_w.saturating_sub(tuika::width::str_cols(&name));
             let suffix_w = if row.active { 8 } else { 0 };
             let status = fit_columns(
-                &overview_status(row),
+                &crate::app::setup::overview_status(row),
                 usable
                     .saturating_sub(name_w)
                     .saturating_sub(2)
                     .saturating_sub(suffix_w),
             );
             let mut spans = vec![
-                Span::styled(
+                ratatui::text::Span::styled(
                     format!("{name}{:width$}  ", "", width = usize::from(name_pad)),
-                    Style::default().fg(theme.text),
+                    ratatui::style::Style::default().fg(theme.text),
                 ),
-                Span::styled(status, Style::default().fg(theme.accent)),
+                ratatui::text::Span::styled(
+                    status,
+                    ratatui::style::Style::default().fg(theme.accent),
+                ),
             ];
             if row.active {
-                spans.push(Span::styled(
+                spans.push(ratatui::text::Span::styled(
                     "  active",
-                    Style::default()
+                    ratatui::style::Style::default()
                         .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
+                        .add_modifier(ratatui::style::Modifier::BOLD),
                 ));
             }
-            Line::from(spans)
+            ratatui::text::Line::from(spans)
         })
         .collect();
-    for (label, hint) in HOME_ACTIONS {
+    for (label, hint) in crate::app::setup::HOME_ACTIONS {
         let name = fit_columns(label, name_w);
         let name_pad = name_w.saturating_sub(tuika::width::str_cols(&name));
-        lines.push(Line::from(vec![
-            Span::styled(
+        lines.push(ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(
                 format!("{name}{:width$}  ", "", width = usize::from(name_pad)),
-                Style::default().fg(theme.accent_alt),
+                ratatui::style::Style::default().fg(theme.accent_alt),
             ),
-            Span::styled(hint.to_string(), theme.muted_style()),
+            ratatui::text::Span::styled(hint.to_string(), theme.muted_style()),
         ]));
     }
     let total = lines.len();
-    let mut column = Flex::column();
+    let mut column = tuika::components::Flex::column();
     if overview.is_empty() {
         column = column.fixed(
             1,
-            element(Text::new(vec![Line::from(Span::styled(
-                "No providers configured yet.",
-                theme.muted_style(),
-            ))])),
+            tuika::view::element(tuika::components::Text::new(vec![
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    "No providers configured yet.",
+                    theme.muted_style(),
+                )),
+            ])),
         );
     }
-    let list = SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
+    let list = tuika::components::SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
     let empty_h = u16::from(overview.is_empty());
-    column = column.grow(1, element(list));
-    (element(column), total.min(MAX_MODAL_ROWS) as u16 + empty_h)
+    column = column.grow(1, tuika::view::element(list));
+    (
+        tuika::view::element(column),
+        total.min(MAX_MODAL_ROWS) as u16 + empty_h,
+    )
 }
 
 /// The action list for one configured provider.
 fn setup_provider_menu(
-    provider: &CatalogProviderRow,
-    state: &SelectState,
+    provider: &crate::CatalogProviderRow,
+    state: &tuika::components::SelectState,
     busy: bool,
     error: Option<&str>,
-    theme: &Theme,
-) -> (Element, u16) {
-    let options = provider_menu_options(provider);
-    let lines: Vec<Line<'static>> = options
+    theme: &tuika::style::Theme,
+) -> (tuika::view::Element, u16) {
+    let options = crate::app::setup::provider_menu_options(provider);
+    let lines: Vec<ratatui::text::Line<'static>> = options
         .iter()
         .map(|option| {
-            Line::from(vec![
-                Span::styled(
+            ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
                     format!("{}  ", option.label),
-                    Style::default().fg(theme.text),
+                    ratatui::style::Style::default().fg(theme.text),
                 ),
-                Span::styled(option.hint.to_string(), theme.muted_style()),
+                ratatui::text::Span::styled(option.hint.to_string(), theme.muted_style()),
             ])
         })
         .collect();
     let count = lines.len() as u16;
-    let list = SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
-    let mut column = Flex::column()
+    let list = tuika::components::SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
+    let mut column = tuika::components::Flex::column()
         .fixed(
             1,
-            element(Text::new(vec![Line::from(Span::styled(
-                overview_status(provider),
-                theme.muted_style(),
-            ))])),
+            tuika::view::element(tuika::components::Text::new(vec![
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    crate::app::setup::overview_status(provider),
+                    theme.muted_style(),
+                )),
+            ])),
         )
-        .grow(1, element(list));
+        .grow(1, tuika::view::element(list));
     let mut height = count + 1;
     if busy {
         column = column.fixed(
             1,
-            element(Text::new(vec![Line::from(Span::styled(
-                "deleting…",
-                theme.muted_style(),
-            ))])),
+            tuika::view::element(tuika::components::Text::new(vec![
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    "deleting…",
+                    theme.muted_style(),
+                )),
+            ])),
         );
         height += 1;
     } else if let Some(message) = error {
         column = column.fixed(1, modal_error(message, theme));
         height += 1;
     }
-    (element(column), height)
+    (tuika::view::element(column), height)
 }
 
 /// The searchable catalog list.
 fn setup_catalog(
-    rows: &[CatalogProviderRow],
+    rows: &[crate::CatalogProviderRow],
     filter: &str,
-    state: &SelectState,
-    theme: &Theme,
+    state: &tuika::components::SelectState,
+    theme: &tuika::style::Theme,
     width: u16,
-) -> (Element, u16) {
-    let filtered = filtered_catalog(rows, filter);
+) -> (tuika::view::Element, u16) {
+    let filtered = crate::app::setup::filtered_catalog(rows, filter);
     let scrollbar_w = u16::from(filtered.len() > MAX_MODAL_ROWS);
     let usable = width
         .saturating_sub(SELECT_MARKER_W)
@@ -447,25 +460,25 @@ fn setup_catalog(
         .max()
         .unwrap_or(0);
     let name_w = max_name_w.min(usable.saturating_sub(2) / 2);
-    let lines: Vec<Line<'static>> = filtered
+    let lines: Vec<ratatui::text::Line<'static>> = filtered
         .iter()
         .map(|row| {
             let name = fit_columns(&row.display_name, name_w);
             let name_pad = name_w.saturating_sub(tuika::width::str_cols(&name));
             let status = fit_columns(
-                &catalog_status(row),
+                &crate::app::setup::catalog_status(row),
                 usable.saturating_sub(name_w).saturating_sub(2),
             );
             let configured = row.configured;
-            Line::from(vec![
-                Span::styled(
+            ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
                     format!("{name}{:width$}  ", "", width = usize::from(name_pad)),
-                    Style::default().fg(theme.text),
+                    ratatui::style::Style::default().fg(theme.text),
                 ),
-                Span::styled(
+                ratatui::text::Span::styled(
                     status,
                     if configured {
-                        Style::default().fg(theme.accent)
+                        ratatui::style::Style::default().fg(theme.accent)
                     } else {
                         theme.muted_style()
                     },
@@ -474,73 +487,90 @@ fn setup_catalog(
         })
         .collect();
     let count = lines.len();
-    let search = Line::from(vec![
-        Span::styled("Search: ", theme.muted_style()),
-        Span::styled(filter.to_string(), Style::default().fg(theme.text)),
-        Span::styled("▏", Style::default().fg(theme.accent_alt)),
+    let search = ratatui::text::Line::from(vec![
+        ratatui::text::Span::styled("Search: ", theme.muted_style()),
+        ratatui::text::Span::styled(
+            filter.to_string(),
+            ratatui::style::Style::default().fg(theme.text),
+        ),
+        ratatui::text::Span::styled("▏", ratatui::style::Style::default().fg(theme.accent_alt)),
     ]);
-    let mut column = Flex::column().fixed(1, element(Text::new(vec![search])));
+    let mut column = tuika::components::Flex::column().fixed(
+        1,
+        tuika::view::element(tuika::components::Text::new(vec![search])),
+    );
     let mut height = 1;
     if count == 0 {
         column = column.fixed(
             1,
-            element(Text::new(vec![Line::from(Span::styled(
-                "no providers match",
-                theme.muted_style(),
-            ))])),
+            tuika::view::element(tuika::components::Text::new(vec![
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    "no providers match",
+                    theme.muted_style(),
+                )),
+            ])),
         );
         height += 1;
     } else {
-        let list = SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
-        column = column.grow(1, element(list));
+        let list = tuika::components::SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
+        column = column.grow(1, tuika::view::element(list));
         height += count.min(MAX_MODAL_ROWS) as u16;
     }
-    (element(column), height)
+    (tuika::view::element(column), height)
 }
 
 /// OAuth sign-in method options.
-fn setup_oauth_options(state: &SelectState, error: Option<&str>, theme: &Theme) -> (Element, u16) {
-    let options = oauth_options();
-    let lines: Vec<Line<'static>> = options
+fn setup_oauth_options(
+    state: &tuika::components::SelectState,
+    error: Option<&str>,
+    theme: &tuika::style::Theme,
+) -> (tuika::view::Element, u16) {
+    let options = crate::app::setup::oauth_options();
+    let lines: Vec<ratatui::text::Line<'static>> = options
         .iter()
         .map(|option| {
-            Line::from(vec![
-                Span::styled(
+            ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
                     format!("{}  ", option.label),
-                    Style::default().fg(theme.text),
+                    ratatui::style::Style::default().fg(theme.text),
                 ),
-                Span::styled(option.hint.to_string(), theme.muted_style()),
+                ratatui::text::Span::styled(option.hint.to_string(), theme.muted_style()),
             ])
         })
         .collect();
     let count = lines.len() as u16;
-    let list = SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
-    let mut column = Flex::column().grow(1, element(list));
+    let list = tuika::components::SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
+    let mut column = tuika::components::Flex::column().grow(1, tuika::view::element(list));
     let mut height = count;
     if let Some(message) = error {
         column = column.fixed(1, modal_error(message, theme));
         height += 1;
     }
-    (element(column), height)
+    (tuika::view::element(column), height)
 }
 
-fn modal_error(message: &str, theme: &Theme) -> Element {
+fn modal_error(message: &str, theme: &tuika::style::Theme) -> tuika::view::Element {
     // Matches the notice-cell error glyph and color in `cells.rs`.
-    element(Text::new(vec![Line::from(vec![
-        Span::styled("✗ ", Style::default().fg(theme.accent)),
-        Span::styled(message.to_string(), Style::default().fg(theme.text)),
-    ])]))
+    tuika::view::element(tuika::components::Text::new(vec![
+        ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled("✗ ", ratatui::style::Style::default().fg(theme.accent)),
+            ratatui::text::Span::styled(
+                message.to_string(),
+                ratatui::style::Style::default().fg(theme.text),
+            ),
+        ]),
+    ]))
 }
 
 /// Masked API-key entry.
 fn setup_key_input(
-    provider: &CatalogProviderRow,
+    provider: &crate::CatalogProviderRow,
     value: &str,
     busy: bool,
     error: Option<&str>,
-    theme: &Theme,
+    theme: &tuika::style::Theme,
     width: u16,
-) -> (Element, u16) {
+) -> (tuika::view::Element, u16) {
     // The key never renders: a masked run of bullets stands in for it, and
     // overlong keys clip from the left so the caret edge stays visible.
     let masked = "•".repeat(
@@ -549,9 +579,9 @@ fn setup_key_input(
             .count()
             .min(usize::from(width.saturating_sub(4))),
     );
-    let mut lines = vec![Line::from(vec![
-        Span::styled("Paste the API key", theme.muted_style()),
-        Span::styled(
+    let mut lines = vec![ratatui::text::Line::from(vec![
+        ratatui::text::Span::styled("Paste the API key", theme.muted_style()),
+        ratatui::text::Span::styled(
             provider
                 .env_vars
                 .first()
@@ -560,120 +590,154 @@ fn setup_key_input(
             theme.muted_style(),
         ),
     ])];
-    lines.push(Line::from(vec![
-        Span::styled("› ", Style::default().fg(theme.accent_alt)),
-        Span::styled(masked, Style::default().fg(theme.text)),
+    lines.push(ratatui::text::Line::from(vec![
+        ratatui::text::Span::styled("› ", ratatui::style::Style::default().fg(theme.accent_alt)),
+        ratatui::text::Span::styled(masked, ratatui::style::Style::default().fg(theme.text)),
     ]));
     let mut height = 2;
     if let Some(message) = error {
-        lines.push(Line::from(vec![
-            Span::styled("✗ ", Style::default().fg(theme.accent)),
-            Span::styled(message.to_string(), Style::default().fg(theme.text)),
+        lines.push(ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled("✗ ", ratatui::style::Style::default().fg(theme.accent)),
+            ratatui::text::Span::styled(
+                message.to_string(),
+                ratatui::style::Style::default().fg(theme.text),
+            ),
         ]));
         height += 1;
     } else if busy {
-        lines.push(Line::from(Span::styled("saving…", theme.muted_style())));
+        lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+            "saving…",
+            theme.muted_style(),
+        )));
         height += 1;
     }
-    (element(Text::new(lines)), height)
+    (
+        tuika::view::element(tuika::components::Text::new(lines)),
+        height,
+    )
 }
 
 /// The login-wait body: device code once it arrives, spinner otherwise.
 fn setup_login_wait(
-    method: LoginMethod,
+    method: crate::LoginMethod,
     device_code: Option<&(String, String)>,
-    app: &App,
-    theme: &Theme,
-) -> (Element, u16) {
+    app: &crate::app::App,
+    theme: &tuika::style::Theme,
+) -> (tuika::view::Element, u16) {
     match (method, device_code) {
-        (LoginMethod::Device, Some((uri, code))) => {
+        (crate::LoginMethod::Device, Some((uri, code))) => {
             let lines = vec![
-                Line::from(vec![
-                    Span::styled("Open ".to_string(), theme.muted_style()),
-                    Span::styled(uri.clone(), Style::default().fg(theme.text)),
+                ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled("Open ".to_string(), theme.muted_style()),
+                    ratatui::text::Span::styled(
+                        uri.clone(),
+                        ratatui::style::Style::default().fg(theme.text),
+                    ),
                 ]),
-                Line::from(vec![
-                    Span::styled("Enter code ".to_string(), theme.muted_style()),
-                    Span::styled(
+                ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled("Enter code ".to_string(), theme.muted_style()),
+                    ratatui::text::Span::styled(
                         code.clone(),
-                        Style::default()
+                        ratatui::style::Style::default()
                             .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
+                            .add_modifier(ratatui::style::Modifier::BOLD),
                     ),
                 ]),
             ];
-            (element(Text::new(lines)), 2)
+            (tuika::view::element(tuika::components::Text::new(lines)), 2)
         }
         _ => {
             let waiting = match method {
-                LoginMethod::Browser => "waiting for the browser sign-in to finish",
-                LoginMethod::Device => "requesting a device code",
+                crate::LoginMethod::Browser => "waiting for the browser sign-in to finish",
+                crate::LoginMethod::Device => "requesting a device code",
             };
-            let row = view! {
+            let row = tuika::view! {
                 row(gap = 1) {
-                    fixed(1) { node(Spinner::new(app.frame).color(theme.accent)) }
-                    grow(1) { node(Text::new(vec![Line::from(Span::styled(
+                    fixed(1) { node(tuika::components::Spinner::new(app.frame).color(theme.accent)) }
+                    grow(1) { node(tuika::components::Text::new(vec![ratatui::text::Line::from(ratatui::text::Span::styled(
                         waiting.to_string(),
                         theme.muted_style(),
                     ))])) }
                 }
             };
-            (element(Flex::column().fixed(1, row)), 1)
+            (
+                tuika::view::element(tuika::components::Flex::column().fixed(1, row)),
+                1,
+            )
         }
     }
 }
 
 /// The custom-provider form: one row per field, focus marked with `›`.
 fn setup_custom_form(
-    form: &CustomForm,
-    busy: CustomBusy,
+    form: &crate::app::setup::CustomForm,
+    busy: crate::app::setup::CustomBusy,
     error: Option<&str>,
-    theme: &Theme,
+    theme: &tuika::style::Theme,
     width: u16,
-) -> (Element, u16) {
+) -> (tuika::view::Element, u16) {
     let label_w = 10u16;
     let value_w = usize::from(width.saturating_sub(label_w).saturating_sub(4));
     let focused = form.focused();
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for field in CUSTOM_FIELD_ORDER {
+    let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
+    for field in crate::app::setup::CUSTOM_FIELD_ORDER {
         let (label, value, muted_hint): (&str, String, &str) = match field {
-            CustomField::Name => ("name", form.name.clone(), "display name"),
-            CustomField::Id => ("id", form.id.clone(), "slug, a-z 0-9 - _"),
-            CustomField::Api => (
+            crate::app::setup::CustomField::Name => ("name", form.name.clone(), "display name"),
+            crate::app::setup::CustomField::Id => ("id", form.id.clone(), "slug, a-z 0-9 - _"),
+            crate::app::setup::CustomField::Api => (
                 "api",
                 format!(
                     "‹ {} ›",
-                    API_FAMILIES[form.api_index.min(API_FAMILIES.len() - 1)].1
+                    crate::app::setup::API_FAMILIES[form
+                        .api_index
+                        .min(crate::app::setup::API_FAMILIES.len() - 1)]
+                    .1
                 ),
                 "",
             ),
-            CustomField::BaseUrl => ("base URL", form.base_url.clone(), "https://…"),
-            CustomField::ApiKey => (
+            crate::app::setup::CustomField::BaseUrl => {
+                ("base URL", form.base_url.clone(), "https://…")
+            }
+            crate::app::setup::CustomField::ApiKey => (
                 "API key",
                 "•".repeat(form.api_key.chars().count().min(value_w)),
                 "optional for local servers",
             ),
-            CustomField::HeaderName => ("header", form.header_name.clone(), "optional"),
-            CustomField::HeaderValue => ("value", form.header_value.clone(), "optional"),
-            CustomField::Models => ("models", form.models.clone(), "ids, first is default"),
+            crate::app::setup::CustomField::HeaderName => {
+                ("header", form.header_name.clone(), "optional")
+            }
+            crate::app::setup::CustomField::HeaderValue => {
+                ("value", form.header_value.clone(), "optional")
+            }
+            crate::app::setup::CustomField::Models => {
+                ("models", form.models.clone(), "ids, first is default")
+            }
         };
         let is_focused = field == focused;
         let marker = if is_focused { "› " } else { "  " };
         let shown = if value.is_empty() && !is_focused {
-            Span::styled(muted_hint.to_string(), Style::default().fg(theme.dim))
+            ratatui::text::Span::styled(
+                muted_hint.to_string(),
+                ratatui::style::Style::default().fg(theme.dim),
+            )
         } else {
-            Span::styled(
+            ratatui::text::Span::styled(
                 fit_columns_left(&value, value_w as u16),
                 if is_focused {
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+                    ratatui::style::Style::default()
+                        .fg(theme.text)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme.text)
+                    ratatui::style::Style::default().fg(theme.text)
                 },
             )
         };
-        lines.push(Line::from(vec![
-            Span::styled(marker.to_string(), Style::default().fg(theme.accent_alt)),
-            Span::styled(
+        lines.push(ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(
+                marker.to_string(),
+                ratatui::style::Style::default().fg(theme.accent_alt),
+            ),
+            ratatui::text::Span::styled(
                 format!("{label:<width$}", width = usize::from(label_w)),
                 theme.muted_style(),
             ),
@@ -682,34 +746,50 @@ fn setup_custom_form(
     }
     let mut height = lines.len() as u16;
     match busy {
-        CustomBusy::Upserting => {
-            lines.push(Line::from(Span::styled(
+        crate::app::setup::CustomBusy::Upserting => {
+            lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
                 "saving provider…",
                 theme.muted_style(),
             )));
             height += 1;
         }
-        CustomBusy::SavingKey => {
-            lines.push(Line::from(Span::styled("saving key…", theme.muted_style())));
+        crate::app::setup::CustomBusy::SavingKey => {
+            lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+                "saving key…",
+                theme.muted_style(),
+            )));
             height += 1;
         }
-        CustomBusy::Idle => {
+        crate::app::setup::CustomBusy::Idle => {
             if let Some(message) = error {
-                lines.push(Line::from(vec![
-                    Span::styled("✗ ", Style::default().fg(theme.accent)),
-                    Span::styled(message.to_string(), Style::default().fg(theme.text)),
+                lines.push(ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(
+                        "✗ ",
+                        ratatui::style::Style::default().fg(theme.accent),
+                    ),
+                    ratatui::text::Span::styled(
+                        message.to_string(),
+                        ratatui::style::Style::default().fg(theme.text),
+                    ),
                 ]));
                 height += 1;
             }
         }
     }
-    (element(Text::new(lines)), height)
+    (
+        tuika::view::element(tuika::components::Text::new(lines)),
+        height,
+    )
 }
 
 /// The `/models` picker inside the modal frame. Auth problems and the active
 /// selection are annotated per row; the width columns align on the longest
 /// display name.
-fn model_picker(picker: &crate::app::ModelPicker, theme: &Theme, width: u16) -> (Element, u16) {
+fn model_picker(
+    picker: &crate::app::ModelPicker,
+    theme: &tuika::style::Theme,
+    width: u16,
+) -> (tuika::view::Element, u16) {
     let scrollbar_w = u16::from(picker.rows.len() > MAX_MODAL_ROWS);
     let content_w = width
         .saturating_sub(SELECT_MARKER_W)
@@ -727,9 +807,9 @@ fn model_picker(picker: &crate::app::ModelPicker, theme: &Theme, width: u16) -> 
         .max()
         .unwrap_or(0);
     // Keep both existing columns visible on a narrow terminal. Each remains a
-    // single SelectList row; overlong fields are clipped with an ellipsis.
+    // single tuika::components::SelectList row; overlong fields are clipped with an ellipsis.
     let name_w = max_name_w.min(content_w.saturating_sub(max_suffix_w.saturating_add(2)) / 2);
-    let rows: Vec<Line<'static>> = picker
+    let rows: Vec<ratatui::text::Line<'static>> = picker
         .rows
         .iter()
         .map(|row| {
@@ -744,29 +824,33 @@ fn model_picker(picker: &crate::app::ModelPicker, theme: &Theme, width: u16) -> 
             let coordinate =
                 fit_columns(&format!("{}/{}", row.provider_id, row.model), coordinate_w);
             let mut spans = vec![
-                Span::styled(
+                ratatui::text::Span::styled(
                     format!("{name}{:width$}  ", "", width = usize::from(name_pad)),
-                    Style::default().fg(theme.text),
+                    ratatui::style::Style::default().fg(theme.text),
                 ),
-                Span::styled(coordinate, theme.muted_style()),
+                ratatui::text::Span::styled(coordinate, theme.muted_style()),
             ];
             if row.active {
-                spans.push(Span::styled(
+                spans.push(ratatui::text::Span::styled(
                     "  active",
-                    Style::default()
+                    ratatui::style::Style::default()
                         .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
+                        .add_modifier(ratatui::style::Modifier::BOLD),
                 ));
             }
             if row.auth_status == "missing" {
-                spans.push(Span::styled("  needs login", theme.muted_style()));
+                spans.push(ratatui::text::Span::styled(
+                    "  needs login",
+                    theme.muted_style(),
+                ));
             }
-            Line::from(spans)
+            ratatui::text::Line::from(spans)
         })
         .collect();
     let count = rows.len();
-    let list = SelectList::new(rows, &picker.state).viewport(MAX_MODAL_ROWS as u16);
-    (element(list), count.min(MAX_MODAL_ROWS) as u16)
+    let list =
+        tuika::components::SelectList::new(rows, &picker.state).viewport(MAX_MODAL_ROWS as u16);
+    (tuika::view::element(list), count.min(MAX_MODAL_ROWS) as u16)
 }
 
 fn model_row_suffix(row: &crate::ModelRow) -> String {
@@ -826,23 +910,26 @@ fn fit_columns_left(text: &str, max_cols: u16) -> String {
 }
 
 /// The rounded input box, with the caret placed by the host through `probe`.
-fn composer(app: &App, theme: &Theme, probe: &RectProbe) -> Element {
-    let input = element(
-        TextInput::new(&app.composer)
-            .style(Style::default().fg(theme.text))
+fn composer(
+    app: &crate::app::App,
+    theme: &tuika::style::Theme,
+    probe: &tuika::probe::RectProbe,
+) -> tuika::view::Element {
+    let input = tuika::view::element(
+        tuika::components::TextInput::new(&app.composer)
+            .style(ratatui::style::Style::default().fg(theme.text))
             .placeholder(
                 "Describe a task, or / for commands",
-                Style::default().fg(theme.dim),
+                ratatui::style::Style::default().fg(theme.dim),
             )
             .highlights(app.composer_highlights(theme)),
     );
-    let prompt = Text::new(vec![Line::from(Span::styled(
-        "› ",
-        Style::default().fg(theme.accent_alt),
-    ))]);
-    view! {
-        boxed(border = BorderStyle::Rounded, border_color = theme.border,
-              padding = Padding::symmetric(1, 0)) {
+    let prompt = tuika::components::Text::new(vec![ratatui::text::Line::from(
+        ratatui::text::Span::styled("› ", ratatui::style::Style::default().fg(theme.accent_alt)),
+    )]);
+    tuika::view! {
+        boxed(border = tuika::style::BorderStyle::Rounded, border_color = theme.border,
+              padding = tuika::geometry::Padding::symmetric(1, 0)) {
             row {
                 fixed(2) { node(prompt) }
                 grow(1) { node(probe.wrap(input)) }
@@ -852,7 +939,7 @@ fn composer(app: &App, theme: &Theme, probe: &RectProbe) -> Element {
 }
 
 /// Key hints on the left; connection, thread, and turn state on the right.
-fn footer(app: &App, theme: &Theme) -> Element {
+fn footer(app: &crate::app::App, theme: &tuika::style::Theme) -> tuika::view::Element {
     let hints = if app.setup_visible() || app.picker.is_some() {
         // The modal window shows its own key hints.
         "".to_string()
@@ -866,16 +953,23 @@ fn footer(app: &App, theme: &Theme) -> Element {
         "  ⏎ send   ⇧⏎ newline   PgUp scroll   ⌃C quit".to_string()
     };
     let hint_style = if app.needs_provider && !app.setup_visible() && app.popup.is_none() {
-        Style::default().fg(theme.accent)
+        ratatui::style::Style::default().fg(theme.accent)
     } else {
         theme.muted_style()
     };
     // Kept short enough to fit beside the hints on an 80-column terminal: a
-    // StatusBar drops an overflowing right group outright. Connection, model,
+    // tuika::components::StatusBar drops an overflowing right group outright. Connection, model,
     // and thread name live in the banner and `/status`.
-    let status = format!("{} · {}  ", short_id(&app.meta.thread_id), app.turn_state);
-    let bar = StatusBar::new()
-        .left(vec![Span::styled(hints, hint_style)])
-        .right(vec![Span::styled(status, Style::default().fg(theme.dim))]);
-    element(bar)
+    let status = format!(
+        "{} · {}  ",
+        crate::cells::short_id(&app.meta.thread_id),
+        app.turn_state
+    );
+    let bar = tuika::components::StatusBar::new()
+        .left(vec![ratatui::text::Span::styled(hints, hint_style)])
+        .right(vec![ratatui::text::Span::styled(
+            status,
+            ratatui::style::Style::default().fg(theme.dim),
+        )]);
+    tuika::view::element(bar)
 }

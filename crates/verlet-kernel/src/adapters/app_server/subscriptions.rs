@@ -2,25 +2,25 @@ const INITIAL_THREAD_STATUS_WAIT_TIMEOUT: std::time::Duration = std::time::Durat
 const FAILED_THREAD_EVENT_GRACE: std::time::Duration = std::time::Duration::from_millis(20);
 
 #[derive(Default)]
-pub(super) struct AppServerSubscriptions {
-    pub(super) next_subscriber_id: u64,
-    pub(super) next_watcher_id: u64,
-    pub(super) subscribers:
+pub(crate) struct AppServerSubscriptions {
+    pub(crate) next_subscriber_id: u64,
+    pub(crate) next_watcher_id: u64,
+    pub(crate) subscribers:
         std::collections::HashMap<String, std::collections::BTreeMap<u64, AppServerSubscriber>>,
-    pub(super) watchers: std::collections::HashMap<String, AppServerThreadWatcher>,
+    pub(crate) watchers: std::collections::HashMap<String, AppServerThreadWatcher>,
 }
 
 #[derive(Clone)]
-pub(super) struct AppServerSubscriber {
-    pub(super) outbound:
+pub(crate) struct AppServerSubscriber {
+    pub(crate) outbound:
         tokio::sync::mpsc::UnboundedSender<crate::adapters::app_server::connection::JsonRpcMessage>,
-    pub(super) opt_out_notifications:
+    pub(crate) opt_out_notifications:
         std::sync::Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
-pub(super) struct AppServerThreadWatcher {
-    pub(super) id: u64,
-    pub(super) cancellation: tokio_util::sync::CancellationToken,
+pub(crate) struct AppServerThreadWatcher {
+    pub(crate) id: u64,
+    pub(crate) cancellation: tokio_util::sync::CancellationToken,
 }
 
 enum ResyncedTurnItem {
@@ -46,24 +46,24 @@ struct ResyncedTurnFacts {
 
 #[cfg(test)]
 #[derive(Clone)]
-pub(super) struct ThreadResyncTestGate {
+pub(crate) struct ThreadResyncTestGate {
     entered: std::sync::Arc<tokio::sync::Notify>,
     release: std::sync::Arc<tokio::sync::Notify>,
 }
 
 #[cfg(test)]
 impl ThreadResyncTestGate {
-    pub(super) async fn wait_until_entered(&self) {
+    pub(crate) async fn wait_until_entered(&self) {
         self.entered.notified().await;
     }
 
-    pub(super) fn release(&self) {
+    pub(crate) fn release(&self) {
         self.release.notify_one();
     }
 }
 
 #[cfg(test)]
-pub(super) fn install_thread_resync_test_gate(thread_id: &str) -> ThreadResyncTestGate {
+pub(crate) fn install_thread_resync_test_gate(thread_id: &str) -> ThreadResyncTestGate {
     let gate = ThreadResyncTestGate {
         entered: std::sync::Arc::new(tokio::sync::Notify::new()),
         release: std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -103,7 +103,7 @@ async fn pause_thread_resync_for_test(thread_id: &str) {
 }
 
 impl crate::adapters::app_server::VerletAppServer {
-    pub(super) async fn subscribe_thread_connection(
+    pub(crate) async fn subscribe_thread_connection(
         &self,
         handle: crate::kernel::runtime_host::RuntimeThreadHandle,
         subscriber: AppServerSubscriber,
@@ -147,7 +147,7 @@ impl crate::adapters::app_server::VerletAppServer {
         subscriber_id
     }
 
-    pub(super) async fn unsubscribe_thread_connection(&self, thread_id: &str, subscriber_id: u64) {
+    pub(crate) async fn unsubscribe_thread_connection(&self, thread_id: &str, subscriber_id: u64) {
         let thread_has_active_turn = self.thread_has_active_turn(thread_id).await;
         let watcher = {
             let mut subscriptions = self.inner.subscriptions.lock().await;
@@ -175,7 +175,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }
     }
 
-    pub(super) async fn finish_thread_watcher(&self, thread_id: &str, watcher_id: u64) {
+    pub(crate) async fn finish_thread_watcher(&self, thread_id: &str, watcher_id: u64) {
         let mut subscriptions = self.inner.subscriptions.lock().await;
         if subscriptions
             .watchers
@@ -186,7 +186,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }
     }
 
-    pub(super) async fn thread_has_active_turn(&self, thread_id: &str) -> bool {
+    pub(crate) async fn thread_has_active_turn(&self, thread_id: &str) -> bool {
         let state = self.inner.state.read().await;
         state
             .threads
@@ -194,7 +194,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .is_some_and(|thread| thread.active_turn_id.is_some())
     }
 
-    pub(super) async fn abort_thread_watcher_if_idle_and_unsubscribed(&self, thread_id: &str) {
+    pub(crate) async fn abort_thread_watcher_if_idle_and_unsubscribed(&self, thread_id: &str) {
         if self.thread_has_active_turn(thread_id).await {
             return;
         }
@@ -215,7 +215,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }
     }
 
-    pub(super) async fn notify_thread_subscribers(
+    pub(crate) async fn notify_thread_subscribers(
         &self,
         thread_id: &str,
         method: &str,
@@ -236,7 +236,7 @@ impl crate::adapters::app_server::VerletAppServer {
 }
 
 impl AppServerSubscriber {
-    pub(super) async fn notify(&self, method: &str, params: serde_json::Value) {
+    pub(crate) async fn notify(&self, method: &str, params: serde_json::Value) {
         if self.opt_out_notifications.read().await.contains(method) {
             return;
         }
@@ -251,7 +251,7 @@ impl AppServerSubscriber {
     }
 }
 
-pub(super) async fn watch_thread(
+pub(crate) async fn watch_thread(
     app: crate::adapters::app_server::VerletAppServer,
     handle: crate::kernel::runtime_host::RuntimeThreadHandle,
     cancellation: tokio_util::sync::CancellationToken,
@@ -408,7 +408,7 @@ pub(super) async fn watch_thread(
     }
 }
 
-pub(super) async fn resynchronize_thread_after_lag(
+pub(crate) async fn resynchronize_thread_after_lag(
     app: &crate::adapters::app_server::VerletAppServer,
     handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
     thread_id: &str,
@@ -823,7 +823,7 @@ fn apply_resynced_turn_projection(
     turn.thinking_completed = false;
 }
 
-pub(super) async fn wait_for_initial_thread_status(
+pub(crate) async fn wait_for_initial_thread_status(
     handle: &crate::kernel::runtime_host::RuntimeThreadHandle,
 ) {
     if handle.status() != verlet_runtime_contracts::ThreadStatus::Starting {
@@ -843,7 +843,7 @@ pub(super) async fn wait_for_initial_thread_status(
     .await;
 }
 
-pub(super) async fn handle_thread_status(
+pub(crate) async fn handle_thread_status(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     status: verlet_runtime_contracts::ThreadStatus,
@@ -910,7 +910,7 @@ pub(super) async fn handle_thread_status(
 
 /// Lets queued runtime failure events provide their code and message before a
 /// failed thread status falls back to a generic failed-turn projection.
-pub(super) async fn handle_failed_thread_status(
+pub(crate) async fn handle_failed_thread_status(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     events: &mut tokio::sync::broadcast::Receiver<
@@ -935,7 +935,7 @@ pub(super) async fn handle_failed_thread_status(
     .await;
 }
 
-pub(super) async fn complete_turn_after_settle(
+pub(crate) async fn complete_turn_after_settle(
     app: crate::adapters::app_server::VerletAppServer,
     thread_id: String,
     turn_id: String,
@@ -1057,9 +1057,9 @@ pub(super) async fn complete_turn_after_settle(
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct AssistantContentProjection {
-    pub(super) text: String,
-    pub(super) thinking: String,
+pub(crate) struct AssistantContentProjection {
+    pub(crate) text: String,
+    pub(crate) thinking: String,
 }
 
 impl AssistantContentProjection {
@@ -1068,7 +1068,7 @@ impl AssistantContentProjection {
     }
 }
 
-pub(super) async fn wait_for_current_turn_assistant_content(
+pub(crate) async fn wait_for_current_turn_assistant_content(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     turn_id: &str,
@@ -1085,7 +1085,7 @@ pub(super) async fn wait_for_current_turn_assistant_content(
     None
 }
 
-pub(super) async fn turn_is_active(
+pub(crate) async fn turn_is_active(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     turn_id: &str,
@@ -1099,7 +1099,7 @@ pub(super) async fn turn_is_active(
 
 /// Reconciles completion payloads from saved session text after fast runtime
 /// turns, because status notifications can outrun queued text notifications.
-pub(super) fn reconcile_turn_assistant_text(
+pub(crate) fn reconcile_turn_assistant_text(
     turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
     text: &str,
 ) -> Option<(Option<serde_json::Value>, String, String)> {
@@ -1147,7 +1147,7 @@ pub(super) fn reconcile_turn_assistant_text(
     Some((None, delta.to_string(), item_id))
 }
 
-pub(super) fn reconcile_turn_thinking_text(
+pub(crate) fn reconcile_turn_thinking_text(
     turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
     text: &str,
 ) -> Option<(Option<serde_json::Value>, String, String)> {
@@ -1195,7 +1195,7 @@ pub(super) fn reconcile_turn_thinking_text(
     Some((None, delta.to_string(), item_id))
 }
 
-pub(super) fn upsert_agent_message_item(
+pub(crate) fn upsert_agent_message_item(
     turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
 ) {
     let item_id = turn.assistant_item_id.clone();
@@ -1211,7 +1211,7 @@ pub(super) fn upsert_agent_message_item(
     }
 }
 
-pub(super) fn upsert_agent_thinking_item(
+pub(crate) fn upsert_agent_thinking_item(
     turn: &mut crate::adapters::app_server::threads::AppServerTurnState,
 ) {
     let item_id = turn.thinking_item_id.clone();
@@ -1227,7 +1227,7 @@ pub(super) fn upsert_agent_thinking_item(
     }
 }
 
-pub(super) async fn current_turn_assistant_content(
+pub(crate) async fn current_turn_assistant_content(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     turn_id: &str,
@@ -1251,7 +1251,7 @@ pub(super) async fn current_turn_assistant_content(
     assistant_content_after_latest_user(&context.messages, &user_text)
 }
 
-pub(super) fn turn_user_text(
+pub(crate) fn turn_user_text(
     turn: &crate::adapters::app_server::threads::AppServerTurnState,
 ) -> Option<String> {
     turn.items
@@ -1262,7 +1262,7 @@ pub(super) fn turn_user_text(
         .filter(|text| !text.is_empty())
 }
 
-pub(super) fn assistant_content_after_latest_user(
+pub(crate) fn assistant_content_after_latest_user(
     messages: &[verlet_history::CanonicalMessage],
     user_text: &str,
 ) -> Option<AssistantContentProjection> {
@@ -1296,7 +1296,7 @@ pub(super) fn assistant_content_after_latest_user(
 }
 
 #[cfg(test)]
-pub(super) async fn latest_assistant_text(
+pub(crate) async fn latest_assistant_text(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
 ) -> Option<String> {
@@ -1322,7 +1322,7 @@ pub(super) async fn latest_assistant_text(
         })
 }
 
-pub(super) async fn complete_shell_command(
+pub(crate) async fn complete_shell_command(
     connection: crate::adapters::app_server::connection::ConnectionState,
     thread_id: String,
     turn_id: String,
@@ -1398,7 +1398,7 @@ pub(super) async fn complete_shell_command(
         .await;
 }
 
-pub(super) async fn run_shell_command(
+pub(crate) async fn run_shell_command(
     cwd: std::path::PathBuf,
     command: String,
 ) -> (i32, String, String) {
@@ -1419,7 +1419,7 @@ pub(super) async fn run_shell_command(
     }
 }
 
-pub(super) async fn handle_thread_event(
+pub(crate) async fn handle_thread_event(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     event: crate::kernel::runtime_host::runtime_api::ThreadEvent,
@@ -1442,7 +1442,7 @@ pub(super) async fn handle_thread_event(
     }
 }
 
-pub(super) async fn handle_runtime_event(
+pub(crate) async fn handle_runtime_event(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     event: crate::kernel::runtime_host::runtime_events::RuntimeEventKind,
@@ -1579,7 +1579,7 @@ pub(super) async fn handle_runtime_event(
     }
 }
 
-pub(super) async fn append_agent_delta(
+pub(crate) async fn append_agent_delta(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     delta: &str,
@@ -1639,7 +1639,7 @@ pub(super) async fn append_agent_delta(
     .await;
 }
 
-pub(super) async fn append_agent_thinking_delta(
+pub(crate) async fn append_agent_thinking_delta(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     delta: &str,
@@ -1699,7 +1699,7 @@ pub(super) async fn append_agent_thinking_delta(
     .await;
 }
 
-pub(super) async fn complete_dynamic_tool(
+pub(crate) async fn complete_dynamic_tool(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     call_id: &str,
@@ -1726,7 +1726,7 @@ pub(super) async fn complete_dynamic_tool(
     None
 }
 
-pub(super) async fn interrupt_active_turn(
+pub(crate) async fn interrupt_active_turn(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     reason: String,
@@ -1773,7 +1773,7 @@ pub(super) async fn interrupt_active_turn(
     }
 }
 
-pub(super) async fn fail_active_turn(
+pub(crate) async fn fail_active_turn(
     app: &crate::adapters::app_server::VerletAppServer,
     thread_id: &str,
     code: impl Into<String>,

@@ -4,7 +4,7 @@ use std::io::Read as _;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn run_daemon(
+pub(crate) async fn run_daemon(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -27,7 +27,7 @@ pub(super) async fn run_daemon(
     }
 }
 
-pub(super) async fn daemon_run(
+pub(crate) async fn daemon_run(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_daemon_run_args(args)?;
@@ -56,7 +56,7 @@ pub(super) async fn daemon_run(
     server.serve(listen).await
 }
 
-pub(super) fn daemon_app_server_config_from_loaded(
+pub(crate) fn daemon_app_server_config_from_loaded(
     loaded: &crate::daemon::daemon_config::LoadedVerletDaemonConfig,
 ) -> crate::kernel::runtime_host::VerletResult<crate::adapters::app_server::VerletAppServerConfig> {
     loaded.config.validate()?;
@@ -102,7 +102,7 @@ pub(super) fn daemon_app_server_config_from_loaded(
     Ok(config)
 }
 
-pub(super) fn daemon_app_server_registry_root(
+pub(crate) fn daemon_app_server_registry_root(
     path: std::path::PathBuf,
 ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     if path.is_absolute() {
@@ -116,7 +116,7 @@ pub(super) fn daemon_app_server_registry_root(
         .join(path))
 }
 
-pub(super) async fn start_daemon_io(
+pub(crate) async fn start_daemon_io(
     io: &crate::daemon::daemon_config::VerletIoConfig,
     sync: &crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig,
     daemon_config_path: Option<std::path::PathBuf>,
@@ -169,7 +169,7 @@ pub(super) async fn start_daemon_io(
     Ok(tasks)
 }
 
-pub(super) async fn start_daemon_sync(
+pub(crate) async fn start_daemon_sync(
     config: &crate::daemon::remote_store::endpoint::VerletDaemonSyncConfig,
     daemon_config_path: Option<std::path::PathBuf>,
     app_server: &crate::adapters::app_server::VerletAppServer,
@@ -238,7 +238,7 @@ pub(super) async fn start_daemon_sync(
     Ok(())
 }
 
-pub(super) async fn remote_child_run() -> crate::kernel::runtime_host::VerletResult<()> {
+pub(crate) async fn remote_child_run() -> crate::kernel::runtime_host::VerletResult<()> {
     let mut encoded = Vec::new();
     std::io::stdin()
         .read_to_end(&mut encoded)
@@ -265,7 +265,7 @@ pub(super) async fn remote_child_run() -> crate::kernel::runtime_host::VerletRes
 /// Starts the push-first settlement lane independently of external route
 /// policy. Handle outcomes always require the durable queue even when an
 /// operator has explicitly made a protocol route best-effort direct.
-pub(super) async fn start_thread_handle_ingress(
+pub(crate) async fn start_thread_handle_ingress(
     ingress: &crate::daemon::daemon_config::VerletIngressConfig,
     server: &crate::adapters::app_server::VerletAppServer,
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
@@ -307,7 +307,7 @@ pub(super) async fn start_thread_handle_ingress(
     Ok(())
 }
 
-pub(super) async fn route_sink_for_ingress(
+pub(crate) async fn route_sink_for_ingress(
     route: &crate::daemon::daemon_config::VerletIoRouteConfig,
     ingress: &crate::daemon::daemon_config::VerletIngressConfig,
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
@@ -350,7 +350,7 @@ pub(super) async fn route_sink_for_ingress(
     ))
 }
 
-pub(super) async fn start_clock_route(
+pub(crate) async fn start_clock_route(
     route: &crate::daemon::daemon_config::VerletIoRouteConfig,
     sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
     server: &crate::adapters::app_server::VerletAppServer,
@@ -374,7 +374,7 @@ pub(super) async fn start_clock_route(
     Ok(())
 }
 
-pub(super) async fn start_telegram_route(
+pub(crate) async fn start_telegram_route(
     route: &crate::daemon::daemon_config::VerletIoRouteConfig,
     sink: std::sync::Arc<dyn verlet_io_core::IngressSink>,
     bridge: &crate::daemon::daemon_io::VerletDaemonIoBridge,
@@ -448,7 +448,7 @@ pub(super) async fn start_telegram_route(
     Ok(())
 }
 
-pub(super) async fn daemon_config(
+pub(crate) async fn daemon_config(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty() {
@@ -484,7 +484,7 @@ pub(super) async fn daemon_config(
     }
 }
 
-pub(super) async fn daemon_service(
+pub(crate) async fn daemon_service(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty() {
@@ -537,7 +537,7 @@ pub(super) async fn daemon_service(
     }
 }
 
-pub(super) fn daemon_service_spec_from_args(
+pub(crate) fn daemon_service_spec_from_args(
     options: &DaemonServicePrintArgs,
 ) -> crate::kernel::runtime_host::VerletResult<crate::daemon::daemon_config::VerletDaemonServiceSpec>
 {
@@ -554,17 +554,17 @@ pub(super) fn daemon_service_spec_from_args(
 }
 
 #[derive(Debug)]
-pub(super) struct DaemonRunArgs {
+pub(crate) struct DaemonRunArgs {
     config_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
-pub(super) struct DaemonConfigValidateArgs {
+pub(crate) struct DaemonConfigValidateArgs {
     config_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
-pub(super) struct DaemonServicePrintArgs {
+pub(crate) struct DaemonServicePrintArgs {
     target: crate::daemon::daemon_config::VerletDaemonServiceTarget,
     config_path: std::path::PathBuf,
     executable: std::path::PathBuf,
@@ -573,12 +573,12 @@ pub(super) struct DaemonServicePrintArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct DaemonServiceUninstallArgs {
+pub(crate) struct DaemonServiceUninstallArgs {
     target: crate::daemon::daemon_config::VerletDaemonServiceTarget,
     label: String,
 }
 
-pub(super) fn parse_daemon_run_args(
+pub(crate) fn parse_daemon_run_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<DaemonRunArgs> {
     let mut config_path = None;
@@ -600,7 +600,7 @@ pub(super) fn parse_daemon_run_args(
     Ok(DaemonRunArgs { config_path })
 }
 
-pub(super) fn parse_daemon_config_validate_args(
+pub(crate) fn parse_daemon_config_validate_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<DaemonConfigValidateArgs> {
     let mut config_path = None;
@@ -622,7 +622,7 @@ pub(super) fn parse_daemon_config_validate_args(
     Ok(DaemonConfigValidateArgs { config_path })
 }
 
-pub(super) fn parse_daemon_service_print_args(
+pub(crate) fn parse_daemon_service_print_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<DaemonServicePrintArgs> {
     let mut target = default_daemon_service_target();
@@ -686,7 +686,7 @@ pub(super) fn parse_daemon_service_print_args(
     })
 }
 
-pub(super) fn parse_daemon_service_uninstall_args(
+pub(crate) fn parse_daemon_service_uninstall_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<DaemonServiceUninstallArgs> {
     let mut target = default_daemon_service_target();
@@ -722,7 +722,7 @@ fn parse_daemon_service_target(
     })
 }
 
-pub(super) fn default_daemon_service_target()
+pub(crate) fn default_daemon_service_target()
 -> crate::daemon::daemon_config::VerletDaemonServiceTarget {
     if cfg!(target_os = "macos") {
         crate::daemon::daemon_config::VerletDaemonServiceTarget::Launchd
@@ -731,7 +731,7 @@ pub(super) fn default_daemon_service_target()
     }
 }
 
-pub(super) fn load_daemon_provider_config(
+pub(crate) fn load_daemon_provider_config(
     config: &crate::daemon::daemon_config::VerletProviderConfig,
 ) -> crate::kernel::runtime_host::VerletResult<crate::cli::console::ChatProviderConfig> {
     match config.provider_name() {
@@ -1119,7 +1119,7 @@ pub(super) fn load_daemon_provider_config(
     }
 }
 
-pub(super) fn provider_is_openai_compatible(provider: &str) -> bool {
+pub(crate) fn provider_is_openai_compatible(provider: &str) -> bool {
     matches!(
         provider,
         "openai_compatible"
@@ -1129,7 +1129,7 @@ pub(super) fn provider_is_openai_compatible(provider: &str) -> bool {
     )
 }
 
-pub(super) fn chat_completions_provider_name(provider: &str) -> String {
+pub(crate) fn chat_completions_provider_name(provider: &str) -> String {
     if provider_is_openai_compatible(provider) {
         crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER.to_string()
     } else {
@@ -1137,7 +1137,7 @@ pub(super) fn chat_completions_provider_name(provider: &str) -> String {
     }
 }
 
-pub(super) fn provider_default_headers(provider: &str) -> Vec<(String, String)> {
+pub(crate) fn provider_default_headers(provider: &str) -> Vec<(String, String)> {
     if provider_is_openai_compatible(provider) {
         vec![("X-Example-Provider".to_string(), "required".to_string())]
     } else {
@@ -1145,7 +1145,7 @@ pub(super) fn provider_default_headers(provider: &str) -> Vec<(String, String)> 
     }
 }
 
-pub(super) fn print_daemon_help() {
+pub(crate) fn print_daemon_help() {
     println!(
         "verlet daemon\n\
 \n\

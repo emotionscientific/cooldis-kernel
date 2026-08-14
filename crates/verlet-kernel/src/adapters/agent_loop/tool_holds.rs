@@ -16,7 +16,7 @@
 /// `Exclusive` admits nothing else on that key for the call's duration.
 #[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum ToolHoldAccess {
+pub(crate) enum ToolHoldAccess {
     Shared,
     Exclusive,
 }
@@ -25,7 +25,7 @@ pub(super) enum ToolHoldAccess {
 /// of the durable tool-call request payload; fields are additive-only.
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(super) enum ToolHoldKey {
+pub(crate) enum ToolHoldKey {
     /// The thread's shell/process substrate: one `BashkitExecutionHarness`
     /// and process table per thread, so all writers serialize.
     ShellSession,
@@ -40,9 +40,9 @@ pub(super) enum ToolHoldKey {
 
 /// One witnessed hold: a key and the access taken on it.
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(super) struct ToolHold {
-    pub(super) key: ToolHoldKey,
-    pub(super) access: ToolHoldAccess,
+pub(crate) struct ToolHold {
+    pub(crate) key: ToolHoldKey,
+    pub(crate) access: ToolHoldAccess,
 }
 
 impl ToolHold {
@@ -83,7 +83,7 @@ impl ToolHold {
 /// global key, so the exclusive-global fail-safe is a true barrier: an
 /// invocation with underivable holds overlaps nothing, not merely no other
 /// global holder.
-pub(super) fn derive_tool_holds(tool_name: &str, arguments: &serde_json::Value) -> Vec<ToolHold> {
+pub(crate) fn derive_tool_holds(tool_name: &str, arguments: &serde_json::Value) -> Vec<ToolHold> {
     const SHELL_SESSION_TOOLS: [&str; 6] = [
         "bash",
         "process_exec",
@@ -150,7 +150,7 @@ fn with_global_floor(mut holds: Vec<ToolHold>) -> Vec<ToolHold> {
 /// Whether two hold sets conflict: some key is held exclusively by one side
 /// while held at all by the other. Conflicting calls serialize in call
 /// order; non-conflicting calls may overlap.
-pub(super) fn holds_conflict(a: &[ToolHold], b: &[ToolHold]) -> bool {
+pub(crate) fn holds_conflict(a: &[ToolHold], b: &[ToolHold]) -> bool {
     a.iter().any(|left| {
         b.iter().any(|right| {
             left.key == right.key
@@ -167,7 +167,7 @@ pub(super) fn holds_conflict(a: &[ToolHold], b: &[ToolHold]) -> bool {
 /// order with finish order witnessed, per-call failure isolation (a failed
 /// call never cancels siblings), turn cancellation cancels all in-flight
 /// calls, and one batch counts as one round.
-pub(super) fn batch_wait_edges(holds: &[Vec<ToolHold>]) -> Vec<Vec<usize>> {
+pub(crate) fn batch_wait_edges(holds: &[Vec<ToolHold>]) -> Vec<Vec<usize>> {
     holds
         .iter()
         .enumerate()
@@ -187,7 +187,7 @@ pub(super) fn batch_wait_edges(holds: &[Vec<ToolHold>]) -> Vec<Vec<usize>> {
 /// order witnessed, isolates per-call failures (a failed call never cancels
 /// siblings), propagates turn cancellation to every in-flight call, and
 /// counts the whole batch as one router round.
-pub(super) fn plan_tool_call_batch(
+pub(crate) fn plan_tool_call_batch(
     tool_calls: &[crate::adapters::agent_loop::ProviderToolCall],
 ) -> Vec<Vec<usize>> {
     let holds = tool_calls

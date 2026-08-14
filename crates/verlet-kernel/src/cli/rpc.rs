@@ -1,6 +1,6 @@
 //! The `rpc` subcommand family.
 
-pub(super) async fn run_rpc(
+pub(crate) async fn run_rpc(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -42,14 +42,14 @@ pub(super) async fn run_rpc(
 }
 
 #[derive(Debug)]
-pub(super) struct RpcArgs {
+pub(crate) struct RpcArgs {
     listen: crate::adapters::app_server::AppServerListenAddr,
     runtime_home: Option<std::path::PathBuf>,
     state_home: Option<std::path::PathBuf>,
     cwd: Option<std::path::PathBuf>,
 }
 
-pub(super) fn parse_rpc_args(
+pub(crate) fn parse_rpc_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<RpcArgs> {
     let mut listen = None;
@@ -98,7 +98,7 @@ pub(super) fn parse_rpc_args(
     })
 }
 
-pub(super) fn print_rpc_help() {
+pub(crate) fn print_rpc_help() {
     println!(
         "verlet rpc\n\
 \n\

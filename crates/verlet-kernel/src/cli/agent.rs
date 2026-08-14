@@ -3,7 +3,7 @@
 use chrono::TimeZone as _;
 use std::io::Write as _;
 
-pub(super) async fn run_agent(
+pub(crate) async fn run_agent(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -30,7 +30,7 @@ pub(super) async fn run_agent(
     }
 }
 
-pub(super) async fn agent_init(
+pub(crate) async fn agent_init(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_agent_init_args(args)?;
@@ -54,7 +54,7 @@ pub(super) async fn agent_init(
     Ok(())
 }
 
-pub(super) async fn agent_plan(
+pub(crate) async fn agent_plan(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_agent_manifest_args(args, "agent plan")?;
@@ -125,7 +125,7 @@ pub(super) async fn agent_plan(
     Ok(())
 }
 
-pub(super) async fn agent_publish(
+pub(crate) async fn agent_publish(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_agent_manifest_args(args, "agent publish")?;
@@ -183,24 +183,24 @@ pub(super) async fn agent_publish(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ManifestOperationRef {
+pub(crate) struct ManifestOperationRef {
     tool_id: String,
     reference: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct OperationRefResolution {
+pub(crate) struct OperationRefResolution {
     declared: String,
     resolved: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct UnpinnedOperationRef {
+pub(crate) struct UnpinnedOperationRef {
     record_name: String,
     operation_name: Option<String>,
 }
 
-pub(super) fn resolve_manifest_operation_refs(
+pub(crate) fn resolve_manifest_operation_refs(
     manifest_path: &std::path::Path,
     operation_registry_root: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<OperationRefResolution>> {
@@ -273,7 +273,7 @@ pub(super) fn resolve_manifest_operation_refs(
     Ok(resolutions)
 }
 
-pub(super) fn manifest_operation_refs_from_source(
+pub(crate) fn manifest_operation_refs_from_source(
     source: &str,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<ManifestOperationRef>> {
     let value: toml::Value = toml::from_str(source).map_err(|err| {
@@ -305,7 +305,7 @@ pub(super) fn manifest_operation_refs_from_source(
     Ok(refs)
 }
 
-pub(super) fn parse_resolvable_operation_ref(
+pub(crate) fn parse_resolvable_operation_ref(
     reference: &str,
 ) -> crate::kernel::runtime_host::VerletResult<Option<UnpinnedOperationRef>> {
     let Some(body) = reference.strip_prefix("op://") else {
@@ -342,7 +342,7 @@ pub(super) fn parse_resolvable_operation_ref(
     }
 }
 
-pub(super) fn rewrite_operation_ref_values(
+pub(crate) fn rewrite_operation_ref_values(
     source: &str,
     replacements: &std::collections::BTreeMap<String, String>,
     manifest_path: &std::path::Path,
@@ -373,7 +373,7 @@ pub(super) fn rewrite_operation_ref_values(
     Ok(rewritten)
 }
 
-pub(super) fn rewrite_operation_ref_line(
+pub(crate) fn rewrite_operation_ref_line(
     line: &str,
     replacements: &std::collections::BTreeMap<String, String>,
     touched: &mut std::collections::BTreeSet<String>,
@@ -435,7 +435,7 @@ pub(super) fn rewrite_operation_ref_line(
     rewritten
 }
 
-pub(super) fn is_escaped_basic_string_quote(bytes: &[u8], quote_index: usize) -> bool {
+pub(crate) fn is_escaped_basic_string_quote(bytes: &[u8], quote_index: usize) -> bool {
     let mut backslashes = 0;
     let mut index = quote_index;
     while index > 0 {
@@ -449,7 +449,7 @@ pub(super) fn is_escaped_basic_string_quote(bytes: &[u8], quote_index: usize) ->
     backslashes % 2 == 1
 }
 
-pub(super) fn write_text_atomically(
+pub(crate) fn write_text_atomically(
     path: &std::path::Path,
     label: String,
     body: &str,
@@ -493,7 +493,7 @@ pub(super) fn write_text_atomically(
     })
 }
 
-pub(super) async fn agent_list(
+pub(crate) async fn agent_list(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_agent_registry_args(args, "agent list")?;
@@ -518,7 +518,7 @@ pub(super) async fn agent_list(
     Ok(())
 }
 
-pub(super) async fn agent_versions(
+pub(crate) async fn agent_versions(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_agent_versions_args(args)?;
@@ -570,7 +570,7 @@ pub(super) async fn agent_versions(
     Ok(())
 }
 
-pub(super) async fn agent_diff(
+pub(crate) async fn agent_diff(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_agent_diff_args(args)?;
@@ -628,7 +628,7 @@ pub(super) async fn agent_diff(
     Ok(())
 }
 
-pub(super) fn manifest_diff_snapshot(
+pub(crate) fn manifest_diff_snapshot(
     record: &crate::agent::manifest::PublishedAgentRecord,
     form: AgentManifestForm,
 ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
@@ -640,7 +640,7 @@ pub(super) fn manifest_diff_snapshot(
     }
 }
 
-pub(super) fn render_manifest_diff_value(value: &serde_json::Value) -> String {
+pub(crate) fn render_manifest_diff_value(value: &serde_json::Value) -> String {
     let rendered = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
     if rendered.chars().count() <= 120 {
         return rendered;
@@ -648,7 +648,7 @@ pub(super) fn render_manifest_diff_value(value: &serde_json::Value) -> String {
     rendered.chars().take(117).collect::<String>() + "..."
 }
 
-pub(super) async fn agent_show(
+pub(crate) async fn agent_show(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_agent_show_args(args)?;
@@ -665,7 +665,7 @@ pub(super) async fn agent_show(
     print_agent_record_json(&record)
 }
 
-pub(super) async fn agent_run(
+pub(crate) async fn agent_run(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_agent_run_args(args)?;
@@ -725,7 +725,7 @@ pub(super) async fn agent_run(
 }
 
 #[derive(Debug)]
-pub(super) struct AgentInitArgs {
+pub(crate) struct AgentInitArgs {
     name: Option<String>,
     out_path: Option<std::path::PathBuf>,
     force: bool,
@@ -733,7 +733,7 @@ pub(super) struct AgentInitArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct AgentManifestArgs {
+pub(crate) struct AgentManifestArgs {
     manifest_path: Option<std::path::PathBuf>,
     registry_root: Option<std::path::PathBuf>,
     operations_registry_root: Option<std::path::PathBuf>,
@@ -742,13 +742,13 @@ pub(super) struct AgentManifestArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct AgentRegistryArgs {
+pub(crate) struct AgentRegistryArgs {
     registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
-pub(super) struct AgentVersionsArgs {
+pub(crate) struct AgentVersionsArgs {
     name: Option<String>,
     registry_root: Option<std::path::PathBuf>,
     json: bool,
@@ -757,19 +757,19 @@ pub(super) struct AgentVersionsArgs {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::Display)]
 #[strum(serialize_all = "snake_case")]
-pub(super) enum AgentManifestForm {
+pub(crate) enum AgentManifestForm {
     Authored,
     Resolved,
 }
 
 #[derive(Debug)]
-pub(super) struct AgentDiffEndpoint {
+pub(crate) struct AgentDiffEndpoint {
     version: String,
     form: AgentManifestForm,
 }
 
 #[derive(Debug)]
-pub(super) struct AgentDiffArgs {
+pub(crate) struct AgentDiffArgs {
     name: Option<String>,
     from: Option<AgentDiffEndpoint>,
     to: Option<AgentDiffEndpoint>,
@@ -779,21 +779,21 @@ pub(super) struct AgentDiffArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct AgentShowArgs {
+pub(crate) struct AgentShowArgs {
     reference: Option<String>,
     registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
-pub(super) struct AgentRunArgs {
+pub(crate) struct AgentRunArgs {
     reference: Option<String>,
     input: Option<String>,
     registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
-pub(super) fn parse_agent_init_args(
+pub(crate) fn parse_agent_init_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<AgentInitArgs> {
     let mut name = None;
@@ -829,7 +829,7 @@ pub(super) fn parse_agent_init_args(
     })
 }
 
-pub(super) fn parse_agent_manifest_args(
+pub(crate) fn parse_agent_manifest_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<AgentManifestArgs> {
@@ -879,7 +879,7 @@ pub(super) fn parse_agent_manifest_args(
     })
 }
 
-pub(super) fn parse_agent_registry_args(
+pub(crate) fn parse_agent_registry_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<AgentRegistryArgs> {
@@ -908,7 +908,7 @@ pub(super) fn parse_agent_registry_args(
     })
 }
 
-pub(super) fn parse_agent_versions_args(
+pub(crate) fn parse_agent_versions_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<AgentVersionsArgs> {
     let mut name = None;
@@ -949,7 +949,7 @@ pub(super) fn parse_agent_versions_args(
     })
 }
 
-pub(super) fn parse_agent_diff_args(
+pub(crate) fn parse_agent_diff_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<AgentDiffArgs> {
     let mut name = None;
@@ -1004,7 +1004,7 @@ pub(super) fn parse_agent_diff_args(
     })
 }
 
-pub(super) fn parse_agent_diff_endpoint(
+pub(crate) fn parse_agent_diff_endpoint(
     value: &str,
 ) -> crate::kernel::runtime_host::VerletResult<AgentDiffEndpoint> {
     let (version, form) = match value.rsplit_once(':') {
@@ -1032,7 +1032,7 @@ fn required_agent_history_value(
     Ok(value)
 }
 
-pub(super) fn parse_agent_show_args(
+pub(crate) fn parse_agent_show_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<AgentShowArgs> {
     let mut reference = None;
@@ -1070,7 +1070,7 @@ pub(super) fn parse_agent_show_args(
     })
 }
 
-pub(super) fn parse_agent_run_args(
+pub(crate) fn parse_agent_run_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<AgentRunArgs> {
     let mut reference = None;
@@ -1115,17 +1115,17 @@ pub(super) fn parse_agent_run_args(
     })
 }
 
-pub(super) fn agent_registry_root(registry_root: Option<std::path::PathBuf>) -> std::path::PathBuf {
+pub(crate) fn agent_registry_root(registry_root: Option<std::path::PathBuf>) -> std::path::PathBuf {
     registry_root.unwrap_or_else(|| std::path::PathBuf::from(".verlet/agents"))
 }
 
-pub(super) fn agent_operations_registry_root(
+pub(crate) fn agent_operations_registry_root(
     registry_root: Option<std::path::PathBuf>,
 ) -> std::path::PathBuf {
     registry_root.unwrap_or_else(crate::agent::manifest::default_operations_registry_root)
 }
 
-pub(super) fn write_agent_project(
+pub(crate) fn write_agent_project(
     name: &str,
     root: &std::path::Path,
     force: bool,
@@ -1179,7 +1179,7 @@ pub(super) fn write_agent_project(
     .map_err(crate::cli::io_error)
 }
 
-pub(super) fn render_agent_manifest_template(
+pub(crate) fn render_agent_manifest_template(
     name: &str,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
     verlet_operations::operation_store::validate_record_name(name)?;
@@ -1207,7 +1207,7 @@ streaming = false\n\
     ))
 }
 
-pub(super) fn render_agent_system_prompt_template(
+pub(crate) fn render_agent_system_prompt_template(
     name: &str,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
     verlet_operations::operation_store::validate_record_name(name)?;
@@ -1219,7 +1219,7 @@ receipt or event evidence needed to resume or debug the run.\n"
     ))
 }
 
-pub(super) fn render_agent_operation_refs_template(
+pub(crate) fn render_agent_operation_refs_template(
     name: &str,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
     verlet_operations::operation_store::validate_record_name(name)?;
@@ -1235,7 +1235,7 @@ operation_ref = \"op://example-tool@sha256:0000000000000000000000000000000000000
     ))
 }
 
-pub(super) fn render_agent_coupling_templates_template(
+pub(crate) fn render_agent_coupling_templates_template(
     name: &str,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
     verlet_operations::operation_store::validate_record_name(name)?;
@@ -1269,7 +1269,7 @@ summary = {:?}\n",
     Ok(out)
 }
 
-pub(super) fn render_agent_operation_slot_template(
+pub(crate) fn render_agent_operation_slot_template(
     name: &str,
 ) -> crate::kernel::runtime_host::VerletResult<String> {
     verlet_operations::operation_store::validate_record_name(name)?;
@@ -1282,11 +1282,11 @@ before publishing verlet.agent.toml.\n"
     ))
 }
 
-pub(super) fn toml_string(value: &str) -> String {
+pub(crate) fn toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-pub(super) fn print_agent_record_json(
+pub(crate) fn print_agent_record_json(
     record: &crate::agent::manifest::PublishedAgentRecord,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let json = serde_json::to_string_pretty(record)
@@ -1295,7 +1295,7 @@ pub(super) fn print_agent_record_json(
     Ok(())
 }
 
-pub(super) fn agent_context_source_lines(manifest: &serde_json::Value) -> Vec<String> {
+pub(crate) fn agent_context_source_lines(manifest: &serde_json::Value) -> Vec<String> {
     let resources = manifest
         .get("resources")
         .and_then(serde_json::Value::as_array)
@@ -1332,7 +1332,7 @@ pub(super) fn agent_context_source_lines(manifest: &serde_json::Value) -> Vec<St
         .collect()
 }
 
-pub(super) fn content_hash_label_from_ref(ref_uri: &str) -> Option<String> {
+pub(crate) fn content_hash_label_from_ref(ref_uri: &str) -> Option<String> {
     if let Some(hash) = ref_uri.strip_prefix("resource://artifact/sha256:")
         && hash.len() == 64
     {
@@ -1342,7 +1342,7 @@ pub(super) fn content_hash_label_from_ref(ref_uri: &str) -> Option<String> {
     (hash.len() == 64).then(|| format!("sha256:{hash}"))
 }
 
-pub(super) fn print_agent_help() {
+pub(crate) fn print_agent_help() {
     println!(
         "verlet agent\n\
 \n\
@@ -1361,7 +1361,7 @@ writes nothing; `publish` reruns the plan and writes an immutable local record.\
     );
 }
 
-pub(super) fn print_agent_init_help() {
+pub(crate) fn print_agent_init_help() {
     println!(
         "verlet agent init\n\
 \n\
@@ -1373,7 +1373,7 @@ Writes a folder-first Verlet agent project. --out selects the project directory.
     );
 }
 
-pub(super) fn print_agent_plan_help() {
+pub(crate) fn print_agent_plan_help() {
     println!(
         "verlet agent plan\n\
 \n\
@@ -1388,7 +1388,7 @@ reported unverified-offline.\n"
     );
 }
 
-pub(super) fn print_agent_publish_help() {
+pub(crate) fn print_agent_publish_help() {
     println!(
         "verlet agent publish\n\
 \n\
@@ -1403,7 +1403,7 @@ op://name@sha256:<hash> refs before publish verification runs.\n"
     );
 }
 
-pub(super) fn print_agent_list_help() {
+pub(crate) fn print_agent_list_help() {
     println!(
         "verlet agent list\n\
 \n\
@@ -1414,7 +1414,7 @@ Lists published agent records in the local registry.\n"
     );
 }
 
-pub(super) fn print_agent_versions_help() {
+pub(crate) fn print_agent_versions_help() {
     println!(
         "verlet agent versions\n\
 \n\
@@ -1425,7 +1425,7 @@ Lists immutable agent versions in publication order.\n"
     );
 }
 
-pub(super) fn print_agent_diff_help() {
+pub(crate) fn print_agent_diff_help() {
     println!(
         "verlet agent diff\n\
 \n\
@@ -1436,7 +1436,7 @@ Prints a structural diff between immutable authored or resolved manifest snapsho
     );
 }
 
-pub(super) fn print_agent_show_help() {
+pub(crate) fn print_agent_show_help() {
     println!(
         "verlet agent show\n\
 \n\
@@ -1447,7 +1447,7 @@ Prints the published agent record as JSON.\n"
     );
 }
 
-pub(super) fn print_agent_run_help() {
+pub(crate) fn print_agent_run_help() {
     println!(
         "verlet agent run\n\
 \n\

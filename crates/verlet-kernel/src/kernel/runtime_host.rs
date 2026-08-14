@@ -183,7 +183,7 @@ fn fork_child_context_is_compatible(
         && context.metadata.get("forked_from_thread_id") == Some(&parent_thread_id.to_string())
 }
 
-struct RuntimeHostInner {
+pub(crate) struct RuntimeHostInner {
     factory: std::sync::Arc<dyn crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory>,
     runtime_store: std::sync::Arc<dyn verlet_history::RuntimeStore>,
     execution_policy: crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy,
@@ -342,7 +342,7 @@ impl Drop for PublishedThreadStartGuard {
 
 impl ReservedTurnSubmission {
     /// Publishes a submission after all fallible admission work has completed.
-    pub(super) async fn submit_unchecked(self) -> bool {
+    pub(crate) async fn submit_unchecked(self) -> bool {
         let Self {
             host,
             thread,
@@ -1112,7 +1112,7 @@ impl RuntimeHost {
         .await
     }
 
-    pub(super) async fn reserve_turn_submission_at_choke_point(
+    pub(crate) async fn reserve_turn_submission_at_choke_point(
         &self,
         thread_id: verlet_runtime_contracts::ThreadId,
         turn_id: impl Into<String>,

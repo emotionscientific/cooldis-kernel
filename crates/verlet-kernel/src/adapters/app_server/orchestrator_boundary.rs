@@ -11,53 +11,53 @@ use verlet_history::EventStore as _;
 /// `client:` followed by one or more `[a-z0-9][a-z0-9-]*` segments joined
 /// by `:`. Recovery and ingress sweeps skip this prefix exactly as they
 /// skip `sync-ingress:`.
-pub(super) const CLIENT_STREAM_PREFIX: &str = "client:";
+pub(crate) const CLIENT_STREAM_PREFIX: &str = "client:";
 
 /// Payload-schema cohort reserved to the kernel; `stream/append` rejects
 /// declared schema ids in it so client cohorts can never collide.
-pub(super) const RESERVED_SCHEMA_COHORT_PREFIX: &str = "cooldis.";
+pub(crate) const RESERVED_SCHEMA_COHORT_PREFIX: &str = "cooldis.";
 
 /// Turn-entry surface name `ingress/submit` registers in
 /// `TURN_ENTRY_SURFACES` (admission coverage ratchet).
-pub(super) const ENVELOPE_INGRESS_SURFACE: &str =
+pub(crate) const ENVELOPE_INGRESS_SURFACE: &str =
     crate::kernel::admission::APP_SERVER_ENVELOPE_INGRESS_SURFACE;
 
-pub(super) const CLIENT_STREAM_THREAD_NAMESPACE: &str = "530827e2-57cf-405e-9ca7-bb08b18c1ab0";
+pub(crate) const CLIENT_STREAM_THREAD_NAMESPACE: &str = "530827e2-57cf-405e-9ca7-bb08b18c1ab0";
 
 // ---------------------------------------------------------------------------
 // ingress/submit
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct IngressSubmitParams {
-    pub(super) thread_id: String,
-    pub(super) input: serde_json::Value,
-    pub(super) delivery: IngressSubmitDelivery,
+pub(crate) struct IngressSubmitParams {
+    pub(crate) thread_id: String,
+    pub(crate) input: serde_json::Value,
+    pub(crate) delivery: IngressSubmitDelivery,
     #[serde(default)]
-    pub(super) dedupe_key: Option<IngressSubmitDedupeKey>,
+    pub(crate) dedupe_key: Option<IngressSubmitDedupeKey>,
     #[serde(default)]
-    pub(super) correlation_id: Option<String>,
+    pub(crate) correlation_id: Option<String>,
     /// `"attested"` (default). `"recorded"` is reserved for the
     /// foreign-harness lane and rejected until that lane exists.
     #[serde(default)]
-    pub(super) tier: Option<String>,
+    pub(crate) tier: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct IngressSubmitDelivery {
-    pub(super) delivery_id: String,
+pub(crate) struct IngressSubmitDelivery {
+    pub(crate) delivery_id: String,
     #[serde(default)]
-    pub(super) attempt: Option<u32>,
+    pub(crate) attempt: Option<u32>,
     #[serde(default)]
-    pub(super) metadata: std::collections::BTreeMap<String, String>,
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct IngressSubmitDedupeKey {
-    pub(super) scope: String,
-    pub(super) key: String,
+pub(crate) struct IngressSubmitDedupeKey {
+    pub(crate) scope: String,
+    pub(crate) key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,27 +65,27 @@ pub(super) struct IngressSubmitDedupeKey {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct StreamAppendParams {
-    pub(super) stream: String,
-    pub(super) records: Vec<StreamAppendRecord>,
+pub(crate) struct StreamAppendParams {
+    pub(crate) stream: String,
+    pub(crate) records: Vec<StreamAppendRecord>,
     /// Optional fence: the append succeeds only if the stream's next
     /// sequence equals this value (compare-and-set for writers; the
     /// orchestrator's placement lease fence rides on it). Uses the store's
     /// fenced append; a stale expectation fails closed with error data
     /// `{ "expected": …, "actual": … }`.
     #[serde(default)]
-    pub(super) expected_sequence: Option<u64>,
+    pub(crate) expected_sequence: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct StreamAppendRecord {
+pub(crate) struct StreamAppendRecord {
     /// Lowercase dotted lifecycle name, `[a-z]+(\.[a-z_]+)+`.
-    pub(super) kind: String,
+    pub(crate) kind: String,
     /// Declared client cohort id, `[a-z][a-z0-9.-]*/[0-9]+`, not in the
     /// reserved kernel cohort. Recorded, not interpreted.
-    pub(super) payload_schema: String,
-    pub(super) payload: serde_json::Value,
+    pub(crate) payload_schema: String,
+    pub(crate) payload: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,22 +93,22 @@ pub(super) struct StreamAppendRecord {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct StreamReadParams {
-    pub(super) stream: String,
+pub(crate) struct StreamReadParams {
+    pub(crate) stream: String,
     #[serde(default)]
-    pub(super) stream_cursor: Option<verlet_history::StreamCursorV1>,
+    pub(crate) stream_cursor: Option<verlet_history::StreamCursorV1>,
     /// 1..=500, default 100 (same clamp as `thread/events/list`).
     #[serde(default)]
-    pub(super) limit: Option<usize>,
+    pub(crate) limit: Option<usize>,
     #[serde(default)]
-    pub(super) kinds: Vec<String>,
+    pub(crate) kinds: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Validation (normative rules from ADR 0009; pure, unit-testable)
 
 /// Accepts `client:<name>` per the ADR grammar, rejects everything else.
-pub(super) fn validate_client_stream_id(
+pub(crate) fn validate_client_stream_id(
     stream: &str,
 ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
     let Some(name) = stream.strip_prefix(CLIENT_STREAM_PREFIX) else {
@@ -136,7 +136,7 @@ pub(super) fn validate_client_stream_id(
 }
 
 /// Kind grammar + declared-schema grammar + reserved-cohort rejection.
-pub(super) fn validate_append_record(
+pub(crate) fn validate_append_record(
     record: &StreamAppendRecord,
 ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
     let kind_segments = record.kind.split('.').collect::<Vec<_>>();
@@ -197,7 +197,7 @@ pub(super) fn validate_append_record(
 
 /// `"attested"` or absent passes; `"recorded"` and anything else rejects
 /// with a validation error naming the reserved lane.
-pub(super) fn validate_tier(
+pub(crate) fn validate_tier(
     tier: Option<&str>,
 ) -> Result<(), crate::adapters::app_server::connection::JsonRpcErrorError> {
     match tier {
@@ -223,7 +223,7 @@ impl crate::adapters::app_server::VerletAppServer {
     /// scheduling, dedupe on the effective key (duplicates return the
     /// original ingress event id with `deduped: true` and schedule
     /// nothing). Result per ADR 0009.
-    pub(super) async fn ingress_submit(
+    pub(crate) async fn ingress_submit(
         &self,
         connection: &crate::adapters::app_server::connection::ConnectionState,
         params: IngressSubmitParams,
@@ -408,7 +408,7 @@ impl crate::adapters::app_server::VerletAppServer {
     /// witnessed records (coordinates: thread_id = UUIDv5 of the full stream
     /// id, tenant from session identity; principal stamped). Fenced when
     /// `expected_sequence` is present. Host-effect witnessed.
-    pub(super) async fn stream_append(
+    pub(crate) async fn stream_append(
         &self,
         connection: &crate::adapters::app_server::connection::ConnectionState,
         params: StreamAppendParams,
@@ -505,7 +505,7 @@ impl crate::adapters::app_server::VerletAppServer {
 
     /// `stream/read`: client streams only; paging/cursor/kinds semantics
     /// mirror `thread/events/list`.
-    pub(super) async fn stream_read(
+    pub(crate) async fn stream_read(
         &self,
         _connection: &crate::adapters::app_server::connection::ConnectionState,
         params: StreamReadParams,

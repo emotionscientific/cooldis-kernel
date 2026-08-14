@@ -7,9 +7,9 @@
 //! plan → publish → bind pipeline with full receipts.
 
 /// Name of the synthesized default agent record (D1).
-pub(super) const DEFAULT_AGENT_NAME: &str = "default";
+pub(crate) const DEFAULT_AGENT_NAME: &str = "default";
 /// Namespace marking kernel-synthesized records (D1).
-pub(super) const DEFAULT_AGENT_NAMESPACE: &str = "verlet";
+pub(crate) const DEFAULT_AGENT_NAMESPACE: &str = "verlet";
 /// The ref a ref-less `thread/start` binds (alias resolution via `@latest`).
 pub(crate) const DEFAULT_AGENT_REF: &str = "agent://verlet/default@latest";
 const DEFAULT_MANIFEST_LOCK_ATTEMPTS: usize = 250;
@@ -21,7 +21,7 @@ const DEFAULT_MANIFEST_LOCK_SLEEP: std::time::Duration = std::time::Duration::fr
 /// publishing; otherwise publish a new version (1.0.0, then patch-bump).
 /// Errors fail daemon startup (fail-closed): an envelope that cannot be
 /// declared does not run.
-pub(super) fn ensure_default_manifest_published(
+pub(crate) fn ensure_default_manifest_published(
     config: &crate::adapters::app_server::VerletAppServerConfig,
     supports_streaming: bool,
 ) -> crate::kernel::runtime_host::VerletResult<crate::agent::manifest::PublishedAgentRecord> {

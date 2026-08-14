@@ -1,11 +1,11 @@
-pub(super) fn unix_timestamp_ms() -> u64 {
+pub(crate) fn unix_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }
 
-pub(super) async fn wait_until_thread_settled(
+pub(crate) async fn wait_until_thread_settled(
     thread: &crate::kernel::runtime_host::RuntimeThreadHandle,
 ) {
     let mut status = thread.subscribe_status();
@@ -25,7 +25,7 @@ pub(super) async fn wait_until_thread_settled(
     }
 }
 
-pub(super) fn latest_message_text(messages: &[verlet_history::CanonicalMessage]) -> Option<String> {
+pub(crate) fn latest_message_text(messages: &[verlet_history::CanonicalMessage]) -> Option<String> {
     messages.iter().rev().find_map(|message| {
         let text = match message {
             verlet_history::CanonicalMessage::Assistant { content, .. }
@@ -45,7 +45,7 @@ pub(super) fn latest_message_text(messages: &[verlet_history::CanonicalMessage])
 
 const THREAD_INTERACTION_RESULT_PREVIEW_MAX_CHARS: usize = 512;
 
-pub(super) fn thread_interaction_preview(output: &str) -> String {
+pub(crate) fn thread_interaction_preview(output: &str) -> String {
     let mut chars = output.chars();
     let preview: String = chars
         .by_ref()
@@ -58,7 +58,7 @@ pub(super) fn thread_interaction_preview(output: &str) -> String {
     }
 }
 
-pub(super) fn emit_thread_interaction(
+pub(crate) fn emit_thread_interaction(
     thread: &crate::kernel::runtime_host::RuntimeThreadHandle,
     interaction_id: verlet_runtime_contracts::RuntimeEventId,
     kind: verlet_runtime_contracts::ThreadInteractionKind,

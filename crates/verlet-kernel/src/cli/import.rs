@@ -6,7 +6,7 @@ use std::os::unix::fs::DirBuilderExt as _;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 
-pub(super) async fn run_import(
+pub(crate) async fn run_import(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -42,7 +42,7 @@ pub(super) async fn run_import(
     }
 }
 
-pub(super) async fn import_build(
+pub(crate) async fn import_build(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_import_args(args, "import build")?;
@@ -63,7 +63,7 @@ pub(super) async fn import_build(
     Ok(())
 }
 
-pub(super) async fn import_publish(
+pub(crate) async fn import_publish(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_import_args(args, "import publish")?;
@@ -106,7 +106,7 @@ pub(super) async fn import_publish(
 }
 
 #[derive(Debug)]
-pub(super) struct BuiltImportPackage {
+pub(crate) struct BuiltImportPackage {
     package: verlet_operations::import_package::ImportPackageSource,
     plan: verlet_operations::openapi_plan::OperationImportPlan,
     artifact_path: std::path::PathBuf,
@@ -115,7 +115,7 @@ pub(super) struct BuiltImportPackage {
     receipt: verlet_operations::import_package::ImportBuildReceipt,
 }
 
-pub(super) async fn build_import_package(
+pub(crate) async fn build_import_package(
     package_path: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<BuiltImportPackage> {
     let package = verlet_operations::import_package::ImportPackageSource::load(package_path)
@@ -270,7 +270,7 @@ pub(super) async fn build_import_package(
     })
 }
 
-pub(super) fn print_import_package_build(build: &BuiltImportPackage) {
+pub(crate) fn print_import_package_build(build: &BuiltImportPackage) {
     println!("import package {}", build.plan.name);
     println!("receipt import_build_v0");
     println!("source_hash {}", build.receipt.source_hash);
@@ -290,20 +290,20 @@ pub(super) fn print_import_package_build(build: &BuiltImportPackage) {
     }
 }
 
-pub(super) fn import_error(
+pub(crate) fn import_error(
     error: verlet_operations::openapi_plan::OpenApiImportError,
 ) -> crate::kernel::runtime_host::VerletError {
     crate::kernel::runtime_host::VerletError::RuntimeFactory(error.to_string())
 }
 
 #[derive(Debug)]
-pub(super) struct ImportArgs {
+pub(crate) struct ImportArgs {
     package_path: Option<std::path::PathBuf>,
     registry_root: Option<std::path::PathBuf>,
     help: bool,
 }
 
-pub(super) fn parse_import_args(
+pub(crate) fn parse_import_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<ImportArgs> {
@@ -340,7 +340,7 @@ pub(super) fn parse_import_args(
     })
 }
 
-pub(super) fn print_import_help() {
+pub(crate) fn print_import_help() {
     println!(
         "verlet import\n\
 \n\
@@ -354,7 +354,7 @@ registry gate. OpenAPI remains an authoring input, not a runtime contract.\n"
     );
 }
 
-pub(super) fn print_import_build_help() {
+pub(crate) fn print_import_build_help() {
     println!(
         "verlet import build\n\
 \n\
@@ -367,7 +367,7 @@ receipt without writing an operation record.\n"
     );
 }
 
-pub(super) fn print_import_publish_help() {
+pub(crate) fn print_import_publish_help() {
     println!(
         "verlet import publish\n\
 \n\

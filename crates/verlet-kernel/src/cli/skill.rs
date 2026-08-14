@@ -1,6 +1,6 @@
 //! The `skill` subcommand family.
 
-pub(super) async fn run_skill(
+pub(crate) async fn run_skill(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -36,7 +36,7 @@ pub(super) async fn run_skill(
     }
 }
 
-pub(super) async fn skill_publish(
+pub(crate) async fn skill_publish(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_skill_publish_args(args)?;
@@ -66,7 +66,7 @@ pub(super) async fn skill_publish(
     Ok(())
 }
 
-pub(super) async fn skill_import(
+pub(crate) async fn skill_import(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_skill_import_args(args)?;
@@ -129,7 +129,7 @@ pub(super) async fn skill_import(
 }
 
 #[derive(Debug)]
-pub(super) struct SkillPublishArgs {
+pub(crate) struct SkillPublishArgs {
     package_dir: Option<std::path::PathBuf>,
     name: Option<String>,
     registry_root: Option<std::path::PathBuf>,
@@ -137,7 +137,7 @@ pub(super) struct SkillPublishArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct SkillImportArgs {
+pub(crate) struct SkillImportArgs {
     skill_dir: Option<std::path::PathBuf>,
     name: Option<String>,
     registry_root: Option<std::path::PathBuf>,
@@ -146,7 +146,7 @@ pub(super) struct SkillImportArgs {
     help: bool,
 }
 
-pub(super) fn parse_skill_publish_args(
+pub(crate) fn parse_skill_publish_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<SkillPublishArgs> {
     let mut package_dir = None;
@@ -191,7 +191,7 @@ pub(super) fn parse_skill_publish_args(
     })
 }
 
-pub(super) fn parse_skill_import_args(
+pub(crate) fn parse_skill_import_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<SkillImportArgs> {
     let mut skill_dir = None;
@@ -247,11 +247,11 @@ pub(super) fn parse_skill_import_args(
     })
 }
 
-pub(super) fn skill_registry_root(registry_root: Option<std::path::PathBuf>) -> std::path::PathBuf {
+pub(crate) fn skill_registry_root(registry_root: Option<std::path::PathBuf>) -> std::path::PathBuf {
     registry_root.unwrap_or_else(|| std::path::PathBuf::from(".verlet/skills"))
 }
 
-pub(super) fn print_skill_help() {
+pub(crate) fn print_skill_help() {
     println!(
         "verlet skill\n\
 \n\
@@ -266,7 +266,7 @@ the same package and blob registries.\n"
     );
 }
 
-pub(super) fn print_skill_publish_help() {
+pub(crate) fn print_skill_publish_help() {
     println!(
         "verlet skill publish\n\
 \n\
@@ -281,7 +281,7 @@ and the floating package-name ref.\n"
     );
 }
 
-pub(super) fn print_skill_import_help() {
+pub(crate) fn print_skill_import_help() {
     println!(
         "verlet skill import\n\
 \n\

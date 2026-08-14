@@ -82,7 +82,7 @@ provider = "local_offline"
 
 fn load_error(label: &str, contents: &str) -> String {
     let file = TestConfigFile::write(label, contents);
-    super::load_host_run_config(&file.path)
+    crate::cli::host::load_host_run_config(&file.path)
         .unwrap_err()
         .to_string()
 }
@@ -91,8 +91,8 @@ fn direct_local_instance(
     id: &str,
     root: std::path::PathBuf,
     cwd: &std::path::Path,
-) -> super::HostInstanceConfig {
-    super::HostInstanceConfig {
+) -> crate::cli::host::HostInstanceConfig {
+    crate::cli::host::HostInstanceConfig {
         id: id.to_string(),
         root,
         cwd: cwd.to_path_buf(),
@@ -101,7 +101,7 @@ fn direct_local_instance(
         hook_shell: "/bin/sh".to_string(),
         clock: None,
         route_digests: Vec::new(),
-        provider: super::HostInstanceProviderConfig {
+        provider: crate::cli::host::HostInstanceProviderConfig {
             provider: "local_offline".to_string(),
             base_url: None,
             api_key_env: None,
@@ -120,7 +120,7 @@ fn parse_minimal_config_with_defaults() {
     );
     let file = TestConfigFile::write("minimal", &config);
 
-    let loaded = super::load_host_run_config(&file.path).unwrap();
+    let loaded = crate::cli::host::load_host_run_config(&file.path).unwrap();
 
     assert_eq!(loaded.listen.addr, "127.0.0.1:0");
     assert!(!loaded.listen.allow_non_loopback);
@@ -139,7 +139,7 @@ fn clock_can_be_disabled_but_must_be_a_boolean() {
     );
     let config = format!("[listen]\naddr = \"127.0.0.1:0\"\n{disabled}");
     let file = TestConfigFile::write("clock-disabled", &config);
-    let loaded = super::load_host_run_config(&file.path).unwrap();
+    let loaded = crate::cli::host::load_host_run_config(&file.path).unwrap();
     assert!(!loaded.instance[0].clock_enabled());
     assert_eq!(loaded.instance[0].clock, Some(false));
 
@@ -161,8 +161,9 @@ fn hosted_clock_queue_paths_are_isolated_under_instance_roots() {
         std::env::temp_dir().join(format!("verlet-host-clock-paths-{}", uuid::Uuid::now_v7()));
     let first_id = crate::adapters::host::InstanceId::new("first").unwrap();
     let second_id = crate::adapters::host::InstanceId::new("second").unwrap();
-    let (first_io, first_route) = super::hosted_clock_io(&first_id, &root.join("first"));
-    let (second_io, second_route) = super::hosted_clock_io(&second_id, &root.join("second"));
+    let (first_io, first_route) = crate::cli::host::hosted_clock_io(&first_id, &root.join("first"));
+    let (second_io, second_route) =
+        crate::cli::host::hosted_clock_io(&second_id, &root.join("second"));
 
     assert_eq!(first_route.id, "clock-first");
     assert_eq!(second_route.id, "clock-second");
@@ -186,15 +187,16 @@ fn hosted_clock_queue_paths_are_isolated_under_instance_roots() {
 #[test]
 fn host_run_args_require_only_a_config_path() {
     let path =
-        super::parse_host_run_args(vec!["--config".into(), "/tmp/host.toml".into()]).unwrap();
+        crate::cli::host::parse_host_run_args(vec!["--config".into(), "/tmp/host.toml".into()])
+            .unwrap();
     assert_eq!(path, std::path::PathBuf::from("/tmp/host.toml"));
     assert!(
-        super::parse_host_run_args(Vec::new())
+        crate::cli::host::parse_host_run_args(Vec::new())
             .unwrap_err()
             .to_string()
             .contains("requires --config")
     );
-    let error = super::parse_host_run_args(vec![
+    let error = crate::cli::host::parse_host_run_args(vec![
         "--token".into(),
         "argument-secret-that-must-not-be-echoed".into(),
     ])
@@ -501,12 +503,12 @@ model = "openai/test"
         root.join("workspace").display(),
     );
     let file = TestConfigFile::write("key-once", &config);
-    let loaded = super::load_host_run_config(&file.path).unwrap();
+    let loaded = crate::cli::host::load_host_run_config(&file.path).unwrap();
     assert!(!format!("{loaded:?}").contains("original-key"));
     // SAFETY: the module lock serializes this mutation and `_env` restores it.
     unsafe { std::env::set_var(&env_name, "changed-after-load") };
 
-    let (_, hosted) = super::hosted_instance_config(&loaded.instance[0]).unwrap();
+    let (_, hosted) = crate::cli::host::hosted_instance_config(&loaded.instance[0]).unwrap();
     assert!(!format!("{hosted:?}").contains("original-key"));
     let auth = hosted.instance_environment.provider_auth.resolve();
     assert!(!format!("{auth:?}").contains("original-key"));
@@ -636,7 +638,10 @@ fn listener_accepts_literal_ipv4_and_ipv6_binds_but_rejects_hostnames() {
         );
         let file = TestConfigFile::write(label, &config);
         assert_eq!(
-            super::load_host_run_config(&file.path).unwrap().listen.addr,
+            crate::cli::host::load_host_run_config(&file.path)
+                .unwrap()
+                .listen
+                .addr,
             addr
         );
     }
@@ -671,21 +676,21 @@ async fn mid_boot_failure_shuts_down_started_instances_and_releases_roots() {
     std::fs::create_dir_all(&workspace).unwrap();
     let first = direct_local_instance("duplicate", root.join("first"), &workspace);
     let second = direct_local_instance("duplicate", root.join("second"), &workspace);
-    let config = super::VerletHostRunConfig {
-        listen: super::HostListenConfig {
+    let config = crate::cli::host::VerletHostRunConfig {
+        listen: crate::cli::host::HostListenConfig {
             addr: "127.0.0.1:0".to_string(),
             allow_non_loopback: false,
         },
         instance: vec![first.clone(), second.clone()],
     };
 
-    let error = super::serve_until_shutdown(config, async { Ok(()) })
+    let error = crate::cli::host::serve_until_shutdown(config, async { Ok(()) })
         .await
         .unwrap_err();
     assert!(error.to_string().contains("already exists"), "{error}");
 
-    let (_, first_successor) = super::hosted_instance_config(&first).unwrap();
-    let (_, second_successor) = super::hosted_instance_config(&second).unwrap();
+    let (_, first_successor) = crate::cli::host::hosted_instance_config(&first).unwrap();
+    let (_, second_successor) = crate::cli::host::hosted_instance_config(&second).unwrap();
     drop(first_successor);
     drop(second_successor);
     std::fs::remove_dir_all(root).unwrap();
@@ -708,15 +713,15 @@ async fn pending_config_failure_releases_reservations_before_listener_bind() {
     let port = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = port.local_addr().unwrap();
     drop(port);
-    let config = super::VerletHostRunConfig {
-        listen: super::HostListenConfig {
+    let config = crate::cli::host::VerletHostRunConfig {
+        listen: crate::cli::host::HostListenConfig {
             addr: addr.to_string(),
             allow_non_loopback: false,
         },
         instance: vec![first.clone(), second],
     };
 
-    let error = super::serve_until_shutdown(config, async { Ok(()) })
+    let error = crate::cli::host::serve_until_shutdown(config, async { Ok(()) })
         .await
         .unwrap_err();
     assert!(
@@ -726,7 +731,7 @@ async fn pending_config_failure_releases_reservations_before_listener_bind() {
 
     let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
     drop(rebound);
-    let (_, successor) = super::hosted_instance_config(&first).unwrap();
+    let (_, successor) = crate::cli::host::hosted_instance_config(&first).unwrap();
     drop(successor);
     std::fs::remove_dir_all(root).unwrap();
 }

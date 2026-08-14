@@ -138,7 +138,7 @@ impl RuntimeServices {
         self.kernel_control.clone()
     }
 
-    pub(super) fn register_turn_watchdog(
+    pub(crate) fn register_turn_watchdog(
         &self,
         input: &mut crate::kernel::runtime_host::turn::TurnInput,
     ) -> crate::kernel::runtime_host::turn::TurnWatchdogHandle {

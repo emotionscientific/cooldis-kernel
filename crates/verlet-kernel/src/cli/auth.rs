@@ -4,7 +4,7 @@ use std::io::Read as _;
 use verlet_metadata::provider_store::LlmProviderAuthStore as _;
 use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 
-pub(super) async fn run_auth(
+pub(crate) async fn run_auth(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
@@ -27,7 +27,7 @@ pub(super) async fn run_auth(
     }
 }
 
-pub(super) async fn auth_login(
+pub(crate) async fn auth_login(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_auth_login_args(args)?;
@@ -128,7 +128,7 @@ fn oauth_identity(
     }
 }
 
-pub(super) async fn auth_status(
+pub(crate) async fn auth_status(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_auth_name_args(args, "auth status")?;
@@ -197,7 +197,7 @@ fn auth_status_value(
     })
 }
 
-pub(super) async fn auth_set(
+pub(crate) async fn auth_set(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_auth_set_args(args)?;
@@ -248,7 +248,7 @@ pub(super) async fn auth_set(
     Ok(())
 }
 
-pub(super) async fn auth_delete(
+pub(crate) async fn auth_delete(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_auth_name_args(args, "auth delete")?;
@@ -269,7 +269,7 @@ pub(super) async fn auth_delete(
 }
 
 #[derive(Debug)]
-pub(super) struct AuthSetArgs {
+pub(crate) struct AuthSetArgs {
     provider_id: Option<String>,
     api_key_stdin: bool,
     state_home: Option<std::path::PathBuf>,
@@ -277,7 +277,7 @@ pub(super) struct AuthSetArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct AuthLoginArgs {
+pub(crate) struct AuthLoginArgs {
     provider_id: Option<String>,
     device: bool,
     state_home: Option<std::path::PathBuf>,
@@ -285,13 +285,13 @@ pub(super) struct AuthLoginArgs {
 }
 
 #[derive(Debug)]
-pub(super) struct AuthNameArgs {
+pub(crate) struct AuthNameArgs {
     provider_id: Option<String>,
     state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
-pub(super) fn parse_auth_set_args(
+pub(crate) fn parse_auth_set_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<AuthSetArgs> {
     let mut provider_id = None;
@@ -332,7 +332,7 @@ pub(super) fn parse_auth_set_args(
     })
 }
 
-pub(super) fn parse_auth_login_args(
+pub(crate) fn parse_auth_login_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<AuthLoginArgs> {
     let mut provider_id = None;
@@ -373,7 +373,7 @@ pub(super) fn parse_auth_login_args(
     })
 }
 
-pub(super) fn parse_auth_name_args(
+pub(crate) fn parse_auth_name_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<AuthNameArgs> {
@@ -412,7 +412,7 @@ pub(super) fn parse_auth_name_args(
     })
 }
 
-pub(super) fn print_auth_help() {
+pub(crate) fn print_auth_help() {
     println!(
         "verlet auth\n\
 \n\
@@ -427,7 +427,7 @@ secret values are never printed.\n"
     );
 }
 
-pub(super) fn print_auth_login_help() {
+pub(crate) fn print_auth_login_help() {
     println!(
         "verlet auth login\n\
 \n\
@@ -440,7 +440,7 @@ stored only in the local provider store and are never printed.\n"
     );
 }
 
-pub(super) fn print_auth_status_help() {
+pub(crate) fn print_auth_status_help() {
     println!(
         "verlet auth status\n\
 \n\
@@ -451,7 +451,7 @@ Prints redacted model-provider credential status.\n"
     );
 }
 
-pub(super) fn print_auth_set_help() {
+pub(crate) fn print_auth_set_help() {
     println!(
         "verlet auth set\n\
 \n\
@@ -462,7 +462,7 @@ Stores a model-provider API key read from stdin. The stored value is never print
     );
 }
 
-pub(super) fn print_auth_delete_help() {
+pub(crate) fn print_auth_delete_help() {
     println!(
         "verlet auth delete\n\
 \n\
@@ -477,7 +477,7 @@ Deletes a stored model-provider credential.\n"
 mod tests {
     #[tokio::test]
     async fn api_key_set_rejects_openai_codex_before_reading_stdin() {
-        let error = super::auth_set(
+        let error = crate::cli::auth::auth_set(
             ["openai-codex", "--api-key-stdin"]
                 .into_iter()
                 .map(std::ffi::OsString::from)
@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn login_args_accept_device_and_state_home() {
-        let parsed = super::parse_auth_login_args(
+        let parsed = crate::cli::auth::parse_auth_login_args(
             [
                 "openai-codex",
                 "--device",
@@ -527,7 +527,7 @@ mod tests {
             email: Some("user@example.com".to_string()),
         };
 
-        let value = super::auth_status_value(&provider, &status, Some(&credential));
+        let value = crate::cli::auth::auth_status_value(&provider, &status, Some(&credential));
         assert_eq!(value["signed_in"], true);
         assert_eq!(value["credential_type"], "oauth");
         assert_eq!(value["account_id"], "acct-123");

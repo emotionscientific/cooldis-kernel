@@ -8,7 +8,7 @@
 //! and the UI is a pure function of what this driver feeds it.
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum ChatInvocation {
+pub(crate) enum ChatInvocation {
     Chat,
 }
 
@@ -33,12 +33,12 @@ impl ChatInvocation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ChatAttachTarget {
+pub(crate) enum ChatAttachTarget {
     Unix(std::path::PathBuf),
     WebSocket(String),
 }
 
-pub(super) async fn run(
+pub(crate) async fn run(
     args: Vec<std::ffi::OsString>,
     invocation: ChatInvocation,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -135,7 +135,7 @@ fn chat_connect_config(
     }
 }
 
-pub(super) fn parse_attach_target(
+pub(crate) fn parse_attach_target(
     raw: &str,
 ) -> crate::kernel::runtime_host::VerletResult<ChatAttachTarget> {
     if let Some(path) = raw.strip_prefix("unix://") {
@@ -181,7 +181,7 @@ where
         thread_name: thread_name(&thread.raw),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    let mut app = verlet_chat::App::new(meta);
+    let mut app = verlet_chat::app::App::new(meta);
     if let Some(prompt) = initial_prompt {
         app.submit(&prompt);
     }
@@ -197,7 +197,7 @@ where
     let mut driver = ChatDriver::new(thread.id)?;
 
     let run_result = {
-        let ui = verlet_chat::run_ui(&mut app, no_color, action_tx, event_rx);
+        let ui = verlet_chat::runner::run_ui(&mut app, no_color, action_tx, event_rx);
         let driven = driver.drive(&mut client, action_rx, event_tx);
         tokio::pin!(ui);
         tokio::pin!(driven);
