@@ -1,7 +1,7 @@
 [package]
 name = "verlet-sqlite"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2024"
 license = "Apache-2.0"
 description = "Engine-owner crate for verlet SQLite stores (ADR 0005): configuration, connections, migrations, DST IO hook"
 
