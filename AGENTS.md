@@ -19,7 +19,7 @@ Keep product logic out:
 
 Working rules:
 
-- Use `cargo test` before claiming runtime changes are done.
+- Use `cargo nextest` before claiming runtime changes are done.
 - Prefer larger, real lifecycle tests over narrow mocks when the cost is low.
   If a provider-backed path can run in roughly five seconds or less, wire it to
   a generic OpenAI-compatible or Anthropic-compatible provider and exercise the
@@ -35,3 +35,10 @@ Working rules:
 - For Agent Experience (AX), keep `README.md`, `docs/index.md`, and
   `docs/public-api-coverage.md` current when changing public positioning,
   coding-agent workflows, CLI/API/tool projections, or man-page/help surfaces.
+
+Rust Rules
+
+- No use imports. Full paths (crate::foo::Bar, std::collections::HashMap). Exception: use some::Trait as _;. ¬ glob, ¬ super::.
+- No pub use re-exports, except when a module's primary export shares the module name: mod open; pub use open::open;.
+- Visibility: pub / pub(crate) / private.
+- No mod.rs; use foo.rs + foo/bar.rs
