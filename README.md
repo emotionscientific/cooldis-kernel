@@ -129,6 +129,25 @@ today. Self-serve cloud placement, a public package registry, marketplace
 flows, and stateful product harnesses are future direction. See
 [docs/roadmap.md](docs/roadmap.md).
 
+## How This Is Built
+
+Coding agents are used extensively in the development of Verlet. Several
+different models draft, implement, review, and cross-examine each other's
+claims, and a human architect makes the design decisions and reviews what
+lands. This is what lets a very small team build a project of this size at
+this speed, and it is why fixes land quickly after they are found.
+
+The design intention is held fixed in a separate, public formalism:
+[verlet-formalism](https://github.com/emotionscientific/verlet-formalism)
+carries the laws and the lexicon the code is written against. Every
+primitive is named there before it is implemented, and the codebase is
+scanned against it on a regular cadence. When a scan finds code and canon
+disagreeing, either the code is fixed or the canon is struck, with a commit
+that says which.
+
+Treat the repository accordingly. It is experimental, it moves fast, and
+the record of why it moved is in the commit history and the formalism.
+
 ## Documentation
 
 - [Docs index](docs/README.md): documentation map.
