@@ -62,6 +62,24 @@ pub(crate) fn refuse_live_instance(
     ))
 }
 
+pub(crate) fn cross_process_database_guidance(
+    alternative: &str,
+) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+        "another process holds this database (most likely the verlet daemon); {alternative}"
+    ))
+}
+
+pub(crate) fn turso_cross_process_lock_error(message: &str) -> bool {
+    // turso 0.7.0-pre.18 erases LimboError::LockingError through turso::Error.
+    let Some((_, engine_error)) = message.split_once("sqlite engine error: ") else {
+        return false;
+    };
+    engine_error == "Locking error: Failed locking file. File is locked by another process"
+        || (engine_error.starts_with("Locking error: Failed locking file '")
+            && engine_error.ends_with("'. File is locked by another process"))
+}
+
 pub(crate) fn register_instance_endpoint(instance_id: &str) {
     active_instance_endpoints()
         .lock()
@@ -612,6 +630,29 @@ mod tests {
         assert!(first.is_absolute());
         assert!(super::unix_socket_path_fits(&first));
         assert_ne!(first, root.join("verlet.sock"));
+    }
+
+    #[test]
+    fn turso_cross_process_lock_match_accepts_only_refused_open_shapes() {
+        assert!(super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Locking error: Failed locking file '/tmp/session_history.sqlite3'. File is locked by another process"
+        ));
+        assert!(super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Locking error: Failed locking file. File is locked by another process"
+        ));
+
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Locking error: Failed to release file lock: permission denied"
+        ));
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: I/O error: Failed locking file '/tmp/session_history.sqlite3'. File is locked by another process"
+        ));
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Internal error: sqlite engine error: Locking error: Failed locking file. File is locked by another process"
+        ));
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: database is locked"
+        ));
     }
 
     #[test]

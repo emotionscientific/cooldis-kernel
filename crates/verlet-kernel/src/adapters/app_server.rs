@@ -2754,10 +2754,8 @@ fn provider_store_error(
     err: verlet_metadata::provider_store::LlmProviderStoreError,
 ) -> crate::kernel::runtime_host::VerletError {
     let message = err.to_string();
-    if crate::cli::secret::turso_cross_process_lock_error(&message) {
-        return crate::cli::secret::cross_process_database_guidance(
-            "stop the running instance and retry",
-        );
+    if instance::turso_cross_process_lock_error(&message) {
+        return instance::cross_process_database_guidance("stop the running instance and retry");
     }
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
         "provider metadata store failed: {message}"
@@ -2828,10 +2826,8 @@ fn metadata_store_error(
     err: verlet_metadata::provider_store::MetadataStoreError,
 ) -> crate::kernel::runtime_host::VerletError {
     let message = err.to_string();
-    if crate::cli::secret::turso_cross_process_lock_error(&message) {
-        return crate::cli::secret::cross_process_database_guidance(
-            "stop the running instance and retry",
-        );
+    if instance::turso_cross_process_lock_error(&message) {
+        return instance::cross_process_database_guidance("stop the running instance and retry");
     }
     crate::kernel::runtime_host::VerletError::RuntimeFactory(message)
 }
@@ -2840,10 +2836,8 @@ fn secret_store_error(
     err: verlet_metadata::secret_store::SecretStoreError,
 ) -> crate::kernel::runtime_host::VerletError {
     let message = err.to_string();
-    if crate::cli::secret::turso_cross_process_lock_error(&message) {
-        return crate::cli::secret::cross_process_database_guidance(
-            "stop the running instance and retry",
-        );
+    if instance::turso_cross_process_lock_error(&message) {
+        return instance::cross_process_database_guidance("stop the running instance and retry");
     }
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
         "secret store failed: {message}"
@@ -2854,10 +2848,8 @@ fn history_store_error(
     err: verlet_history::HistoryError,
 ) -> crate::kernel::runtime_host::VerletError {
     let message = err.to_string();
-    if crate::cli::secret::turso_cross_process_lock_error(&message) {
-        return crate::cli::secret::cross_process_database_guidance(
-            "stop the running instance and retry",
-        );
+    if instance::turso_cross_process_lock_error(&message) {
+        return instance::cross_process_database_guidance("stop the running instance and retry");
     }
     crate::kernel::runtime_host::VerletError::History(message)
 }

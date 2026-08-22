@@ -371,8 +371,10 @@ pub(crate) async fn load_replay_recorded_events(
                 .await
                 .map_err(|err| {
                     let message = err.to_string();
-                    if crate::cli::secret::turso_cross_process_lock_error(&message) {
-                        crate::cli::secret::cross_process_database_guidance(
+                    if crate::adapters::app_server::instance::turso_cross_process_lock_error(
+                        &message,
+                    ) {
+                        crate::adapters::app_server::instance::cross_process_database_guidance(
                             "stop the daemon and retry",
                         )
                     } else {
