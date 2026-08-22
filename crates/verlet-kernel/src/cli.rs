@@ -11,7 +11,7 @@ mod host;
 mod identity;
 mod import;
 mod rpc;
-mod secret;
+pub(crate) mod secret;
 mod skill;
 mod tool;
 

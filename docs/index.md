@@ -90,7 +90,9 @@ skill-package resources with bind-time name pinning, witnessed workspace skill
 discovery without a second mount, bind-plane local host-workspace mounts,
 daemon/RPC surfaces, daemon-embedded store-primary
 stream propagation, store-backed remote child placement, and the proof path for
-packageable local agents.
+packageable local agents. Each running app-server instance publishes an endpoint
+record beside its owned state roots so local clients can discover its Unix
+socket without scanning ports or guessing paths.
 
 The managed cloud, public package registry, private marketplace, and stateful
 harness product layer are V2 direction.

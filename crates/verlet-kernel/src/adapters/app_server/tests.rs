@@ -8857,6 +8857,7 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
             first_record.resolved_manifest["model_profiles"][0]["model_ref"].as_str(),
             Some("model://local_offline/echo-v1")
         );
+        app.shutdown().await.unwrap();
     }
 
     let listen =
@@ -9026,6 +9027,7 @@ async fn assert_app_server_resume_uses_stream_after_registry_mutation(
             .find(|binding| binding.payload.name == "search")
             .expect("opening bind should attach search")
             .attach_event_id;
+        app.shutdown().await.unwrap();
     }
 
     let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
@@ -9268,6 +9270,7 @@ streaming = false
             .upsert_thread_lifecycle(lifecycle)
             .await
             .unwrap();
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -14270,6 +14273,7 @@ streaming = false
             .await
             .unwrap();
     }
+    first.shutdown().await.unwrap();
     drop(connection);
     drop(first);
 
@@ -15254,6 +15258,7 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
         .unwrap();
         wait_for_provider_requests(&first_client, 1).await;
         wait_for_session_text(&app, &thread_id, "inspected").await;
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -15396,6 +15401,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
                 vec!["second persisted turn".to_string(), "inspected".to_string()],
             ]
         );
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -16062,6 +16068,7 @@ async fn restored_thread_provider_requests_end_with_current_input() {
             turn["turn"]["id"].as_str().unwrap(),
         )
         .await;
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -16178,6 +16185,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
             wait_for_assistant_texts(&app, &thread_id, 1).await,
             vec!["before restart completion".to_string()]
         );
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -16305,6 +16313,7 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
         let turn_id = turn["turn"]["id"].as_str().unwrap();
         collect_agent_deltas_until_turn_completed(&mut outbound_rx, &thread_id, turn_id).await;
         assert_eq!(wait_for_assistant_texts(&app, &thread_id, 1).await.len(), 1);
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -18141,6 +18150,18 @@ async fn hosted_constructor_failure_after_inner_build_releases_roots() {
             .to_string()
             .contains("injected constructor reload failure")
     );
+    assert!(
+        !roots
+            .state_home
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
+    );
+    assert!(
+        !roots
+            .user_state_home
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
+    );
 
     let successor = crate::adapters::app_server::VerletAppServerConfig::hosted(
         roots,
@@ -18372,6 +18393,61 @@ async fn shutdown_stops_an_instance_owned_listener() {
             ) => {}
         Err(error) => panic!("mid-handshake connection closed unexpectedly: {error}"),
     }
+}
+
+#[tokio::test]
+async fn shutdown_removes_owned_endpoint_records() {
+    let root = unique_test_root("endpoint-record-shutdown");
+    let app = test_app_at_root(&root).await;
+    let state_home = root.join("state");
+    let user_state_home = root.join("user-state");
+    let state_endpoint =
+        crate::adapters::app_server::instance::resolve_instance_endpoint(&state_home)
+            .expect("the state endpoint record must be live after construction");
+    let user_endpoint =
+        crate::adapters::app_server::instance::resolve_instance_endpoint(&user_state_home)
+            .expect("the user endpoint record must be live after construction");
+    assert_eq!(state_endpoint, user_endpoint);
+
+    app.shutdown().await.unwrap();
+
+    assert!(
+        !state_home
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
+    );
+    assert!(
+        !user_state_home
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
+    );
+    assert_eq!(
+        crate::adapters::app_server::instance::resolve_instance_endpoint(&state_home),
+        None
+    );
+    assert_eq!(
+        crate::adapters::app_server::instance::resolve_instance_endpoint(&user_state_home),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn constructor_metadata_lock_uses_cross_process_guidance() {
+    let error = crate::adapters::app_server::metadata_store_error(
+        verlet_metadata::provider_store::MetadataStoreError::Storage(
+            "sqlite engine error: Locking error: Failed locking file. File is locked by another process"
+                .to_string(),
+        ),
+    );
+
+    assert!(
+        error
+            .to_string()
+            .contains("another process holds this database")
+    );
+    assert!(error.to_string().contains("stop the running instance"));
+    assert!(!error.to_string().contains("File is locked"));
 }
 
 #[tokio::test]

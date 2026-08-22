@@ -1311,7 +1311,8 @@ pub(crate) fn env_or_file(
 pub(crate) struct PrivateAppServer {
     listen: crate::adapters::app_server::AppServerListenAddr,
     root: std::path::PathBuf,
-    task: tokio::task::JoinHandle<crate::kernel::runtime_host::VerletResult<()>>,
+    server: crate::adapters::app_server::VerletAppServer,
+    task: Option<tokio::task::JoinHandle<crate::kernel::runtime_host::VerletResult<()>>>,
 }
 
 impl PrivateAppServer {
@@ -1344,21 +1345,41 @@ impl PrivateAppServer {
 
         let server = crate::adapters::app_server::VerletAppServer::new_local(config).await?;
         let serve_listen = listen.clone();
-        let task = tokio::spawn(async move { server.serve(serve_listen).await });
+        let serve_server = server.clone();
+        let task = tokio::spawn(async move { serve_server.serve(serve_listen).await });
         wait_for_private_socket(socket_path(&listen)).await?;
-        Ok(Self { listen, root, task })
+        Ok(Self {
+            listen,
+            root,
+            server,
+            task: Some(task),
+        })
     }
 
     pub(crate) fn socket_path(&self) -> &std::path::Path {
         socket_path(&self.listen)
     }
 
-    pub(crate) fn shutdown(self) {}
+    pub(crate) async fn shutdown(mut self) -> crate::kernel::runtime_host::VerletResult<()> {
+        let shutdown = self.server.shutdown().await;
+        let serving = match self.task.take() {
+            Some(task) => task.await.map_err(|error| {
+                crate::cli::usage_error(format!(
+                    "private app-server task failed during shutdown: {error}"
+                ))
+            })?,
+            None => Ok(()),
+        };
+        shutdown?;
+        serving
+    }
 }
 
 impl Drop for PrivateAppServer {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }

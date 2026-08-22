@@ -902,7 +902,6 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
     let store_path = bootstrap_config.state_home.join("session_history.sqlite3");
     let baseline = active_credential_count(&store_path, OPERATOR_ID).await;
 
-    let mut generations = Vec::new();
     for _ in 0..4 {
         let mut config = app_config(
             &root,
@@ -924,24 +923,20 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
         let app = verlet::adapters::app_server::VerletAppServer::new(config)
             .await
             .unwrap();
-        generations.push(app);
         assert_eq!(
             active_credential_count(&store_path, OPERATOR_ID).await,
             baseline + 1,
             "a restart left more than one active console credential"
         );
+        app.shutdown().await.unwrap();
+        assert_eq!(
+            active_credential_count(&store_path, OPERATOR_ID).await,
+            baseline,
+            "graceful app-server shutdown did not revoke its console credential"
+        );
     }
 
     let record_path = root.join("state").join("console-credential-id");
-    assert!(record_path.is_file());
-    for app in generations {
-        app.shutdown().await.unwrap();
-    }
-    assert_eq!(
-        active_credential_count(&store_path, OPERATOR_ID).await,
-        baseline,
-        "graceful app-server shutdown did not revoke its console credential"
-    );
     assert!(!record_path.exists());
     let _ = std::fs::remove_dir_all(root);
 }

@@ -78,7 +78,9 @@ This repository contains the standalone Verlet kernel workspace:
   coupling ABI, attachment config, command projections, and Wasm operation support.
 - Runtime surfaces: CLI, daemon, app-server RPC, MCP, ACP, provider adapters,
   virtual bash, VFS, process handles, and daemon-embedded store-primary stream
-  sync with scoped credentials and single-writer leases.
+  sync with scoped credentials and single-writer leases. Running app-server
+  instances publish an `endpoint.json` record beside each owned state root for
+  deterministic local discovery.
 - Release and verification tooling for tagged binary releases.
 
 The product layer is outside this repository. Auth products, billing,
