@@ -18,6 +18,304 @@
 //! root exclusively, blob store included; a shared dedup CAS store is a
 //! future optimization with its own design.
 
+use sha2::Digest as _;
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct InstanceEndpoint {
+    pub pid: u32,
+    pub unix_socket: std::path::PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_url: Option<String>,
+    pub started_at: String,
+    pub instance_id: String,
+}
+
+pub fn resolve_instance_endpoint(state_root: &std::path::Path) -> Option<InstanceEndpoint> {
+    let record = std::fs::read(state_root.join(super::ENDPOINT_RECORD_NAME)).ok()?;
+    let endpoint = serde_json::from_slice::<InstanceEndpoint>(&record).ok()?;
+    if !endpoint.unix_socket.is_absolute()
+        || endpoint.started_at.trim().is_empty()
+        || endpoint.instance_id.trim().is_empty()
+        || !process_is_live(endpoint.pid)
+    {
+        return None;
+    }
+    Some(endpoint)
+}
+
+pub(crate) fn refuse_live_instance(
+    state_root: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let Some(endpoint) = resolve_instance_endpoint(state_root) else {
+        return Ok(());
+    };
+    if endpoint.pid == std::process::id() && !instance_endpoint_is_active(&endpoint.instance_id) {
+        return Ok(());
+    }
+    Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+        format!(
+            "instance already running for {}, pid {}, socket {}",
+            state_root.display(),
+            endpoint.pid,
+            endpoint.unix_socket.display()
+        ),
+    ))
+}
+
+pub(crate) fn cross_process_database_guidance() -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(
+        "another process holds this database (most likely a running Verlet instance); stop that instance and retry"
+            .to_string(),
+    )
+}
+
+pub(crate) fn turso_cross_process_lock_error(message: &str) -> bool {
+    // turso 0.7.0-pre.18 erases LimboError::LockingError through turso::Error.
+    let Some((_, engine_error)) = message.split_once("sqlite engine error: ") else {
+        return false;
+    };
+    engine_error == "Locking error: Failed locking file. File is locked by another process"
+        || (engine_error.starts_with("Locking error: Failed locking file '")
+            && engine_error.ends_with("'. File is locked by another process"))
+}
+
+pub(crate) fn register_instance_endpoint(instance_id: &str) {
+    active_instance_endpoints()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(instance_id.to_string());
+}
+
+pub(crate) fn unregister_instance_endpoint(instance_id: &str) {
+    active_instance_endpoints()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(instance_id);
+}
+
+fn instance_endpoint_is_active(instance_id: &str) -> bool {
+    active_instance_endpoints()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(instance_id)
+}
+
+fn active_instance_endpoints() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static ACTIVE_ENDPOINTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<String>>,
+    > = std::sync::OnceLock::new();
+    ACTIVE_ENDPOINTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+pub(crate) fn write_instance_endpoint(
+    state_root: &std::path::Path,
+    endpoint: &InstanceEndpoint,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    if !endpoint.unix_socket.is_absolute() {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "endpoint record unix socket must be absolute: {}",
+                endpoint.unix_socket.display()
+            ),
+        ));
+    }
+    std::fs::create_dir_all(state_root)
+        .map_err(|error| endpoint_record_error(state_root, error))?;
+    let path = state_root.join(super::ENDPOINT_RECORD_NAME);
+    let temporary = state_root.join(format!(
+        ".{}.{}.tmp",
+        super::ENDPOINT_RECORD_NAME,
+        uuid::Uuid::now_v7()
+    ));
+    let mut bytes = serde_json::to_vec_pretty(endpoint).map_err(|error| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to encode endpoint record {}: {error}",
+            path.display()
+        ))
+    })?;
+    bytes.push(b'\n');
+    let result = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        replace_endpoint_record(&temporary, &path)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(endpoint_record_error(state_root, error));
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_owned_instance_endpoint(
+    state_root: &std::path::Path,
+    instance_id: &str,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    let path = state_root.join(super::ENDPOINT_RECORD_NAME);
+    let record = match std::fs::read(&path) {
+        Ok(record) => record,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(endpoint_record_error(state_root, error)),
+    };
+    let endpoint = serde_json::from_slice::<InstanceEndpoint>(&record).map_err(|error| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "failed to decode endpoint record {} during shutdown: {error}",
+            path.display()
+        ))
+    })?;
+    if endpoint.instance_id != instance_id {
+        return Ok(());
+    }
+    std::fs::remove_file(&path).map_err(|error| endpoint_record_error(state_root, error))
+}
+
+pub(crate) fn absolute_path(
+    path: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|error| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "failed to resolve absolute endpoint path {}: {error}",
+                path.display()
+            ))
+        })
+}
+
+pub(crate) fn instance_unix_socket_path(
+    state_root: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
+    let state_root = absolute_path(state_root)?;
+    let candidate = state_root.join("verlet.sock");
+    if unix_socket_path_fits(&candidate) {
+        return Ok(candidate);
+    }
+
+    let digest = sha2::Sha256::digest(state_root.to_string_lossy().as_bytes());
+    let digest = format!("{digest:x}");
+    let runtime_path = crate::daemon::daemon_config::default_verlet_daemon_socket_path();
+    let runtime_dir = runtime_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/tmp"));
+    let hashed = runtime_dir.join(format!("{}.sock", &digest[..32]));
+    if unix_socket_path_fits(&hashed) {
+        return Ok(hashed);
+    }
+
+    let temporary = std::env::temp_dir().join(format!("verlet-{}.sock", &digest[..24]));
+    if unix_socket_path_fits(&temporary) {
+        return Ok(temporary);
+    }
+    Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+        format!(
+            "could not derive a Unix socket path within the platform limit for state root {}",
+            state_root.display()
+        ),
+    ))
+}
+
+fn endpoint_record_error(
+    state_root: &std::path::Path,
+    error: impl std::fmt::Display,
+) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+        "failed to update endpoint record {}: {error}",
+        state_root.join(super::ENDPOINT_RECORD_NAME).display()
+    ))
+}
+
+#[cfg(not(windows))]
+fn replace_endpoint_record(
+    temporary: &std::path::Path,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::rename(temporary, path)
+}
+
+#[cfg(windows)]
+fn replace_endpoint_record(
+    temporary: &std::path::Path,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::rename(temporary, path)
+}
+
+#[cfg(unix)]
+fn process_is_live(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_is_live(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let handle = unsafe {
+        windows_sys::Win32::System::Threading::OpenProcess(
+            windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return false;
+    }
+    let mut exit_code = 0_u32;
+    let inspected = unsafe {
+        windows_sys::Win32::System::Threading::GetExitCodeProcess(handle, &mut exit_code)
+    };
+    unsafe {
+        windows_sys::Win32::Foundation::CloseHandle(handle);
+    }
+    inspected != 0 && exit_code == windows_sys::Win32::Foundation::STILL_ACTIVE as u32
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_live(pid: u32) -> bool {
+    pid == std::process::id()
+}
+
+#[cfg(unix)]
+pub(crate) fn unix_socket_path_fits(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let maximum_path_bytes = if cfg!(any(target_os = "linux", target_os = "android")) {
+        107
+    } else {
+        103
+    };
+    path.as_os_str().as_bytes().len() <= maximum_path_bytes
+}
+
+#[cfg(not(unix))]
+pub(crate) fn unix_socket_path_fits(_path: &std::path::Path) -> bool {
+    true
+}
+
 /// The filesystem roots one kernel instance owns exclusively. All paths
 /// must be absolute; construction of a hosted instance canonicalizes them
 /// (creating the directories first so symlinked parents resolve) and
@@ -129,6 +427,12 @@ pub fn reserve_instance_roots(
                     ),
                 ));
             }
+        }
+    }
+
+    for (_, original, canonical) in &canonical_roots {
+        if resolve_instance_endpoint(canonical).is_some() {
+            refuse_live_instance(original)?;
         }
     }
 
@@ -273,5 +577,174 @@ impl std::fmt::Debug for InstanceEnvironment {
             .field("provider_auth", &self.provider_auth)
             .field("hook_shell", &self.hook_shell)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "verlet-endpoint-record-{label}-{}",
+            uuid::Uuid::now_v7()
+        ))
+    }
+
+    fn endpoint(root: &std::path::Path, pid: u32) -> super::InstanceEndpoint {
+        super::InstanceEndpoint {
+            pid,
+            unix_socket: root.join("verlet.sock"),
+            ws_url: Some("ws://127.0.0.1:49200/rpc".to_string()),
+            started_at: "2026-08-22T12:00:00Z".to_string(),
+            instance_id: uuid::Uuid::now_v7().to_string(),
+        }
+    }
+
+    #[test]
+    fn endpoint_record_round_trips_for_a_live_process() {
+        let root = test_root("live");
+        let expected = endpoint(&root, std::process::id());
+
+        super::write_instance_endpoint(&root, &expected).unwrap();
+
+        assert_eq!(super::resolve_instance_endpoint(&root), Some(expected));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_endpoint_record_is_not_resolved() {
+        let root = test_root("stale");
+        let stale = endpoint(&root, u32::MAX);
+
+        super::write_instance_endpoint(&root, &stale).unwrap();
+
+        assert_eq!(super::resolve_instance_endpoint(&root), None);
+        assert!(root.join(super::super::ENDPOINT_RECORD_NAME).is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inactive_same_process_endpoint_does_not_refuse_a_successor() {
+        let root = test_root("inactive-same-process");
+        let stale = endpoint(&root, std::process::id());
+        super::write_instance_endpoint(&root, &stale).unwrap();
+
+        super::refuse_live_instance(&root).unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn owned_endpoint_removal_preserves_a_successor_record() {
+        let root = test_root("owned-removal");
+        let owner = endpoint(&root, std::process::id());
+        let successor = endpoint(&root, std::process::id());
+        super::write_instance_endpoint(&root, &owner).unwrap();
+        super::write_instance_endpoint(&root, &successor).unwrap();
+
+        super::remove_owned_instance_endpoint(&root, &owner.instance_id).unwrap();
+
+        assert_eq!(
+            super::resolve_instance_endpoint(&root),
+            Some(successor.clone())
+        );
+        assert_eq!(
+            serde_json::from_slice::<super::InstanceEndpoint>(
+                &std::fs::read(root.join(super::super::ENDPOINT_RECORD_NAME)).unwrap()
+            )
+            .unwrap(),
+            successor
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_state_root_uses_a_deterministic_short_socket_path() {
+        let root = std::path::Path::new("/tmp").join("deep".repeat(40));
+
+        let first = super::instance_unix_socket_path(&root).unwrap();
+        let second = super::instance_unix_socket_path(&root).unwrap();
+
+        assert_eq!(first, second);
+        assert!(first.is_absolute());
+        assert!(super::unix_socket_path_fits(&first));
+        assert_ne!(first, root.join("verlet.sock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_path_limit_reserves_the_trailing_nul() {
+        let maximum = if cfg!(any(target_os = "linux", target_os = "android")) {
+            107
+        } else {
+            103
+        };
+        let fitting = std::path::PathBuf::from(format!("/{}", "s".repeat(maximum - 1)));
+        let too_long = std::path::PathBuf::from(format!("/{}", "s".repeat(maximum)));
+
+        assert_eq!(fitting.as_os_str().len(), maximum);
+        assert_eq!(too_long.as_os_str().len(), maximum + 1);
+        assert!(super::unix_socket_path_fits(&fitting));
+        assert!(!super::unix_socket_path_fits(&too_long));
+    }
+
+    #[test]
+    fn turso_cross_process_lock_match_accepts_only_refused_open_shapes() {
+        assert!(super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Locking error: Failed locking file '/tmp/session_history.sqlite3'. File is locked by another process"
+        ));
+        assert!(super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Locking error: Failed locking file. File is locked by another process"
+        ));
+
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Locking error: Failed to release file lock: permission denied"
+        ));
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: I/O error: Failed locking file '/tmp/session_history.sqlite3'. File is locked by another process"
+        ));
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Internal error: sqlite engine error: Locking error: Failed locking file. File is locked by another process"
+        ));
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: database is locked"
+        ));
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Locking error: Failed locking file. File is locked by another process; retry budget exhausted"
+        ));
+
+        assert_eq!(
+            super::cross_process_database_guidance().to_string(),
+            "runtime factory failed: another process holds this database (most likely a running Verlet instance); stop that instance and retry"
+        );
+    }
+
+    #[test]
+    fn live_endpoint_record_refuses_root_reservation_before_store_open() {
+        let root = test_root("reservation");
+        let roots = super::InstanceRoots::under(&root);
+        let live = endpoint(&roots.state_home, std::process::id());
+        super::register_instance_endpoint(&live.instance_id);
+        super::write_instance_endpoint(&roots.state_home, &live).unwrap();
+
+        let error = super::reserve_instance_roots(&roots).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "runtime factory failed: instance already running for {}, pid {}, socket {}",
+                roots.state_home.display(),
+                live.pid,
+                live.unix_socket.display()
+            )
+        );
+        assert!(
+            !roots
+                .state_home
+                .join(super::super::METADATA_DB_NAME)
+                .exists()
+        );
+        super::unregister_instance_endpoint(&live.instance_id);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

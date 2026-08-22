@@ -612,6 +612,34 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_instance_serves_its_derived_endpoint_without_a_serve_call() {
+        let root = test_root("derived-endpoint");
+        let instance_root = root.join("instance");
+        let state_root = instance_root.join("state");
+        let host = crate::adapters::host::VerletHost::new();
+        let id = crate::adapters::host::InstanceId::new("instance").unwrap();
+        host.start_instance(id, test_config(&instance_root, "tenant", "operator"))
+            .await
+            .unwrap();
+
+        let state_root = std::fs::canonicalize(state_root).unwrap();
+        let endpoint =
+            crate::adapters::app_server::instance::resolve_instance_endpoint(&state_root).unwrap();
+        assert_eq!(
+            endpoint.unix_socket,
+            crate::adapters::app_server::instance::instance_unix_socket_path(&state_root).unwrap()
+        );
+        let stream = tokio::net::UnixStream::connect(&endpoint.unix_socket)
+            .await
+            .unwrap();
+        drop(stream);
+
+        host.shutdown().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn shutdown_and_concurrent_start_cannot_leave_a_late_instance() {
         let root = test_root("shutdown-start-race");

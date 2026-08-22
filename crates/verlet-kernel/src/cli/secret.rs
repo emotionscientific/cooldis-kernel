@@ -1,8 +1,6 @@
 //! The `secret` subcommand family and shared local metadata-store access.
 
 use std::io::Read as _;
-#[cfg(test)]
-mod tests;
 
 pub(crate) async fn run_secret(
     mut args: Vec<std::ffi::OsString>,
@@ -385,8 +383,8 @@ pub(crate) async fn open_secret_store(
     ))
     .await
     .map_err(|err| {
-        if turso_cross_process_lock_error(&err.to_string()) {
-            cross_process_database_guidance("stop the daemon and retry")
+        if crate::adapters::app_server::instance::turso_cross_process_lock_error(&err.to_string()) {
+            crate::adapters::app_server::instance::cross_process_database_guidance()
         } else {
             secret_cli_error(err)
         }
@@ -402,10 +400,8 @@ pub(crate) async fn open_provider_store(
     )
     .await
     .map_err(|err| {
-        if turso_cross_process_lock_error(&err.to_string()) {
-            cross_process_database_guidance(
-                "use the running daemon's modelProvider RPC or stop the daemon and retry",
-            )
+        if crate::adapters::app_server::instance::turso_cross_process_lock_error(&err.to_string()) {
+            crate::adapters::app_server::instance::cross_process_database_guidance()
         } else {
             provider_cli_error(err)
         }
@@ -414,24 +410,6 @@ pub(crate) async fn open_provider_store(
         .await
         .map_err(provider_cli_error)?;
     Ok(store)
-}
-
-pub(crate) fn cross_process_database_guidance(
-    alternative: &str,
-) -> crate::kernel::runtime_host::VerletError {
-    crate::cli::usage_error(format!(
-        "another process holds this database (most likely the verlet daemon); {alternative}"
-    ))
-}
-
-pub(crate) fn turso_cross_process_lock_error(message: &str) -> bool {
-    // turso 0.7.0-pre.18 erases LimboError::LockingError through turso::Error.
-    let Some((_, engine_error)) = message.split_once("sqlite engine error: ") else {
-        return false;
-    };
-    engine_error == "Locking error: Failed locking file. File is locked by another process"
-        || (engine_error.starts_with("Locking error: Failed locking file '")
-            && engine_error.ends_with("'. File is locked by another process"))
 }
 
 pub(crate) fn secret_cli_error(

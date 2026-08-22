@@ -20,6 +20,30 @@ client parity is not the target of that topology surface.
 
 ## Current Surfaces
 
+### Endpoint record and discovery
+
+Every constructed app-server instance publishes an endpoint record at
+`<state_root>/endpoint.json`. The same record is written for its project state
+root and user state root when they differ. It contains `pid`, an absolute
+`unix_socket`, an optional `ws_url`, `started_at`, and `instance_id`. The record
+appears only after the stores are open and the Unix socket is bound. Explicit
+server shutdown removes records still owned by that `instance_id`.
+
+A client discovers an instance by reading this record, checking that `pid` is
+live, and then connecting to `unix_socket`. If that connection fails, slice 2
+may try `ws_url` when present. Clients do not scan ports or guess paths. A dead
+PID makes the record stale, but clients leave it in place so the next server
+can overwrite it. PID reuse can make the liveness check appear positive, so a
+successful connection remains the final authority.
+
+A configured short Unix listener is used directly. WebSocket listeners and
+configured Unix paths that exceed the platform limit use
+`<state_root>/verlet.sock` when it fits. Deep roots use a deterministic hash in
+the same runtime directory selected by `default_verlet_daemon_socket_path`,
+with the system temporary directory as a final short-path fallback. This keeps
+`console`, TCP WebSocket `rpc`, daemon, private chat, and hosted instances
+discoverable through a real Unix socket.
+
 ### Standalone RPC quick start
 
 Bootstrap an operator into an explicit state home before starting a standalone

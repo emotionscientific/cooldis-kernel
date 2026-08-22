@@ -45,6 +45,114 @@ async fn daemon_run_serves_codex_remote_on_configured_unix_socket() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn console_endpoint_record_refuses_daemon_then_becomes_stale_after_sigkill() {
+    let smoke_id = uuid::Uuid::now_v7().simple().to_string();
+    let root = std::path::Path::new("/tmp").join(format!("cdisep-{}", &smoke_id[..12]));
+    let assets = root.join("console-assets");
+    let user_home = root.join("user-home");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<!doctype html><title>test</title>",
+    )
+    .unwrap();
+    let socket = root.join("run/verlet.sock");
+    let config_path = root.join("verlet.toml");
+    write_daemon_config(&config_path, &root, &socket);
+
+    let mut console = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut console);
+    let mut console = console
+        .arg("console")
+        .arg("--no-open")
+        .arg("--cwd")
+        .arg(&root)
+        .arg("--config")
+        .arg(&config_path)
+        .env("VERLET_HOME", &user_home)
+        .env("VERLET_CONSOLE_ASSET_DIR", &assets)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let console_pid = console.id().unwrap();
+    let state_home = root.join("state");
+    let endpoint = wait_for_endpoint_record(&state_home, &mut console).await;
+    let canonical_state_home = std::fs::canonicalize(&state_home).unwrap();
+    assert_eq!(endpoint.pid, console_pid);
+    assert!(endpoint.unix_socket.is_absolute());
+    assert_eq!(
+        endpoint.unix_socket,
+        canonical_state_home.join("verlet.sock")
+    );
+    assert!(endpoint.unix_socket.exists());
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::net::UnixStream::connect(&endpoint.unix_socket),
+    )
+    .await
+    .expect("console endpoint socket did not accept promptly")
+    .unwrap();
+    drop(stream);
+    assert!(
+        endpoint
+            .ws_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("ws://127.0.0.1:"))
+    );
+
+    let mut daemon = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut daemon);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        daemon
+            .arg("daemon")
+            .arg("run")
+            .arg("--config")
+            .arg(&config_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+    .expect("daemon contention did not fail fast")
+    .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = format!(
+        "instance already running for {}, pid {}, socket {}",
+        canonical_state_home.display(),
+        endpoint.pid,
+        endpoint.unix_socket.display()
+    );
+    assert!(
+        stderr.contains(&expected),
+        "expected {expected:?} in daemon stderr {stderr:?}"
+    );
+    assert!(!stderr.contains("File is locked"));
+
+    console.start_kill().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), console.wait())
+        .await
+        .expect("console did not exit after SIGKILL")
+        .unwrap();
+    assert!(
+        state_home
+            .join(verlet::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .is_file()
+    );
+    assert_eq!(
+        verlet::adapters::app_server::instance::resolve_instance_endpoint(&state_home),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn write_daemon_config(
     config_path: &std::path::Path,
     root: &std::path::Path,
@@ -99,6 +207,29 @@ async fn connect_daemon_client(
         "timed out waiting for daemon socket {}; last connect error: {}",
         socket.display(),
         last_error.unwrap_or_else(|| "socket did not appear".to_string())
+    );
+}
+
+async fn wait_for_endpoint_record(
+    state_home: &std::path::Path,
+    child: &mut tokio::process::Child,
+) -> verlet::adapters::app_server::instance::InstanceEndpoint {
+    for _ in 0..1_500 {
+        if let Some(endpoint) =
+            verlet::adapters::app_server::instance::resolve_instance_endpoint(state_home)
+        {
+            return endpoint;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("server exited before writing its endpoint record: {status}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "timed out waiting for endpoint record {}",
+        state_home
+            .join(verlet::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .display()
     );
 }
 

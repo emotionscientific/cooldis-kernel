@@ -703,25 +703,32 @@ pub(crate) async fn agent_run(
         );
     config.agent_registry_root = agent_registry_root;
     let app = crate::adapters::app_server::VerletAppServer::new_local(config).await?;
-    let thread_start = app
-        .local_json_rpc_request(
-            "thread/start",
-            serde_json::json!({
-            "agentRef": reference,
-            }),
-        )
-        .await?;
-    let thread_id = thread_start["thread"]["id"]
-        .as_str()
-        .ok_or_else(|| crate::cli::usage_error("thread/start response missing thread id"))?
-        .to_string();
-    let receipt_ids = crate::cli::console::manifest_receipt_event_ids(&app, &thread_id).await?;
-    let assistant_text = crate::cli::console::run_local_app_turn(&app, &thread_id, &input).await?;
-    println!("{assistant_text}");
-    println!("manifest.compile.completed: {}", receipt_ids.0);
-    println!("manifest.bind.completed: {}", receipt_ids.1);
+    let result: crate::kernel::runtime_host::VerletResult<()> = async {
+        let thread_start = app
+            .local_json_rpc_request(
+                "thread/start",
+                serde_json::json!({
+                "agentRef": reference,
+                }),
+            )
+            .await?;
+        let thread_id = thread_start["thread"]["id"]
+            .as_str()
+            .ok_or_else(|| crate::cli::usage_error("thread/start response missing thread id"))?
+            .to_string();
+        let receipt_ids = crate::cli::console::manifest_receipt_event_ids(&app, &thread_id).await?;
+        let assistant_text =
+            crate::cli::console::run_local_app_turn(&app, &thread_id, &input).await?;
+        println!("{assistant_text}");
+        println!("manifest.compile.completed: {}", receipt_ids.0);
+        println!("manifest.bind.completed: {}", receipt_ids.1);
+        Ok(())
+    }
+    .await;
+    let shutdown = app.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
-    Ok(())
+    result?;
+    shutdown
 }
 
 #[derive(Debug)]

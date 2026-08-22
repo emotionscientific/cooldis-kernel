@@ -85,8 +85,9 @@ async fn run_chat_console(
         }
     }
     .await;
-    launched.shutdown();
-    result
+    let shutdown = launched.shutdown().await;
+    result?;
+    shutdown
 }
 
 async fn run_attached_chat(

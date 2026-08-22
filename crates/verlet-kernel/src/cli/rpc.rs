@@ -38,7 +38,10 @@ pub(crate) async fn run_rpc(
             eprintln!("Same-uid Unix socket peers need no token.");
         }
     }
-    server.serve(options.listen).await
+    let serving = server.serve(options.listen).await;
+    let shutdown = server.shutdown().await;
+    serving?;
+    shutdown
 }
 
 #[derive(Debug)]

@@ -8857,6 +8857,7 @@ async fn default_manifest_thread_rebinds_after_config_model_changes() {
             first_record.resolved_manifest["model_profiles"][0]["model_ref"].as_str(),
             Some("model://local_offline/echo-v1")
         );
+        app.shutdown().await.unwrap();
     }
 
     let listen =
@@ -9026,6 +9027,7 @@ async fn assert_app_server_resume_uses_stream_after_registry_mutation(
             .find(|binding| binding.payload.name == "search")
             .expect("opening bind should attach search")
             .attach_event_id;
+        app.shutdown().await.unwrap();
     }
 
     let registry = crate::agent::manifest::LocalAgentRegistry::new(&agent_registry_root);
@@ -9268,6 +9270,7 @@ streaming = false
             .upsert_thread_lifecycle(lifecycle)
             .await
             .unwrap();
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -14270,6 +14273,7 @@ streaming = false
             .await
             .unwrap();
     }
+    first.shutdown().await.unwrap();
     drop(connection);
     drop(first);
 
@@ -15254,6 +15258,7 @@ async fn app_server_loads_threads_and_rebuilds_context_from_shared_session_store
         .unwrap();
         wait_for_provider_requests(&first_client, 1).await;
         wait_for_session_text(&app, &thread_id, "inspected").await;
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -15396,6 +15401,7 @@ async fn restored_thread_start_streams_and_thread_read_returns_persisted_turns()
                 vec!["second persisted turn".to_string(), "inspected".to_string()],
             ]
         );
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -16062,6 +16068,7 @@ async fn restored_thread_provider_requests_end_with_current_input() {
             turn["turn"]["id"].as_str().unwrap(),
         )
         .await;
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -16178,6 +16185,7 @@ async fn restored_thread_notifications_use_current_completion_and_persist_once()
             wait_for_assistant_texts(&app, &thread_id, 1).await,
             vec!["before restart completion".to_string()]
         );
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -16305,6 +16313,7 @@ async fn restored_thread_multiple_subscribers_receive_single_applied_turns() {
         let turn_id = turn["turn"]["id"].as_str().unwrap();
         collect_agent_deltas_until_turn_completed(&mut outbound_rx, &thread_id, turn_id).await;
         assert_eq!(wait_for_assistant_texts(&app, &thread_id, 1).await.len(), 1);
+        app.shutdown().await.unwrap();
         thread_id
     };
 
@@ -17915,6 +17924,20 @@ async fn failed_console_retirement_can_be_retried_to_completion() {
             .contains("failed to read Verlet console credential record")
     );
     assert!(app.inner.tasks.is_shutdown());
+    assert!(
+        !root
+            .join("state")
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists(),
+        "shutdown left the project endpoint record after its listener stopped"
+    );
+    assert!(
+        !root
+            .join("user-state")
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists(),
+        "shutdown left the user endpoint record after its listener stopped"
+    );
     assert!(app.inner.console_credential.lock().await.is_some());
     assert!(
         app.inner
@@ -18140,6 +18163,18 @@ async fn hosted_constructor_failure_after_inner_build_releases_roots() {
         error
             .to_string()
             .contains("injected constructor reload failure")
+    );
+    assert!(
+        !roots
+            .state_home
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
+    );
+    assert!(
+        !roots
+            .user_state_home
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
     );
 
     let successor = crate::adapters::app_server::VerletAppServerConfig::hosted(
@@ -18372,6 +18407,170 @@ async fn shutdown_stops_an_instance_owned_listener() {
             ) => {}
         Err(error) => panic!("mid-handshake connection closed unexpectedly: {error}"),
     }
+}
+
+#[tokio::test]
+async fn shutdown_removes_owned_endpoint_records() {
+    let root = unique_test_root("endpoint-record-shutdown");
+    let app = test_app_at_root(&root).await;
+    let state_home = root.join("state");
+    let user_state_home = root.join("user-state");
+    let state_endpoint =
+        crate::adapters::app_server::instance::resolve_instance_endpoint(&state_home)
+            .expect("the state endpoint record must be live after construction");
+    let user_endpoint =
+        crate::adapters::app_server::instance::resolve_instance_endpoint(&user_state_home)
+            .expect("the user endpoint record must be live after construction");
+    assert_eq!(state_endpoint, user_endpoint);
+
+    let mut successor_endpoint = state_endpoint.clone();
+    successor_endpoint.instance_id = uuid::Uuid::now_v7().to_string();
+    crate::adapters::app_server::instance::write_instance_endpoint(
+        &state_home,
+        &successor_endpoint,
+    )
+    .unwrap();
+
+    app.shutdown().await.unwrap();
+
+    assert!(
+        state_home
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .is_file()
+    );
+    assert!(
+        !user_state_home
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
+    );
+    assert_eq!(
+        crate::adapters::app_server::instance::resolve_instance_endpoint(&state_home),
+        Some(successor_endpoint)
+    );
+    assert_eq!(
+        crate::adapters::app_server::instance::resolve_instance_endpoint(&user_state_home),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_socket_preparation_refuses_live_socket_and_removes_stale_socket() {
+    let root = std::path::Path::new("/tmp").join(format!(
+        "veps-{}",
+        &uuid::Uuid::now_v7().simple().to_string()[..12]
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("verlet.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+    let error = crate::adapters::app_server::prepare_unix_socket_path(&path).unwrap_err();
+    assert!(error.to_string().contains("live app-server socket"));
+    assert!(path.exists());
+
+    drop(listener);
+    crate::adapters::app_server::prepare_unix_socket_path(&path).unwrap();
+    assert!(!path.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn endpoint_listener_start_failure_publishes_no_record_and_allows_retry() {
+    let root = std::path::Path::new("/tmp").join(format!(
+        "vepf-{}",
+        &uuid::Uuid::now_v7().simple().to_string()[..12]
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let socket = root.join("app-server.sock");
+    std::fs::write(&socket, "occupied").unwrap();
+
+    let error =
+        match crate::adapters::app_server::VerletAppServer::new_local(test_config_at_root(&root))
+            .await
+        {
+            Ok(_) => panic!("app-server unexpectedly replaced a non-socket path"),
+            Err(error) => error,
+        };
+    assert!(error.to_string().contains("refusing to replace non-socket"));
+    assert!(
+        !root
+            .join("state")
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
+    );
+    assert!(
+        !root
+            .join("user-state")
+            .join(crate::adapters::app_server::ENDPOINT_RECORD_NAME)
+            .exists()
+    );
+
+    std::fs::remove_file(&socket).unwrap();
+    let successor = test_app_at_root(&root).await;
+    successor.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn configured_overlong_unix_path_is_served_by_the_derived_endpoint() {
+    let root = std::path::Path::new("/tmp").join(format!(
+        "vepl-{}",
+        &uuid::Uuid::now_v7().simple().to_string()[..12]
+    ));
+    let configured_path = std::path::Path::new("/tmp").join("s".repeat(180));
+    let mut config = test_config_at_root(&root);
+    config.listen = crate::adapters::app_server::AppServerListenAddr::Unix(configured_path.clone());
+    let app = crate::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let expected = crate::adapters::app_server::instance::instance_unix_socket_path(
+        &std::fs::canonicalize(root.join("state")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(app.inner.endpoint.unix_socket, expected);
+    assert_ne!(app.inner.endpoint.unix_socket, configured_path);
+
+    let serving_app = app.clone();
+    let serving = tokio::spawn(async move {
+        serving_app
+            .serve(crate::adapters::app_server::AppServerListenAddr::Unix(
+                configured_path,
+            ))
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(!serving.is_finished());
+    let stream = tokio::net::UnixStream::connect(&app.inner.endpoint.unix_socket)
+        .await
+        .unwrap();
+    drop(stream);
+
+    app.shutdown().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), serving)
+        .await
+        .expect("serve did not stop with the endpoint listener")
+        .unwrap()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn constructor_metadata_lock_uses_cross_process_guidance() {
+    let error = crate::adapters::app_server::metadata_store_error(
+        verlet_metadata::provider_store::MetadataStoreError::Storage(
+            "sqlite engine error: Locking error: Failed locking file. File is locked by another process"
+                .to_string(),
+        ),
+    );
+
+    assert_eq!(
+        error.to_string(),
+        "runtime factory failed: another process holds this database (most likely a running Verlet instance); stop that instance and retry"
+    );
+    assert!(!error.to_string().contains("File is locked"));
 }
 
 #[tokio::test]

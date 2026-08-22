@@ -7158,7 +7158,7 @@ async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
         .submit(coalesce_envelope("restart", "3002", 1_000, 10))
         .await
         .unwrap();
-    let (_server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
+    let (server, bridge, _rx) = test_bridge_at_root(&fixture_root).await;
     let worker = crate::daemon::daemon_io::VerletDaemonQueueWorker::new(
         durable_queue.clone(),
         bridge.clone(),
@@ -7183,6 +7183,9 @@ async fn queue_worker_recovers_held_coalesce_batch_after_restart() {
     drop(connection);
     drop(worker);
     drop(durable_queue);
+    server.shutdown().await.unwrap();
+    drop(bridge);
+    drop(server);
 
     let (restarted_server, restarted_bridge, _rx) = restarted_bridge_at_root(&fixture_root).await;
     let reopened = std::sync::Arc::new(

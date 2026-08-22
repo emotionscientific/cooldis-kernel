@@ -250,7 +250,7 @@ fn revoking_a_bogus_id_fails_without_printing_success() {
 }
 
 #[tokio::test]
-async fn locked_store_tells_the_user_to_stop_the_daemon() {
+async fn locked_store_tells_the_user_to_stop_the_running_instance() {
     let state_home = temp_state_home();
     std::fs::create_dir_all(&state_home).unwrap();
     let state_home_arg = state_home.to_string_lossy().to_string();
@@ -267,7 +267,7 @@ async fn locked_store_tells_the_user_to_stop_the_daemon() {
     let list = run_identity(["identity", "list", "--state-home", &state_home_arg]);
     assert!(!list.status.success());
     assert!(stderr(&list).contains("another process holds this database"));
-    assert!(stderr(&list).contains("stop the daemon and retry"));
+    assert!(stderr(&list).contains("stop that instance and retry"));
 
     drop(authority);
     remove_sqlite_state(&state_home);

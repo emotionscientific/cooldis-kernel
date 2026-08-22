@@ -45,6 +45,7 @@ const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_COMMAND_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 const DEFAULT_OPERATION_REGISTRY_ROOT: &str = ".verlet/operations";
 const METADATA_DB_NAME: &str = "metadata.sqlite3";
+pub const ENDPOINT_RECORD_NAME: &str = "endpoint.json";
 const THREAD_APP_SERVER_CWD_METADATA: &str = "cooldis.app_server.cwd";
 const THREAD_APP_SERVER_MODEL_PROVIDER_METADATA: &str = "cooldis.app_server.model_provider";
 const THREAD_APP_SERVER_EPHEMERAL_METADATA: &str = "cooldis.app_server.ephemeral";
@@ -233,7 +234,7 @@ impl VerletAppServerConfig {
         let blob_registry_root = canonical_roots[4].clone();
         let skill_registry_root = canonical_roots[5].clone();
         let mut config = Self {
-            listen: AppServerListenAddr::Unix(runtime_home.join("app-server.unbound.sock")),
+            listen: AppServerListenAddr::Unix(instance::instance_unix_socket_path(&state_home)?),
             runtime_home: runtime_home.clone(),
             state_home,
             user_state_home,
@@ -432,6 +433,57 @@ impl VerletAppServerConfig {
 
     pub fn provider_metadata_store_path(&self) -> std::path::PathBuf {
         self.user_metadata_store_path()
+    }
+
+    fn validate_endpoint_availability(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        for root in self.endpoint_record_roots()? {
+            instance::refuse_live_instance(&root)?;
+        }
+        Ok(())
+    }
+
+    fn endpoint_record_roots(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<Vec<std::path::PathBuf>> {
+        let mut roots = Vec::with_capacity(2);
+        for root in [&self.state_home, &self.user_state_home] {
+            let absolute = instance::absolute_path(root)?;
+            let root = std::fs::canonicalize(&absolute).unwrap_or(absolute);
+            if !roots.iter().any(|existing| existing == &root) {
+                roots.push(root);
+            }
+        }
+        Ok(roots)
+    }
+
+    fn instance_endpoint(
+        &self,
+        state_root: &std::path::Path,
+    ) -> crate::kernel::runtime_host::VerletResult<instance::InstanceEndpoint> {
+        let unix_socket = match &self.listen {
+            AppServerListenAddr::Unix(path) => {
+                let path = instance::absolute_path(path)?;
+                if instance::unix_socket_path_fits(&path) {
+                    path
+                } else {
+                    instance::instance_unix_socket_path(state_root)?
+                }
+            }
+            AppServerListenAddr::WebSocket(_) => instance::instance_unix_socket_path(state_root)?,
+        };
+        let ws_url = match &self.listen {
+            AppServerListenAddr::WebSocket(addr) if addr.port() != 0 => {
+                Some(AppServerListenAddr::WebSocket(*addr).display())
+            }
+            AppServerListenAddr::Unix(_) | AppServerListenAddr::WebSocket(_) => None,
+        };
+        Ok(instance::InstanceEndpoint {
+            pid: std::process::id(),
+            unix_socket,
+            ws_url,
+            started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            instance_id: uuid::Uuid::now_v7().to_string(),
+        })
     }
 
     fn validate_root_reservation(&self) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -845,6 +897,9 @@ struct VerletAppServerInner {
     /// this instead of `std::env`/globals.
     #[allow(dead_code)]
     instance_environment: instance::InstanceEnvironment,
+    configured_listen: AppServerListenAddr,
+    endpoint: instance::InstanceEndpoint,
+    endpoint_record_roots: Vec<std::path::PathBuf>,
     tenant_id: String,
     user_id: String,
     identity_mode: crate::daemon::identity::IdentityMode,
@@ -976,6 +1031,7 @@ impl Drop for SessionCloseWitness {
 
 impl Drop for VerletAppServerInner {
     fn drop(&mut self) {
+        instance::unregister_instance_endpoint(&self.endpoint.instance_id);
         let Some(credential) = self.console_credential.get_mut().take() else {
             return;
         };
@@ -1086,6 +1142,7 @@ impl VerletAppServer {
         mut config: VerletAppServerConfig,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
         config.validate_root_reservation()?;
+        config.validate_endpoint_availability()?;
         let metadata_store = open_and_seed_metadata_store(config.metadata_store_path()).await?;
         let user_metadata_store =
             open_and_seed_metadata_store(config.user_metadata_store_path()).await?;
@@ -1127,6 +1184,7 @@ impl VerletAppServer {
         >,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
         config.validate_root_reservation()?;
+        config.validate_endpoint_availability()?;
         let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
             .await
             .map_err(metadata_store_error)?;
@@ -1247,6 +1305,7 @@ impl VerletAppServer {
         turn_endpoint_router: std::sync::Arc<AppServerTurnEndpointRouter>,
     ) -> crate::kernel::runtime_host::VerletResult<Self> {
         config.validate_root_reservation()?;
+        config.validate_endpoint_availability()?;
         crate::adapters::app_server::threads::normalize_registry_roots(&mut config);
         let provider_surface =
             agent_manifest_provider_surface_for_config(&config, &metadata_store).await?;
@@ -1268,6 +1327,8 @@ impl VerletAppServer {
         )?;
         let metadata_store_path = config.metadata_store_path();
         let user_metadata_store_path = config.user_metadata_store_path();
+        let endpoint_record_roots = config.endpoint_record_roots()?;
+        let endpoint = config.instance_endpoint(&endpoint_record_roots[0])?;
         let model_catalog = model_catalog::MergedModelCatalog::new(&config.user_state_home);
         #[cfg(not(test))]
         let model_catalog_state_home = config.user_state_home.clone();
@@ -1281,7 +1342,7 @@ impl VerletAppServer {
         let session_store_path = tenant_context.session_history_path();
         let identity_store = verlet_history_sqlite::SqliteSessionStore::open(&session_store_path)
             .await
-            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+            .map_err(history_store_error)?
             .with_lease_epoch(config.lease_epoch);
         let runtime_store = std::sync::Arc::new(identity_store.clone())
             as std::sync::Arc<dyn verlet_history::RuntimeStore>;
@@ -1327,6 +1388,9 @@ impl VerletAppServer {
                 dispatch_gate: tokio::sync::RwLock::new(()),
                 root_reservation: config.root_reservation,
                 instance_environment: config.instance_environment,
+                configured_listen: config.listen,
+                endpoint,
+                endpoint_record_roots,
                 tenant_id: config.tenant_id,
                 user_id: config.user_id,
                 identity_mode: config.identity_mode,
@@ -1435,9 +1499,7 @@ impl VerletAppServer {
             let recovery_store =
                 verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
                     .await
-                    .map_err(|err| {
-                        crate::kernel::runtime_host::VerletError::History(err.to_string())
-                    })?
+                    .map_err(history_store_error)?
                     .with_lease_epoch(app.inner.lease_epoch);
             crate::daemon::recovery_sweep::StartupRecoverySweep::new(
                 recovery_store,
@@ -1466,6 +1528,25 @@ impl VerletAppServer {
                 recovery.thread_joins, recovery.process_outcomes,
             );
         }
+        instance::register_instance_endpoint(&app.inner.endpoint.instance_id);
+        if let Err(error) = app.start_instance_unix_listener().await {
+            if let Err(shutdown_error) = app.shutdown().await {
+                eprintln!(
+                    "failed to shut down Verlet app-server after endpoint listener error {error}: {shutdown_error}"
+                );
+            }
+            return Err(error);
+        }
+        for state_root in &app.inner.endpoint_record_roots {
+            if let Err(error) = instance::write_instance_endpoint(state_root, &app.inner.endpoint) {
+                if let Err(shutdown_error) = app.shutdown().await {
+                    eprintln!(
+                        "failed to shut down Verlet app-server after endpoint record error {error}: {shutdown_error}"
+                    );
+                }
+                return Err(error);
+            }
+        }
         // Catalog refresh is instance-owned and starts only after every
         // fallible construction and recovery step. It never participates in
         // constructor success or the first chat/RPC path.
@@ -1482,6 +1563,76 @@ impl VerletAppServer {
             AppServerListenAddr::Unix(path) => self.serve_unix(path).await,
             AppServerListenAddr::WebSocket(addr) => self.serve_websocket(addr).await,
         }
+    }
+
+    #[cfg(unix)]
+    async fn start_instance_unix_listener(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        let path = self.inner.endpoint.unix_socket.clone();
+        prepare_unix_socket_path(&path)?;
+        let listener = tokio::net::UnixListener::bind(&path).map_err(|error| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "failed to bind Verlet endpoint socket {}: {error}",
+                path.display()
+            ))
+        })?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "failed to secure Verlet endpoint socket {}: {error}",
+                    path.display()
+                ))
+            },
+        )?;
+
+        let inner = std::sync::Arc::downgrade(&self.inner);
+        let tasks = std::sync::Arc::downgrade(&self.inner.tasks);
+        let cancellation = self.inner.tasks.cancellation();
+        if !self.inner.tasks.spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    accepted = listener.accept() => accepted,
+                };
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        eprintln!("Verlet endpoint socket accept failed: {error}");
+                        continue;
+                    }
+                };
+                let peer_uid = match stream.peer_cred() {
+                    Ok(credentials) => credentials.uid(),
+                    Err(error) => {
+                        eprintln!("failed to inspect Verlet endpoint peer credentials: {error}");
+                        continue;
+                    }
+                };
+                let Some(inner) = inner.upgrade() else {
+                    return;
+                };
+                let Some(tasks) = tasks.upgrade() else {
+                    return;
+                };
+                let app = VerletAppServer { inner };
+                if !tasks.spawn(async move {
+                    if let Err(error) = app.handle_unix_stream(stream, peer_uid).await {
+                        eprintln!("Verlet endpoint connection failed: {error}");
+                    }
+                }) {
+                    return;
+                }
+            }
+        }) {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "Verlet app-server shut down before its endpoint socket started".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    async fn start_instance_unix_listener(&self) -> crate::kernel::runtime_host::VerletResult<()> {
+        Ok(())
     }
 
     /// Transport-independent RPC dispatch (EMO-551): serve one JSON-RPC
@@ -1580,6 +1731,9 @@ impl VerletAppServer {
             return Ok(());
         }
 
+        for state_root in &self.inner.endpoint_record_roots {
+            instance::remove_owned_instance_endpoint(state_root, &self.inner.endpoint.instance_id)?;
+        }
         self.inner.tasks.cancel();
         let _dispatch = self.inner.dispatch_gate.write().await;
         self.inner.tasks.shutdown().await;
@@ -1597,6 +1751,7 @@ impl VerletAppServer {
             .supervisor
             .shutdown_and_unregister_tenant(&self.inner.tenant_id)
             .await?;
+        instance::unregister_instance_endpoint(&self.inner.endpoint.instance_id);
         *shutdown = true;
         Ok(())
     }
@@ -1665,6 +1820,17 @@ impl VerletAppServer {
         &self,
         path: std::path::PathBuf,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
+        let path = instance::absolute_path(&path)?;
+        let configured_path = match &self.inner.configured_listen {
+            AppServerListenAddr::Unix(configured_path) => {
+                Some(instance::absolute_path(configured_path)?)
+            }
+            AppServerListenAddr::WebSocket(_) => None,
+        };
+        if path == self.inner.endpoint.unix_socket || configured_path.as_ref() == Some(&path) {
+            self.inner.tasks.cancellation().cancelled().await;
+            return Ok(());
+        }
         prepare_unix_socket_path(&path)?;
         let listener = tokio::net::UnixListener::bind(&path).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
@@ -2586,8 +2752,12 @@ fn resolve_catalog_config_value(
 fn provider_store_error(
     err: verlet_metadata::provider_store::LlmProviderStoreError,
 ) -> crate::kernel::runtime_host::VerletError {
+    let message = err.to_string();
+    if instance::turso_cross_process_lock_error(&message) {
+        return instance::cross_process_database_guidance();
+    }
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-        "provider metadata store failed: {err}"
+        "provider metadata store failed: {message}"
     ))
 }
 
@@ -2654,13 +2824,33 @@ async fn agent_manifest_provider_surface_from_parts(
 fn metadata_store_error(
     err: verlet_metadata::provider_store::MetadataStoreError,
 ) -> crate::kernel::runtime_host::VerletError {
-    crate::kernel::runtime_host::VerletError::RuntimeFactory(err.to_string())
+    let message = err.to_string();
+    if instance::turso_cross_process_lock_error(&message) {
+        return instance::cross_process_database_guidance();
+    }
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(message)
 }
 
 fn secret_store_error(
     err: verlet_metadata::secret_store::SecretStoreError,
 ) -> crate::kernel::runtime_host::VerletError {
-    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!("secret store failed: {err}"))
+    let message = err.to_string();
+    if instance::turso_cross_process_lock_error(&message) {
+        return instance::cross_process_database_guidance();
+    }
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+        "secret store failed: {message}"
+    ))
+}
+
+fn history_store_error(
+    err: verlet_history::HistoryError,
+) -> crate::kernel::runtime_host::VerletError {
+    let message = err.to_string();
+    if instance::turso_cross_process_lock_error(&message) {
+        return instance::cross_process_database_guidance();
+    }
+    crate::kernel::runtime_host::VerletError::History(message)
 }
 
 fn metadata_store_jsonrpc_error(
@@ -3604,20 +3794,51 @@ fn prepare_unix_socket_path(
             )?;
         }
     }
-    if path.exists() {
-        let metadata = std::fs::symlink_metadata(path).map_err(|err| {
-            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "failed to inspect existing app-server socket {}: {err}",
-                path.display()
-            ))
-        })?;
-        if metadata.file_type().is_file() || metadata.file_type().is_dir() {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "failed to inspect existing app-server socket {}: {error}",
+                    path.display()
+                ),
+            ));
+        }
+    };
+    if let Some(metadata) = metadata {
+        use std::os::unix::fs::FileTypeExt as _;
+        if !metadata.file_type().is_socket() {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
                     "refusing to replace non-socket app-server path {}",
                     path.display()
                 ),
             ));
+        }
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(stream) => {
+                drop(stream);
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "refusing to replace live app-server socket {}",
+                        path.display()
+                    ),
+                ));
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(error) => {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "failed to verify existing app-server socket {} is stale: {error}",
+                        path.display()
+                    ),
+                ));
+            }
         }
         std::fs::remove_file(path).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
