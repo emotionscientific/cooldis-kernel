@@ -62,12 +62,11 @@ pub(crate) fn refuse_live_instance(
     ))
 }
 
-pub(crate) fn cross_process_database_guidance(
-    alternative: &str,
-) -> crate::kernel::runtime_host::VerletError {
-    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-        "another process holds this database (most likely the verlet daemon); {alternative}"
-    ))
+pub(crate) fn cross_process_database_guidance() -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(
+        "another process holds this database (most likely a running Verlet instance); stop that instance and retry"
+            .to_string(),
+    )
 }
 
 pub(crate) fn turso_cross_process_lock_error(message: &str) -> bool {
@@ -304,7 +303,12 @@ fn process_is_live(pid: u32) -> bool {
 #[cfg(unix)]
 pub(crate) fn unix_socket_path_fits(path: &std::path::Path) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
-    path.as_os_str().as_bytes().len() <= 103
+    let maximum_path_bytes = if cfg!(any(target_os = "linux", target_os = "android")) {
+        107
+    } else {
+        103
+    };
+    path.as_os_str().as_bytes().len() <= maximum_path_bytes
 }
 
 #[cfg(not(unix))]
@@ -618,6 +622,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn inactive_same_process_endpoint_does_not_refuse_a_successor() {
+        let root = test_root("inactive-same-process");
+        let stale = endpoint(&root, std::process::id());
+        super::write_instance_endpoint(&root, &stale).unwrap();
+
+        super::refuse_live_instance(&root).unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn owned_endpoint_removal_preserves_a_successor_record() {
+        let root = test_root("owned-removal");
+        let owner = endpoint(&root, std::process::id());
+        let successor = endpoint(&root, std::process::id());
+        super::write_instance_endpoint(&root, &owner).unwrap();
+        super::write_instance_endpoint(&root, &successor).unwrap();
+
+        super::remove_owned_instance_endpoint(&root, &owner.instance_id).unwrap();
+
+        assert_eq!(
+            super::resolve_instance_endpoint(&root),
+            Some(successor.clone())
+        );
+        assert_eq!(
+            serde_json::from_slice::<super::InstanceEndpoint>(
+                &std::fs::read(root.join(super::super::ENDPOINT_RECORD_NAME)).unwrap()
+            )
+            .unwrap(),
+            successor
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn deep_state_root_uses_a_deterministic_short_socket_path() {
@@ -630,6 +669,23 @@ mod tests {
         assert!(first.is_absolute());
         assert!(super::unix_socket_path_fits(&first));
         assert_ne!(first, root.join("verlet.sock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_path_limit_reserves_the_trailing_nul() {
+        let maximum = if cfg!(any(target_os = "linux", target_os = "android")) {
+            107
+        } else {
+            103
+        };
+        let fitting = std::path::PathBuf::from(format!("/{}", "s".repeat(maximum - 1)));
+        let too_long = std::path::PathBuf::from(format!("/{}", "s".repeat(maximum)));
+
+        assert_eq!(fitting.as_os_str().len(), maximum);
+        assert_eq!(too_long.as_os_str().len(), maximum + 1);
+        assert!(super::unix_socket_path_fits(&fitting));
+        assert!(!super::unix_socket_path_fits(&too_long));
     }
 
     #[test]
@@ -653,6 +709,14 @@ mod tests {
         assert!(!super::turso_cross_process_lock_error(
             "history storage failed: database is locked"
         ));
+        assert!(!super::turso_cross_process_lock_error(
+            "history storage failed: sqlite engine error: Locking error: Failed locking file. File is locked by another process; retry budget exhausted"
+        ));
+
+        assert_eq!(
+            super::cross_process_database_guidance().to_string(),
+            "runtime factory failed: another process holds this database (most likely a running Verlet instance); stop that instance and retry"
+        );
     }
 
     #[test]

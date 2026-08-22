@@ -384,9 +384,7 @@ pub(crate) async fn open_secret_store(
     .await
     .map_err(|err| {
         if crate::adapters::app_server::instance::turso_cross_process_lock_error(&err.to_string()) {
-            crate::adapters::app_server::instance::cross_process_database_guidance(
-                "stop the daemon and retry",
-            )
+            crate::adapters::app_server::instance::cross_process_database_guidance()
         } else {
             secret_cli_error(err)
         }
@@ -403,9 +401,7 @@ pub(crate) async fn open_provider_store(
     .await
     .map_err(|err| {
         if crate::adapters::app_server::instance::turso_cross_process_lock_error(&err.to_string()) {
-            crate::adapters::app_server::instance::cross_process_database_guidance(
-                "use the running daemon's modelProvider RPC or stop the daemon and retry",
-            )
+            crate::adapters::app_server::instance::cross_process_database_guidance()
         } else {
             provider_cli_error(err)
         }

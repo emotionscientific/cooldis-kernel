@@ -713,6 +713,9 @@ pub(crate) async fn run_remote_child(
     let parent_process_id = unsafe { libc::getppid() };
     app_config.runtime_home = bootstrap.runtime_home.clone();
     app_config.state_home = bootstrap.state_home.clone();
+    app_config.listen = crate::adapters::app_server::AppServerListenAddr::Unix(
+        crate::adapters::app_server::instance::instance_unix_socket_path(&app_config.state_home)?,
+    );
     let app = crate::adapters::app_server::VerletAppServer::new_local(app_config).await?;
     let supervisor = app.supervisor();
     let child = &bootstrap.request.child;

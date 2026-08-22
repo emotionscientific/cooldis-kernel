@@ -897,6 +897,7 @@ struct VerletAppServerInner {
     /// this instead of `std::env`/globals.
     #[allow(dead_code)]
     instance_environment: instance::InstanceEnvironment,
+    configured_listen: AppServerListenAddr,
     endpoint: instance::InstanceEndpoint,
     endpoint_record_roots: Vec<std::path::PathBuf>,
     tenant_id: String,
@@ -1387,6 +1388,7 @@ impl VerletAppServer {
                 dispatch_gate: tokio::sync::RwLock::new(()),
                 root_reservation: config.root_reservation,
                 instance_environment: config.instance_environment,
+                configured_listen: config.listen,
                 endpoint,
                 endpoint_record_roots,
                 tenant_id: config.tenant_id,
@@ -1595,7 +1597,7 @@ impl VerletAppServer {
                     Ok(accepted) => accepted,
                     Err(error) => {
                         eprintln!("Verlet endpoint socket accept failed: {error}");
-                        return;
+                        continue;
                     }
                 };
                 let peer_uid = match stream.peer_cred() {
@@ -1612,11 +1614,13 @@ impl VerletAppServer {
                     return;
                 };
                 let app = VerletAppServer { inner };
-                tasks.spawn(async move {
+                if !tasks.spawn(async move {
                     if let Err(error) = app.handle_unix_stream(stream, peer_uid).await {
                         eprintln!("Verlet endpoint connection failed: {error}");
                     }
-                });
+                }) {
+                    return;
+                }
             }
         }) {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
@@ -1727,6 +1731,9 @@ impl VerletAppServer {
             return Ok(());
         }
 
+        for state_root in &self.inner.endpoint_record_roots {
+            instance::remove_owned_instance_endpoint(state_root, &self.inner.endpoint.instance_id)?;
+        }
         self.inner.tasks.cancel();
         let _dispatch = self.inner.dispatch_gate.write().await;
         self.inner.tasks.shutdown().await;
@@ -1744,20 +1751,6 @@ impl VerletAppServer {
             .supervisor
             .shutdown_and_unregister_tenant(&self.inner.tenant_id)
             .await?;
-        let mut endpoint_error = None;
-        for state_root in &self.inner.endpoint_record_roots {
-            if let Err(error) = instance::remove_owned_instance_endpoint(
-                state_root,
-                &self.inner.endpoint.instance_id,
-            ) && endpoint_error.is_none()
-            {
-                endpoint_error = Some(error);
-            }
-        }
-        if let Some(error) = endpoint_error {
-            instance::unregister_instance_endpoint(&self.inner.endpoint.instance_id);
-            return Err(error);
-        }
         instance::unregister_instance_endpoint(&self.inner.endpoint.instance_id);
         *shutdown = true;
         Ok(())
@@ -1828,7 +1821,13 @@ impl VerletAppServer {
         path: std::path::PathBuf,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
         let path = instance::absolute_path(&path)?;
-        if path == self.inner.endpoint.unix_socket {
+        let configured_path = match &self.inner.configured_listen {
+            AppServerListenAddr::Unix(configured_path) => {
+                Some(instance::absolute_path(configured_path)?)
+            }
+            AppServerListenAddr::WebSocket(_) => None,
+        };
+        if path == self.inner.endpoint.unix_socket || configured_path.as_ref() == Some(&path) {
             self.inner.tasks.cancellation().cancelled().await;
             return Ok(());
         }
@@ -2755,7 +2754,7 @@ fn provider_store_error(
 ) -> crate::kernel::runtime_host::VerletError {
     let message = err.to_string();
     if instance::turso_cross_process_lock_error(&message) {
-        return instance::cross_process_database_guidance("stop the running instance and retry");
+        return instance::cross_process_database_guidance();
     }
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
         "provider metadata store failed: {message}"
@@ -2827,7 +2826,7 @@ fn metadata_store_error(
 ) -> crate::kernel::runtime_host::VerletError {
     let message = err.to_string();
     if instance::turso_cross_process_lock_error(&message) {
-        return instance::cross_process_database_guidance("stop the running instance and retry");
+        return instance::cross_process_database_guidance();
     }
     crate::kernel::runtime_host::VerletError::RuntimeFactory(message)
 }
@@ -2837,7 +2836,7 @@ fn secret_store_error(
 ) -> crate::kernel::runtime_host::VerletError {
     let message = err.to_string();
     if instance::turso_cross_process_lock_error(&message) {
-        return instance::cross_process_database_guidance("stop the running instance and retry");
+        return instance::cross_process_database_guidance();
     }
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
         "secret store failed: {message}"
@@ -2849,7 +2848,7 @@ fn history_store_error(
 ) -> crate::kernel::runtime_host::VerletError {
     let message = err.to_string();
     if instance::turso_cross_process_lock_error(&message) {
-        return instance::cross_process_database_guidance("stop the running instance and retry");
+        return instance::cross_process_database_guidance();
     }
     crate::kernel::runtime_host::VerletError::History(message)
 }
@@ -3795,20 +3794,51 @@ fn prepare_unix_socket_path(
             )?;
         }
     }
-    if path.exists() {
-        let metadata = std::fs::symlink_metadata(path).map_err(|err| {
-            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "failed to inspect existing app-server socket {}: {err}",
-                path.display()
-            ))
-        })?;
-        if metadata.file_type().is_file() || metadata.file_type().is_dir() {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "failed to inspect existing app-server socket {}: {error}",
+                    path.display()
+                ),
+            ));
+        }
+    };
+    if let Some(metadata) = metadata {
+        use std::os::unix::fs::FileTypeExt as _;
+        if !metadata.file_type().is_socket() {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                 format!(
                     "refusing to replace non-socket app-server path {}",
                     path.display()
                 ),
             ));
+        }
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(stream) => {
+                drop(stream);
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "refusing to replace live app-server socket {}",
+                        path.display()
+                    ),
+                ));
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(error) => {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "failed to verify existing app-server socket {} is stale: {error}",
+                        path.display()
+                    ),
+                ));
+            }
         }
         std::fs::remove_file(path).map_err(|err| {
             crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(

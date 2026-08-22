@@ -374,9 +374,7 @@ pub(crate) async fn load_replay_recorded_events(
                     if crate::adapters::app_server::instance::turso_cross_process_lock_error(
                         &message,
                     ) {
-                        crate::adapters::app_server::instance::cross_process_database_guidance(
-                            "stop the daemon and retry",
-                        )
+                        crate::adapters::app_server::instance::cross_process_database_guidance()
                     } else {
                         crate::cli::usage_error(format!("failed to open journal read-only: {err}"))
                     }

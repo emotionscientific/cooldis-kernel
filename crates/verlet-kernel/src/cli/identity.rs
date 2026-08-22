@@ -542,9 +542,7 @@ async fn open_identity_authority(
 fn identity_cli_error(error: impl std::fmt::Display) -> crate::kernel::runtime_host::VerletError {
     let message = error.to_string();
     if crate::adapters::app_server::instance::turso_cross_process_lock_error(&message) {
-        crate::adapters::app_server::instance::cross_process_database_guidance(
-            "stop the daemon and retry",
-        )
+        crate::adapters::app_server::instance::cross_process_database_guidance()
     } else {
         crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
             "identity store failed: {message}"

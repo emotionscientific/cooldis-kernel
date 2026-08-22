@@ -37,13 +37,24 @@ pub(crate) async fn daemon_run(
     let listen = config.listen.clone();
 
     let server = crate::adapters::app_server::VerletAppServer::new_local(config).await?;
-    let _io_tasks = start_daemon_io(
+    let _io_tasks = match start_daemon_io(
         &loaded.config.io,
         &loaded.config.sync,
         loaded.path.clone(),
         &server,
     )
-    .await?;
+    .await
+    {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            if let Err(shutdown_error) = server.shutdown().await {
+                eprintln!(
+                    "failed to shut down Verlet daemon after I/O startup error {error}: {shutdown_error}"
+                );
+            }
+            return Err(error);
+        }
+    };
     eprintln!(
         "verlet daemon listening on {}",
         loaded.config.app_server.listen
@@ -53,7 +64,10 @@ pub(crate) async fn daemon_run(
     } else {
         eprintln!("verlet daemon config <defaults>");
     }
-    server.serve(listen).await
+    let serving = server.serve(listen).await;
+    let shutdown = server.shutdown().await;
+    serving?;
+    shutdown
 }
 
 pub(crate) fn daemon_app_server_config_from_loaded(

@@ -230,7 +230,7 @@ async fn coupling_replay_guides_user_when_daemon_holds_journal() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains(
-            "another process holds this database (most likely the verlet daemon); stop the daemon and retry"
+            "another process holds this database (most likely a running Verlet instance); stop that instance and retry"
         ),
         "missing lock guidance in stderr:\n{stderr}"
     );

@@ -85,7 +85,19 @@ async fn console_endpoint_record_refuses_daemon_then_becomes_stale_after_sigkill
     let canonical_state_home = std::fs::canonicalize(&state_home).unwrap();
     assert_eq!(endpoint.pid, console_pid);
     assert!(endpoint.unix_socket.is_absolute());
+    assert_eq!(
+        endpoint.unix_socket,
+        canonical_state_home.join("verlet.sock")
+    );
     assert!(endpoint.unix_socket.exists());
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::net::UnixStream::connect(&endpoint.unix_socket),
+    )
+    .await
+    .expect("console endpoint socket did not accept promptly")
+    .unwrap();
+    drop(stream);
     assert!(
         endpoint
             .ws_url
