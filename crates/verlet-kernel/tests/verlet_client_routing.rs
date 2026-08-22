@@ -208,21 +208,28 @@ async fn service_managed_serve_ignores_configured_idle_timeout() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn auth_outside_project_does_not_create_arbitrary_project_state() {
+async fn auth_outside_project_starts_user_home_server_without_caller_state() {
     let root = TestRoot::new("verlet-auth-outside-project");
     let directory = root.path().join("arbitrary-directory");
     let user_home = root.path().join("user-home");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::create_dir_all(&user_home).unwrap();
+    std::fs::write(
+        user_home.join("config.toml"),
+        "[daemon]\nidle_timeout = \"500ms\"\n",
+    )
+    .unwrap();
 
     let output = run_client(&directory, &user_home, ["auth", "status", "openai-codex"]).await;
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("auth was run outside a Verlet project"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success("auth status outside a project", &output);
     assert!(!directory.join(".verlet").exists());
+
+    let state_root = user_home.join("state");
+    let endpoint = wait_for_endpoint(&state_root, None).await;
+    assert_ne!(endpoint.pid, std::process::id());
+    assert!(state_root.join("serve.log").is_file());
+    assert!(!user_home.join("projects/home").exists());
+    wait_for_endpoint_removal(&state_root).await;
 }
 
 async fn run_client<const N: usize>(
@@ -237,6 +244,7 @@ async fn run_client<const N: usize>(
         command
             .args(args)
             .current_dir(project)
+            .env("HOME", user_home)
             .env("VERLET_HOME", user_home)
             .stdin(std::process::Stdio::null())
             .output(),

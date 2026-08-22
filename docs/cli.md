@@ -66,10 +66,9 @@ the endpoint record for their scope and connect to its Unix socket. Project
 commands use the same project and state-root resolution as `verlet console`.
 Auth first checks the current project instance because that instance also owns
 the user metadata root. If no project instance is reachable, auth checks the
-user-root endpoint record. Outside a Verlet project, auth can use an already
-running user-root instance, but it will not create project state under the
-arbitrary current directory; start a server from a project first if no user
-instance is running.
+user-root endpoint record. Outside a Verlet project, a user-scoped command
+starts its server from the Verlet home with project and user state sharing the
+user state root, and creates nothing under the arbitrary current directory.
 
 When no matching instance is reachable, a client starts `verlet serve`
 detached, writes its stdout and stderr to `<state_root>/serve.log`, waits up to

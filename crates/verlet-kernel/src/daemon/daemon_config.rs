@@ -25,6 +25,7 @@ pub struct LoadedVerletDaemonConfig {
 pub struct VerletProjectDiscovery {
     pub root: std::path::PathBuf,
     pub config_path: Option<std::path::PathBuf>,
+    pub found_project: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -891,6 +892,7 @@ pub fn discover_verlet_project(
             return Ok(VerletProjectDiscovery {
                 root: dir.to_path_buf(),
                 config_path: Some(candidate),
+                found_project: true,
             });
         }
     }
@@ -900,6 +902,7 @@ pub fn discover_verlet_project(
             return Ok(VerletProjectDiscovery {
                 root: dir.to_path_buf(),
                 config_path: None,
+                found_project: true,
             });
         }
     }
@@ -907,6 +910,7 @@ pub fn discover_verlet_project(
     Ok(VerletProjectDiscovery {
         root: start,
         config_path: None,
+        found_project: false,
     })
 }
 

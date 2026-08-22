@@ -629,6 +629,7 @@ fn discovers_project_root_from_nearest_config_then_dot_verlet() {
     let discovered = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
     assert_eq!(discovered.root, workspace);
     assert_eq!(discovered.config_path, None);
+    assert!(discovered.found_project);
 
     let configured = root.join("configured");
     let configured_nested = configured.join("a/b");
@@ -642,6 +643,7 @@ fn discovers_project_root_from_nearest_config_then_dot_verlet() {
         discovered.config_path,
         Some(discovered.root.join("verlet.toml"))
     );
+    assert!(discovered.found_project);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -658,6 +660,7 @@ fn project_discovery_ignores_legacy_config() {
     let legacy_only = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
     assert_eq!(legacy_only.root, nested);
     assert_eq!(legacy_only.config_path, None);
+    assert!(!legacy_only.found_project);
 
     std::fs::write(&canonical, "").unwrap();
     let both = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
