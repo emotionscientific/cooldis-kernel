@@ -151,6 +151,9 @@ the record of why it moved is in the commit history and the formalism.
 ## Documentation
 
 - [Docs index](docs/README.md): documentation map.
+- [Agents in Version Control](https://emotionscientific.github.io/verlet-kernel/primer/agents-in-version-control.html):
+  plain-language primer on the runtime, with a prompt per section to ask a
+  coding agent in this checkout ([PDF](docs/primer/agents-in-version-control.pdf)).
 - [Overview](docs/index.md): product category and current status.
 - [Getting started](docs/getting-started.md): local run and inspection path.
 - [CLI](docs/cli.md): canonical commands, help model, and receipt-backed bind

@@ -7,6 +7,11 @@ provider adapters, and release gates.
 
 ## Start Here
 
+- [Agents in Version Control](https://emotionscientific.github.io/verlet-kernel/primer/agents-in-version-control.html):
+  a plain primer on what an agent runtime has to get right and how Verlet
+  does it, with a copyable prompt per section for asking a coding agent in
+  this checkout. Also as [PDF](primer/agents-in-version-control.pdf);
+  source HTML at [primer/](primer/).
 - [Verlet overview](index.md): product category, current status, and next
   reading path.
 - [Getting Started](getting-started.md): install, run, and inspect the local
